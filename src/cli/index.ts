@@ -63,7 +63,7 @@ async function runCli(): Promise<void> {
   } = await import("./register.js");
 
   // Version injected at build time by tsup define
-  const version = process.env.CLAUDESTORY_VERSION ?? "0.0.0-dev";
+  const version = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
 
   // ISS-570: silent skill-dir refresh if the CLI version changed + schedule
   // a background update check so the next invocation's banner is fresh.

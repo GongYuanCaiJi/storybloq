@@ -13,6 +13,6 @@ export default defineConfig({
   splitting: false,
   shims: true,
   define: {
-    "process.env.CLAUDESTORY_VERSION": JSON.stringify(pkg.version),
+    "process.env.STORYBLOQ_VERSION": JSON.stringify(pkg.version),
   },
 });

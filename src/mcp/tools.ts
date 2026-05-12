@@ -246,7 +246,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
     // call has fresh data. Dev builds skip the check.
     try {
       const { readUpdateCacheSync, refreshUpdateCacheInBackground } = await import("../core/update-check.js");
-      const running = process.env.CLAUDESTORY_VERSION ?? "0.0.0-dev";
+      const running = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
       const info = readUpdateCacheSync(running);
       refreshUpdateCacheInBackground();
       if (info?.updateAvailable && result.content[0]?.type === "text") {

@@ -51,7 +51,8 @@ if (!SIDECAR_SCRIPT.includes(SIDECAR_SENTINEL)) {
 }
 
 function livenessLog(tag: string, detail: Record<string, unknown>): void {
-  if (process.env.CLAUDESTORY_LIVENESS_DEBUG !== "1") return;
+  const debug = process.env.STORYBLOQ_LIVENESS_DEBUG ?? process.env.CLAUDESTORY_LIVENESS_DEBUG;
+  if (debug !== "1") return;
   try { process.stderr.write("liveness:" + tag + " " + JSON.stringify(detail) + "\n"); } catch { /* best-effort */ }
 }
 

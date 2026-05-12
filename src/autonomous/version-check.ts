@@ -56,5 +56,5 @@ export function getInstalledVersion(): string | null {
  * Get the running server version from the build-time constant.
  */
 export function getRunningVersion(): string {
-  return process.env.CLAUDESTORY_VERSION ?? "0.0.0-dev";
+  return process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
 }

@@ -28,7 +28,7 @@ const LEGACY_ENV_VAR = "CLAUDESTORY_PROJECT_ROOT";
 const CONFIG_PATH = ".story/config.json";
 
 // Version injected at build time by tsup define
-const version = process.env.CLAUDESTORY_VERSION ?? "0.0.0-dev";
+const version = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
 
 /**
  * Try to discover project root. Returns the root path or null.
