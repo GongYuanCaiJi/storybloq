@@ -125,9 +125,7 @@ export function handleTicketMetaGet(
       output: JSON.stringify(successEnvelope({ id, path: path ?? null, value }), null, 2),
     };
   }
-  return {
-    output: path ? JSON.stringify(value, null, 2) : JSON.stringify(value, null, 2),
-  };
+  return { output: JSON.stringify(value, null, 2) };
 }
 
 export function handleTicketNext(ctx: CommandContext, count: number = 1): CommandResult {

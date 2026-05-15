@@ -84,7 +84,8 @@ export function setMetadataValue<T extends Record<string, unknown>>(
   const root = cloneUnknown(entity) as Record<string, unknown>;
   let cursor = root;
   for (let i = 0; i < segments.length - 1; i++) {
-    const seg = segments[i]!;
+    const seg = segments[i];
+    if (!seg) throw new CliValidationError("invalid_input", `Invalid metadata path "${path}"`);
     const next = cursor[seg];
     if (next === undefined) {
       cursor[seg] = {};
@@ -96,7 +97,9 @@ export function setMetadataValue<T extends Record<string, unknown>>(
     }
     cursor = cursor[seg] as Record<string, unknown>;
   }
-  cursor[segments[segments.length - 1]!] = cloneUnknown(value);
+  const leaf = segments[segments.length - 1];
+  if (!leaf) throw new CliValidationError("invalid_input", `Invalid metadata path "${path}"`);
+  cursor[leaf] = cloneUnknown(value);
   return root as T;
 }
 
@@ -104,14 +107,17 @@ function pruneEmptyContainers(root: Record<string, unknown>, segments: string[])
   const parents: Array<{ parent: Record<string, unknown>; key: string }> = [];
   let cursor: Record<string, unknown> = root;
   for (let i = 0; i < segments.length - 1; i++) {
-    const seg = segments[i]!;
+    const seg = segments[i];
+    if (!seg) return;
     const next = cursor[seg];
     if (!next || typeof next !== "object" || Array.isArray(next)) return;
     parents.push({ parent: cursor, key: seg });
     cursor = next as Record<string, unknown>;
   }
   for (let i = parents.length - 1; i >= 0; i--) {
-    const { parent, key } = parents[i]!;
+    const pair = parents[i];
+    if (!pair) continue;
+    const { parent, key } = pair;
     const candidate = parent[key];
     if (
       candidate &&
@@ -136,14 +142,16 @@ export function unsetMetadataValue<T extends Record<string, unknown>>(
   const root = cloneUnknown(entity) as Record<string, unknown>;
   let cursor = root;
   for (let i = 0; i < segments.length - 1; i++) {
-    const seg = segments[i]!;
+    const seg = segments[i];
+    if (!seg) throw new CliValidationError("invalid_input", `Invalid metadata path "${path}"`);
     const next = cursor[seg];
     if (!next || typeof next !== "object" || Array.isArray(next)) {
       throw new CliValidationError("not_found", `Metadata path "${path}" not found`);
     }
     cursor = next as Record<string, unknown>;
   }
-  const leaf = segments[segments.length - 1]!;
+  const leaf = segments[segments.length - 1];
+  if (!leaf) throw new CliValidationError("invalid_input", `Invalid metadata path "${path}"`);
   if (!(leaf in cursor)) {
     throw new CliValidationError("not_found", `Metadata path "${path}" not found`);
   }
