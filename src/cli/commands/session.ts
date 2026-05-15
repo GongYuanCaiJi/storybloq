@@ -12,7 +12,8 @@
  * and never mutates a session whose revision/status drifted between scan and
  * write (under-lock re-validation).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import {
   findStaleSessions,
@@ -207,12 +208,9 @@ interface TailEvent {
 }
 
 function readTailEvents(dir: string, limit: number): TailEvent[] {
-  let raw: string;
-  try {
-    raw = readFileSync(join(dir, "events.log"), "utf-8");
-  } catch {
-    return [];
-  }
+  const eventsResult = tryReadFile(join(dir, "events.log"));
+  if (!eventsResult.ok) return [];
+  const raw = eventsResult.content;
   const lines = raw.split("\n").filter((l) => l.trim().length > 0);
   const tail = lines.slice(-limit);
   const parsed: TailEvent[] = [];

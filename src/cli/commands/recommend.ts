@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
+import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import { recommend, type RecommendOptions } from "../../core/recommend.js";
 import { formatRecommendations } from "../../core/output-formatter.js";
@@ -17,7 +18,8 @@ function buildRecommendOptions(ctx: CommandContext): RecommendOptions {
   try {
     const files = readdirSync(ctx.handoversDir).filter((f) => f.endsWith(".md")).sort();
     if (files.length > 0) {
-      opts.latestHandoverContent = readFileSync(join(ctx.handoversDir, files[files.length - 1]), "utf-8");
+      const handoverResult = tryReadFile(join(ctx.handoversDir, files[files.length - 1]));
+      if (handoverResult.ok) opts.latestHandoverContent = handoverResult.content;
     }
   } catch { /* no handovers */ }
 
@@ -26,7 +28,9 @@ function buildRecommendOptions(ctx: CommandContext): RecommendOptions {
     const snapshotsDir = join(ctx.root, ".story", "snapshots");
     const snapFiles = readdirSync(snapshotsDir).filter((f) => f.endsWith(".json")).sort();
     if (snapFiles.length > 0) {
-      const raw = readFileSync(join(snapshotsDir, snapFiles[snapFiles.length - 1]), "utf-8");
+      const snapResult = tryReadFile(join(snapshotsDir, snapFiles[snapFiles.length - 1]));
+      if (!snapResult.ok) return opts;
+      const raw = snapResult.content;
       const snap = JSON.parse(raw) as { issues?: Array<{ status?: string }> };
       if (snap.issues) {
         opts.previousOpenIssueCount = snap.issues.filter((i) => i.status !== "resolved").length;

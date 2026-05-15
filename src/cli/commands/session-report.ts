@@ -3,7 +3,8 @@
  * Decoupled from ProjectState: reads session files directly.
  * Works even if .story/ project state is corrupted.
  */
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import { readSession, readEvents, sessionDir } from "../../autonomous/session.js";
 import { CURRENT_SESSION_SCHEMA_VERSION } from "../../autonomous/session-types.js";
@@ -51,7 +52,16 @@ export async function handleSessionReport(
     };
   }
   try {
-    const rawJson = JSON.parse(readFileSync(statePath, "utf-8"));
+    const readResult = tryReadFile(statePath);
+    if (!readResult.ok) {
+      return {
+        output: `Error: Session ${sessionId} corrupt — cannot read state.json.`,
+        exitCode: 1,
+        errorCode: "project_corrupt",
+        isError: true,
+      };
+    }
+    const rawJson = JSON.parse(readResult.content);
     if (rawJson && typeof rawJson === "object" && "schemaVersion" in rawJson &&
         rawJson.schemaVersion !== CURRENT_SESSION_SCHEMA_VERSION) {
       return {
@@ -86,9 +96,8 @@ export async function handleSessionReport(
 
   // 6. Read plan.md (optional)
   let planContent: string | null = null;
-  try {
-    planContent = readFileSync(join(dir, "plan.md"), "utf-8");
-  } catch { /* graceful — plan section shows "Not available" */ }
+  const planResult = tryReadFile(join(dir, "plan.md"));
+  if (planResult.ok) planContent = planResult.content;
 
   // 7. Git log for session range (best-effort — requires both refs)
   let gitLog: string[] | null = null;

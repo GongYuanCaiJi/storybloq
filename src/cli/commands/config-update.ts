@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import { withProjectLock, atomicWrite, guardPath } from "../../core/project-loader.js";
 import { ConfigSchema } from "../../models/config.js";
@@ -57,8 +57,9 @@ export async function handleConfigSetOverrides(
   await withProjectLock(root, { strict: false }, async () => {
     // Read current config as raw JSON (preserves all keys)
     const configPath = join(root, ".story", "config.json");
-    const rawContent = readFileSync(configPath, "utf-8");
-    const raw = JSON.parse(rawContent) as Record<string, unknown>;
+    const readResult = tryReadFile(configPath);
+    if (!readResult.ok) throw new ProjectLoaderError("io_error", `Cannot read config: ${readResult.error.message}`, readResult.error);
+    const raw = JSON.parse(readResult.content) as Record<string, unknown>;
 
     if (clear) {
       delete raw.recipeOverrides;

@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import { discoverProjectRoot } from "../../core/project-root-discovery.js";
 import { STORY_GITIGNORE_ENTRIES } from "../../core/init.js";
@@ -60,12 +61,8 @@ function activePayload(session: Parameters<typeof buildActivePayload>[0], root: 
 function ensureGitignore(root: string): void {
   const gitignorePath = join(root, ".story", ".gitignore");
 
-  let existing = "";
-  try {
-    existing = readFileSync(gitignorePath, "utf-8");
-  } catch {
-    // File doesn't exist — will create
-  }
+  const readResult = tryReadFile(gitignorePath);
+  let existing = readResult.ok ? readResult.content : "";
 
   const lines = existing.split("\n").map((l) => l.trim());
   const missing = STORY_GITIGNORE_ENTRIES.filter((e) => !lines.includes(e));
