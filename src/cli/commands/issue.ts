@@ -25,10 +25,35 @@ import {
   normalizeArrayOption,
   CliValidationError,
 } from "../helpers.js";
+import {
+  parseMetadataJsonValue,
+  getMetadataValue,
+  setMetadataValue,
+  unsetMetadataValue,
+} from "./custom-metadata.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
 // Re-export for register.ts
 export { ISSUE_STATUSES, ISSUE_SEVERITIES };
+
+const ISSUE_CORE_FIELDS = new Set([
+  "id",
+  "title",
+  "status",
+  "severity",
+  "components",
+  "impact",
+  "resolution",
+  "location",
+  "discoveredDate",
+  "resolvedDate",
+  "relatedTickets",
+  "order",
+  "phase",
+  "createdBy",
+  "assignedTo",
+  "lastModifiedBy",
+]);
 
 // --- Read Handlers ---
 
@@ -76,6 +101,28 @@ export function handleIssueGet(
     };
   }
   return { output: formatIssue(issue, ctx.format) };
+}
+
+export function handleIssueMetaGet(
+  id: string,
+  path: string | undefined,
+  ctx: CommandContext,
+): CommandResult {
+  const issue = ctx.state.issueByID(id);
+  if (!issue) {
+    return {
+      output: formatError("not_found", `Issue ${id} not found`, ctx.format),
+      exitCode: ExitCode.USER_ERROR,
+      errorCode: "not_found",
+    };
+  }
+  const value = getMetadataValue(issue as Record<string, unknown>, path, ISSUE_CORE_FIELDS);
+  if (ctx.format === "json") {
+    return {
+      output: JSON.stringify(successEnvelope({ id, path: path ?? null, value }), null, 2),
+    };
+  }
+  return { output: JSON.stringify(value, null, 2) };
 }
 
 // --- Write Handlers ---
@@ -284,6 +331,56 @@ export async function handleIssueUpdate(
     return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
   }
   return { output: `Updated issue ${updatedIssue.id}: ${updatedIssue.title}` };
+}
+
+export async function handleIssueMetaSet(
+  id: string,
+  path: string,
+  rawValue: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  const parsedValue = parseMetadataJsonValue(rawValue);
+  let updatedIssue: Issue | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const existing = state.issueByID(id);
+    if (!existing) {
+      throw new CliValidationError("not_found", `Issue ${id} not found`);
+    }
+    const issue = setMetadataValue(existing as Issue & Record<string, unknown>, path, parsedValue, ISSUE_CORE_FIELDS);
+    validatePostWriteIssueState(issue, state, false);
+    await writeIssueUnlocked(issue, root);
+    updatedIssue = issue;
+  });
+  if (!updatedIssue) throw new Error("Issue not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
+  }
+  return { output: `Updated issue ${updatedIssue.id}: metadata "${path}" set` };
+}
+
+export async function handleIssueMetaUnset(
+  id: string,
+  path: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  let updatedIssue: Issue | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const existing = state.issueByID(id);
+    if (!existing) {
+      throw new CliValidationError("not_found", `Issue ${id} not found`);
+    }
+    const issue = unsetMetadataValue(existing as Issue & Record<string, unknown>, path, ISSUE_CORE_FIELDS);
+    validatePostWriteIssueState(issue, state, false);
+    await writeIssueUnlocked(issue, root);
+    updatedIssue = issue;
+  });
+  if (!updatedIssue) throw new Error("Issue not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
+  }
+  return { output: `Updated issue ${updatedIssue.id}: metadata "${path}" removed` };
 }
 
 export async function handleIssueDelete(

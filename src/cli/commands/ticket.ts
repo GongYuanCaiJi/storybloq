@@ -29,10 +29,34 @@ import {
   normalizeArrayOption,
   CliValidationError,
 } from "../helpers.js";
+import {
+  parseMetadataJsonValue,
+  getMetadataValue,
+  setMetadataValue,
+  unsetMetadataValue,
+} from "./custom-metadata.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
 // Re-export for register.ts
 export { TICKET_STATUSES, TICKET_TYPES };
+
+const TICKET_CORE_FIELDS = new Set([
+  "id",
+  "title",
+  "description",
+  "type",
+  "status",
+  "phase",
+  "order",
+  "createdDate",
+  "completedDate",
+  "blockedBy",
+  "parentTicket",
+  "createdBy",
+  "assignedTo",
+  "lastModifiedBy",
+  "claimedBySession",
+]);
 
 // --- Read Handlers ---
 
@@ -80,6 +104,30 @@ export function handleTicketGet(
     };
   }
   return { output: formatTicket(ticket, ctx.state, ctx.format) };
+}
+
+export function handleTicketMetaGet(
+  id: string,
+  path: string | undefined,
+  ctx: CommandContext,
+): CommandResult {
+  const ticket = ctx.state.ticketByID(id);
+  if (!ticket) {
+    return {
+      output: formatError("not_found", `Ticket ${id} not found`, ctx.format),
+      exitCode: ExitCode.USER_ERROR,
+      errorCode: "not_found",
+    };
+  }
+  const value = getMetadataValue(ticket as Record<string, unknown>, path, TICKET_CORE_FIELDS);
+  if (ctx.format === "json") {
+    return {
+      output: JSON.stringify(successEnvelope({ id, path: path ?? null, value }), null, 2),
+    };
+  }
+  return {
+    output: path ? JSON.stringify(value, null, 2) : JSON.stringify(value, null, 2),
+  };
 }
 
 export function handleTicketNext(ctx: CommandContext, count: number = 1): CommandResult {
@@ -325,6 +373,56 @@ export async function handleTicketUpdate(
     return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
   }
   return { output: `Updated ticket ${updatedTicket.id}: ${updatedTicket.title}` };
+}
+
+export async function handleTicketMetaSet(
+  id: string,
+  path: string,
+  rawValue: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  const parsedValue = parseMetadataJsonValue(rawValue);
+  let updatedTicket: Ticket | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const existing = state.ticketByID(id);
+    if (!existing) {
+      throw new CliValidationError("not_found", `Ticket ${id} not found`);
+    }
+    const ticket = setMetadataValue(existing as Ticket & Record<string, unknown>, path, parsedValue, TICKET_CORE_FIELDS);
+    validatePostWriteState(ticket, state, false);
+    await writeTicketUnlocked(ticket, root);
+    updatedTicket = ticket;
+  });
+  if (!updatedTicket) throw new Error("Ticket not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
+  }
+  return { output: `Updated ticket ${updatedTicket.id}: metadata "${path}" set` };
+}
+
+export async function handleTicketMetaUnset(
+  id: string,
+  path: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  let updatedTicket: Ticket | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const existing = state.ticketByID(id);
+    if (!existing) {
+      throw new CliValidationError("not_found", `Ticket ${id} not found`);
+    }
+    const ticket = unsetMetadataValue(existing as Ticket & Record<string, unknown>, path, TICKET_CORE_FIELDS);
+    validatePostWriteState(ticket, state, false);
+    await writeTicketUnlocked(ticket, root);
+    updatedTicket = ticket;
+  });
+  if (!updatedTicket) throw new Error("Ticket not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
+  }
+  return { output: `Updated ticket ${updatedTicket.id}: metadata "${path}" removed` };
 }
 
 export async function handleTicketDelete(

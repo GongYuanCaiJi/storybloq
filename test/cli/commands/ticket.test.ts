@@ -9,6 +9,9 @@ import {
   handleTicketBlocked,
   handleTicketCreate,
   handleTicketUpdate,
+  handleTicketMetaGet,
+  handleTicketMetaSet,
+  handleTicketMetaUnset,
   handleTicketDelete,
 } from "../../../src/cli/commands/ticket.js";
 import { ExitCode } from "../../../src/core/output-formatter.js";
@@ -409,6 +412,69 @@ describe("handleTicketUpdate", () => {
     await expect(
       handleTicketUpdate("T-001", { type: "invalid" }, "md", dir),
     ).rejects.toThrow("Unknown ticket type");
+  });
+});
+
+describe("handleTicketMeta*", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const d of tmpDirs) await rm(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  async function setupProject(dir: string) {
+    await initProject(dir, { name: "test" });
+    await handleTicketCreate(
+      { title: "Original", type: "task", phase: "p0", description: "orig desc", blockedBy: [], parentTicket: null },
+      "md", dir,
+    );
+  }
+
+  it("sets and gets nested metadata path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+    await handleTicketMetaSet("T-001", "integrations.linearIssue", "\"ABC-123\"", "md", dir);
+    const { loadProject } = await import("../../../src/core/project-loader.js");
+    const { state, warnings } = await loadProject(dir);
+    const result = handleTicketMetaGet("T-001", "integrations.linearIssue", {
+      state,
+      warnings,
+      root: dir,
+      handoversDir: join(dir, ".story", "handovers"),
+      format: "json",
+    });
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.value).toBe("ABC-123");
+  });
+
+  it("unsets metadata path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+    await handleTicketMetaSet("T-001", "labels", "[\"frontend\",\"qa\"]", "md", dir);
+    await handleTicketMetaUnset("T-001", "labels", "json", dir);
+    const raw = await readFile(join(dir, ".story", "tickets", "T-001.json"), "utf-8");
+    const ticket = JSON.parse(raw);
+    expect(ticket.labels).toBeUndefined();
+  });
+
+  it("rejects protected core field updates", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+    await expect(
+      handleTicketMetaSet("T-001", "status", "\"complete\"", "md", dir),
+    ).rejects.toThrow("Cannot set metadata on core field");
+  });
+
+  it("rejects non-JSON metadata values", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+    await expect(
+      handleTicketMetaSet("T-001", "labels", "frontend", "md", dir),
+    ).rejects.toThrow("valid JSON");
   });
 });
 

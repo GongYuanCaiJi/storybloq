@@ -42,12 +42,18 @@ describe("reference command", () => {
     expect(names).toContain("ticket next");
     expect(names).toContain("ticket create");
     expect(names).toContain("ticket update");
+    expect(names).toContain("ticket meta get");
+    expect(names).toContain("ticket meta set");
+    expect(names).toContain("ticket meta unset");
     expect(names).toContain("ticket delete");
     // Issue subcommands
     expect(names).toContain("issue list");
     expect(names).toContain("issue get");
     expect(names).toContain("issue create");
     expect(names).toContain("issue update");
+    expect(names).toContain("issue meta get");
+    expect(names).toContain("issue meta set");
+    expect(names).toContain("issue meta unset");
     expect(names).toContain("issue delete");
     // Phase subcommands
     expect(names).toContain("phase list");
@@ -76,10 +82,12 @@ describe("reference command", () => {
     expect(names).toContain("storybloq_phase_tickets");
     expect(names).toContain("storybloq_ticket_list");
     expect(names).toContain("storybloq_ticket_get");
+    expect(names).toContain("storybloq_ticket_meta_get");
     expect(names).toContain("storybloq_ticket_next");
     expect(names).toContain("storybloq_ticket_blocked");
     expect(names).toContain("storybloq_issue_list");
     expect(names).toContain("storybloq_issue_get");
+    expect(names).toContain("storybloq_issue_meta_get");
     expect(names).toContain("storybloq_handover_list");
     expect(names).toContain("storybloq_handover_latest");
     expect(names).toContain("storybloq_handover_get");
@@ -95,6 +103,10 @@ describe("reference command", () => {
     expect(names).toContain("storybloq_lesson_create");
     expect(names).toContain("storybloq_lesson_update");
     expect(names).toContain("storybloq_lesson_reinforce");
+    expect(names).toContain("storybloq_ticket_meta_set");
+    expect(names).toContain("storybloq_ticket_meta_unset");
+    expect(names).toContain("storybloq_issue_meta_set");
+    expect(names).toContain("storybloq_issue_meta_unset");
   });
 
   it("reference.md matches handleReference output (drift detection)", () => {

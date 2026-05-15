@@ -6,9 +6,9 @@ import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
 
 // Handler imports
 import { handleStatus } from "../../src/cli/commands/status.js";
-import { handleTicketGet } from "../../src/cli/commands/ticket.js";
+import { handleTicketGet, handleTicketMetaGet, handleTicketMetaSet, handleTicketMetaUnset } from "../../src/cli/commands/ticket.js";
 import { handlePhaseList, handlePhaseCreate } from "../../src/cli/commands/phase.js";
-import { handleIssueList } from "../../src/cli/commands/issue.js";
+import { handleIssueList, handleIssueMetaGet, handleIssueMetaSet, handleIssueMetaUnset } from "../../src/cli/commands/issue.js";
 import { handleHandoverList, handleHandoverLatest } from "../../src/cli/commands/handover.js";
 import { handleValidate } from "../../src/cli/commands/validate.js";
 import { handleBlockerList } from "../../src/cli/commands/blocker.js";
@@ -142,6 +142,54 @@ describe("MCP integration — real filesystem", () => {
     // not_found is informational, not isError
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain("No handovers");
+  });
+
+  it("ticket metadata write/read/unset works through MCP pipelines", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-ticket-meta-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    const { handleTicketCreate } = await import("../../src/cli/commands/ticket.js");
+    await handleTicketCreate(
+      { title: "Meta ticket", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null },
+      "md",
+      dir,
+    );
+    const setResult = await runMcpWriteTool(dir, (root, format) =>
+      handleTicketMetaSet("T-001", "integrations.linearIssue", "\"ABC-123\"", format, root),
+    );
+    expect(setResult.isError).toBeUndefined();
+    const getResult = await runMcpReadTool(dir, (ctx) =>
+      handleTicketMetaGet("T-001", "integrations.linearIssue", ctx),
+    );
+    expect(getResult.content[0].text).toContain("ABC-123");
+    const unsetResult = await runMcpWriteTool(dir, (root, format) =>
+      handleTicketMetaUnset("T-001", "integrations.linearIssue", format, root),
+    );
+    expect(unsetResult.isError).toBeUndefined();
+  });
+
+  it("issue metadata write/read/unset works through MCP pipelines", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-issue-meta-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    const { handleIssueCreate } = await import("../../src/cli/commands/issue.js");
+    await handleIssueCreate(
+      { title: "Meta issue", severity: "high", impact: "x", components: [], relatedTickets: [], location: [] },
+      "md",
+      dir,
+    );
+    const setResult = await runMcpWriteTool(dir, (root, format) =>
+      handleIssueMetaSet("ISS-001", "severitySource", "\"user-report\"", format, root),
+    );
+    expect(setResult.isError).toBeUndefined();
+    const getResult = await runMcpReadTool(dir, (ctx) =>
+      handleIssueMetaGet("ISS-001", "severitySource", ctx),
+    );
+    expect(getResult.content[0].text).toContain("user-report");
+    const unsetResult = await runMcpWriteTool(dir, (root, format) =>
+      handleIssueMetaUnset("ISS-001", "severitySource", format, root),
+    );
+    expect(unsetResult.isError).toBeUndefined();
   });
 });
 

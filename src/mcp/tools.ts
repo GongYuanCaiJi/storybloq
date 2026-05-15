@@ -76,6 +76,9 @@ import { handleBlockerList } from "../cli/commands/blocker.js";
 import {
   handleTicketList,
   handleTicketGet,
+  handleTicketMetaGet,
+  handleTicketMetaSet,
+  handleTicketMetaUnset,
   handleTicketNext,
   handleTicketBlocked,
   handleTicketCreate,
@@ -84,6 +87,9 @@ import {
 import {
   handleIssueList,
   handleIssueGet,
+  handleIssueMetaGet,
+  handleIssueMetaSet,
+  handleIssueMetaUnset,
   handleIssueCreate,
   handleIssueUpdate,
 } from "../cli/commands/issue.js";
@@ -357,6 +363,14 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTicketGet(args.id, ctx)));
 
+  server.registerTool("storybloq_ticket_meta_get", {
+    description: "Get custom metadata on a ticket",
+    inputSchema: {
+      id: z.string().regex(TICKET_ID_REGEX).describe("Ticket ID (e.g. T-001)"),
+      path: z.string().optional().describe("Metadata path (dot notation). Omit to return all custom metadata."),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTicketMetaGet(args.id, args.path, ctx)));
+
   server.registerTool("storybloq_issue_list", {
     description: "List issues with optional filters",
     inputSchema: {
@@ -374,6 +388,14 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       id: z.string().regex(ISSUE_ID_REGEX).describe("Issue ID (e.g. ISS-001)"),
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleIssueGet(args.id, ctx)));
+
+  server.registerTool("storybloq_issue_meta_get", {
+    description: "Get custom metadata on an issue",
+    inputSchema: {
+      id: z.string().regex(ISSUE_ID_REGEX).describe("Issue ID (e.g. ISS-001)"),
+      path: z.string().optional().describe("Metadata path (dot notation). Omit to return all custom metadata."),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleIssueMetaGet(args.id, args.path, ctx)));
 
   server.registerTool("storybloq_handover_get", {
     description: "Content of a specific handover document by filename",
@@ -502,6 +524,27 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
     ),
   ));
 
+  server.registerTool("storybloq_ticket_meta_set", {
+    description: "Set custom metadata on a ticket using JSON value input",
+    inputSchema: {
+      id: z.string().regex(TICKET_ID_REGEX).describe("Ticket ID (e.g. T-001)"),
+      path: z.string().describe("Metadata path (dot notation)"),
+      value: z.string().describe("JSON-encoded metadata value"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleTicketMetaSet(args.id, args.path, args.value, format, root),
+  ));
+
+  server.registerTool("storybloq_ticket_meta_unset", {
+    description: "Unset custom metadata on a ticket",
+    inputSchema: {
+      id: z.string().regex(TICKET_ID_REGEX).describe("Ticket ID (e.g. T-001)"),
+      path: z.string().describe("Metadata path (dot notation)"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleTicketMetaUnset(args.id, args.path, format, root),
+  ));
+
   // --- Issue write tools ---
 
   server.registerTool("storybloq_issue_create", {
@@ -564,6 +607,27 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       format,
       root,
     ),
+  ));
+
+  server.registerTool("storybloq_issue_meta_set", {
+    description: "Set custom metadata on an issue using JSON value input",
+    inputSchema: {
+      id: z.string().regex(ISSUE_ID_REGEX).describe("Issue ID (e.g. ISS-001)"),
+      path: z.string().describe("Metadata path (dot notation)"),
+      value: z.string().describe("JSON-encoded metadata value"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleIssueMetaSet(args.id, args.path, args.value, format, root),
+  ));
+
+  server.registerTool("storybloq_issue_meta_unset", {
+    description: "Unset custom metadata on an issue",
+    inputSchema: {
+      id: z.string().regex(ISSUE_ID_REGEX).describe("Issue ID (e.g. ISS-001)"),
+      path: z.string().describe("Metadata path (dot notation)"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleIssueMetaUnset(args.id, args.path, format, root),
   ));
 
   // --- Note tools ---

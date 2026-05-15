@@ -7,6 +7,9 @@ import {
   handleIssueGet,
   handleIssueCreate,
   handleIssueUpdate,
+  handleIssueMetaGet,
+  handleIssueMetaSet,
+  handleIssueMetaUnset,
   handleIssueDelete,
 } from "../../../src/cli/commands/issue.js";
 import { ExitCode } from "../../../src/core/output-formatter.js";
@@ -358,6 +361,70 @@ describe("handleIssueUpdate", () => {
     await expect(
       handleIssueUpdate("ISS-001", { phase: "nonexistent" }, "md", dir),
     ).rejects.toThrow("not found in roadmap");
+  });
+});
+
+describe("handleIssueMeta*", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const d of tmpDirs) await rm(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  async function setupIssue(dir: string) {
+    await initProject(dir, { name: "test" });
+    await handleIssueCreate(
+      { title: "Original Bug", severity: "high", impact: "broken", components: ["core"], relatedTickets: [], location: [] },
+      "md", dir,
+    );
+  }
+
+  it("sets and gets metadata", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-meta-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    await handleIssueMetaSet("ISS-001", "severitySource", "\"user-report\"", "md", dir);
+    const { loadProject } = await import("../../../src/core/project-loader.js");
+    const { state, warnings } = await loadProject(dir);
+    const result = handleIssueMetaGet("ISS-001", "severitySource", {
+      state,
+      warnings,
+      root: dir,
+      handoversDir: join(dir, ".story", "handovers"),
+      format: "json",
+    });
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.value).toBe("user-report");
+  });
+
+  it("supports nested metadata paths", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-meta-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    await handleIssueMetaSet("ISS-001", "integrations.linearIssue", "\"ABC-123\"", "md", dir);
+    const raw = await readFile(join(dir, ".story", "issues", "ISS-001.json"), "utf-8");
+    const issue = JSON.parse(raw);
+    expect(issue.integrations.linearIssue).toBe("ABC-123");
+  });
+
+  it("unsets metadata paths", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-meta-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    await handleIssueMetaSet("ISS-001", "severitySource", "\"user-report\"", "md", dir);
+    await handleIssueMetaUnset("ISS-001", "severitySource", "json", dir);
+    const raw = await readFile(join(dir, ".story", "issues", "ISS-001.json"), "utf-8");
+    const issue = JSON.parse(raw);
+    expect(issue.severitySource).toBeUndefined();
+  });
+
+  it("rejects protected core field updates", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-meta-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    await expect(
+      handleIssueMetaSet("ISS-001", "title", "\"new\"", "md", dir),
+    ).rejects.toThrow("Cannot set metadata on core field");
   });
 });
 

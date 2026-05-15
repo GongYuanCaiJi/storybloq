@@ -38,6 +38,9 @@ import { handleBlockerList, handleBlockerAdd, handleBlockerClear } from "./comma
 import {
   handleTicketList,
   handleTicketGet,
+  handleTicketMetaGet,
+  handleTicketMetaSet,
+  handleTicketMetaUnset,
   handleTicketNext,
   handleTicketBlocked,
   handleTicketCreate,
@@ -47,6 +50,9 @@ import {
 import {
   handleIssueList,
   handleIssueGet,
+  handleIssueMetaGet,
+  handleIssueMetaSet,
+  handleIssueMetaUnset,
   handleIssueCreate,
   handleIssueUpdate,
   handleIssueDelete,
@@ -765,6 +771,172 @@ export function registerTicketCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "meta",
+          "Get/set/unset custom metadata on a ticket",
+          (y2) =>
+            y2
+              .command(
+                "get <id> [path]",
+                "Get ticket metadata (all custom fields or one path)",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Ticket ID (e.g. T-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        describe: "Metadata path (dot notation)",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseTicketId(argv.id as string);
+                  await runReadCommand(format, (ctx) =>
+                    handleTicketMetaGet(id, argv.path as string | undefined, ctx),
+                  );
+                },
+              )
+              .command(
+                "set <id> <path> <value>",
+                "Set ticket metadata at a path (value must be JSON)",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Ticket ID (e.g. T-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Metadata path (dot notation)",
+                      })
+                      .positional("value", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "JSON metadata value",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseTicketId(argv.id as string);
+                  const root = (
+                    await import("../core/project-root-discovery.js")
+                  ).discoverProjectRoot();
+                  if (!root) {
+                    writeOutput(
+                      formatError(
+                        "not_found",
+                        "No .story/ project found.",
+                        format,
+                      ),
+                    );
+                    process.exitCode = ExitCode.USER_ERROR;
+                    return;
+                  }
+                  try {
+                    const result = await handleTicketMetaSet(
+                      id,
+                      argv.path as string,
+                      argv.value as string,
+                      format,
+                      root,
+                    );
+                    writeOutput(result.output);
+                    process.exitCode = result.exitCode ?? ExitCode.OK;
+                  } catch (err: unknown) {
+                    if (err instanceof CliValidationError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const { ProjectLoaderError } = await import(
+                      "../core/errors.js"
+                    );
+                    if (err instanceof ProjectLoaderError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const message =
+                      err instanceof Error ? err.message : String(err);
+                    writeOutput(formatError("io_error", message, format));
+                    process.exitCode = ExitCode.USER_ERROR;
+                  }
+                },
+              )
+              .command(
+                "unset <id> <path>",
+                "Unset ticket metadata at a path",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Ticket ID (e.g. T-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Metadata path (dot notation)",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseTicketId(argv.id as string);
+                  const root = (
+                    await import("../core/project-root-discovery.js")
+                  ).discoverProjectRoot();
+                  if (!root) {
+                    writeOutput(
+                      formatError(
+                        "not_found",
+                        "No .story/ project found.",
+                        format,
+                      ),
+                    );
+                    process.exitCode = ExitCode.USER_ERROR;
+                    return;
+                  }
+                  try {
+                    const result = await handleTicketMetaUnset(
+                      id,
+                      argv.path as string,
+                      format,
+                      root,
+                    );
+                    writeOutput(result.output);
+                    process.exitCode = result.exitCode ?? ExitCode.OK;
+                  } catch (err: unknown) {
+                    if (err instanceof CliValidationError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const { ProjectLoaderError } = await import(
+                      "../core/errors.js"
+                    );
+                    if (err instanceof ProjectLoaderError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const message =
+                      err instanceof Error ? err.message : String(err);
+                    writeOutput(formatError("io_error", message, format));
+                    process.exitCode = ExitCode.USER_ERROR;
+                  }
+                },
+              )
+              .demandCommand(1, "Specify a ticket meta subcommand: get, set, unset")
+              .strict(),
+        )
+        .command(
           "delete <id>",
           "Delete a ticket",
           (y2) =>
@@ -792,7 +964,7 @@ export function registerTicketCommand(yargs: Argv): Argv {
         )
         .demandCommand(
           1,
-          "Specify a ticket subcommand: list, get, next, blocked, create, update, delete",
+          "Specify a ticket subcommand: list, get, next, blocked, create, update, meta, delete",
         )
         .strict(),
     () => {},
@@ -1105,6 +1277,172 @@ export function registerIssueCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "meta",
+          "Get/set/unset custom metadata on an issue",
+          (y2) =>
+            y2
+              .command(
+                "get <id> [path]",
+                "Get issue metadata (all custom fields or one path)",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Issue ID (e.g. ISS-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        describe: "Metadata path (dot notation)",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseIssueId(argv.id as string);
+                  await runReadCommand(format, (ctx) =>
+                    handleIssueMetaGet(id, argv.path as string | undefined, ctx),
+                  );
+                },
+              )
+              .command(
+                "set <id> <path> <value>",
+                "Set issue metadata at a path (value must be JSON)",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Issue ID (e.g. ISS-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Metadata path (dot notation)",
+                      })
+                      .positional("value", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "JSON metadata value",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseIssueId(argv.id as string);
+                  const root = (
+                    await import("../core/project-root-discovery.js")
+                  ).discoverProjectRoot();
+                  if (!root) {
+                    writeOutput(
+                      formatError(
+                        "not_found",
+                        "No .story/ project found.",
+                        format,
+                      ),
+                    );
+                    process.exitCode = ExitCode.USER_ERROR;
+                    return;
+                  }
+                  try {
+                    const result = await handleIssueMetaSet(
+                      id,
+                      argv.path as string,
+                      argv.value as string,
+                      format,
+                      root,
+                    );
+                    writeOutput(result.output);
+                    process.exitCode = result.exitCode ?? ExitCode.OK;
+                  } catch (err: unknown) {
+                    if (err instanceof CliValidationError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const { ProjectLoaderError } = await import(
+                      "../core/errors.js"
+                    );
+                    if (err instanceof ProjectLoaderError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const message =
+                      err instanceof Error ? err.message : String(err);
+                    writeOutput(formatError("io_error", message, format));
+                    process.exitCode = ExitCode.USER_ERROR;
+                  }
+                },
+              )
+              .command(
+                "unset <id> <path>",
+                "Unset issue metadata at a path",
+                (y3) =>
+                  addFormatOption(
+                    y3
+                      .positional("id", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Issue ID (e.g. ISS-001)",
+                      })
+                      .positional("path", {
+                        type: "string",
+                        demandOption: true,
+                        describe: "Metadata path (dot notation)",
+                      }),
+                  ),
+                async (argv) => {
+                  const format = parseOutputFormat(argv.format);
+                  const id = parseIssueId(argv.id as string);
+                  const root = (
+                    await import("../core/project-root-discovery.js")
+                  ).discoverProjectRoot();
+                  if (!root) {
+                    writeOutput(
+                      formatError(
+                        "not_found",
+                        "No .story/ project found.",
+                        format,
+                      ),
+                    );
+                    process.exitCode = ExitCode.USER_ERROR;
+                    return;
+                  }
+                  try {
+                    const result = await handleIssueMetaUnset(
+                      id,
+                      argv.path as string,
+                      format,
+                      root,
+                    );
+                    writeOutput(result.output);
+                    process.exitCode = result.exitCode ?? ExitCode.OK;
+                  } catch (err: unknown) {
+                    if (err instanceof CliValidationError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const { ProjectLoaderError } = await import(
+                      "../core/errors.js"
+                    );
+                    if (err instanceof ProjectLoaderError) {
+                      writeOutput(formatError(err.code, err.message, format));
+                      process.exitCode = ExitCode.USER_ERROR;
+                      return;
+                    }
+                    const message =
+                      err instanceof Error ? err.message : String(err);
+                    writeOutput(formatError("io_error", message, format));
+                    process.exitCode = ExitCode.USER_ERROR;
+                  }
+                },
+              )
+              .demandCommand(1, "Specify an issue meta subcommand: get, set, unset")
+              .strict(),
+        )
+        .command(
           "delete <id>",
           "Delete an issue",
           (y2) =>
@@ -1125,7 +1463,7 @@ export function registerIssueCommand(yargs: Argv): Argv {
         )
         .demandCommand(
           1,
-          "Specify an issue subcommand: list, get, create, update, delete",
+          "Specify an issue subcommand: list, get, create, update, meta, delete",
         )
         .strict(),
     () => {},
