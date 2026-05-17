@@ -4,6 +4,7 @@ import { evaluatePressure } from "../context-pressure.js";
 import { nextTickets } from "../../core/queries.js";
 import { findFirstPostComplete, type NextStageResult } from "./registry.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
+import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinity.js";
 
 /**
  * COMPLETE stage -- Ticket completed, decide next action.
@@ -250,6 +251,13 @@ export class CompleteStage implements WorkflowStage {
       candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } }, i: number) =>
         `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
       ).join("\n");
+    }
+
+    // T-328: Branch affinity annotation
+    const affinity = detectBranchAffinity(ctx.state.git?.branch ?? null);
+    const { warningText } = buildAffinityAnnotation(affinity);
+    if (warningText) {
+      candidatesText = warningText + "\n\n" + candidatesText;
     }
 
     const topCandidate = candidates.kind === "found" ? candidates.candidates[0] : null;

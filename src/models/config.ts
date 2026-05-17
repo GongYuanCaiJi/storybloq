@@ -28,6 +28,7 @@ export const ConfigSchema = z
       codexReviewBackends: z.array(z.string()).optional(),
       handoverInterval: z.number().min(0).optional(),
       stages: z.record(z.record(z.unknown())).optional(),
+      branchStrategy: z.enum(["none", "per-ticket"]).optional(),
     }).optional(),
   })
   .passthrough();

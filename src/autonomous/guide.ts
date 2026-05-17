@@ -60,6 +60,7 @@ import { writeResumeMarker, removeResumeMarker } from "./resume-marker.js";
 import { refreshStatusForSession, isSessionActiveForStatus } from "./status-writer.js";
 import { formatCompactReport } from "../core/session-report-formatter.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "./target-work.js";
+import { detectBranchAffinity, buildAffinityAnnotation } from "./branch-affinity.js";
 import {
   handleHandoverLatest,
   handleHandoverCreate,
@@ -92,7 +93,7 @@ function writeSessionAndRefresh(
 export const RECOVERY_MAPPING: Readonly<Record<string, { state: string; resetPlan: boolean; resetCode: boolean }>> = {
   PICK_TICKET:    { state: "PICK_TICKET", resetPlan: false, resetCode: false },
   COMPLETE:       { state: "PICK_TICKET", resetPlan: false, resetCode: false },
-  HANDOVER:       { state: "PICK_TICKET", resetPlan: false, resetCode: false },
+  HANDOVER:       { state: "SESSION_END", resetPlan: false, resetCode: false },
   PLAN:           { state: "PLAN",        resetPlan: true,  resetCode: false },
   IMPLEMENT:      { state: "PLAN",        resetPlan: true,  resetCode: false },
   WRITE_TESTS:    { state: "PLAN",        resetPlan: true,  resetCode: false },
@@ -756,6 +757,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
       if (Array.isArray(overrides.reviewBackends)) sessionConfig.reviewBackends = overrides.reviewBackends as string[];
       if (Array.isArray(overrides.codexReviewBackends)) sessionConfig.codexReviewBackends = overrides.codexReviewBackends as string[];
       if (typeof overrides.handoverInterval === "number") sessionConfig.handoverInterval = overrides.handoverInterval;
+      if (overrides.branchStrategy === "none" || overrides.branchStrategy === "per-ticket") sessionConfig.branchStrategy = overrides.branchStrategy;
       if (overrides.stages && typeof overrides.stages === "object") {
         sessionConfig.stageOverrides = overrides.stages as Record<string, Record<string, unknown>>;
       }
@@ -779,6 +781,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
     reviewBackends: sessionConfig.reviewBackends,
     codexReviewBackends: sessionConfig.codexReviewBackends,
     stages: sessionConfig.stageOverrides,
+    branchStrategy: sessionConfig.branchStrategy,
   });
 
   // T-183: Clean stale resume marker before creating a new session
@@ -895,6 +898,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
       resolvedRecipeId: resolvedRecipe.id,
       resolvedStages: resolvedRecipe.stages as Record<string, Record<string, unknown>>,
       resolvedDirtyFileHandling: resolvedRecipe.dirtyFileHandling,
+      resolvedBranchStrategy: resolvedRecipe.branchStrategy,
       resolvedDefaults: {
         maxTicketsPerSession: resolvedRecipe.defaults.maxTicketsPerSession,
         compactThreshold: resolvedRecipe.defaults.compactThreshold,
@@ -1256,6 +1260,13 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
       candidatesText = "No tickets found.";
     }
 
+    // T-328: Branch affinity annotation
+    const startAffinity = detectBranchAffinity(updated.git?.branch ?? null);
+    const { warningText: startWarning } = buildAffinityAnnotation(startAffinity);
+    if (startWarning) {
+      candidatesText = startWarning + "\n\n" + candidatesText;
+    }
+
     // T-153: Surface high/critical issues alongside ticket candidates
     const highIssues = projectState.issues.filter(
       i => i.status === "open" && (i.severity === "critical" || i.severity === "high"),
@@ -1352,6 +1363,7 @@ function resolveRecipeFromState(state: FullSessionState): import("./stages/types
     postComplete: state.resolvedPostComplete ?? [],
     stages: state.resolvedStages ?? {},
     dirtyFileHandling: state.resolvedDirtyFileHandling ?? "block",
+    branchStrategy: (state.resolvedBranchStrategy ?? "none") as "none" | "per-ticket",
     defaults: state.resolvedDefaults ?? {
       maxTicketsPerSession: state.config.maxTicketsPerSession,
       compactThreshold: state.config.compactThreshold,
@@ -1385,6 +1397,11 @@ async function processAdvance(
       ? advance.result
       : { instruction: "Session ended.", reminders: [] as string[] };
     return guideResult(ctx.state, "SESSION_END", terminalResult);
+  }
+
+  // Reset stuck-retry counter on any non-retry action
+  if (advance.action !== "retry" && (ctx.state as Record<string, unknown>).stuckRetryCount) {
+    ctx.writeState({ stuckRetryCount: 0 });
   }
 
   switch (advance.action) {
@@ -1454,11 +1471,14 @@ async function processAdvance(
       if (isStageAdvance(enterResult)) return processAdvance(ctx, nextStage, enterResult, depth + 1);
       return guideResult(ctx.state, nextStage.id, enterResult);
     }
-    case "retry":
+    case "retry": {
+      const prevCount = (ctx.state as Record<string, unknown>).stuckRetryCount ?? 0;
+      ctx.writeState({ stuckRetryCount: (prevCount as number) + 1 });
       return guideResult(ctx.state, currentStage.id, {
         instruction: advance.instruction,
         reminders: advance.reminders ? [...advance.reminders] : [],
       });
+    }
     case "back":
     case "goto": {
       const target = advance.target;
@@ -1732,6 +1752,15 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         }
       } catch { /* use default */ }
 
+      // T-328: Branch affinity annotation (skip in targeted mode)
+      if (!isTargetedMode(driftWritten)) {
+        const driftAffinity = detectBranchAffinity(driftWritten.git?.branch ?? null);
+        const { warningText: driftWarning } = buildAffinityAnnotation(driftAffinity);
+        if (driftWarning) {
+          candidatesText = driftWarning + "\n\n" + candidatesText;
+        }
+      }
+
       return guideResult(driftWritten, "PICK_TICKET", {
         instruction: [
           `# Resumed After Compact — HEAD Mismatch`,
@@ -1882,6 +1911,15 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         ).join("\n");
       }
     } catch { /* use default text */ }
+
+    // T-328: Branch affinity annotation (skip in targeted mode)
+    if (!isTargetedMode(written)) {
+      const cleanAffinity = detectBranchAffinity(written.git?.branch ?? null);
+      const { warningText: cleanWarning } = buildAffinityAnnotation(cleanAffinity);
+      if (cleanWarning) {
+        candidatesText = cleanWarning + "\n\n" + candidatesText;
+      }
+    }
 
     return guideResult(written, "PICK_TICKET", {
       instruction: [
@@ -2069,7 +2107,8 @@ async function handleCancel(root: string, args: GuideInput): Promise<McpToolResu
     (totalDone < info.state.config.maxTicketsPerSession);
   const isWorkingState = !["SESSION_END", "HANDOVER", "COMPACT"].includes(info.state.state);
 
-  if (isAutoMode && hasTicketsRemaining && isWorkingState) {
+  const isStuck = ((info.state as Record<string, unknown>).stuckRetryCount ?? 0) >= 5;
+  if (isAutoMode && hasTicketsRemaining && isWorkingState && !isStuck) {
     return {
       content: [{
         type: "text",

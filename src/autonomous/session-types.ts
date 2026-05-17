@@ -579,6 +579,7 @@ export const SessionStateSchema = z.object({
   resolvedRecipeId: z.string().optional(),
   resolvedStages: z.record(z.record(z.unknown())).optional(),
   resolvedDirtyFileHandling: z.string().optional(),
+  resolvedBranchStrategy: z.enum(["none", "per-ticket"]).default("none"),
   resolvedDefaults: z.object({
     maxTicketsPerSession: z.number(),
     compactThreshold: z.string(),
@@ -595,6 +596,9 @@ export const SessionStateSchema = z.object({
     filed: z.number().default(0),
     lastTelemetryLine: z.number().default(0),
   }).optional(),
+
+  // Stuck-detection: consecutive retry count for cancel gate bypass
+  stuckRetryCount: z.number().default(0),
 
   // T-260: Liveness infrastructure
   sidecarPid: z.number().nullish(),

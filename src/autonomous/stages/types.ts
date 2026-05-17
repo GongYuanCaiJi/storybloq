@@ -52,6 +52,7 @@ export interface ResolvedRecipe {
   readonly postComplete: readonly string[];
   readonly stages: Readonly<Record<string, Record<string, unknown>>>;
   readonly dirtyFileHandling: string;
+  readonly branchStrategy: "none" | "per-ticket";
   readonly defaults: {
     readonly maxTicketsPerSession: number;
     readonly compactThreshold: string;

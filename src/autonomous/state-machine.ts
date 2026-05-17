@@ -7,13 +7,13 @@ import type { WorkflowState } from "./session-types.js";
 const TRANSITIONS: Record<WorkflowState, readonly (WorkflowState | "*")[]> = {
   INIT:          ["PICK_TICKET"],         // start does INIT + LOAD_CONTEXT internally
   LOAD_CONTEXT:  ["PICK_TICKET"],         // internal (never seen by Claude)
-  PICK_TICKET:   ["PLAN", "ISSUE_FIX", "COMPLETE", "SESSION_END"],  // COMPLETE for ISS-075 (nothing left to do)
-  PLAN:          ["PLAN_REVIEW"],
-  PLAN_REVIEW:   ["IMPLEMENT", "WRITE_TESTS", "PLAN", "PLAN_REVIEW", "SESSION_END"],   // approve → IMPLEMENT/WRITE_TESTS, reject → PLAN, stay for next round; SESSION_END for tiered exit
+  PICK_TICKET:   ["PLAN", "ISSUE_FIX", "COMPLETE", "SESSION_END", "HANDOVER"],  // COMPLETE for ISS-075 (nothing left to do); HANDOVER for T-328 branch mismatch
+  PLAN:          ["PLAN_REVIEW", "HANDOVER"],  // HANDOVER for skip_ticket
+  PLAN_REVIEW:   ["IMPLEMENT", "WRITE_TESTS", "PLAN", "PLAN_REVIEW", "SESSION_END", "HANDOVER"],   // approve → IMPLEMENT/WRITE_TESTS, reject → PLAN, stay for next round; SESSION_END for tiered exit; HANDOVER for skip_ticket
   IMPLEMENT:     ["CODE_REVIEW", "TEST", "COMPLETE"],  // TEST when test stage enabled, COMPLETE for no-op tickets (ISS-069)
   WRITE_TESTS:   ["IMPLEMENT", "WRITE_TESTS", "PLAN", "COMPLETE"],  // advance → IMPLEMENT, retry stays, exhaustion → PLAN, no-op → COMPLETE (ISS-069)
   TEST:          ["CODE_REVIEW", "IMPLEMENT", "TEST"],  // pass → CODE_REVIEW, fail → IMPLEMENT, retry
-  CODE_REVIEW:   ["VERIFY", "BUILD", "FINALIZE", "IMPLEMENT", "PLAN", "CODE_REVIEW", "SESSION_END", "ISSUE_FIX"], // approve → VERIFY/BUILD/FINALIZE, reject → IMPLEMENT/PLAN, stay for next round; SESSION_END for tiered exit; T-208: ISSUE_FIX for issue-fix reviews
+  CODE_REVIEW:   ["VERIFY", "BUILD", "FINALIZE", "IMPLEMENT", "PLAN", "CODE_REVIEW", "SESSION_END", "ISSUE_FIX", "HANDOVER"], // approve → VERIFY/BUILD/FINALIZE, reject → IMPLEMENT/PLAN, stay for next round; SESSION_END for tiered exit; T-208: ISSUE_FIX for issue-fix reviews; HANDOVER for skip
   VERIFY:        ["BUILD", "FINALIZE", "IMPLEMENT", "VERIFY"],  // pass → BUILD/FINALIZE, fail → IMPLEMENT, retry
   BUILD:         ["FINALIZE", "IMPLEMENT", "BUILD"],  // pass → FINALIZE, fail → IMPLEMENT, retry
   FINALIZE:      ["COMPLETE", "PICK_TICKET"],  // ISS-084: issues now route through COMPLETE too; PICK_TICKET kept for in-flight session compat

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
+import { detectBranchAffinity, checkAffinityMismatch, buildAffinityAnnotation, buildMismatchHandoverInstruction, createTicketBranch, refreshGitWorkingState } from "../branch-affinity.js";
 
 /**
  * PICK_TICKET stage -- Claude selects the next ticket to work on.
@@ -75,6 +76,13 @@ export class PickTicketStage implements WorkflowStage {
       candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } }, i: number) =>
         `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
       ).join("\n");
+    }
+
+    // T-328: Branch affinity annotation
+    const affinity = detectBranchAffinity(ctx.state.git?.branch ?? null);
+    const { warningText } = buildAffinityAnnotation(affinity);
+    if (warningText) {
+      candidatesText = warningText + "\n\n" + candidatesText;
     }
 
     // ISS-084: Surface ALL open issues (severity affects display order, not work-remaining check)
@@ -151,6 +159,24 @@ export class PickTicketStage implements WorkflowStage {
     const targetReject = this.enforceTargetList(ctx, ticketId);
     if (targetReject) return targetReject;
 
+    // T-328: Branch affinity mismatch blocking
+    // Skip when: targeted mode (already handled above), or per-ticket branching (Part 2)
+    if (!isTargetedMode(ctx.state) && ctx.state.resolvedBranchStrategy !== "per-ticket") {
+      const affinity = detectBranchAffinity(ctx.state.git?.branch ?? null);
+      const mismatch = checkAffinityMismatch(affinity, ticketId);
+      if (mismatch.blocked) {
+        return {
+          action: "goto",
+          target: "HANDOVER",
+          result: {
+            instruction: buildMismatchHandoverInstruction(affinity, ticketId, ctx.state.sessionId),
+            reminders: [],
+            transitionedFrom: "PICK_TICKET",
+          },
+        };
+      }
+    }
+
     // Validate ticket
     let projectState;
     try {
@@ -170,6 +196,37 @@ export class PickTicketStage implements WorkflowStage {
       const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
       if (!(ticket.status === "inprogress" && ticketClaim === ctx.state.sessionId)) {
         return { action: "retry", instruction: `Ticket ${ticketId} is ${ticket.status} — pick an open ticket.` };
+      }
+    }
+
+    // T-328 Part 2: Per-ticket branch creation
+    if (ctx.state.resolvedBranchStrategy === "per-ticket") {
+      const headResult = await import("../git-inspector.js").then(m => m.gitHead(ctx.root));
+      if (!headResult.ok || headResult.data.branch === null) {
+        return { action: "retry", instruction: `branchStrategy is "per-ticket" but ${!headResult.ok ? "git is unavailable" : "HEAD is detached"}. Switch to a branch or set branchStrategy to "none".` };
+      }
+      const result = await createTicketBranch(
+        ctx.root,
+        ctx.state.git ?? { branch: null, mergeBase: null },
+        { id: ticket.id, title: ticket.title },
+        "story",
+      );
+      if (!result.ok) {
+        return { action: "retry", instruction: `Branch creation failed: ${result.message}. Fix the issue and retry.` };
+      }
+      if (result.data.created || result.data.branchName !== ctx.state.git?.branch) {
+        const refreshed = await refreshGitWorkingState(ctx.root);
+        if (!refreshed) {
+          return { action: "retry", instruction: `Branch "${result.data.branchName}" was checked out but git state refresh failed. Run \`git status\` and retry.` };
+        }
+        ctx.updateDraft({
+          git: {
+            ...ctx.state.git,
+            branch: refreshed.branch,
+            expectedHead: refreshed.expectedHead,
+            baseline: refreshed.baseline,
+          },
+        });
       }
     }
 
@@ -216,6 +273,23 @@ export class PickTicketStage implements WorkflowStage {
     const targetReject = this.enforceTargetList(ctx, issueId);
     if (targetReject) return targetReject;
 
+    // T-328: Branch affinity mismatch blocking
+    if (!isTargetedMode(ctx.state) && ctx.state.resolvedBranchStrategy !== "per-ticket") {
+      const affinity = detectBranchAffinity(ctx.state.git?.branch ?? null);
+      const mismatch = checkAffinityMismatch(affinity, issueId);
+      if (mismatch.blocked) {
+        return {
+          action: "goto",
+          target: "HANDOVER",
+          result: {
+            instruction: buildMismatchHandoverInstruction(affinity, issueId, ctx.state.sessionId),
+            reminders: [],
+            transitionedFrom: "PICK_TICKET",
+          },
+        };
+      }
+    }
+
     let projectState;
     try {
       ({ state: projectState } = await ctx.loadProject());
@@ -231,6 +305,37 @@ export class PickTicketStage implements WorkflowStage {
     const targeted = isTargetedMode(ctx.state);
     if (issue.status !== "open" && !(targeted && issue.status === "inprogress")) {
       return { action: "retry", instruction: `Issue ${issueId} is ${issue.status}. Pick an open issue.` };
+    }
+
+    // T-328 Part 2: Per-ticket branch creation for issues
+    if (ctx.state.resolvedBranchStrategy === "per-ticket") {
+      const headResult = await import("../git-inspector.js").then(m => m.gitHead(ctx.root));
+      if (!headResult.ok || headResult.data.branch === null) {
+        return { action: "retry", instruction: `branchStrategy is "per-ticket" but ${!headResult.ok ? "git is unavailable" : "HEAD is detached"}. Switch to a branch or set branchStrategy to "none".` };
+      }
+      const result = await createTicketBranch(
+        ctx.root,
+        ctx.state.git ?? { branch: null, mergeBase: null },
+        { id: issue.id, title: issue.title },
+        "fix",
+      );
+      if (!result.ok) {
+        return { action: "retry", instruction: `Branch creation failed: ${result.message}. Fix the issue and retry.` };
+      }
+      if (result.data.created || result.data.branchName !== ctx.state.git?.branch) {
+        const refreshed = await refreshGitWorkingState(ctx.root);
+        if (!refreshed) {
+          return { action: "retry", instruction: `Branch "${result.data.branchName}" was checked out but git state refresh failed. Run \`git status\` and retry.` };
+        }
+        ctx.updateDraft({
+          git: {
+            ...ctx.state.git,
+            branch: refreshed.branch,
+            expectedHead: refreshed.expectedHead,
+            baseline: refreshed.baseline,
+          },
+        });
+      }
     }
 
     // ISS-090: Mark issue as inprogress with pendingProjectMutation for crash recovery

@@ -14,6 +14,7 @@ interface RawRecipe {
   postComplete?: readonly string[];
   stages?: Record<string, Record<string, unknown>>;
   dirtyFileHandling?: string;
+  branchStrategy?: "none" | "per-ticket";
   defaults?: {
     maxTicketsPerSession?: number;
     compactThreshold?: string;
@@ -77,6 +78,7 @@ export function resolveRecipe(
     reviewBackends?: string[];
     codexReviewBackends?: string[];
     stages?: Record<string, Record<string, unknown>>;
+    branchStrategy?: "none" | "per-ticket";
   },
 ): ResolvedRecipe {
   let raw: RawRecipe;
@@ -182,6 +184,7 @@ export function resolveRecipe(
     postComplete,
     stages,
     dirtyFileHandling: raw.dirtyFileHandling ?? "block",
+    branchStrategy: projectOverrides?.branchStrategy ?? raw.branchStrategy ?? "none",
     defaults,
   };
 }

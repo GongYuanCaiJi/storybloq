@@ -111,3 +111,31 @@ Use `/story auto T-XXX` instead. A single-ticket targeted auto session is equiva
 - Require a `ticketId` -- no ad-hoc review without a ticket in V1
 - Use the same review process as auto mode (same backends, same adaptive depth)
 - Can be cancelled with `action: "cancel"` at any point
+
+## Branch Affinity
+
+When running `/story auto` (standard mode, no targetWork), the guide checks if the
+current git branch contains a ticket or issue ID (e.g. `story/T-012-rebrand`).
+
+**Behavior:**
+- If the branch implies a specific ticket, the candidate list shows it first with a
+  `[Branch affinity]` marker. The guide expects you to pick that ticket.
+- If you pick a DIFFERENT ticket, the guide blocks the pick and routes to HANDOVER.
+  This prevents unrelated commits from contaminating a feature branch.
+- If the branch contains multiple IDs (ambiguous), a warning is shown but no blocking
+  occurs.
+
+**If mismatch blocking triggers, tell the user:**
+> This branch is scoped to {id}. The session will end with a handover.
+> To work on other tickets:
+> - Switch to `main` and run `/story auto` from there
+> - Use targeted mode: `/story auto T-XXX` (skips the branch check)
+> - Set `branchStrategy: "per-ticket"` in config (auto-creates branches per ticket)
+
+**When branchStrategy is "per-ticket":**
+The guide creates a new branch per ticket automatically. The mismatch check is skipped
+because each ticket gets its own branch.
+
+**Targeted mode (`/story auto T-XXX ISS-YYY`):**
+Branch affinity is skipped entirely. The targetWork list constrains picks regardless of
+branch name.

@@ -290,6 +290,53 @@ export async function gitRevListAncestryPath(
 }
 
 // ---------------------------------------------------------------------------
+// T-328: Branch operations for per-ticket branch creation
+// ---------------------------------------------------------------------------
+
+/** Create a new branch at a specific base and check it out. */
+export async function gitCheckoutNewBranch(cwd: string, branchName: string, base: string): Promise<GitResult<void>> {
+  return git(cwd, ["checkout", "-b", branchName, base], () => undefined);
+}
+
+/** Check if a local branch exists. Exit code 1 = not found, other errors propagated. */
+export async function gitBranchExists(cwd: string, branchName: string): Promise<GitResult<boolean>> {
+  return new Promise((resolve) => {
+    execFile("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], { cwd, timeout: GIT_TIMEOUT }, (err) => {
+      if (err) {
+        // execFile sets err.code to numeric exit code for process exits.
+        // Exit code 1 = ref not found. Any other error (spawn failure, timeout) is a real error.
+        const exitCode = (err as unknown as { code?: number }).code;
+        if (exitCode === 1) {
+          resolve({ ok: true, data: false });
+        } else {
+          resolve({ ok: false, reason: "git_error", message: (err as Error).message });
+        }
+        return;
+      }
+      resolve({ ok: true, data: true });
+    });
+  });
+}
+
+/** Check out an existing branch. */
+export async function gitCheckoutBranch(cwd: string, branchName: string): Promise<GitResult<void>> {
+  return git(cwd, ["checkout", branchName], () => undefined);
+}
+
+/** Validate a branch name against git's ref format rules. */
+export async function gitCheckRefFormat(cwd: string, refName: string): Promise<GitResult<boolean>> {
+  return new Promise((resolve) => {
+    execFile("git", ["check-ref-format", "--branch", refName], { cwd, timeout: GIT_TIMEOUT }, (err) => {
+      if (err) {
+        resolve({ ok: true, data: false });
+        return;
+      }
+      resolve({ ok: true, data: true });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------
 

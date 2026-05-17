@@ -63,6 +63,7 @@ export interface SessionConfig {
   mode?: "auto" | "review" | "plan" | "guided";
   handoverInterval?: number;
   stageOverrides?: Record<string, Record<string, unknown>>;
+  branchStrategy?: "none" | "per-ticket";
 }
 
 /** Create a new session directory and write initial state.json. */
