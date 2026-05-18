@@ -51,6 +51,7 @@ async function runCli(): Promise<void> {
     registerNoteCommand,
     registerLessonCommand,
     registerRecommendCommand,
+    registerDispatchCommand,
     registerReferenceCommand,
     registerSelftestCommand,
     registerCodexReviewCommand,
@@ -115,6 +116,7 @@ async function runCli(): Promise<void> {
   cli = registerRecapCommand(cli);
   cli = registerExportCommand(cli);
   cli = registerRecommendCommand(cli);
+  cli = registerDispatchCommand(cli);
   cli = registerReferenceCommand(cli);
   cli = registerSelftestCommand(cli);
   cli = registerCodexReviewCommand(cli);

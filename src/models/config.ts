@@ -29,6 +29,7 @@ export const ConfigSchema = z
       handoverInterval: z.number().min(0).optional(),
       stages: z.record(z.record(z.unknown())).optional(),
       branchStrategy: z.enum(["none", "per-ticket"]).optional(),
+      maxParallelAgents: z.number().min(1).max(8).optional(),
     }).optional(),
   })
   .passthrough();

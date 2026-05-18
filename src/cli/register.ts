@@ -70,6 +70,7 @@ import {
   LESSON_SOURCES,
 } from "./commands/lesson.js";
 import { handleRecommend } from "./commands/recommend.js";
+import { handleDispatchRecommend, handleDispatch } from "./commands/dispatch.js";
 import {
   handlePhaseList,
   handlePhaseCurrent,
@@ -1915,6 +1916,69 @@ export function registerRecommendCommand(yargs: Argv): Argv {
       const raw = Number(argv.count) || 5;
       const count = Math.max(1, Math.min(10, Math.floor(raw)));
       await runReadCommand(format, (ctx) => handleRecommend(ctx, count));
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// dispatch
+// ---------------------------------------------------------------------------
+
+export function registerDispatchCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "dispatch [ids..]",
+    "Dispatch work to Agent View background sessions",
+    (y) =>
+      addFormatOption(y)
+        .positional("ids", {
+          type: "string",
+          array: true,
+          describe: "Ticket/issue IDs to dispatch (T-XXX, ISS-XXX)",
+        })
+        .option("recommend", {
+          type: "boolean",
+          default: false,
+          describe: "Show recommended dispatch plan without executing",
+        })
+        .option("all", {
+          type: "boolean",
+          default: false,
+          describe: "Dispatch all recommended items",
+        })
+        .option("count", {
+          type: "number",
+          default: 3,
+          describe: "Number of recommendations to consider (1-8)",
+        })
+        .option("yes", {
+          alias: "y",
+          type: "boolean",
+          default: false,
+          describe: "Execute without confirmation",
+        })
+        .option("dry-run", {
+          type: "boolean",
+          default: false,
+          describe: "Show plan without executing",
+        }),
+    async (argv) => {
+      const format = parseOutputFormat(argv.format);
+      const raw = Number(argv.count) || 3;
+      const count = Math.max(1, Math.min(8, Math.floor(raw)));
+      const dryRun = !!(argv.recommend || argv.dryRun);
+
+      const ids: readonly string[] | "all" = argv.all
+        ? "all"
+        : (argv.ids as string[] | undefined) ?? [];
+
+      if (ids !== "all" && ids.length === 0) {
+        await runReadCommand(format, (ctx) => handleDispatchRecommend(ctx, count));
+        return;
+      }
+
+      await runReadCommand(format, (ctx) =>
+        handleDispatch(ctx, { ids, count, dryRun, yes: !!argv.yes }),
+      );
     },
   );
 }
