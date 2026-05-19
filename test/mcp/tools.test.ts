@@ -44,7 +44,7 @@ describe("runMcpReadTool — happy path", () => {
       handoversDir: "/tmp/test/.story/handovers",
       format: "md",
     };
-    const result = handleStatus(ctx);
+    const result = await handleStatus(ctx);
     expect(result.output).toContain("p1");
     expect(result.exitCode).toBeUndefined();
   });
@@ -315,7 +315,7 @@ describe("runMcpReadTool — integrity warnings", () => {
     };
 
     // Calling handler directly to verify the warning prefix logic
-    const result = handleStatus(ctx);
+    const result = await handleStatus(ctx);
     // The handler itself doesn't add the warning — the pipeline does.
     // We test the handler output is clean:
     expect(result.output).toBeDefined();
@@ -338,7 +338,7 @@ describe("handler format lock", () => {
       handoversDir: "/tmp/test/.story/handovers",
       format: "md",
     };
-    const result = handleStatus(ctx);
+    const result = await handleStatus(ctx);
     // Should NOT be JSON envelope
     expect(() => JSON.parse(result.output)).toThrow();
   });
@@ -356,7 +356,7 @@ describe("handler format lock", () => {
       handoversDir: "/tmp/test/.story/handovers",
       format: "json",
     };
-    const result = handleStatus(ctx);
+    const result = await handleStatus(ctx);
     expect(() => JSON.parse(result.output)).not.toThrow();
   });
 });

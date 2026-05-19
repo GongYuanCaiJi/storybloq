@@ -92,7 +92,7 @@ describe("init bootstrap — MCP degraded mode flow", () => {
       handoversDir: join(dir, ".story", "handovers"),
       format: "md" as const,
     };
-    const result = handleStatus(ctx);
+    const result = await handleStatus(ctx);
     expect(result.output).toBeDefined();
     // Should not throw
   });

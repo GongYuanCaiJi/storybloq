@@ -1,6 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { dirname } from "node:path";
+import { join, dirname } from "node:path";
 import type { ResolvedNode } from "./resolver.js";
 import { loadProject, type LoadResult } from "../core/project-loader.js";
 
@@ -24,11 +23,18 @@ export interface ScanOptions {
   timeoutMs?: number;
 }
 
+function checkAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+}
+
 export async function scanNodeSummary(
   storyDir: string,
   signal?: AbortSignal,
 ): Promise<NodeScanSummary> {
-  const configRaw = await readFile(join(storyDir, "config.json"), { encoding: "utf-8", signal });
+  checkAborted(signal);
+
+  const configRaw = await readFile(join(storyDir, "config.json"), "utf-8");
+  checkAborted(signal);
   const config = JSON.parse(configRaw) as Record<string, unknown>;
 
   let ticketCount = 0;
@@ -37,12 +43,15 @@ export async function scanNodeSummary(
 
   const ticketsDir = join(storyDir, "tickets");
   try {
-    const ticketFiles = await readdir(ticketsDir, { signal });
+    const ticketFiles = await readdir(ticketsDir);
+    checkAborted(signal);
     const jsonFiles = ticketFiles.filter((f) => f.endsWith(".json"));
 
     const reads = jsonFiles.map(async (f) => {
       try {
-        const raw = await readFile(join(ticketsDir, f), { encoding: "utf-8", signal });
+        checkAborted(signal);
+        const raw = await readFile(join(ticketsDir, f), "utf-8");
+        checkAborted(signal);
         const ticket = JSON.parse(raw) as Record<string, unknown>;
         ticketCount++;
         if (ticket.status === "open") openTickets++;
@@ -52,8 +61,8 @@ export async function scanNodeSummary(
       }
     });
     await Promise.all(reads);
-  } catch {
-    // no tickets directory
+  } catch (err) {
+    if (signal?.aborted) throw err;
   }
 
   let issueCount = 0;
@@ -61,12 +70,16 @@ export async function scanNodeSummary(
 
   const issuesDir = join(storyDir, "issues");
   try {
-    const issueFiles = await readdir(issuesDir, { signal });
+    checkAborted(signal);
+    const issueFiles = await readdir(issuesDir);
+    checkAborted(signal);
     const jsonFiles = issueFiles.filter((f) => f.endsWith(".json"));
 
     const reads = jsonFiles.map(async (f) => {
       try {
-        const raw = await readFile(join(issuesDir, f), { encoding: "utf-8", signal });
+        checkAborted(signal);
+        const raw = await readFile(join(issuesDir, f), "utf-8");
+        checkAborted(signal);
         const issue = JSON.parse(raw) as Record<string, unknown>;
         issueCount++;
         if (issue.status === "open") openIssues++;
@@ -75,8 +88,8 @@ export async function scanNodeSummary(
       }
     });
     await Promise.all(reads);
-  } catch {
-    // no issues directory
+  } catch (err) {
+    if (signal?.aborted) throw err;
   }
 
   let lastHandoverDate: string | null = null;
@@ -84,7 +97,7 @@ export async function scanNodeSummary(
 
   const handoversDir = join(storyDir, "handovers");
   try {
-    const files = await readdir(handoversDir, { signal });
+    const files = await readdir(handoversDir);
     const mdFiles = files.filter((f) => f.endsWith(".md")).sort();
     if (mdFiles.length > 0) {
       const latest = mdFiles[mdFiles.length - 1]!;
@@ -92,7 +105,7 @@ export async function scanNodeSummary(
       lastHandoverDate = dateMatch ? dateMatch[1]! : null;
 
       try {
-        const content = await readFile(join(handoversDir, latest), { encoding: "utf-8", signal });
+        const content = await readFile(join(handoversDir, latest), "utf-8");
         const titleMatch = content.match(/^#\s+(.+)/m);
         lastHandoverTitle = titleMatch ? titleMatch[1]!.trim() : null;
       } catch {
@@ -152,10 +165,11 @@ export async function scanAllSummaries(
       controller,
     )
       .then((summary): NodeScanResult => ({ reachable: true, summary }))
-      .catch((err): NodeScanResult => ({
-        reachable: false,
-        reason: err instanceof Error && err.message === "timeout" ? "timeout" : `scan error: ${String(err)}`,
-      }));
+      .catch((err): NodeScanResult => {
+        const isTimeout = (err instanceof Error && err.message === "timeout") ||
+          (typeof DOMException !== "undefined" && err instanceof DOMException && err.name === "AbortError");
+        return { reachable: false, reason: isTimeout ? "timeout" : `scan error: ${String(err)}` };
+      });
 
     promises.push({ name, promise: scanPromise });
   }

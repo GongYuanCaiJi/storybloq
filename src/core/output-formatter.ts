@@ -1,4 +1,6 @@
 import type { OutputFormat, ErrorCode } from "../models/types.js";
+import type { FederationState, FederationNodeEntry } from "../federation/state.js";
+import type { Config } from "../models/config.js";
 import type { Ticket } from "../models/ticket.js";
 import type { Issue } from "../models/issue.js";
 import type { Note } from "../models/note.js";
@@ -189,6 +191,68 @@ export function formatStatus(
     lines.push("");
     lines.push("This project has been initialized but has no tickets, issues, or handovers yet.");
     lines.push("Run the /story setup flow to analyze your project and create an initial roadmap.");
+  }
+
+  return lines.join("\n");
+}
+
+export function formatFederatedStatus(
+  fedState: FederationState,
+  config: Config,
+  format: OutputFormat,
+  activeSessions: readonly ActiveSessionSummary[] = [],
+): string {
+  const data = {
+    federation: fedState,
+    project: config.project,
+    type: config.type,
+  };
+
+  if (format === "json") {
+    return JSON.stringify(successEnvelope(data), null, 2);
+  }
+
+  const lines: string[] = [
+    `# ${escapeMarkdownInline(fedState.orchestratorProject)} (orchestrator)`,
+    "",
+    `Federation: ${fedState.nodeCount} nodes (${fedState.reachableCount} reachable${fedState.unreachableCount > 0 ? `, ${fedState.unreachableCount} unreachable` : ""})`,
+    `Tickets: ${fedState.totalCompleteTickets}/${fedState.totalTickets} across all nodes | Issues: ${fedState.totalOpenIssues} open`,
+    "",
+  ];
+
+  const overrides = config.recipeOverrides as Record<string, unknown> | undefined;
+  const backends = overrides?.reviewBackends as string[] | undefined;
+  if (backends && backends.length > 0) {
+    lines.push(`Review backends: ${backends.join(", ")}`);
+    lines.push("");
+  }
+
+  lines.push("## Nodes");
+  lines.push("");
+  lines.push("| Node | Health | Tickets | Issues | Last Activity | Role |");
+  lines.push("|------|--------|---------|--------|---------------|------|");
+
+  for (const node of fedState.nodes) {
+    if (node.reachable && node.scanSummary) {
+      const s = node.scanSummary;
+      lines.push(
+        `| ${escapeMarkdownInline(node.name)} | ${escapeMarkdownInline(node.health)} | ${s.completeTickets}/${s.ticketCount} | ${s.openIssues} open | ${escapeMarkdownInline(s.lastHandoverDate ?? "none")} | ${escapeMarkdownInline(node.role)} |`,
+      );
+    } else {
+      lines.push(
+        `| ${escapeMarkdownInline(node.name)} | ${escapeMarkdownInline(node.health)} | -- | -- | unreachable | ${escapeMarkdownInline(node.role)} |`,
+      );
+    }
+  }
+
+  if (activeSessions.length > 0) {
+    lines.push("");
+    lines.push("## Active Sessions");
+    lines.push("");
+    for (const s of activeSessions) {
+      const ticket = s.ticketId ? `${s.ticketId}: ${escapeMarkdownInline(s.ticketTitle ?? "")}` : "no ticket";
+      lines.push(`- ${s.sessionId.slice(0, 8)}: ${s.state} -- ${ticket} (${s.mode} mode)`);
+    }
   }
 
   return lines.join("\n");
