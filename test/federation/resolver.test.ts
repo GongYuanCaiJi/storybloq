@@ -90,6 +90,20 @@ describe("resolveNodePath", () => {
     const result = resolveNodePath("/some/raw/path", "/tmp/orch");
     expect(result.rawPath).toBe("/some/raw/path");
   });
+
+  it("resolves relative path against orchestrator root, not cwd", async () => {
+    const orchDir = await createNodeDir("orchestrator");
+    const nodeDir = await createNodeDir("engine");
+    const { basename } = await import("node:path");
+    const nodeName = basename(nodeDir);
+    const parentDir = join(nodeDir, "..");
+    const result = resolveNodePath(nodeName, parentDir);
+    const nodeDirReal = await realpath(nodeDir);
+    expect(result.resolved).toBe(true);
+    if (result.resolved) {
+      expect(result.absolutePath).toBe(nodeDirReal);
+    }
+  });
 });
 
 describe("resolveAllNodes", () => {

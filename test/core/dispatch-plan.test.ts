@@ -252,4 +252,16 @@ describe("buildFederationDispatchPlan (T-336)", () => {
     const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
     expect(plan.entries).toHaveLength(0);
   });
+
+  it("does not deduplicate same ID across different nodes", () => {
+    const nodeRecs = new Map([
+      ["engine", { root: "/dev/engine", recommendations: [makeRec({ id: "T-001", title: "engine setup", score: 90 })] }],
+      ["cloud", { root: "/dev/cloud", recommendations: [makeRec({ id: "T-001", title: "cloud setup", score: 80 })] }],
+    ]);
+    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    expect(plan.entries).toHaveLength(2);
+    expect(plan.entries[0].target.title).toBe("engine setup");
+    expect(plan.entries[1].target.title).toBe("cloud setup");
+    expect(plan.skipped).toHaveLength(0);
+  });
 });

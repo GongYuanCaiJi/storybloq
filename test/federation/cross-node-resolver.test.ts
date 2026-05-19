@@ -148,4 +148,12 @@ describe("CrossNodeBlockingResolver", () => {
       expect(resolver.getCrossNodeStatus("engine:T-999")).toBeUndefined();
     });
   });
+
+  describe("unindexed ref safety", () => {
+    it("treats refs not in statuses as unresolved", async () => {
+      const resolver = await CrossNodeBlockingResolver.build([], new Map());
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-061"]);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe("unresolved");
+    });
+  });
 });

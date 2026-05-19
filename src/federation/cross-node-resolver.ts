@@ -109,7 +109,10 @@ export class CrossNodeBlockingResolver {
     for (const ref of refs) {
       if (typeof ref !== "string") continue;
       const status = this.statuses.get(ref);
-      if (!status) continue;
+      if (!status) {
+        hasUnresolved = true;
+        continue;
+      }
 
       if (!status.resolved) {
         hasUnresolved = true;

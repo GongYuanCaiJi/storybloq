@@ -6,6 +6,7 @@ import type { FederationState } from "./state.js";
 export interface CachedNodeSummary {
   ticketCount: number;
   openTickets: number;
+  completeTickets: number;
   issueCount: number;
   openIssues: number;
   lastHandoverDate: string | null;
@@ -46,6 +47,7 @@ export function writeFederationCache(storyDir: string, state: FederationState): 
     const summary: CachedNodeSummary = {
       ticketCount: entry.scanSummary?.ticketCount ?? 0,
       openTickets: entry.scanSummary?.openTickets ?? 0,
+      completeTickets: entry.scanSummary?.completeTickets ?? 0,
       issueCount: entry.scanSummary?.issueCount ?? 0,
       openIssues: entry.scanSummary?.openIssues ?? 0,
       lastHandoverDate: entry.scanSummary?.lastHandoverDate ?? null,

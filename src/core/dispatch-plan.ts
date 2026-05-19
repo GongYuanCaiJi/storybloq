@@ -167,11 +167,12 @@ export function buildFederationDispatchPlan(
         skipped.push({ id: rec.id, reason: `action (not dispatchable) [${nodeName}]` });
         continue;
       }
-      if (seen.has(rec.id)) {
+      const globalKey = `${nodeName}:${rec.id}`;
+      if (seen.has(globalKey)) {
         skipped.push({ id: rec.id, reason: `duplicate across nodes [${nodeName}]` });
         continue;
       }
-      seen.add(rec.id);
+      seen.add(globalKey);
       candidates.push({
         target: {
           id: rec.id,

@@ -126,6 +126,11 @@ describe("PathSafetySchema", () => {
   it("rejects empty string", () => {
     expect(PathSafetySchema.safeParse("").success).toBe(false);
   });
+
+  it("rejects backslash traversal segments", () => {
+    expect(PathSafetySchema.safeParse("..\\other-repo").success).toBe(false);
+    expect(PathSafetySchema.safeParse("node\\..\\other").success).toBe(false);
+  });
 });
 
 describe("NodeSchema", () => {

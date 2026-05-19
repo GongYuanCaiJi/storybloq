@@ -20,7 +20,7 @@ export const PathSafetySchema = z
   .string()
   .min(1, "Path must not be empty")
   .refine((p) => !p.includes("\0"), { message: "Path must not contain null bytes" })
-  .refine((p) => !p.split("/").includes(".."), {
+  .refine((p) => !p.replace(/\\/g, "/").split("/").includes(".."), {
     message: "Path must not contain .. segments",
   });
 

@@ -1,5 +1,5 @@
 import { realpathSync, accessSync, existsSync, constants } from "node:fs";
-import { join, normalize } from "node:path";
+import { join, normalize, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 
 export type ResolvedNode =
@@ -14,10 +14,11 @@ function expandTilde(p: string): string {
 
 export function resolveNodePath(rawPath: string, orchestratorRoot: string): ResolvedNode {
   const expanded = expandTilde(rawPath);
+  const candidate = isAbsolute(expanded) ? expanded : resolve(expandTilde(orchestratorRoot), expanded);
 
   let resolved: string;
   try {
-    resolved = realpathSync(expanded);
+    resolved = realpathSync(candidate);
   } catch (err: unknown) {
     const code = (err as NodeJS.ErrnoException).code;
     const reason = code === "ENOENT" ? "path does not exist"
