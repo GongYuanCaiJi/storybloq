@@ -1,7 +1,7 @@
 import type { ErrorCode } from "../models/types.js";
 
 /** Schema version this loader understands. Config.schemaVersion > this → version_mismatch. */
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export class ProjectLoaderError extends Error {
   readonly name = "ProjectLoaderError";

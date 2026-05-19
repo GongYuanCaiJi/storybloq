@@ -77,6 +77,64 @@ describe("ConfigSchema", () => {
       }
     });
   });
+
+  describe("federation fields (T-332)", () => {
+    const base = {
+      version: 2, project: "test", type: "npm", language: "typescript",
+      features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true },
+    };
+
+    it("parses config with nodes field (permissive at base level)", () => {
+      const data = { ...base, nodes: { engine: { path: "~/Dev/engine" } } };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.nodes).toBeDefined();
+    });
+
+    it("parses config with orchestrator field", () => {
+      const data = { ...base, orchestrator: "~/Developer/studio" };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.orchestrator).toBe("~/Developer/studio");
+    });
+
+    it("parses config with federation field", () => {
+      const data = { ...base, federation: { allowNodeWrites: true } };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.federation).toBeDefined();
+    });
+
+    it("accepts schemaVersion 2", () => {
+      const data = { ...base, schemaVersion: 2 };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.schemaVersion).toBe(2);
+    });
+
+    it("preserves nodes field in round-trip", () => {
+      const data = { ...base, nodes: { engine: { path: "~/Dev/engine", custom: true } } };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        const serialized = JSON.parse(JSON.stringify(result.data));
+        const reparsed = ConfigSchema.safeParse(serialized);
+        expect(reparsed.success).toBe(true);
+        if (reparsed.success) {
+          expect(reparsed.data.nodes).toBeDefined();
+        }
+      }
+    });
+
+    it("non-orchestrator config with stray nodes key preserves via passthrough", () => {
+      const data = { ...base, type: "npm", nodes: { arbitrary: "data" } };
+      const result = ConfigSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.nodes).toBeDefined();
+      }
+    });
+  });
 });
 
 describe("FeaturesSchema", () => {

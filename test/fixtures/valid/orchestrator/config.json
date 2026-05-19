@@ -1,0 +1,35 @@
+{
+  "version": 2,
+  "schemaVersion": 2,
+  "project": "studio",
+  "type": "orchestrator",
+  "language": "typescript",
+  "features": {
+    "tickets": true,
+    "issues": true,
+    "handovers": true,
+    "roadmap": true,
+    "reviews": true
+  },
+  "nodes": {
+    "engine": {
+      "path": "~/Developer/engine",
+      "stack": "swift-spm",
+      "role": "Headless video/audio engine",
+      "summary": "Core pipeline working",
+      "health": "green",
+      "dependsOn": []
+    },
+    "cloud": {
+      "path": "~/Developer/cloud",
+      "stack": "typescript-npm",
+      "role": "Cloud API backend",
+      "summary": "Webhook system live",
+      "health": "yellow",
+      "dependsOn": ["engine"]
+    }
+  },
+  "federation": {
+    "allowNodeWrites": false
+  }
+}

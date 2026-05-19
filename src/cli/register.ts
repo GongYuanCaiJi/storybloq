@@ -178,6 +178,45 @@ export function registerRepairCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// migrate
+// ---------------------------------------------------------------------------
+
+export function registerMigrateCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "migrate",
+    "Migrate config schema to latest version",
+    (y) =>
+      y
+        .option("dry-run", {
+          type: "boolean",
+          default: false,
+          describe: "Show proposed changes without writing",
+        })
+        .option("format", {
+          choices: ["md", "json"] as const,
+          default: "md",
+          describe: "Output format",
+        }),
+    async (argv) => {
+      const format = parseOutputFormat(argv.format);
+      const dryRun = argv["dry-run"] as boolean;
+      const { handleMigrate } = await import("./commands/migrate.js");
+      const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+      if (!root) {
+        writeOutput(formatError("not_found", "No .story/ project found.", format));
+        process.exitCode = ExitCode.USER_ERROR;
+        return;
+      }
+      const result = await handleMigrate(root, format, { dryRun });
+      writeOutput(result.output);
+      if (result.errorCode) {
+        process.exitCode = ExitCode.USER_ERROR;
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // handover
 // ---------------------------------------------------------------------------
 

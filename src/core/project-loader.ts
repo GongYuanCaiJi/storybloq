@@ -19,6 +19,7 @@ import { NoteSchema, type Note } from "../models/note.js";
 import { LessonSchema, type Lesson } from "../models/lesson.js";
 import { RoadmapSchema, type Roadmap } from "../models/roadmap.js";
 import { ConfigSchema, type Config } from "../models/config.js";
+import { validateOrchestratorOverlay } from "../models/federation-config.js";
 import { TICKET_ID_REGEX, ISSUE_ID_REGEX, NOTE_ID_REGEX, LESSON_ID_REGEX } from "../models/types.js";
 import { ProjectState } from "./project-state.js";
 import {
@@ -109,8 +110,24 @@ export async function loadProject(
     RoadmapSchema,
   );
 
-  // 6. Load tickets (best-effort)
+  // 5b. Validate orchestrator overlay (non-fatal)
   const warnings: LoadWarning[] = [];
+  if (
+    config.type === "orchestrator" &&
+    config.nodes &&
+    typeof config.nodes === "object" &&
+    Object.keys(config.nodes).length > 0
+  ) {
+    const overlay = validateOrchestratorOverlay(config as Record<string, unknown>);
+    for (const w of overlay.warnings) {
+      warnings.push({ type: "schema_error" as LoadWarningType, file: "config.json", message: w });
+    }
+    for (const e of overlay.errors) {
+      warnings.push({ type: "schema_error" as LoadWarningType, file: "config.json", message: e });
+    }
+  }
+
+  // 6. Load tickets (best-effort)
   const tickets = await loadDirectory<Ticket>(
     join(wrapDir, "tickets"),
     absRoot,

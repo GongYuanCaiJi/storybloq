@@ -31,6 +31,9 @@ export const ConfigSchema = z
       branchStrategy: z.enum(["none", "per-ticket"]).optional(),
       maxParallelAgents: z.number().min(1).max(8).optional(),
     }).optional(),
+    nodes: z.record(z.string(), z.unknown()).optional(),
+    orchestrator: z.string().optional(),
+    federation: z.record(z.unknown()).optional(),
   })
   .passthrough();
 
