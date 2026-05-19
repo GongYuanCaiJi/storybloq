@@ -7,6 +7,8 @@
 import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { NODE_NAME_REGEX } from "../models/federation-config.js";
+import { resolveNodeRoot, checkNodeWritePermission } from "./node-resolution.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/session-types.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
@@ -154,12 +156,15 @@ function formatMcpError(code: string, message: string): string {
 export async function runMcpReadTool(
   pinnedRoot: string,
   handler: (ctx: CommandContext) => Promise<CommandResult> | CommandResult,
+  effectiveRoot?: string,
 ): Promise<McpToolResult> {
+  // Liveness is always anchored to pinnedRoot (the orchestrator), not the effective node root.
   try { touchMcpLiveness(pinnedRoot); } catch { /* best-effort */ }
+  const loadRoot = effectiveRoot ?? pinnedRoot;
   try {
-    const { state, warnings } = await loadProject(pinnedRoot);
-    const handoversDir = join(pinnedRoot, ".story", "handovers");
-    const ctx: CommandContext = { state, warnings, root: pinnedRoot, handoversDir, format: "md" };
+    const { state, warnings } = await loadProject(loadRoot);
+    const handoversDir = join(loadRoot, ".story", "handovers");
+    const ctx: CommandContext = { state, warnings, root: loadRoot, handoversDir, format: "md" };
 
     const result = await handler(ctx);
 
@@ -212,10 +217,12 @@ export async function runMcpReadTool(
 export async function runMcpWriteTool(
   pinnedRoot: string,
   handler: (root: string, format: "md") => Promise<CommandResult>,
+  effectiveRoot?: string,
 ): Promise<McpToolResult> {
   try { touchMcpLiveness(pinnedRoot); } catch { /* best-effort */ }
+  const writeRoot = effectiveRoot ?? pinnedRoot;
   try {
-    const result = await handler(pinnedRoot, "md");
+    const result = await handler(writeRoot, "md");
 
     if (result.errorCode && INFRASTRUCTURE_ERROR_CODES.includes(result.errorCode)) {
       return {
@@ -238,6 +245,32 @@ export async function runMcpWriteTool(
 }
 
 // --- Tool registration ---
+
+const nodeParam = z.string().regex(NODE_NAME_REGEX).optional().describe("Node name (orchestrator only). When provided, operates on that node's .story/ instead of the orchestrator's.");
+
+function resolveEffectiveRoot(pinnedRoot: string, nodeName?: string): { root: string } | McpToolResult {
+  if (!nodeName) return { root: pinnedRoot };
+  const resolved = resolveNodeRoot(pinnedRoot, nodeName);
+  if (!resolved.ok) {
+    return { content: [{ type: "text" as const, text: resolved.error }], isError: true };
+  }
+  return { root: resolved.root };
+}
+
+function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { root: string } | McpToolResult {
+  if (!nodeName) return { root: pinnedRoot };
+  if (!checkNodeWritePermission(pinnedRoot)) {
+    return {
+      content: [{ type: "text" as const, text: "Node writes disabled. Set `federation.allowNodeWrites: true` in .story/config.json to enable cross-node writes from this orchestrator." }],
+      isError: true,
+    };
+  }
+  const resolved = resolveNodeRoot(pinnedRoot, nodeName);
+  if (!resolved.ok) {
+    return { content: [{ type: "text" as const, text: resolved.error }], isError: true };
+  }
+  return { root: resolved.root };
+}
 
 export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   // --- No-arg tools ---
@@ -337,31 +370,40 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       status: z.enum(TICKET_STATUSES).optional().describe("Filter by status: open, inprogress, complete"),
       phase: z.string().optional().describe("Filter by phase ID"),
       type: z.enum(TICKET_TYPES).optional().describe("Filter by type: task, feature, chore"),
+      node: nodeParam,
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => {
-    // Check phase existence when filter is provided
-    if (args.phase) {
-      const phaseExists = ctx.state.roadmap.phases.some((p) => p.id === args.phase);
-      if (!phaseExists) {
-        return {
-          output: `Phase "${args.phase}" not found in roadmap.`,
-          exitCode: 1 as const,
-          errorCode: "not_found" as const,
-        };
+  }, (args) => {
+    const eff = resolveEffectiveRoot(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpReadTool(pinnedRoot, (ctx) => {
+      if (args.phase) {
+        const phaseExists = ctx.state.roadmap.phases.some((p) => p.id === args.phase);
+        if (!phaseExists) {
+          return {
+            output: `Phase "${args.phase}" not found in roadmap.`,
+            exitCode: 1 as const,
+            errorCode: "not_found" as const,
+          };
+        }
       }
-    }
-    return handleTicketList(
-      { status: args.status, phase: args.phase, type: args.type },
-      ctx,
-    );
-  }));
+      return handleTicketList(
+        { status: args.status, phase: args.phase, type: args.type },
+        ctx,
+      );
+    }, eff.root);
+  });
 
   server.registerTool("storybloq_ticket_get", {
     description: "Get a ticket by ID (includes umbrella tickets)",
     inputSchema: {
       id: z.string().regex(TICKET_ID_REGEX).describe("Ticket ID (e.g. T-001, T-079b)"),
+      node: nodeParam,
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTicketGet(args.id, ctx)));
+  }, (args) => {
+    const eff = resolveEffectiveRoot(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpReadTool(pinnedRoot, (ctx) => handleTicketGet(args.id, ctx), eff.root);
+  });
 
   server.registerTool("storybloq_ticket_meta_get", {
     description: "Get custom passthrough metadata for a ticket. Omitting path returns all custom metadata.",
@@ -377,17 +419,27 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       status: z.enum(ISSUE_STATUSES).optional().describe("Filter by status: open, inprogress, resolved"),
       severity: z.enum(ISSUE_SEVERITIES).optional().describe("Filter by severity: critical, high, medium, low"),
       component: z.string().optional().describe("Filter by component name"),
+      node: nodeParam,
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
-    handleIssueList({ status: args.status, severity: args.severity, component: args.component }, ctx),
-  ));
+  }, (args) => {
+    const eff = resolveEffectiveRoot(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpReadTool(pinnedRoot, (ctx) =>
+      handleIssueList({ status: args.status, severity: args.severity, component: args.component }, ctx),
+    eff.root);
+  });
 
   server.registerTool("storybloq_issue_get", {
     description: "Get an issue by ID",
     inputSchema: {
       id: z.string().regex(ISSUE_ID_REGEX).describe("Issue ID (e.g. ISS-001)"),
+      node: nodeParam,
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleIssueGet(args.id, ctx)));
+  }, (args) => {
+    const eff = resolveEffectiveRoot(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpReadTool(pinnedRoot, (ctx) => handleIssueGet(args.id, ctx), eff.root);
+  });
 
   server.registerTool("storybloq_issue_meta_get", {
     description: "Get custom passthrough metadata for an issue. Omitting path returns all custom metadata.",
@@ -477,8 +529,12 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       description: z.string().optional().describe("Ticket description"),
       blockedBy: z.array(z.string().regex(TICKET_ID_REGEX)).optional().describe("IDs of blocking tickets"),
       parentTicket: z.string().regex(TICKET_ID_REGEX).optional().describe("Parent ticket ID (makes this a sub-ticket)"),
+      node: nodeParam,
     },
-  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+  }, (args) => {
+    const eff = resolveEffectiveRootForWrite(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
     handleTicketCreate(
       {
         title: args.title,
@@ -490,8 +546,8 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       },
       format,
       root,
-    ),
-  ));
+    ), eff.root);
+  });
 
   server.registerTool("storybloq_ticket_update", {
     description: "Update an existing ticket",
