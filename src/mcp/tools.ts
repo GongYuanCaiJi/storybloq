@@ -9,6 +9,8 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { NODE_NAME_REGEX } from "../models/federation-config.js";
 import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, type McpToolResult } from "./node-resolution.js";
+import { initProject } from "../core/init.js";
+import { resolveNodePath } from "../federation/resolver.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/session-types.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
@@ -877,6 +879,64 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   ));
 
   // No MCP delete tools for any entity — deletion is destructive and stays CLI-only (human-gated).
+
+  // --- Federation bootstrap ---
+
+  server.registerTool("storybloq_node_init", {
+    description: "Initialize .story/ in a federation child node from the orchestrator. Does not require allowNodeWrites.",
+    inputSchema: {
+      node: z.string().regex(NODE_NAME_REGEX).describe("Node name from orchestrator config"),
+      type: z.string().optional().describe("Project type (e.g. npm, macapp, swift-spm)"),
+      language: z.string().optional().describe("Primary language"),
+      force: z.boolean().optional().describe("Overwrite existing config if .story/ already exists"),
+    },
+  }, async (args) => {
+    try { touchMcpLiveness(pinnedRoot); } catch { /* best-effort */ }
+    try {
+      const config = readOrchestratorConfig(pinnedRoot);
+      if (!config) {
+        return { content: [{ type: "text" as const, text: "Cannot read orchestrator config." }], isError: true };
+      }
+      if (config.type !== "orchestrator") {
+        return { content: [{ type: "text" as const, text: "storybloq_node_init is only available on orchestrator projects." }], isError: true };
+      }
+      const rawNodes = config.nodes;
+      if (!rawNodes || typeof rawNodes !== "object" || Array.isArray(rawNodes) || !(args.node in (rawNodes as Record<string, unknown>))) {
+        return { content: [{ type: "text" as const, text: `Node "${args.node}" not found in orchestrator config.` }], isError: true };
+      }
+      const nodeConf = (rawNodes as Record<string, Record<string, unknown>>)[args.node]!;
+      const rawPath = typeof nodeConf.path === "string" ? nodeConf.path : "";
+      if (!rawPath) {
+        return { content: [{ type: "text" as const, text: `Node "${args.node}" has no path configured.` }], isError: true };
+      }
+      const resolved = resolveNodePath(rawPath, pinnedRoot);
+      if (!resolved.resolved) {
+        if (resolved.reason === "no .story/config.json found" && resolved.absolutePath) {
+          const result = await initProject(resolved.absolutePath, {
+            name: args.node,
+            force: args.force,
+            type: args.type ?? (typeof nodeConf.stack === "string" ? nodeConf.stack : undefined),
+            language: args.language,
+          });
+          return { content: [{ type: "text" as const, text: `Initialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}` }] };
+        }
+        return { content: [{ type: "text" as const, text: `Cannot resolve node "${args.node}": ${resolved.reason}` }], isError: true };
+      }
+      // Node already has .story/ -- init with force if requested
+      if (!args.force) {
+        return { content: [{ type: "text" as const, text: `Node "${args.node}" already has .story/. Use force: true to reinitialize.` }], isError: true };
+      }
+      const result = await initProject(resolved.absolutePath, {
+        name: args.node,
+        force: true,
+        type: args.type ?? (typeof nodeConf.stack === "string" ? nodeConf.stack : undefined),
+        language: args.language,
+      });
+      return { content: [{ type: "text" as const, text: `Reinitialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}` }] };
+    } catch (err) {
+      return { content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
+    }
+  });
 
   // --- Selftest ---
 

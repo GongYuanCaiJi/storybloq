@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 
 export type ResolvedNode =
   | { resolved: true; absolutePath: string; storyDir: string; rawPath: string }
-  | { resolved: false; reason: string; rawPath: string };
+  | { resolved: false; reason: string; rawPath: string; absolutePath?: string };
 
 function expandTilde(p: string): string {
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));
@@ -51,7 +51,7 @@ export function resolveNodePath(rawPath: string, orchestratorRoot: string, preRe
 
   const storyDir = join(resolved, ".story");
   if (!existsSync(join(storyDir, "config.json"))) {
-    return { resolved: false, reason: "no .story/config.json found", rawPath };
+    return { resolved: false, reason: "no .story/config.json found", rawPath, absolutePath: resolved };
   }
 
   return { resolved: true, absolutePath: resolved, storyDir, rawPath };
