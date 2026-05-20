@@ -61,9 +61,11 @@ export function topologicalSortNodes(
   queue.sort();
 
   const result: string[] = [];
+  const emitted = new Set<string>();
   while (queue.length > 0) {
     const node = queue.shift()!;
     result.push(node);
+    emitted.add(node);
     for (const dependent of adjList.get(node) ?? []) {
       const newDeg = (inDegree.get(dependent) ?? 1) - 1;
       inDegree.set(dependent, newDeg);
@@ -76,7 +78,7 @@ export function topologicalSortNodes(
   }
 
   if (result.length < keys.length) {
-    const remaining = keys.filter((k) => !result.includes(k)).sort();
+    const remaining = keys.filter((k) => !emitted.has(k)).sort();
     result.push(...remaining);
   }
 

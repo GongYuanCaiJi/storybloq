@@ -999,7 +999,7 @@ export async function guardPath(
     resolvedDir = targetDir;
   }
 
-  if (!resolvedDir.startsWith(resolvedRoot)) {
+  if (resolvedDir !== resolvedRoot && !resolvedDir.startsWith(resolvedRoot + "/")) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Path ${target} resolves outside project root`,

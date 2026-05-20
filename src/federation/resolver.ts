@@ -12,9 +12,10 @@ function expandTilde(p: string): string {
   return p;
 }
 
-export function resolveNodePath(rawPath: string, orchestratorRoot: string): ResolvedNode {
+export function resolveNodePath(rawPath: string, orchestratorRoot: string, preResolvedOrchRoot?: string): ResolvedNode {
   const expanded = expandTilde(rawPath);
-  const candidate = isAbsolute(expanded) ? expanded : resolve(expandTilde(orchestratorRoot), expanded);
+  const expandedOrch = expandTilde(orchestratorRoot);
+  const candidate = isAbsolute(expanded) ? expanded : resolve(expandedOrch, expanded);
 
   let resolved: string;
   try {
@@ -28,10 +29,14 @@ export function resolveNodePath(rawPath: string, orchestratorRoot: string): Reso
   }
 
   let orchResolved: string;
-  try {
-    orchResolved = realpathSync(expandTilde(orchestratorRoot));
-  } catch {
-    orchResolved = normalize(expandTilde(orchestratorRoot));
+  if (preResolvedOrchRoot) {
+    orchResolved = preResolvedOrchRoot;
+  } else {
+    try {
+      orchResolved = realpathSync(expandedOrch);
+    } catch {
+      orchResolved = normalize(expandedOrch);
+    }
   }
 
   if (resolved === orchResolved) {
@@ -56,9 +61,17 @@ export function resolveAllNodes(
   nodes: Record<string, { path: string }>,
   orchestratorRoot: string,
 ): Map<string, ResolvedNode> {
+  const expandedOrch = expandTilde(orchestratorRoot);
+  let orchResolved: string;
+  try {
+    orchResolved = realpathSync(expandedOrch);
+  } catch {
+    orchResolved = normalize(expandedOrch);
+  }
+
   const results = new Map<string, ResolvedNode>();
   for (const [name, node] of Object.entries(nodes)) {
-    results.set(name, resolveNodePath(node.path, orchestratorRoot));
+    results.set(name, resolveNodePath(node.path, orchestratorRoot, orchResolved));
   }
   return results;
 }

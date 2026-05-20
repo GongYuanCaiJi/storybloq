@@ -193,7 +193,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
       ["engine", { root: "/dev/engine", recommendations: engineRecs }],
       ["cloud", { root: "/dev/cloud", recommendations: cloudRecs }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 5);
     expect(plan.entries.length).toBe(3);
     const cwds = plan.entries.map((e) => e.cwd);
     expect(cwds).toContain("/dev/engine");
@@ -205,7 +205,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
       ["engine", { root: "/dev/engine", recommendations: engineRecs }],
       ["cloud", { root: "/dev/cloud", recommendations: cloudRecs }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 5);
     const scores = plan.entries.map((e) => {
       const allRecs = [...engineRecs, ...cloudRecs];
       return allRecs.find((r) => r.id === e.target.id)?.score ?? 0;
@@ -220,7 +220,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
       ["engine", { root: "/dev/engine", recommendations: engineRecs }],
       ["cloud", { root: "/dev/cloud", recommendations: cloudRecs }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 2, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 2);
     expect(plan.entries).toHaveLength(2);
     expect(plan.skipped.length).toBeGreaterThanOrEqual(1);
   });
@@ -229,7 +229,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
     const nodeRecs = new Map([
       ["engine", { root: "/dev/engine", recommendations: engineRecs }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.0.0");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.0.0", 5);
     expect(plan.claudeVersionOk).toBe(false);
   });
 
@@ -241,7 +241,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
     const nodeRecs = new Map([
       ["engine", { root: "/dev/engine", recommendations: recsWithAction }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 5);
     expect(plan.entries.every((e) => e.target.kind !== "action")).toBe(true);
   });
 
@@ -249,7 +249,7 @@ describe("buildFederationDispatchPlan (T-336)", () => {
     const nodeRecs = new Map([
       ["engine", { root: "/dev/engine", recommendations: [] }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 5);
     expect(plan.entries).toHaveLength(0);
   });
 
@@ -258,10 +258,16 @@ describe("buildFederationDispatchPlan (T-336)", () => {
       ["engine", { root: "/dev/engine", recommendations: [makeRec({ id: "T-001", title: "engine setup", score: 90 })] }],
       ["cloud", { root: "/dev/cloud", recommendations: [makeRec({ id: "T-001", title: "cloud setup", score: 80 })] }],
     ]);
-    const plan = buildFederationDispatchPlan(nodeRecs, 5, "2.1.140");
+    const plan = buildFederationDispatchPlan(nodeRecs, "2.1.140", 5);
     expect(plan.entries).toHaveLength(2);
     expect(plan.entries[0].target.title).toBe("engine setup");
     expect(plan.entries[1].target.title).toBe("cloud setup");
+    expect(plan.skipped).toHaveLength(0);
+  });
+
+  it("returns empty plan for empty node map", () => {
+    const plan = buildFederationDispatchPlan(new Map(), "2.1.140", 5);
+    expect(plan.entries).toHaveLength(0);
     expect(plan.skipped).toHaveLength(0);
   });
 });

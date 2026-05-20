@@ -129,29 +129,28 @@ export function validateOrchestratorOverlay(
   }
 
   const nodeEntries = rawNodes as Record<string, unknown>;
+  const nodeKeys = new Set(Object.keys(nodeEntries));
+  const nodesForCycle: Record<string, { dependsOn?: string[] }> = {};
+  const paths = new Map<string, string>();
 
-  for (const key of Object.keys(nodeEntries)) {
+  for (const [key, value] of Object.entries(nodeEntries)) {
     const nameResult = NodeNameSchema.safeParse(key);
     if (!nameResult.success) {
       errors.push(
         `Invalid node name "${key}": ${nameResult.error.issues.map((i) => i.message).join(", ")}`,
       );
     }
-  }
 
-  for (const [key, value] of Object.entries(nodeEntries)) {
     const nodeResult = NodeSchema.safeParse(value);
     if (!nodeResult.success) {
       errors.push(
         `Node "${key}": ${nodeResult.error.issues.map((i) => i.message).join(", ")}`,
       );
     }
-  }
 
-  const nodeKeys = new Set(Object.keys(nodeEntries));
-  for (const [key, value] of Object.entries(nodeEntries)) {
     const node = value as Record<string, unknown>;
-    const deps = Array.isArray(node.dependsOn) ? node.dependsOn : [];
+    const deps = Array.isArray(node.dependsOn) ? (node.dependsOn as string[]) : [];
+
     for (const dep of deps) {
       if (typeof dep === "string" && !nodeKeys.has(dep)) {
         errors.push(
@@ -159,26 +158,9 @@ export function validateOrchestratorOverlay(
         );
       }
     }
-  }
 
-  const nodesForCycle: Record<string, { dependsOn?: string[] }> = {};
-  for (const [key, value] of Object.entries(nodeEntries)) {
-    const node = value as Record<string, unknown>;
-    nodesForCycle[key] = {
-      dependsOn: Array.isArray(node.dependsOn)
-        ? (node.dependsOn as string[])
-        : [],
-    };
-  }
+    nodesForCycle[key] = { dependsOn: deps };
 
-  const cycle = detectCycles(nodesForCycle);
-  if (cycle) {
-    errors.push(`Dependency cycle detected: ${cycle}`);
-  }
-
-  const paths = new Map<string, string>();
-  for (const [key, value] of Object.entries(nodeEntries)) {
-    const node = value as Record<string, unknown>;
     if (typeof node.path === "string") {
       const existing = paths.get(node.path);
       if (existing) {
@@ -189,6 +171,11 @@ export function validateOrchestratorOverlay(
         paths.set(node.path, key);
       }
     }
+  }
+
+  const cycle = detectCycles(nodesForCycle);
+  if (cycle) {
+    errors.push(`Dependency cycle detected: ${cycle}`);
   }
 
   return {

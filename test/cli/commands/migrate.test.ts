@@ -157,4 +157,35 @@ describe("storybloq migrate", () => {
     const result = await handleMigrate(dir, "md", { dryRun: false });
     expect(result.errorCode).toBeDefined();
   });
+
+  it("returns error when .story/ directory is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "migrate-test-"));
+    tmpDirs.push(dir);
+    const result = await handleMigrate(dir, "md", { dryRun: false });
+    expect(result.errorCode).toBe("not_found");
+    expect(result.output).toContain("No .story/");
+  });
+
+  it("returns valid JSON for already-migrated config", async () => {
+    const dir = await setupProject({
+      version: 2, schemaVersion: 2, project: "test", type: "npm", language: "typescript",
+      features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true },
+    });
+    tmpDirs.push(dir);
+    const result = await handleMigrate(dir, "json", { dryRun: false });
+    const parsed = JSON.parse(result.output) as Record<string, unknown>;
+    expect(parsed.version).toBe(1);
+    const data = parsed.data as Record<string, unknown>;
+    expect(data.migrated).toBe(false);
+  });
+
+  it("returns error for config failing schema validation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "migrate-test-"));
+    tmpDirs.push(dir);
+    const storyDir = join(dir, ".story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(join(storyDir, "config.json"), JSON.stringify({ version: 2 }));
+    const result = await handleMigrate(dir, "md", { dryRun: false });
+    expect(result.errorCode).toBe("validation_failed");
+  });
 });

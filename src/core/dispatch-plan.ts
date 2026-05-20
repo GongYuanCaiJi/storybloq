@@ -51,6 +51,10 @@ export function supportsAgentView(version: string): boolean {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function isDispatchableKind(kind: string): kind is "ticket" | "issue" {
+  return kind === "ticket" || kind === "issue";
+}
+
 function normalizeId(id: string): string {
   const upper = id.toUpperCase();
   const match = upper.match(/^(T-\d+)([A-Z]?)$/);
@@ -74,7 +78,7 @@ export function buildDispatchPlan(
   let targets: DispatchTarget[];
 
   if (ids === "all") {
-    const dispatchable = recommendations.filter((r) => r.kind !== "action");
+    const dispatchable = recommendations.filter((r) => isDispatchableKind(r.kind));
     targets = dispatchable
       .slice(0, maxAgents)
       .map((r) => ({
@@ -101,12 +105,12 @@ export function buildDispatchPlan(
 
       const rec = recommendations.find((r) => r.id.toUpperCase() === normalized.toUpperCase());
       if (rec) {
-        if (rec.kind === "action") {
+        if (!isDispatchableKind(rec.kind)) {
           skipped.push({ id: normalized, reason: "action (not dispatchable)" });
         } else {
           targets.push({
             id: rec.id,
-            kind: rec.kind as "ticket" | "issue",
+            kind: rec.kind,
             title: rec.title,
             reason: rec.reason,
           });
@@ -153,8 +157,8 @@ export function buildDispatchPlan(
 
 export function buildFederationDispatchPlan(
   nodeRecommendations: Map<string, { root: string; recommendations: readonly Recommendation[] }>,
-  maxAgents: number,
   claudeVersion: string | null,
+  maxAgents: number,
 ): DispatchPlan {
   const skipped: { id: string; reason: string }[] = [];
 
@@ -163,7 +167,7 @@ export function buildFederationDispatchPlan(
 
   for (const [nodeName, { root, recommendations }] of nodeRecommendations) {
     for (const rec of recommendations) {
-      if (rec.kind === "action") {
+      if (!isDispatchableKind(rec.kind)) {
         skipped.push({ id: rec.id, reason: `action (not dispatchable) [${nodeName}]` });
         continue;
       }
@@ -176,7 +180,7 @@ export function buildFederationDispatchPlan(
       candidates.push({
         target: {
           id: rec.id,
-          kind: rec.kind as "ticket" | "issue",
+          kind: rec.kind,
           title: rec.title,
           reason: `${nodeName}: ${rec.reason}`,
         },

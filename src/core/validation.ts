@@ -1,5 +1,6 @@
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
+import { CROSS_NODE_REF_CAPTURE_REGEX } from "../models/ticket.js";
 
 // --- Types ---
 
@@ -267,13 +268,12 @@ export function validateProject(state: ProjectState): ValidationResult {
     typeof state.config.nodes === "object"
   ) {
     const nodeNames = new Set(Object.keys(state.config.nodes));
-    const crossNodeRefPattern = /^([a-z][a-z0-9_-]{0,63}):(T-\d+[a-z]?|ISS-\d+)$/;
     for (const ticket of state.tickets) {
-      const refs = (ticket as Record<string, unknown>).crossNodeBlockedBy;
-      if (!Array.isArray(refs)) continue;
+      const refs = ticket.crossNodeBlockedBy;
+      if (!refs) continue;
       for (const ref of refs) {
         if (typeof ref !== "string") continue;
-        const match = crossNodeRefPattern.exec(ref);
+        const match = CROSS_NODE_REF_CAPTURE_REGEX.exec(ref);
         if (!match) continue;
         const nodeName = match[1]!;
         if (!nodeNames.has(nodeName)) {

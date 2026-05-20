@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { scanNodeSummary, scanAllSummaries } from "../../src/federation/scanner.js";
+import { scanNodeSummary, scanAllSummaries, loadNodeFullState } from "../../src/federation/scanner.js";
 import type { ResolvedNode } from "../../src/federation/resolver.js";
 
 const tmpDirs: string[] = [];
@@ -85,6 +85,7 @@ describe("scanNodeSummary", () => {
     });
     const result = await scanNodeSummary(join(dir, ".story"));
     expect(result.project).toBe("engine");
+    expect(result.type).toBe("npm");
     expect(result.ticketCount).toBe(3);
     expect(result.completeTickets).toBe(1);
     expect(result.openTickets).toBe(1);
@@ -114,13 +115,44 @@ describe("scanNodeSummary", () => {
     expect(result.ticketCount).toBe(1);
   });
 
+  it("counts inprogress tickets in total but not in open or complete", async () => {
+    const dir = await createNodeProject({
+      name: "mixed",
+      tickets: [
+        { id: "T-001", status: "inprogress" },
+        { id: "T-002", status: "inprogress" },
+      ],
+    });
+    const result = await scanNodeSummary(join(dir, ".story"));
+    expect(result.ticketCount).toBe(2);
+    expect(result.openTickets).toBe(0);
+    expect(result.completeTickets).toBe(0);
+  });
+
+  it("tolerates corrupt issue JSON", async () => {
+    const dir = await createNodeProject({ name: "corrupt-issue" });
+    await writeFile(join(dir, ".story", "issues", "ISS-BAD.json"), "not json");
+    await writeFile(
+      join(dir, ".story", "issues", "ISS-001.json"),
+      JSON.stringify({
+        id: "ISS-001", title: "Good issue", status: "open",
+        severity: "high", impact: "test", relatedTickets: [],
+        created: "2026-01-01",
+      }),
+    );
+    const result = await scanNodeSummary(join(dir, ".story"));
+    expect(result.issueCount).toBe(1);
+    expect(result.openIssues).toBe(1);
+  });
+
   it("reads latest handover info", async () => {
     const dir = await createNodeProject({
       name: "with-handovers",
       handovers: ["2026-05-01-session.md", "2026-05-10-feature.md"],
     });
     const result = await scanNodeSummary(join(dir, ".story"));
-    expect(result.lastHandoverDate).toBeTruthy();
+    expect(result.lastHandoverDate).toBe("2026-05-10");
+    expect(result.lastHandoverTitle).toBe("Handover");
   });
 });
 
@@ -184,5 +216,50 @@ describe("scanAllSummaries", () => {
     for (const [, result] of results) {
       expect(result.reachable).toBe(false);
     }
+  });
+
+  it("does not throw on timeout (contract: timeout produces unreachable or scan completes)", async () => {
+    const tickets = Array.from({ length: 50 }, (_, i) => ({
+      id: `T-${String(i + 1).padStart(3, "0")}`,
+      status: "open",
+    }));
+    const dir = await createNodeProject({ name: "slow", tickets });
+    const nodes = new Map([
+      ["slow", { resolved: true, absolutePath: dir, storyDir: join(dir, ".story"), rawPath: dir }],
+    ]);
+    const results = await scanAllSummaries(nodes, { timeoutMs: 1 });
+    const result = results.get("slow")!;
+    expect(result).toBeDefined();
+    if (result.reachable) {
+      expect(result.summary.ticketCount).toBe(50);
+    } else {
+      expect(result.reason).toMatch(/timeout|scan error/);
+    }
+  });
+});
+
+describe("loadNodeFullState", () => {
+  it("loads project from story dir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "fed-fullstate-"));
+    tmpDirs.push(dir);
+    const storyDir = join(dir, ".story");
+    await mkdir(join(storyDir, "tickets"), { recursive: true });
+    await mkdir(join(storyDir, "issues"), { recursive: true });
+    await mkdir(join(storyDir, "handovers"), { recursive: true });
+    await mkdir(join(storyDir, "notes"), { recursive: true });
+    await mkdir(join(storyDir, "lessons"), { recursive: true });
+    await writeFile(join(storyDir, "config.json"), JSON.stringify({
+      version: 2, schemaVersion: 2, project: "loadtest", type: "npm", language: "typescript",
+      features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true },
+    }));
+    await writeFile(join(storyDir, "roadmap.json"), JSON.stringify({ title: "Roadmap", date: "2026-01-01", phases: [], blockers: [] }));
+    await writeFile(join(storyDir, "tickets", "T-001.json"), JSON.stringify({
+      id: "T-001", title: "Test ticket", description: "", type: "task",
+      status: "open", phase: null, order: 10, blockedBy: [],
+      createdDate: "2026-01-01", completedDate: null,
+    }));
+    const result = await loadNodeFullState(storyDir);
+    expect(result.state.config.project).toBe("loadtest");
+    expect(result.state.tickets.length).toBe(1);
   });
 });

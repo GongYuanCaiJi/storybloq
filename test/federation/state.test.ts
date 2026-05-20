@@ -33,6 +33,10 @@ describe("topologicalSortNodes", () => {
     expect(cloudIdx).toBeLessThan(conductorIdx);
   });
 
+  it("returns empty array for empty input", () => {
+    expect(topologicalSortNodes({})).toEqual([]);
+  });
+
   it("falls back to alphabetical on cycle", () => {
     const nodes = {
       b: { dependsOn: ["a"] },
@@ -42,6 +46,15 @@ describe("topologicalSortNodes", () => {
     expect(sorted).toHaveLength(2);
     expect(sorted).toContain("a");
     expect(sorted).toContain("b");
+  });
+
+  it("silently drops dangling dependsOn references", () => {
+    const nodes = {
+      cloud: { dependsOn: ["engine", "nonexistent"] },
+      engine: { dependsOn: [] },
+    };
+    const sorted = topologicalSortNodes(nodes);
+    expect(sorted).toEqual(["engine", "cloud"]);
   });
 
   it("returns alphabetical for nodes without dependencies", () => {
@@ -89,6 +102,9 @@ describe("buildFederationState", () => {
     expect(state.totalOpenIssues).toBe(1);
     expect(state.reachableCount).toBe(2);
     expect(state.unreachableCount).toBe(0);
+    expect(state.nodeCount).toBe(2);
+    expect(state.nodes[0]!.name).toBe("engine");
+    expect(state.nodes[1]!.name).toBe("cloud");
   });
 
   it("includes unreachable nodes with reason", () => {
@@ -135,6 +151,21 @@ describe("buildFederationState", () => {
     expect(state.totalTickets).toBe(0);
     expect(state.totalIssues).toBe(0);
     expect(state.orchestratorProject).toBe("studio");
+  });
+
+  it("treats node absent from scan map as unreachable with reason 'unknown'", () => {
+    const config = { ...baseConfig, nodes: { engine: { path: "/dev/engine", health: "green" as const, dependsOn: [] } } };
+    const resolved = new Map<string, ResolvedNode>([
+      ["engine", { resolved: true, absolutePath: "/dev/engine", storyDir: "/dev/engine/.story", rawPath: "/dev/engine" }],
+    ]);
+    const scans = new Map<string, NodeScanResult>();
+
+    const state = buildFederationState(config, resolved, scans);
+    expect(state.reachableCount).toBe(0);
+    expect(state.unreachableCount).toBe(1);
+    const entry = state.nodes[0]!;
+    expect(entry.reachable).toBe(false);
+    expect(entry.unreachableReason).toBe("unknown");
   });
 
   it("carries both rawPath and resolvedPath in entries", () => {

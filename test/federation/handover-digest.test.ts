@@ -46,10 +46,12 @@ describe("buildHandoverDigest", () => {
     const engine = digest.find((d) => d.nodeName === "engine")!;
     expect(engine.heading).toBe("Engine feature work");
     expect(engine.date).toBe("2026-05-18");
+    expect(engine.filename).toBe("2026-05-18-feature.md");
 
     const cloud = digest.find((d) => d.nodeName === "cloud")!;
     expect(cloud.heading).toBe("Cloud deployment");
     expect(cloud.date).toBe("2026-05-17");
+    expect(cloud.filename).toBe("2026-05-17-deploy.md");
   });
 
   it("returns null heading for node with no handovers", async () => {
@@ -66,7 +68,7 @@ describe("buildHandoverDigest", () => {
     expect(digest[0]!.heading).toBeNull();
   });
 
-  it("skips unresolved nodes", async () => {
+  it("includes unresolved nodes with null fields", async () => {
     const nodes = new Map<string, ResolvedNode>([
       ["broken", { resolved: false, reason: "not found", rawPath: "/missing" }],
     ]);
@@ -87,6 +89,33 @@ describe("buildHandoverDigest", () => {
 
     const digest = await buildHandoverDigest(nodes);
     expect(digest[0]!.heading).toBe("Late heading");
+  });
+
+  it("handles non-date-prefixed filename", async () => {
+    const dir = await createNodeWithHandovers("nodate", [
+      { filename: "session-notes.md", content: "# Session notes\nSome content" },
+    ]);
+    const nodes = new Map([
+      ["nodate", { resolved: true, absolutePath: dir, storyDir: join(dir, ".story"), rawPath: dir }],
+    ]);
+    const digest = await buildHandoverDigest(nodes);
+    expect(digest[0]!.date).toBeNull();
+    expect(digest[0]!.heading).toBe("Session notes");
+    expect(digest[0]!.filename).toBe("session-notes.md");
+  });
+
+  it("selects lexicographically last file even if non-date-prefixed", async () => {
+    const dir = await createNodeWithHandovers("mixed", [
+      { filename: "2026-05-15-session.md", content: "# Date-prefixed session\nContent" },
+      { filename: "z-notes.md", content: "# Z notes\nContent" },
+    ]);
+    const nodes = new Map<string, ResolvedNode>([
+      ["mixed", { resolved: true, absolutePath: dir, storyDir: join(dir, ".story"), rawPath: dir }],
+    ]);
+    const digest = await buildHandoverDigest(nodes);
+    expect(digest[0]!.filename).toBe("z-notes.md");
+    expect(digest[0]!.heading).toBe("Z notes");
+    expect(digest[0]!.date).toBeNull();
   });
 
   it("truncates heading to 120 chars", async () => {

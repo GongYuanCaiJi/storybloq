@@ -8,7 +8,7 @@ import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { NODE_NAME_REGEX } from "../models/federation-config.js";
-import { resolveNodeRoot, checkNodeWritePermission } from "./node-resolution.js";
+import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, type McpToolResult } from "./node-resolution.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/session-types.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
@@ -133,11 +133,6 @@ const INFRASTRUCTURE_ERROR_CODES: readonly string[] = [
   "version_mismatch",
 ];
 
-/** MCP tool result shape. */
-interface McpToolResult {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-}
 
 /** Consistent error text format for all isError: true MCP responses. */
 function formatMcpError(code: string, message: string): string {
@@ -259,13 +254,17 @@ function resolveEffectiveRoot(pinnedRoot: string, nodeName?: string): { root: st
 
 function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { root: string } | McpToolResult {
   if (!nodeName) return { root: pinnedRoot };
-  if (!checkNodeWritePermission(pinnedRoot)) {
+  const config = readOrchestratorConfig(pinnedRoot);
+  if (!config) {
+    return { content: [{ type: "text" as const, text: "Cannot read orchestrator config" }], isError: true };
+  }
+  if (!checkNodeWritePermission(pinnedRoot, config)) {
     return {
       content: [{ type: "text" as const, text: "Node writes disabled. Set `federation.allowNodeWrites: true` in .story/config.json to enable cross-node writes from this orchestrator." }],
       isError: true,
     };
   }
-  const resolved = resolveNodeRoot(pinnedRoot, nodeName);
+  const resolved = resolveNodeRoot(pinnedRoot, nodeName, config);
   if (!resolved.ok) {
     return { content: [{ type: "text" as const, text: resolved.error }], isError: true };
   }
@@ -561,24 +560,29 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       phase: z.string().nullable().optional().describe("New phase ID (null to clear)"),
       parentTicket: z.string().regex(TICKET_ID_REGEX).nullable().optional().describe("Parent ticket ID (null to clear)"),
       blockedBy: z.array(z.string().regex(TICKET_ID_REGEX)).optional().describe("IDs of blocking tickets"),
+      node: nodeParam,
     },
-  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
-    handleTicketUpdate(
-      args.id,
-      {
-        status: args.status,
-        title: args.title,
-        type: args.type,
-        order: args.order,
-        description: args.description,
-        phase: args.phase,
-        parentTicket: args.parentTicket,
-        blockedBy: args.blockedBy,
-      },
-      format,
-      root,
-    ),
-  ));
+  }, (args) => {
+    const eff = resolveEffectiveRootForWrite(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
+      handleTicketUpdate(
+        args.id,
+        {
+          status: args.status,
+          title: args.title,
+          type: args.type,
+          order: args.order,
+          description: args.description,
+          phase: args.phase,
+          parentTicket: args.parentTicket,
+          blockedBy: args.blockedBy,
+        },
+        format,
+        root,
+      ),
+    eff.root);
+  });
 
   server.registerTool("storybloq_ticket_meta_set", {
     description: "Set custom passthrough metadata on a ticket. Core ticket fields are protected.",
@@ -613,22 +617,27 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       relatedTickets: z.array(z.string().regex(TICKET_ID_REGEX)).optional().describe("Related ticket IDs"),
       location: z.array(z.string()).optional().describe("File locations"),
       phase: z.string().optional().describe("Phase ID"),
+      node: nodeParam,
     },
-  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
-    handleIssueCreate(
-      {
-        title: args.title,
-        severity: args.severity,
-        impact: args.impact,
-        components: args.components ?? [],
-        relatedTickets: args.relatedTickets ?? [],
-        location: args.location ?? [],
-        phase: args.phase,
-      },
-      format,
-      root,
-    ),
-  ));
+  }, (args) => {
+    const eff = resolveEffectiveRootForWrite(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
+      handleIssueCreate(
+        {
+          title: args.title,
+          severity: args.severity,
+          impact: args.impact,
+          components: args.components ?? [],
+          relatedTickets: args.relatedTickets ?? [],
+          location: args.location ?? [],
+          phase: args.phase,
+        },
+        format,
+        root,
+      ),
+    eff.root);
+  });
 
   server.registerTool("storybloq_issue_update", {
     description: "Update an existing issue",
@@ -644,26 +653,31 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       location: z.array(z.string()).optional().describe("File locations"),
       order: z.number().int().optional().describe("New sort order"),
       phase: z.string().nullable().optional().describe("New phase ID (null to clear)"),
+      node: nodeParam,
     },
-  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
-    handleIssueUpdate(
-      args.id,
-      {
-        status: args.status,
-        title: args.title,
-        severity: args.severity,
-        impact: args.impact,
-        resolution: args.resolution,
-        components: args.components,
-        relatedTickets: args.relatedTickets,
-        location: args.location,
-        order: args.order,
-        phase: args.phase,
-      },
-      format,
-      root,
-    ),
-  ));
+  }, (args) => {
+    const eff = resolveEffectiveRootForWrite(pinnedRoot, args.node);
+    if ("content" in eff) return eff;
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
+      handleIssueUpdate(
+        args.id,
+        {
+          status: args.status,
+          title: args.title,
+          severity: args.severity,
+          impact: args.impact,
+          resolution: args.resolution,
+          components: args.components,
+          relatedTickets: args.relatedTickets,
+          location: args.location,
+          order: args.order,
+          phase: args.phase,
+        },
+        format,
+        root,
+      ),
+    eff.root);
+  });
 
   server.registerTool("storybloq_issue_meta_set", {
     description: "Set custom passthrough metadata on an issue. Core issue fields are protected.",

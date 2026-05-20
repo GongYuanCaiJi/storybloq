@@ -202,8 +202,18 @@ export function formatFederatedStatus(
   format: OutputFormat,
   activeSessions: readonly ActiveSessionSummary[] = [],
 ): string {
+  const sanitizedNodes = fedState.nodes.map((node) => ({
+    name: node.name,
+    rawPath: node.rawPath,
+    health: node.health,
+    role: node.role,
+    summary: node.summary,
+    dependsOn: node.dependsOn,
+    reachable: node.reachable,
+    scanSummary: node.scanSummary,
+  }));
   const data = {
-    federation: fedState,
+    federation: { ...fedState, nodes: sanitizedNodes },
     project: config.project,
     type: config.type,
   };

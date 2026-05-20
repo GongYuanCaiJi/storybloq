@@ -69,6 +69,45 @@ async function createNodeWithTickets(
   return dir;
 }
 
+async function createNodeWithItems(
+  name: string,
+  tickets: Array<{ id: string; status: string }>,
+  issues: Array<{ id: string; status: string }>,
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), `fed-xnode-${name}-`));
+  tmpDirs.push(dir);
+  const storyDir = join(dir, ".story");
+  await mkdir(join(storyDir, "tickets"), { recursive: true });
+  await mkdir(join(storyDir, "issues"), { recursive: true });
+  await mkdir(join(storyDir, "handovers"), { recursive: true });
+  await mkdir(join(storyDir, "notes"), { recursive: true });
+  await mkdir(join(storyDir, "lessons"), { recursive: true });
+
+  await writeFile(join(storyDir, "config.json"), JSON.stringify({
+    version: 2, schemaVersion: 2, project: name, type: "npm", language: "typescript",
+    features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true },
+  }));
+  await writeFile(join(storyDir, "roadmap.json"), JSON.stringify({ version: 2, phases: [], blockers: [] }));
+
+  for (const t of tickets) {
+    await writeFile(join(storyDir, "tickets", `${t.id}.json`), JSON.stringify({
+      id: t.id, title: `${name} ticket`, description: "", type: "task",
+      status: t.status, phase: null, order: 10, blockedBy: [],
+      createdDate: "2026-01-01", completedDate: t.status === "complete" ? "2026-05-01" : null,
+    }));
+  }
+
+  for (const iss of issues) {
+    await writeFile(join(storyDir, "issues", `${iss.id}.json`), JSON.stringify({
+      id: iss.id, title: `${name} issue`, description: "", type: "bug",
+      status: iss.status, priority: "medium", relatedTickets: [],
+      createdDate: "2026-01-01", resolvedDate: iss.status === "resolved" ? "2026-05-01" : null,
+    }));
+  }
+
+  return dir;
+}
+
 afterEach(async () => {
   for (const d of tmpDirs) {
     await rm(d, { recursive: true, force: true }).catch(() => {});
@@ -154,6 +193,133 @@ describe("CrossNodeBlockingResolver", () => {
       const resolver = await CrossNodeBlockingResolver.build([], new Map());
       const ticket = makeTicketWithCrossRef("T-001", ["engine:T-061"]);
       expect(resolver.isCrossNodeBlocked(ticket)).toBe("unresolved");
+    });
+  });
+
+  // TQ-1: ISS-xxx refs
+  describe("ISS-xxx cross-node refs", () => {
+    it("returns true when cross-node ref points to an open remote issue", async () => {
+      const nodeDir = await createNodeWithItems(
+        "engine",
+        [],
+        [{ id: "ISS-001", status: "open" }],
+      );
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:ISS-001"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: nodeDir, storyDir: join(nodeDir, ".story"), rawPath: nodeDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(true);
+    });
+
+    it("returns false when cross-node ref points to a resolved remote issue", async () => {
+      const nodeDir = await createNodeWithItems(
+        "engine",
+        [],
+        [{ id: "ISS-001", status: "resolved" }],
+      );
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:ISS-001"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: nodeDir, storyDir: join(nodeDir, ".story"), rawPath: nodeDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(false);
+    });
+  });
+
+  // TQ-2: Status normalization
+  describe("status normalization", () => {
+    it("remote ticket with status 'inprogress' -> getCrossNodeStatus resolved=true status='inprogress', isCrossNodeBlocked=true", async () => {
+      const nodeDir = await createNodeWithTickets("engine", [{ id: "T-061", status: "inprogress" }]);
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-061"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: nodeDir, storyDir: join(nodeDir, ".story"), rawPath: nodeDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      const status = resolver.getCrossNodeStatus("engine:T-061");
+      expect(status).toBeDefined();
+      expect(status?.resolved).toBe(true);
+      if (status?.resolved) {
+        expect(status.status).toBe("inprogress");
+      }
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(true);
+    });
+
+    it("remote ticket with status 'resolved' -> getCrossNodeStatus resolved=true status='complete', isCrossNodeBlocked=false", async () => {
+      const nodeDir = await createNodeWithTickets("engine", [{ id: "T-061", status: "resolved" }]);
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-061"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: nodeDir, storyDir: join(nodeDir, ".story"), rawPath: nodeDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      const status = resolver.getCrossNodeStatus("engine:T-061");
+      expect(status).toBeDefined();
+      expect(status?.resolved).toBe(true);
+      if (status?.resolved) {
+        expect(status.status).toBe("complete");
+      }
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(false);
+    });
+  });
+
+  // TQ-18: Malformed ref strings
+  describe("malformed ref strings", () => {
+    it("silently skips all malformed refs during build and never returns true (blocked)", async () => {
+      // All five strings are rejected by the regex and never entered into statuses.
+      // isCrossNodeBlocked sees refs that are not in statuses, which counts as
+      // unresolved rather than blocked - the ticket is not actively blocked.
+      const ticket = makeTicketWithCrossRef("T-001", [
+        "Engine:T-001",   // uppercase node name - fails regex
+        ":T-001",         // missing node name
+        "engine:bad",     // item id not T-xxx or ISS-xxx
+        "engine:",        // missing item id
+        "not-a-ref",      // no colon separator
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], new Map());
+      const result = resolver.isCrossNodeBlocked(ticket);
+      // Malformed refs are never indexed so the ticket cannot be positively blocked.
+      expect(result).not.toBe(true);
+    });
+  });
+
+  describe("blocked takes precedence over unresolved", () => {
+    it("returns true when one ref is blocking and another is unresolved", async () => {
+      const nodeDir = await createNodeWithTickets("engine", [{ id: "T-061", status: "open" }]);
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-061", "broken:T-099"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: nodeDir, storyDir: join(nodeDir, ".story"), rawPath: nodeDir }],
+        ["broken", { resolved: false, reason: "path does not exist", rawPath: "/missing" }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(true);
+    });
+  });
+
+  describe("multi-node fan-out", () => {
+    it("resolves refs across two different nodes", async () => {
+      const engineDir = await createNodeWithTickets("engine", [{ id: "T-010", status: "complete" }]);
+      const cloudDir = await createNodeWithTickets("cloud", [{ id: "T-020", status: "open" }]);
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-010", "cloud:T-020"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: engineDir, storyDir: join(engineDir, ".story"), rawPath: engineDir }],
+        ["cloud", { resolved: true, absolutePath: cloudDir, storyDir: join(cloudDir, ".story"), rawPath: cloudDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(true);
+      expect(resolver.getCrossNodeStatus("engine:T-010")).toEqual({ resolved: true, status: "complete" });
+      expect(resolver.getCrossNodeStatus("cloud:T-020")).toEqual({ resolved: true, status: "open" });
+    });
+
+    it("returns false when all refs across multiple nodes are complete", async () => {
+      const engineDir = await createNodeWithTickets("engine", [{ id: "T-010", status: "complete" }]);
+      const cloudDir = await createNodeWithTickets("cloud", [{ id: "T-020", status: "complete" }]);
+      const ticket = makeTicketWithCrossRef("T-001", ["engine:T-010", "cloud:T-020"]);
+      const resolvedNodes = new Map<string, ResolvedNode>([
+        ["engine", { resolved: true, absolutePath: engineDir, storyDir: join(engineDir, ".story"), rawPath: engineDir }],
+        ["cloud", { resolved: true, absolutePath: cloudDir, storyDir: join(cloudDir, ".story"), rawPath: cloudDir }],
+      ]);
+      const resolver = await CrossNodeBlockingResolver.build([ticket], resolvedNodes);
+      expect(resolver.isCrossNodeBlocked(ticket)).toBe(false);
     });
   });
 });

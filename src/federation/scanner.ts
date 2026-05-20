@@ -2,6 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { ResolvedNode } from "./resolver.js";
 import { loadProject, type LoadResult } from "../core/project-loader.js";
+import { findLatestHandover } from "./handover-utils.js";
 
 export interface NodeScanSummary {
   project: string;
@@ -33,99 +34,71 @@ export async function scanNodeSummary(
 ): Promise<NodeScanSummary> {
   checkAborted(signal);
 
-  const configRaw = await readFile(join(storyDir, "config.json"), "utf-8");
-  checkAborted(signal);
-  const config = JSON.parse(configRaw) as Record<string, unknown>;
-
-  let ticketCount = 0;
-  let openTickets = 0;
-  let completeTickets = 0;
-
-  const ticketsDir = join(storyDir, "tickets");
+  let configRaw: string;
   try {
-    const ticketFiles = await readdir(ticketsDir);
-    checkAborted(signal);
-    const jsonFiles = ticketFiles.filter((f) => f.endsWith(".json"));
-
-    const reads = jsonFiles.map(async (f) => {
-      try {
-        checkAborted(signal);
-        const raw = await readFile(join(ticketsDir, f), "utf-8");
-        checkAborted(signal);
-        const ticket = JSON.parse(raw) as Record<string, unknown>;
-        ticketCount++;
-        if (ticket.status === "open") openTickets++;
-        else if (ticket.status === "complete") completeTickets++;
-      } catch (err) {
-        if (signal?.aborted) throw err;
-      }
-    });
-    await Promise.all(reads);
-  } catch (err) {
-    if (signal?.aborted) throw err;
-  }
-
-  let issueCount = 0;
-  let openIssues = 0;
-
-  const issuesDir = join(storyDir, "issues");
-  try {
-    checkAborted(signal);
-    const issueFiles = await readdir(issuesDir);
-    checkAborted(signal);
-    const jsonFiles = issueFiles.filter((f) => f.endsWith(".json"));
-
-    const reads = jsonFiles.map(async (f) => {
-      try {
-        checkAborted(signal);
-        const raw = await readFile(join(issuesDir, f), "utf-8");
-        checkAborted(signal);
-        const issue = JSON.parse(raw) as Record<string, unknown>;
-        issueCount++;
-        if (issue.status === "open") openIssues++;
-      } catch (err) {
-        if (signal?.aborted) throw err;
-      }
-    });
-    await Promise.all(reads);
-  } catch (err) {
-    if (signal?.aborted) throw err;
-  }
-
-  let lastHandoverDate: string | null = null;
-  let lastHandoverTitle: string | null = null;
-
-  const handoversDir = join(storyDir, "handovers");
-  try {
-    const files = await readdir(handoversDir);
-    const mdFiles = files.filter((f) => f.endsWith(".md")).sort();
-    if (mdFiles.length > 0) {
-      const latest = mdFiles[mdFiles.length - 1]!;
-      const dateMatch = latest.match(/^(\d{4}-\d{2}-\d{2})/);
-      lastHandoverDate = dateMatch ? dateMatch[1]! : null;
-
-      try {
-        const content = await readFile(join(handoversDir, latest), "utf-8");
-        const titleMatch = content.match(/^#\s+(.+)/m);
-        lastHandoverTitle = titleMatch ? titleMatch[1]!.trim() : null;
-      } catch {
-        // read error, skip title
-      }
-    }
+    configRaw = await readFile(join(storyDir, "config.json"), "utf-8");
   } catch {
-    // no handovers directory
+    throw new Error("Cannot read node config.json");
   }
+  checkAborted(signal);
+  let config: Record<string, unknown>;
+  try {
+    config = JSON.parse(configRaw) as Record<string, unknown>;
+  } catch {
+    throw new Error("Corrupt config.json: invalid JSON");
+  }
+
+  async function countDir(
+    dir: string,
+    statusBuckets: readonly string[],
+  ): Promise<{ total: number; counts: Map<string, number> }> {
+    const counts = new Map<string, number>(statusBuckets.map((s) => [s, 0]));
+    let total = 0;
+    try {
+      const files = await readdir(dir);
+      checkAborted(signal);
+      const jsonFiles = files.filter((f) => f.endsWith(".json"));
+      const results = await Promise.all(
+        jsonFiles.map(async (f): Promise<string | null> => {
+          try {
+            checkAborted(signal);
+            const raw = await readFile(join(dir, f), "utf-8");
+            checkAborted(signal);
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            return typeof parsed.status === "string" ? parsed.status : null;
+          } catch (err) {
+            if (signal?.aborted) throw err;
+            return null;
+          }
+        }),
+      );
+      for (const status of results) {
+        if (status === null) continue;
+        total++;
+        if (counts.has(status)) counts.set(status, (counts.get(status) ?? 0) + 1);
+      }
+    } catch (err) {
+      if (signal?.aborted) throw err;
+    }
+    return { total, counts };
+  }
+
+  const [ticketResult, issueResult, handoverInfo] = await Promise.all([
+    countDir(join(storyDir, "tickets"), ["open", "complete"]),
+    countDir(join(storyDir, "issues"), ["open"]),
+    findLatestHandover(join(storyDir, "handovers")).catch(() => null),
+  ]);
 
   return {
     project: typeof config.project === "string" ? config.project : "unknown",
     type: typeof config.type === "string" ? config.type : "unknown",
-    ticketCount,
-    openTickets,
-    completeTickets,
-    issueCount,
-    openIssues,
-    lastHandoverDate,
-    lastHandoverTitle,
+    ticketCount: ticketResult.total,
+    openTickets: ticketResult.counts.get("open") ?? 0,
+    completeTickets: ticketResult.counts.get("complete") ?? 0,
+    issueCount: issueResult.total,
+    openIssues: issueResult.counts.get("open") ?? 0,
+    lastHandoverDate: handoverInfo?.date ?? null,
+    lastHandoverTitle: handoverInfo?.heading ?? null,
   };
 }
 
@@ -168,7 +141,7 @@ export async function scanAllSummaries(
       .catch((err): NodeScanResult => {
         const isTimeout = (err instanceof Error && err.message === "timeout") ||
           (typeof DOMException !== "undefined" && err instanceof DOMException && err.name === "AbortError");
-        return { reachable: false, reason: isTimeout ? "timeout" : `scan error: ${String(err)}` };
+        return { reachable: false, reason: isTimeout ? "timeout" : "scan error" };
       });
 
     promises.push({ name, promise: scanPromise });

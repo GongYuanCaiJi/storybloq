@@ -17,7 +17,9 @@ export async function handleStatus(ctx: CommandContext): Promise<CommandResult> 
 
   if (isOrchestrator && hasNodes) {
     const nodeEntries = Object.fromEntries(
-      Object.entries(nodes).map(([k, v]) => [k, { path: typeof v.path === "string" ? v.path : "" }]),
+      Object.entries(nodes)
+        .filter(([, v]) => v != null && typeof v === "object")
+        .map(([k, v]) => [k, { path: typeof v.path === "string" ? v.path : "" }]),
     );
     const resolvedNodes = resolveAllNodes(nodeEntries, ctx.root);
     const scanResults = await scanAllSummaries(resolvedNodes);

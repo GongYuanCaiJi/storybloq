@@ -19,9 +19,9 @@ export async function handleMigrate(
 ): Promise<CommandResult> {
   const { dryRun } = options;
   const absRoot = resolve(root);
-  const wrapDir = join(absRoot, ".story");
+  const storyDir = join(absRoot, ".story");
 
-  if (!existsSync(wrapDir)) {
+  if (!existsSync(storyDir)) {
     return {
       output: format === "json"
         ? JSON.stringify({ version: 1, error: "No .story/ directory found" })
@@ -30,14 +30,14 @@ export async function handleMigrate(
     };
   }
 
-  let resultOutput = "";
+  let resultOutput: string;
 
   let release: (() => Promise<void>) | undefined;
   try {
-    release = await lockfile.lock(wrapDir, {
+    release = await lockfile.lock(storyDir, {
       retries: { retries: 3, minTimeout: 100, maxTimeout: 1000 },
       stale: 10000,
-      lockfilePath: join(wrapDir, ".lock"),
+      lockfilePath: join(storyDir, ".lock"),
     });
   } catch {
     return {
@@ -49,7 +49,7 @@ export async function handleMigrate(
   }
 
   try {
-    const configPath = join(wrapDir, "config.json");
+    const configPath = join(storyDir, "config.json");
     const readResult = tryReadFile(configPath);
     if (!readResult.ok) {
       throw new ProjectLoaderError(

@@ -1,5 +1,6 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CROSS_NODE_REF_CAPTURE_REGEX } from "../models/ticket.js";
 import type { Ticket } from "../models/ticket.js";
 import type { ResolvedNode } from "./resolver.js";
 
@@ -7,7 +8,12 @@ export type CrossNodeRefStatus =
   | { resolved: true; status: "complete" | "open" | "inprogress" }
   | { resolved: false; reason: string };
 
-const CROSS_NODE_REF_PATTERN = /^([a-z][a-z0-9_-]{0,63}):(T-\d+[a-z]?|ISS-\d+)$/;
+
+function normalizeStatus(status: string): "complete" | "open" | "inprogress" {
+  if (status === "complete" || status === "resolved") return "complete";
+  if (status === "inprogress") return "inprogress";
+  return "open";
+}
 
 export class CrossNodeBlockingResolver {
   private constructor(private readonly statuses: Map<string, CrossNodeRefStatus>) {}
@@ -19,11 +25,10 @@ export class CrossNodeBlockingResolver {
     const refsByNode = new Map<string, Set<string>>();
 
     for (const ticket of tickets) {
-      const refs = (ticket as Record<string, unknown>).crossNodeBlockedBy;
-      if (!Array.isArray(refs)) continue;
+      const refs = ticket.crossNodeBlockedBy;
+      if (!refs) continue;
       for (const ref of refs) {
-        if (typeof ref !== "string") continue;
-        const match = CROSS_NODE_REF_PATTERN.exec(ref);
+        const match = CROSS_NODE_REF_CAPTURE_REGEX.exec(ref);
         if (!match) continue;
         const nodeName = match[1]!;
         const itemId = match[2]!;
@@ -38,71 +43,38 @@ export class CrossNodeBlockingResolver {
       const node = resolvedNodes.get(nodeName);
 
       if (!node || !node.resolved) {
-        const reason = node && !node.resolved ? node.reason : "node not configured";
+        const reason = node?.reason ?? "node not configured";
         for (const itemId of itemIds) {
           statuses.set(`${nodeName}:${itemId}`, { resolved: false, reason });
         }
         continue;
       }
 
-      const nodeTicketStatuses = new Map<string, string>();
-      const nodeIssueStatuses = new Map<string, string>();
-
-      try {
-        const ticketsDir = join(node.storyDir, "tickets");
-        const ticketFiles = await readdir(ticketsDir).catch(() => [] as string[]);
-        for (const f of ticketFiles.filter((f) => f.endsWith(".json"))) {
-          try {
-            const raw = await readFile(join(ticketsDir, f), "utf-8");
-            const parsed = JSON.parse(raw) as Record<string, unknown>;
-            if (typeof parsed.id === "string" && typeof parsed.status === "string") {
-              nodeTicketStatuses.set(parsed.id, parsed.status);
-            }
-          } catch { /* corrupt file, skip */ }
-        }
-
-        const issuesDir = join(node.storyDir, "issues");
-        const issueFiles = await readdir(issuesDir).catch(() => [] as string[]);
-        for (const f of issueFiles.filter((f) => f.endsWith(".json"))) {
-          try {
-            const raw = await readFile(join(issuesDir, f), "utf-8");
-            const parsed = JSON.parse(raw) as Record<string, unknown>;
-            if (typeof parsed.id === "string" && typeof parsed.status === "string") {
-              nodeIssueStatuses.set(parsed.id, parsed.status);
-            }
-          } catch { /* corrupt file, skip */ }
-        }
-      } catch {
-        for (const itemId of itemIds) {
-          statuses.set(`${nodeName}:${itemId}`, { resolved: false, reason: "scan error" });
-        }
-        continue;
-      }
-
-      for (const itemId of itemIds) {
+      const reads = Array.from(itemIds).map(async (itemId) => {
         const isTicket = itemId.startsWith("T-");
-        const statusMap = isTicket ? nodeTicketStatuses : nodeIssueStatuses;
-        const itemStatus = statusMap.get(itemId);
-
-        if (!itemStatus) {
+        const dir = join(node.storyDir, isTicket ? "tickets" : "issues");
+        try {
+          const raw = await readFile(join(dir, `${itemId}.json`), "utf-8");
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          if (typeof parsed.status === "string") {
+            statuses.set(`${nodeName}:${itemId}`, { resolved: true, status: normalizeStatus(parsed.status) });
+          } else {
+            statuses.set(`${nodeName}:${itemId}`, { resolved: false, reason: "item not found in node" });
+          }
+        } catch {
           statuses.set(`${nodeName}:${itemId}`, { resolved: false, reason: "item not found in node" });
-        } else {
-          const normalized = itemStatus === "complete" || itemStatus === "resolved"
-            ? "complete"
-            : itemStatus === "inprogress"
-              ? "inprogress"
-              : "open";
-          statuses.set(`${nodeName}:${itemId}`, { resolved: true, status: normalized });
         }
-      }
+      });
+
+      await Promise.all(reads);
     }
 
     return new CrossNodeBlockingResolver(statuses);
   }
 
   isCrossNodeBlocked(ticket: Ticket): boolean | "unresolved" {
-    const refs = (ticket as Record<string, unknown>).crossNodeBlockedBy;
-    if (!Array.isArray(refs) || refs.length === 0) return false;
+    const refs = ticket.crossNodeBlockedBy;
+    if (!refs || refs.length === 0) return false;
 
     let hasUnresolved = false;
 

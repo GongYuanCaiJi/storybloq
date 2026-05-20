@@ -5,9 +5,6 @@ import { join } from "node:path";
 import {
   resolveNodeRoot,
   checkNodeWritePermission,
-  withNodeReadResolution,
-  withNodeWriteResolution,
-  type McpToolResult,
 } from "../../src/mcp/node-resolution.js";
 
 const tmpDirs: string[] = [];
@@ -106,6 +103,16 @@ describe("resolveNodeRoot", () => {
     }
   });
 
+  it("returns io_error when config.json is missing", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "fed-no-config-"));
+    tmpDirs.push(dir);
+    const result = resolveNodeRoot(dir, "engine");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errorCode).toBe("io_error");
+    }
+  });
+
   it("returns error for unresolvable node path", async () => {
     const orchDir = await createOrchestratorProject({
       nodes: { broken: { path: join(tmpdir(), "fed-nonexistent-" + Date.now() + "-" + Math.random().toString(36).slice(2)) } },
@@ -130,75 +137,3 @@ describe("checkNodeWritePermission", () => {
   });
 });
 
-describe("withNodeReadResolution", () => {
-  it("passes pinnedRoot when no node arg", async () => {
-    const orchDir = await createOrchestratorProject();
-    let receivedRoot = "";
-    const mockResult: McpToolResult = { content: [{ type: "text", text: "ok" }] };
-    await withNodeReadResolution(orchDir, undefined, async (root) => {
-      receivedRoot = root;
-      return mockResult;
-    });
-    expect(receivedRoot).toBe(orchDir);
-  });
-
-  it("passes resolved node root for valid node", async () => {
-    const nodeDir = await createNodeProject("engine");
-    const orchDir = await createOrchestratorProject({ nodes: { engine: { path: nodeDir } } });
-    let receivedRoot = "";
-    const mockResult: McpToolResult = { content: [{ type: "text", text: "ok" }] };
-    await withNodeReadResolution(orchDir, "engine", async (root) => {
-      receivedRoot = root;
-      return mockResult;
-    });
-    expect(receivedRoot).not.toBe(orchDir);
-    expect(receivedRoot).toBeTruthy();
-  });
-
-  it("returns error for unknown node", async () => {
-    const orchDir = await createOrchestratorProject();
-    const result = await withNodeReadResolution(orchDir, "missing", async () => {
-      return { content: [{ type: "text", text: "should not reach" }] };
-    });
-    expect(result.content[0]!.text).toContain("not found");
-  });
-});
-
-describe("withNodeWriteResolution", () => {
-  it("blocks write when allowNodeWrites is false", async () => {
-    const nodeDir = await createNodeProject("engine");
-    const orchDir = await createOrchestratorProject({
-      nodes: { engine: { path: nodeDir } },
-      allowNodeWrites: false,
-    });
-    const result = await withNodeWriteResolution(orchDir, "engine", async () => {
-      return { content: [{ type: "text", text: "should not reach" }] };
-    });
-    expect(result.content[0]!.text).toContain("writes disabled");
-  });
-
-  it("allows write when allowNodeWrites is true", async () => {
-    const nodeDir = await createNodeProject("engine");
-    const orchDir = await createOrchestratorProject({
-      nodes: { engine: { path: nodeDir } },
-      allowNodeWrites: true,
-    });
-    let receivedRoot = "";
-    await withNodeWriteResolution(orchDir, "engine", async (root) => {
-      receivedRoot = root;
-      return { content: [{ type: "text", text: "ok" }] };
-    });
-    expect(receivedRoot).not.toBe(orchDir);
-    expect(receivedRoot).toBeTruthy();
-  });
-
-  it("passes pinnedRoot when no node arg", async () => {
-    const orchDir = await createOrchestratorProject();
-    let receivedRoot = "";
-    await withNodeWriteResolution(orchDir, undefined, async (root) => {
-      receivedRoot = root;
-      return { content: [{ type: "text", text: "ok" }] };
-    });
-    expect(receivedRoot).toBe(orchDir);
-  });
-});

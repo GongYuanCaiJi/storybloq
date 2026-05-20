@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { FederationState } from "./state.js";
@@ -30,8 +30,8 @@ export function readFederationCache(storyDir: string): FederationCache | null {
     if (!parsed.lastScanTimestamp || !parsed.nodes) return null;
     return parsed;
   } catch (err) {
-    if (err instanceof SyntaxError && existsSync(cachePath)) {
-      try { unlinkSync(cachePath); } catch { /* ignore */ }
+    if (err instanceof SyntaxError) {
+      try { unlinkSync(cachePath); } catch { /* ENOENT or permission -- ignore */ }
     }
     return null;
   }
@@ -62,6 +62,10 @@ export function writeFederationCache(storyDir: string, state: FederationState): 
 
   const cachePath = join(storyDir, CACHE_FILENAME);
   const tmpPath = `${cachePath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(cache, null, 2) + "\n");
-  renameSync(tmpPath, cachePath);
+  try {
+    writeFileSync(tmpPath, JSON.stringify(cache, null, 2) + "\n");
+    renameSync(tmpPath, cachePath);
+  } finally {
+    try { unlinkSync(tmpPath); } catch { /* ENOENT expected on happy path */ }
+  }
 }
