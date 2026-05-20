@@ -8,6 +8,7 @@
 import type { ProjectState } from "./project-state.js";
 import type { Ticket } from "../models/ticket.js";
 import type { IssueSeverity } from "../models/types.js";
+import type { FederationState, FederationNodeEntry } from "../federation/state.js";
 import {
   nextTicket,
   currentPhase,
@@ -22,21 +23,24 @@ import { validateProject } from "./validation.js";
 export type RecommendCategory =
   | "validation_errors"
   | "critical_issue"
+  | "fed_red_blocker"
   | "inprogress_ticket"
+  | "fed_unreachable"
   | "high_impact_unblock"
+  | "fed_bottleneck"
   | "near_complete_umbrella"
+  | "fed_high_issues"
   | "phase_momentum"
+  | "fed_stale_node"
   | "quick_win"
   | "open_issue"
   | "handover_context"
   | "debt_trend";
 
-/** Optional inputs for handover context (ISS-018) and debt trend (ISS-019). */
 export interface RecommendOptions {
-  /** Content of the most recent handover file. */
   readonly latestHandoverContent?: string;
-  /** Number of open issues in the previous snapshot. */
   readonly previousOpenIssueCount?: number;
+  readonly federationState?: FederationState;
 }
 
 export type RecommendItemKind = "ticket" | "issue" | "action";
@@ -77,14 +81,19 @@ const MAX_PHASE_PENALTY = 400;
 const CATEGORY_PRIORITY: Record<RecommendCategory, number> = {
   validation_errors: 1,
   critical_issue: 2,
-  inprogress_ticket: 3,
-  high_impact_unblock: 4,
-  near_complete_umbrella: 5,
-  phase_momentum: 6,
-  debt_trend: 7,
-  quick_win: 8,
-  handover_context: 9,
-  open_issue: 10,
+  fed_red_blocker: 3,
+  inprogress_ticket: 4,
+  fed_unreachable: 5,
+  high_impact_unblock: 6,
+  fed_bottleneck: 7,
+  near_complete_umbrella: 8,
+  fed_high_issues: 9,
+  phase_momentum: 10,
+  fed_stale_node: 11,
+  debt_trend: 12,
+  quick_win: 13,
+  handover_context: 14,
+  open_issue: 15,
 };
 
 // --- Public API ---
@@ -109,6 +118,17 @@ export function recommend(
     () => generateOpenIssues(state),
     () => generateDebtTrend(state, options),
   ];
+
+  if (options?.federationState && state.config.type === "orchestrator") {
+    const facts = buildFederationFacts(options.federationState);
+    generators.push(
+      () => generateFedUnreachable(facts),
+      () => generateFedRedBlockers(facts),
+      () => generateFedBottleneck(facts),
+      () => generateFedHighIssues(facts),
+      () => generateFedStaleNodes(facts),
+    );
+  }
 
   for (const gen of generators) {
     for (const rec of gen()) {
@@ -449,6 +469,157 @@ function extractTicketIdsFromActionableSections(content: string): Set<string> {
     }
   }
   return ids;
+}
+
+// --- Federation generators ---
+
+const FED_STALE_DAYS = 14;
+const FED_ISSUE_RATIO_THRESHOLD = 0.3;
+const FED_ISSUE_ABSOLUTE_MINIMUM = 3;
+
+interface FederationFacts {
+  nodes: FederationNodeEntry[];
+  downstreamOf: Map<string, string[]>;
+  suppressedScanBased: Set<string>;
+  suppressedBottleneck: Set<string>;
+}
+
+function buildFederationFacts(fedState: FederationState): FederationFacts {
+  const downstreamOf = new Map<string, string[]>();
+  for (const node of fedState.nodes) {
+    for (const dep of node.dependsOn) {
+      const existing = downstreamOf.get(dep);
+      if (existing) existing.push(node.name);
+      else downstreamOf.set(dep, [node.name]);
+    }
+  }
+  return {
+    nodes: fedState.nodes,
+    downstreamOf,
+    suppressedScanBased: new Set(),
+    suppressedBottleneck: new Set(),
+  };
+}
+
+function generateFedUnreachable(facts: FederationFacts): Recommendation[] {
+  const recs: Recommendation[] = [];
+  let index = 0;
+  for (const node of facts.nodes) {
+    if (!node.reachable) {
+      facts.suppressedScanBased.add(node.name);
+      const reason = node.unreachableReason
+        ? `Node "${node.name}" is unreachable (${node.unreachableReason})`
+        : `Node "${node.name}" is unreachable`;
+      recs.push({
+        id: `FED_UNREACHABLE_${node.name}`,
+        kind: "action",
+        title: `Init ${node.name}`,
+        category: "fed_unreachable",
+        reason,
+        score: 750 - Math.min(index++, 99),
+      });
+    }
+  }
+  return recs;
+}
+
+function generateFedRedBlockers(facts: FederationFacts): Recommendation[] {
+  const recs: Recommendation[] = [];
+  let index = 0;
+  for (const node of facts.nodes) {
+    if (node.health !== "red" && node.health !== "yellow") continue;
+    const downstream = facts.downstreamOf.get(node.name);
+    if (!downstream || downstream.length === 0) continue;
+    facts.suppressedBottleneck.add(node.name);
+    const baseScore = node.health === "red" ? 850 : 840;
+    recs.push({
+      id: `FED_RED_${node.name}`,
+      kind: "action",
+      title: `Address ${node.name} (${node.health})`,
+      category: "fed_red_blocker",
+      reason: `Node "${node.name}" is ${node.health} and blocks ${downstream.join(", ")}`,
+      score: baseScore - Math.min(index++, 99),
+    });
+  }
+  return recs;
+}
+
+function generateFedBottleneck(facts: FederationFacts): Recommendation[] {
+  const recs: Recommendation[] = [];
+  let index = 0;
+  for (const node of facts.nodes) {
+    if (facts.suppressedBottleneck.has(node.name)) continue;
+    if (node.health === "green") continue;
+    const downstream = facts.downstreamOf.get(node.name);
+    if (!downstream || downstream.length < 2) continue;
+    recs.push({
+      id: `FED_BOTTLENECK_${node.name}`,
+      kind: "action",
+      title: `Bottleneck: ${node.name}`,
+      category: "fed_bottleneck",
+      reason: `Node "${node.name}" is ${node.health} and depended on by ${downstream.length} nodes (${downstream.join(", ")})`,
+      score: 650 - Math.min(index++, 99),
+    });
+  }
+  return recs;
+}
+
+function generateFedHighIssues(facts: FederationFacts): Recommendation[] {
+  const recs: Recommendation[] = [];
+  let index = 0;
+  for (const node of facts.nodes) {
+    if (facts.suppressedScanBased.has(node.name)) continue;
+    if (!node.scanSummary) continue;
+    const { openIssues, ticketCount } = node.scanSummary;
+    if (ticketCount <= 0) continue;
+    if (openIssues < FED_ISSUE_ABSOLUTE_MINIMUM) continue;
+    const ratio = openIssues / ticketCount;
+    if (ratio <= FED_ISSUE_RATIO_THRESHOLD) continue;
+    recs.push({
+      id: `FED_ISSUES_${node.name}`,
+      kind: "action",
+      title: `Issue debt in ${node.name}`,
+      category: "fed_high_issues",
+      reason: `Node "${node.name}" has ${openIssues} open issues across ${ticketCount} tickets (${Math.round(ratio * 100)}%)`,
+      score: 550 - Math.min(index++, 99),
+    });
+  }
+  return recs;
+}
+
+function generateFedStaleNodes(facts: FederationFacts, now?: Date): Recommendation[] {
+  const recs: Recommendation[] = [];
+  const today = now ?? new Date();
+  let index = 0;
+  for (const node of facts.nodes) {
+    if (facts.suppressedScanBased.has(node.name)) continue;
+    if (!node.scanSummary) continue;
+    const lastDate = node.scanSummary.lastHandoverDate;
+    if (lastDate) {
+      const parsed = new Date(lastDate);
+      if (Number.isNaN(parsed.getTime())) continue;
+      const daysSince = Math.floor((today.getTime() - parsed.getTime()) / 86_400_000);
+      if (daysSince <= FED_STALE_DAYS) continue;
+      recs.push({
+        id: `FED_STALE_${node.name}`,
+        kind: "action",
+        title: `Stale: ${node.name}`,
+        category: "fed_stale_node",
+        reason: `Node "${node.name}" has no handover activity in ${daysSince} days`,
+        score: 475 - Math.min(index++, 99),
+      });
+    } else {
+      recs.push({
+        id: `FED_STALE_${node.name}`,
+        kind: "action",
+        title: `Stale: ${node.name}`,
+        category: "fed_stale_node",
+        reason: `Node "${node.name}" has never had a handover`,
+        score: 475 - Math.min(index++, 99),
+      });
+    }
+  }
+  return recs;
 }
 
 // --- ISS-019: Debt trend detection ---

@@ -1,12 +1,67 @@
 import { describe, it, expect } from "vitest";
 import { recommend } from "../../src/core/recommend.js";
+import type { FederationState, FederationNodeEntry } from "../../src/federation/state.js";
+import type { NodeScanSummary } from "../../src/federation/scanner.js";
+import type { Config } from "../../src/models/config.js";
 import {
   makeTicket,
   makeIssue,
   makeState,
   makeRoadmap,
   makePhase,
+  minimalConfig,
 } from "./test-factories.js";
+
+function makeFedNode(overrides: Partial<FederationNodeEntry> & { name: string }): FederationNodeEntry {
+  return {
+    rawPath: `/dev/${overrides.name}`,
+    resolvedPath: `/dev/${overrides.name}`,
+    health: "green",
+    role: "",
+    summary: "",
+    dependsOn: [],
+    reachable: true,
+    ...overrides,
+  };
+}
+
+function makeFedState(nodes: FederationNodeEntry[]): FederationState {
+  const reachable = nodes.filter((n) => n.reachable);
+  return {
+    orchestratorProject: "test-orch",
+    nodeCount: nodes.length,
+    reachableCount: reachable.length,
+    unreachableCount: nodes.length - reachable.length,
+    nodes,
+    totalTickets: 0,
+    totalOpenTickets: 0,
+    totalCompleteTickets: 0,
+    totalIssues: 0,
+    totalOpenIssues: 0,
+    lastScanTimestamp: new Date().toISOString(),
+  };
+}
+
+function makeScanSummary(overrides: Partial<NodeScanSummary> = {}): NodeScanSummary {
+  return {
+    project: "test",
+    type: "npm",
+    ticketCount: 10,
+    openTickets: 2,
+    completeTickets: 8,
+    issueCount: 1,
+    openIssues: 0,
+    lastHandoverDate: new Date().toISOString().slice(0, 10),
+    lastHandoverTitle: "Latest",
+    ...overrides,
+  };
+}
+
+const orchestratorConfig: Config = {
+  ...minimalConfig,
+  type: "orchestrator",
+  nodes: { engine: { path: "~/dev/engine" } },
+};
 
 describe("recommend", () => {
   it("empty project → empty recommendations", () => {
@@ -631,5 +686,188 @@ describe("recommend", () => {
     const result = recommend(state, 10);
     const trend = result.recommendations.find((r) => r.id === "DEBT_TREND");
     expect(trend).toBeUndefined();
+  });
+});
+
+describe("federation recommendations", () => {
+  it("empty orchestrator with federation state produces recommendations", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "cloud", health: "green", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "components", reachable: false, unreachableReason: "no .story/config.json found" }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    expect(result.recommendations.length).toBeGreaterThan(0);
+    expect(result.recommendations.every((r) => r.id.startsWith("FED_"))).toBe(true);
+  });
+
+  it("red blocker ranks above in-progress ticket", () => {
+    const state = makeState({
+      config: orchestratorConfig,
+      tickets: [makeTicket({ id: "T-001", status: "inprogress" })],
+    });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "cloud", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const redIdx = result.recommendations.findIndex((r) => r.id === "FED_RED_engine");
+    const ipIdx = result.recommendations.findIndex((r) => r.id === "T-001");
+    expect(redIdx).toBeGreaterThanOrEqual(0);
+    expect(ipIdx).toBeGreaterThanOrEqual(0);
+    expect(redIdx).toBeLessThan(ipIdx);
+  });
+
+  it("unreachable node gets FED_UNREACHABLE", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "components", reachable: false, unreachableReason: "no .story/config.json found" }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_UNREACHABLE_components");
+    expect(rec).toBeDefined();
+    expect(rec!.category).toBe("fed_unreachable");
+    expect(rec!.reason).toContain("unreachable");
+  });
+
+  it("bottleneck: yellow node with 3 dependents flagged", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "yellow", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "a", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "b", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "c", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_RED_engine");
+    expect(rec).toBeDefined();
+    expect(rec!.category).toBe("fed_red_blocker");
+  });
+
+  it("bottleneck: green node with 3 dependents NOT flagged as bottleneck", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "green", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "a", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "b", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "c", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const bottleneck = result.recommendations.find((r) => r.id === "FED_BOTTLENECK_engine");
+    expect(bottleneck).toBeUndefined();
+  });
+
+  it("high issue node flagged", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", scanSummary: makeScanSummary({ ticketCount: 12, openIssues: 5, issueCount: 5 }) }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_ISSUES_engine");
+    expect(rec).toBeDefined();
+    expect(rec!.reason).toContain("42%");
+  });
+
+  it("low issue node not flagged", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", scanSummary: makeScanSummary({ ticketCount: 20, openIssues: 1, issueCount: 1 }) }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_ISSUES_engine");
+    expect(rec).toBeUndefined();
+  });
+
+  it("stale node flagged (30 days ago)", () => {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", scanSummary: makeScanSummary({ lastHandoverDate: thirtyDaysAgo }) }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_STALE_engine");
+    expect(rec).toBeDefined();
+    expect(rec!.reason).toContain("30 days");
+  });
+
+  it("fresh node not flagged as stale (3 days ago)", () => {
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000).toISOString().slice(0, 10);
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", scanSummary: makeScanSummary({ lastHandoverDate: threeDaysAgo }) }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const rec = result.recommendations.find((r) => r.id === "FED_STALE_engine");
+    expect(rec).toBeUndefined();
+  });
+
+  it("no federationState = no federation recs", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const result = recommend(state, 10);
+    const fedRecs = result.recommendations.filter((r) => r.id.startsWith("FED_"));
+    expect(fedRecs).toHaveLength(0);
+  });
+
+  it("federation and local recs coexist sorted by score", () => {
+    const state = makeState({
+      config: orchestratorConfig,
+      tickets: [makeTicket({ id: "T-001", status: "inprogress" })],
+    });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "cloud", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const fedRecs = result.recommendations.filter((r) => r.id.startsWith("FED_"));
+    const localRecs = result.recommendations.filter((r) => !r.id.startsWith("FED_"));
+    expect(fedRecs.length).toBeGreaterThan(0);
+    expect(localRecs.length).toBeGreaterThan(0);
+    for (let i = 1; i < result.recommendations.length; i++) {
+      expect(result.recommendations[i]!.score).toBeLessThanOrEqual(result.recommendations[i - 1]!.score);
+    }
+  });
+
+  it("suppression: unreachable red node gets both FED_UNREACHABLE and FED_RED", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", reachable: false, unreachableReason: "path does not exist" }),
+      makeFedNode({ name: "cloud", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    expect(result.recommendations.find((r) => r.id === "FED_UNREACHABLE_engine")).toBeDefined();
+    expect(result.recommendations.find((r) => r.id === "FED_RED_engine")).toBeDefined();
+  });
+
+  it("suppression: red_blocker suppresses bottleneck for same node", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "a", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "b", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    expect(result.recommendations.find((r) => r.id === "FED_RED_engine")).toBeDefined();
+    expect(result.recommendations.find((r) => r.id === "FED_BOTTLENECK_engine")).toBeUndefined();
+  });
+
+  it("division by zero: node with 0 tickets produces no FED_ISSUES", () => {
+    const state = makeState({ config: orchestratorConfig });
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", scanSummary: makeScanSummary({ ticketCount: 0, openIssues: 5, issueCount: 5 }) }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    expect(result.recommendations.find((r) => r.id === "FED_ISSUES_engine")).toBeUndefined();
+  });
+
+  it("non-orchestrator project ignores federationState", () => {
+    const state = makeState();
+    const fedState = makeFedState([
+      makeFedNode({ name: "engine", health: "red", scanSummary: makeScanSummary() }),
+      makeFedNode({ name: "cloud", dependsOn: ["engine"], scanSummary: makeScanSummary() }),
+    ]);
+    const result = recommend(state, 10, { federationState: fedState });
+    const fedRecs = result.recommendations.filter((r) => r.id.startsWith("FED_"));
+    expect(fedRecs).toHaveLength(0);
   });
 });

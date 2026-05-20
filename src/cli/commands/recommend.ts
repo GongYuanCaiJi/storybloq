@@ -3,10 +3,13 @@ import { tryReadFile } from "../util/file-io.js";
 import { join } from "node:path";
 import { recommend, type RecommendOptions } from "../../core/recommend.js";
 import { formatRecommendations } from "../../core/output-formatter.js";
+import { loadFederationState } from "../../federation/recommend-loader.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
-export function handleRecommend(ctx: CommandContext, count: number): CommandResult {
-  const options = buildRecommendOptions(ctx);
+export async function handleRecommend(ctx: CommandContext, count: number): Promise<CommandResult> {
+  const baseOptions = buildRecommendOptions(ctx);
+  const fedState = await loadFederationState(ctx.root, ctx.state.config);
+  const options: RecommendOptions = { ...baseOptions, ...(fedState ? { federationState: fedState } : {}) };
   const result = recommend(ctx.state, count, options);
   return { output: formatRecommendations(result, ctx.state, ctx.format) };
 }

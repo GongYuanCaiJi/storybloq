@@ -118,6 +118,7 @@ export function makeState(
     lessons?: Lesson[];
     roadmap?: Roadmap;
     handoverFilenames?: string[];
+    config?: Config;
   } = {},
 ): ProjectState {
   return new ProjectState({
@@ -126,7 +127,7 @@ export function makeState(
     notes: opts.notes ?? [],
     lessons: opts.lessons ?? [],
     roadmap: opts.roadmap ?? emptyRoadmap,
-    config: minimalConfig,
+    config: opts.config ?? minimalConfig,
     handoverFilenames: opts.handoverFilenames ?? [],
   });
 }

@@ -1446,7 +1446,10 @@ export function formatRecommendations(
     if (state.isEmptyScaffold) {
       return "No recommendations yet — this project needs tickets and phases. Run the /story setup flow to get started.";
     }
-    return "No recommendations — all work is complete or blocked.";
+    if (state.config.type === "orchestrator") {
+      return "No recommendations. Run storybloq status for federation overview.";
+    }
+    return "No recommendations -- all work is complete or blocked.";
   }
 
   const lines: string[] = ["# Recommendations", ""];
