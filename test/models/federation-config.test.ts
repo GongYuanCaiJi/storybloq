@@ -200,6 +200,56 @@ describe("NodeSchema", () => {
       expect((result.data as Record<string, unknown>).customField).toBe(true);
     }
   });
+
+  it("accepts kind as free string", () => {
+    expect(NodeSchema.safeParse({ ...validNode, kind: "library" }).success).toBe(true);
+    expect(NodeSchema.safeParse({ ...validNode, kind: "bridge" }).success).toBe(true);
+    expect(NodeSchema.safeParse({ ...validNode, kind: "custom-thing" }).success).toBe(true);
+  });
+
+  it("rejects kind that is empty or too long", () => {
+    expect(NodeSchema.safeParse({ ...validNode, kind: "" }).success).toBe(false);
+    expect(NodeSchema.safeParse({ ...validNode, kind: "a".repeat(33) }).success).toBe(false);
+  });
+
+  it("accepts missing kind as undefined", () => {
+    const result = NodeSchema.safeParse(validNode);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.kind).toBeUndefined();
+  });
+
+  it("accepts links with to and via", () => {
+    const result = NodeSchema.safeParse({
+      ...validNode,
+      links: [{ to: "cloud", via: "streaming API" }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.links).toHaveLength(1);
+      expect(result.data.links![0]!.to).toBe("cloud");
+      expect(result.data.links![0]!.via).toBe("streaming API");
+    }
+  });
+
+  it("accepts links without via", () => {
+    const result = NodeSchema.safeParse({
+      ...validNode,
+      links: [{ to: "engine" }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.links![0]!.via).toBeUndefined();
+  });
+
+  it("validates link to against NodeNameSchema", () => {
+    expect(NodeSchema.safeParse({ ...validNode, links: [{ to: "Valid-Name" }] }).success).toBe(false);
+    expect(NodeSchema.safeParse({ ...validNode, links: [{ to: "engine" }] }).success).toBe(true);
+  });
+
+  it("accepts missing links as undefined", () => {
+    const result = NodeSchema.safeParse(validNode);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.links).toBeUndefined();
+  });
 });
 
 describe("NodesMapSchema", () => {
@@ -377,5 +427,31 @@ describe("validateOrchestratorOverlay", () => {
     };
     const result = validateOrchestratorOverlay(config);
     expect(result.valid).toBe(true);
+  });
+
+  it("warns on link referencing non-existent node", () => {
+    const config = {
+      ...baseConfig,
+      nodes: {
+        engine: { path: "~/Dev/engine", links: [{ to: "missing-node" }] },
+        cloud: { path: "~/Dev/cloud" },
+      },
+    };
+    const result = validateOrchestratorOverlay(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings.some((w: string) => w.includes("missing-node"))).toBe(true);
+  });
+
+  it("accepts valid link targets without warnings", () => {
+    const config = {
+      ...baseConfig,
+      nodes: {
+        engine: { path: "~/Dev/engine", links: [{ to: "cloud", via: "API" }] },
+        cloud: { path: "~/Dev/cloud" },
+      },
+    };
+    const result = validateOrchestratorOverlay(config);
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toHaveLength(0);
   });
 });

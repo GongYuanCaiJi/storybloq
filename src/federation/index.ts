@@ -18,3 +18,6 @@ export { buildHandoverDigest } from "./handover-digest.js";
 
 export type { LatestHandoverInfo } from "./handover-utils.js";
 export { findLatestHandover } from "./handover-utils.js";
+
+export type { NodeRecommendationLoadWarning, NodeRecommendationsLoadResult } from "./node-recommend.js";
+export { loadNodeRecommendations } from "./node-recommend.js";

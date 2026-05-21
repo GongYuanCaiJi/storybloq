@@ -15,6 +15,7 @@ import {
   ticketsUnblockedBy,
   umbrellaProgress,
   descendantLeaves,
+  isCrossNodeBlocked,
 } from "./queries.js";
 import { validateProject } from "./validation.js";
 
@@ -41,6 +42,7 @@ export interface RecommendOptions {
   readonly latestHandoverContent?: string;
   readonly previousOpenIssueCount?: number;
   readonly federationState?: FederationState;
+  readonly crossNodeRefStatuses?: Record<string, string>;
 }
 
 export type RecommendItemKind = "ticket" | "issue" | "action";
@@ -107,14 +109,15 @@ export function recommend(
   const dedup = new Map<string, Recommendation>();
   const phaseIndex = buildPhaseIndex(state);
 
+  const crossNodeStatuses = options?.crossNodeRefStatuses;
   const generators = [
     () => generateValidationSuggestions(state),
     () => generateCriticalIssues(state),
-    () => generateInProgressTickets(state, phaseIndex),
-    () => generateHighImpactUnblocks(state),
-    () => generateNearCompleteUmbrellas(state, phaseIndex),
-    () => generatePhaseMomentum(state),
-    () => generateQuickWins(state, phaseIndex),
+    () => generateInProgressTickets(state, phaseIndex, crossNodeStatuses),
+    () => generateHighImpactUnblocks(state, crossNodeStatuses),
+    () => generateNearCompleteUmbrellas(state, phaseIndex, crossNodeStatuses),
+    () => generatePhaseMomentum(state, crossNodeStatuses),
+    () => generateQuickWins(state, phaseIndex, crossNodeStatuses),
     () => generateOpenIssues(state),
     () => generateDebtTrend(state, options),
   ];
@@ -220,9 +223,13 @@ function generateCriticalIssues(state: ProjectState): Recommendation[] {
   }));
 }
 
-function generateInProgressTickets(state: ProjectState, phaseIndex: Map<string, number>): Recommendation[] {
+function generateInProgressTickets(
+  state: ProjectState,
+  phaseIndex: Map<string, number>,
+  crossNodeStatuses?: Record<string, string>,
+): Recommendation[] {
   const tickets = state.leafTickets.filter(
-    (t) => t.status === "inprogress",
+    (t) => t.status === "inprogress" && !isCrossNodeBlocked(t, crossNodeStatuses),
   );
   const sorted = sortByPhaseAndOrder(tickets, phaseIndex);
 
@@ -236,12 +243,13 @@ function generateInProgressTickets(state: ProjectState, phaseIndex: Map<string, 
   }));
 }
 
-function generateHighImpactUnblocks(state: ProjectState): Recommendation[] {
+function generateHighImpactUnblocks(state: ProjectState, crossNodeStatuses?: Record<string, string>): Recommendation[] {
   const candidates: { ticket: Ticket; unblockCount: number }[] = [];
 
   for (const ticket of state.leafTickets) {
     if (ticket.status === "complete") continue;
     if (state.isBlocked(ticket)) continue;
+    if (isCrossNodeBlocked(ticket, crossNodeStatuses)) continue;
 
     const wouldUnblock = ticketsUnblockedBy(ticket.id, state);
     if (wouldUnblock.length >= 2) {
@@ -264,6 +272,7 @@ function generateHighImpactUnblocks(state: ProjectState): Recommendation[] {
 function generateNearCompleteUmbrellas(
   state: ProjectState,
   phaseIndex: Map<string, number>,
+  crossNodeStatuses?: Record<string, string>,
 ): Recommendation[] {
   const candidates: {
     umbrellaId: string;
@@ -283,9 +292,10 @@ function generateNearCompleteUmbrellas(
     const ratio = progress.complete / progress.total;
     if (ratio < 0.8) continue;
 
-    // Find first incomplete leaf, sorted by phase+order
     const leaves = descendantLeaves(umbrellaId, state);
-    const incomplete = leaves.filter((t) => t.status !== "complete");
+    const incomplete = leaves.filter(
+      (t) => t.status !== "complete" && !state.isBlocked(t) && !isCrossNodeBlocked(t, crossNodeStatuses),
+    );
     const sorted = sortByPhaseAndOrder(incomplete, phaseIndex);
     if (sorted.length === 0) continue;
 
@@ -312,28 +322,32 @@ function generateNearCompleteUmbrellas(
   }));
 }
 
-function generatePhaseMomentum(state: ProjectState): Recommendation[] {
-  const outcome = nextTicket(state);
-  if (outcome.kind !== "found") return [];
-
-  const ticket = outcome.ticket;
-  return [
-    {
-      id: ticket.id,
-      kind: "ticket" as const,
-      title: ticket.title,
-      category: "phase_momentum" as const,
-      reason: `Next in phase order (${ticket.phase ?? "none"})`,
-      score: 500,
-    },
-  ];
+function generatePhaseMomentum(state: ProjectState, crossNodeStatuses?: Record<string, string>): Recommendation[] {
+  for (const phase of state.roadmap.phases) {
+    if (state.phaseStatus(phase.id) === "complete") continue;
+    const leaves = state.phaseTickets(phase.id);
+    const candidate = leaves.find(
+      (t) => t.status !== "complete" && !state.isBlocked(t) && !isCrossNodeBlocked(t, crossNodeStatuses),
+    );
+    if (!candidate) continue;
+    return [
+      {
+        id: candidate.id,
+        kind: "ticket" as const,
+        title: candidate.title,
+        category: "phase_momentum" as const,
+        reason: `Next in phase order (${candidate.phase ?? "none"})`,
+        score: 500,
+      },
+    ];
+  }
+  return [];
 }
 
-function generateQuickWins(state: ProjectState, phaseIndex: Map<string, number>): Recommendation[] {
-  // chore is a heuristic proxy for "quick win" — not all chores are quick
+function generateQuickWins(state: ProjectState, phaseIndex: Map<string, number>, crossNodeStatuses?: Record<string, string>): Recommendation[] {
   const tickets = state.leafTickets.filter(
     (t) =>
-      t.status === "open" && t.type === "chore" && !state.isBlocked(t),
+      t.status === "open" && t.type === "chore" && !state.isBlocked(t) && !isCrossNodeBlocked(t, crossNodeStatuses),
   );
   const sorted = sortByPhaseAndOrder(tickets, phaseIndex);
 

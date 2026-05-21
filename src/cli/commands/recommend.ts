@@ -4,12 +4,18 @@ import { join } from "node:path";
 import { recommend, type RecommendOptions } from "../../core/recommend.js";
 import { formatRecommendations } from "../../core/output-formatter.js";
 import { loadFederationState } from "../../federation/recommend-loader.js";
+import { readFederationCache } from "../../federation/cache.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
 export async function handleRecommend(ctx: CommandContext, count: number): Promise<CommandResult> {
   const baseOptions = buildRecommendOptions(ctx);
   const fedState = await loadFederationState(ctx.root, ctx.state.config);
-  const options: RecommendOptions = { ...baseOptions, ...(fedState ? { federationState: fedState } : {}) };
+  const cache = readFederationCache(join(ctx.root, ".story"));
+  const options: RecommendOptions = {
+    ...baseOptions,
+    ...(fedState ? { federationState: fedState } : {}),
+    ...(cache?.crossNodeRefStatuses ? { crossNodeRefStatuses: cache.crossNodeRefStatuses } : {}),
+  };
   const result = recommend(ctx.state, count, options);
   return { output: formatRecommendations(result, ctx.state, ctx.format) };
 }

@@ -8,6 +8,7 @@ import {
   currentPhase,
   phasesWithStatus,
   isBlockerCleared,
+  isCrossNodeBlocked,
 } from "../../src/core/queries.js";
 import { makeTicket, makeIssue, makeState, makeRoadmap, makePhase } from "./test-factories.js";
 
@@ -578,5 +579,57 @@ describe("isBlockerCleared", () => {
 
   it("returns false for minimal blocker (name only)", () => {
     expect(isBlockerCleared({ name: "test" } as any)).toBe(false);
+  });
+});
+
+describe("isCrossNodeBlocked", () => {
+  it("returns false for ticket with no crossNodeBlockedBy", () => {
+    const ticket = makeTicket({ id: "T-001" });
+    expect(isCrossNodeBlocked(ticket)).toBe(false);
+  });
+
+  it("returns false for ticket with empty crossNodeBlockedBy", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: [] });
+    expect(isCrossNodeBlocked(ticket)).toBe(false);
+  });
+
+  it("returns true when crossNodeBlockedBy has refs but no cache provided", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket)).toBe(true);
+  });
+
+  it("returns true when crossNodeBlockedBy has refs but cache is undefined", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket, undefined)).toBe(true);
+  });
+
+  it("returns true when ref is not in cache (unknown)", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket, {})).toBe(true);
+  });
+
+  it("returns true when ref status is not complete", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket, { "core:T-010": "open" })).toBe(true);
+  });
+
+  it("returns true when ref status is inprogress", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket, { "core:T-010": "inprogress" })).toBe(true);
+  });
+
+  it("returns false when all refs are complete", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010", "api:T-005"] });
+    expect(isCrossNodeBlocked(ticket, { "core:T-010": "complete", "api:T-005": "complete" })).toBe(false);
+  });
+
+  it("returns true when some refs are complete but one is not", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010", "api:T-005"] });
+    expect(isCrossNodeBlocked(ticket, { "core:T-010": "complete", "api:T-005": "open" })).toBe(true);
+  });
+
+  it("returns true for unresolved status", () => {
+    const ticket = makeTicket({ id: "T-001", crossNodeBlockedBy: ["core:T-010"] });
+    expect(isCrossNodeBlocked(ticket, { "core:T-010": "unresolved" })).toBe(true);
   });
 });

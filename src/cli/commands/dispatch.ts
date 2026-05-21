@@ -1,9 +1,13 @@
-import { recommend } from "../../core/recommend.js";
-import { buildDispatchPlan, type DispatchPlan } from "../../core/dispatch-plan.js";
+import { recommend, type RecommendOptions } from "../../core/recommend.js";
+import { buildDispatchPlan, buildFederationDispatchPlan, type DispatchPlan } from "../../core/dispatch-plan.js";
 import { detectClaudeVersion, spawnBackgroundAgent } from "../../autonomous/agent-view.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import { ExitCode } from "../../core/output-formatter.js";
 import type { Config } from "../../models/config.js";
+import { loadFederationState } from "../../federation/recommend-loader.js";
+import { loadNodeRecommendations, type NodeRecommendationLoadWarning } from "../../federation/node-recommend.js";
+import { readFederationCache } from "../../federation/cache.js";
+import { join } from "node:path";
 
 export interface DispatchOptions {
   readonly ids: readonly string[] | "all";
@@ -59,19 +63,101 @@ function titleLookup(ctx: CommandContext): (id: string) => string | undefined {
   };
 }
 
-export function handleDispatchRecommend(ctx: CommandContext, count: number): CommandResult {
-  const { recommendations } = recommend(ctx.state, count);
+function appendNodeRecommendationWarnings(
+  plan: DispatchPlan,
+  warnings: readonly NodeRecommendationLoadWarning[],
+): DispatchPlan {
+  if (warnings.length === 0) return plan;
+  return {
+    ...plan,
+    skipped: [
+      ...plan.skipped,
+      ...warnings.map((warning) => ({
+        id: `node:${warning.node}`,
+        reason: `recommendation scan skipped: ${warning.reason}`,
+      })),
+    ],
+  };
+}
+
+function crossNodeRefStatuses(ctx: CommandContext): Record<string, string> | undefined {
+  return readFederationCache(join(ctx.root, ".story"))?.crossNodeRefStatuses;
+}
+
+export async function handleDispatchRecommend(ctx: CommandContext, count: number): Promise<CommandResult> {
+  const config = ctx.state.config as Config;
+  if (config.type === "orchestrator") {
+    return handleFederationDispatchRecommend(ctx, count);
+  }
+  const cache = readFederationCache(join(ctx.root, ".story"));
+  const options: RecommendOptions = {
+    ...(cache?.crossNodeRefStatuses ? { crossNodeRefStatuses: cache.crossNodeRefStatuses } : {}),
+  };
+  const { recommendations } = recommend(ctx.state, count, options);
   const claudeVersion = detectClaudeVersion();
-  const plan = buildDispatchPlan(recommendations, "all", ctx.root, claudeVersion, getMaxAgents(ctx.state.config as Config));
+  const plan = buildDispatchPlan(recommendations, "all", ctx.root, claudeVersion, getMaxAgents(config));
 
   const output = ctx.format === "json" ? formatPlanJson(plan) : formatPlan(plan);
   return { output };
 }
 
-export async function handleDispatch(ctx: CommandContext, options: DispatchOptions): Promise<CommandResult> {
-  const { recommendations } = recommend(ctx.state, options.count);
+async function handleFederationDispatchRecommend(ctx: CommandContext, count: number): Promise<CommandResult> {
+  const config = ctx.state.config as Config;
+  const cachedStatuses = crossNodeRefStatuses(ctx);
+  const fedState = await loadFederationState(ctx.root, config);
+  if (!fedState) {
+    return {
+      output: "No federation state available. Run `storybloq status` first.",
+      exitCode: ExitCode.USER_ERROR,
+    };
+  }
+  const statuses = crossNodeRefStatuses(ctx) ?? cachedStatuses;
+  const nodeRecs = await loadNodeRecommendations(fedState, count, statuses);
   const claudeVersion = detectClaudeVersion();
-  const plan = buildDispatchPlan(recommendations, options.ids, ctx.root, claudeVersion, getMaxAgents(ctx.state.config as Config), titleLookup(ctx));
+  const plan = appendNodeRecommendationWarnings(
+    buildFederationDispatchPlan(nodeRecs.recommendationsByNode, claudeVersion, getMaxAgents(config)),
+    nodeRecs.warnings,
+  );
+  const output = ctx.format === "json" ? formatPlanJson(plan) : formatPlan(plan);
+  return { output };
+}
+
+export async function handleDispatch(ctx: CommandContext, options: DispatchOptions): Promise<CommandResult> {
+  const config = ctx.state.config as Config;
+
+  if (config.type === "orchestrator" && options.ids !== "all") {
+    return {
+      output: "Cannot dispatch explicit ticket IDs on an orchestrator project. Orchestrator tickets are coordination milestones.\nUse `storybloq dispatch --recommend` for federation dispatch, or dispatch directly in node projects.",
+      exitCode: ExitCode.USER_ERROR,
+    };
+  }
+
+  let plan: DispatchPlan;
+  const claudeVersion = detectClaudeVersion();
+
+  if (config.type === "orchestrator") {
+    const cachedStatuses = crossNodeRefStatuses(ctx);
+    const fedState = await loadFederationState(ctx.root, config);
+    if (!fedState) {
+      return {
+        output: "No federation state available. Run `storybloq status` first.",
+        exitCode: ExitCode.USER_ERROR,
+      };
+    }
+    const statuses = crossNodeRefStatuses(ctx) ?? cachedStatuses;
+    const nodeRecs = await loadNodeRecommendations(fedState, options.count, statuses);
+    plan = appendNodeRecommendationWarnings(
+      buildFederationDispatchPlan(nodeRecs.recommendationsByNode, claudeVersion, getMaxAgents(config)),
+      nodeRecs.warnings,
+    );
+  } else {
+    const cache = readFederationCache(join(ctx.root, ".story"));
+    const recOptions: RecommendOptions = {
+      ...(cache?.crossNodeRefStatuses ? { crossNodeRefStatuses: cache.crossNodeRefStatuses } : {}),
+    };
+    const { recommendations } = recommend(ctx.state, options.count, recOptions);
+    plan = buildDispatchPlan(recommendations, options.ids, ctx.root, claudeVersion, getMaxAgents(config), titleLookup(ctx));
+  }
 
   if (options.dryRun) {
     const output = ctx.format === "json" ? formatPlanJson(plan) : formatPlan(plan);

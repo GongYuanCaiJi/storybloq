@@ -299,6 +299,27 @@ export function descendantLeaves(
   return collectDescendantLeaves(ticketId, state, new Set());
 }
 
+// --- Cross-Node Blocking ---
+
+/**
+ * Check if a ticket is blocked by cross-node references.
+ * Conservative: missing cache or unknown ref = blocked.
+ * Only "complete" status unblocks.
+ */
+export function isCrossNodeBlocked(
+  ticket: Ticket,
+  crossNodeRefStatuses?: Record<string, string>,
+): boolean {
+  const refs = ticket.crossNodeBlockedBy;
+  if (!refs || refs.length === 0) return false;
+  if (!crossNodeRefStatuses) return true;
+  return refs.some((ref) => {
+    const status = crossNodeRefStatuses[ref];
+    if (!status) return true;
+    return status !== "complete";
+  });
+}
+
 // --- Private Helpers ---
 
 /**

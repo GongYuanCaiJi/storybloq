@@ -326,6 +326,9 @@ export function formatTicket(
   if (ticket.blockedBy.length > 0) {
     lines.push(`Blocked by: ${ticket.blockedBy.join(", ")}`);
   }
+  if (ticket.crossNodeBlockedBy && ticket.crossNodeBlockedBy.length > 0) {
+    lines.push(`Cross-node blocked by: ${ticket.crossNodeBlockedBy.join(", ")}`);
+  }
   if (ticket.parentTicket) {
     lines.push(`Parent: ${ticket.parentTicket}`);
   }

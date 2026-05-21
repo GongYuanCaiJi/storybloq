@@ -24,6 +24,13 @@ export const PathSafetySchema = z
     message: "Path must not contain .. segments",
   });
 
+export const NodeLinkSchema = z.object({
+  to: NodeNameSchema,
+  via: z.string().max(60).optional(),
+});
+
+export type NodeLink = z.infer<typeof NodeLinkSchema>;
+
 export const NodeSchema = z
   .object({
     path: PathSafetySchema,
@@ -32,6 +39,8 @@ export const NodeSchema = z
     summary: z.string().max(200).optional().default(""),
     health: NodeHealthSchema.optional().default("grey"),
     dependsOn: z.array(NodeNameSchema).optional().default([]),
+    kind: z.string().trim().min(1).max(32).optional(),
+    links: z.array(NodeLinkSchema).optional(),
   })
   .passthrough();
 
@@ -160,6 +169,16 @@ export function validateOrchestratorOverlay(
     }
 
     nodesForCycle[key] = { dependsOn: deps };
+
+    const links = Array.isArray(node.links) ? (node.links as Array<Record<string, unknown>>) : [];
+    for (const link of links) {
+      const to = typeof link.to === "string" ? link.to : "";
+      if (to && !nodeKeys.has(to)) {
+        warnings.push(
+          `Node "${key}": links.to references non-existent node "${to}"`,
+        );
+      }
+    }
 
     if (typeof node.path === "string") {
       const existing = paths.get(node.path);

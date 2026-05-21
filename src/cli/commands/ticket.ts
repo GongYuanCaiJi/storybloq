@@ -51,6 +51,7 @@ const TICKET_CORE_METADATA_KEYS = new Set([
   "createdDate",
   "completedDate",
   "blockedBy",
+  "crossNodeBlockedBy",
   "parentTicket",
   "createdBy",
   "assignedTo",
@@ -304,6 +305,7 @@ export async function handleTicketUpdate(
     order?: number;
     description?: string;
     blockedBy?: string[];
+    crossNodeBlockedBy?: string[] | null;
     parentTicket?: string | null;
   },
   format: string,
@@ -359,6 +361,7 @@ export async function handleTicketUpdate(
       ...(updates.phase !== undefined && { phase: updates.phase }),
       ...(updates.order !== undefined && { order: updates.order }),
       ...(updates.blockedBy !== undefined && { blockedBy: updates.blockedBy }),
+      ...(updates.crossNodeBlockedBy !== undefined && { crossNodeBlockedBy: updates.crossNodeBlockedBy ?? undefined }),
       ...(updates.parentTicket !== undefined && { parentTicket: updates.parentTicket }),
       ...statusChanges,
     };

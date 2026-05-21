@@ -8,6 +8,7 @@ import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { NODE_NAME_REGEX } from "../models/federation-config.js";
+import { CROSS_NODE_REF_REGEX } from "../models/ticket.js";
 import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, type McpToolResult } from "./node-resolution.js";
 import { initProject } from "../core/init.js";
 import { resolveNodePath } from "../federation/resolver.js";
@@ -562,6 +563,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       phase: z.string().nullable().optional().describe("New phase ID (null to clear)"),
       parentTicket: z.string().regex(TICKET_ID_REGEX).nullable().optional().describe("Parent ticket ID (null to clear)"),
       blockedBy: z.array(z.string().regex(TICKET_ID_REGEX)).optional().describe("IDs of blocking tickets"),
+      crossNodeBlockedBy: z.array(z.string().regex(CROSS_NODE_REF_REGEX)).nullable().optional().describe("Cross-node blocking refs (e.g. engine:T-061). Null to clear."),
       node: nodeParam,
     },
   }, (args) => {
@@ -579,6 +581,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
           phase: args.phase,
           parentTicket: args.parentTicket,
           blockedBy: args.blockedBy,
+          crossNodeBlockedBy: args.crossNodeBlockedBy,
         },
         format,
         root,

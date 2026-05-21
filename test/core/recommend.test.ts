@@ -871,3 +871,89 @@ describe("federation recommendations", () => {
     expect(fedRecs).toHaveLength(0);
   });
 });
+
+describe("crossNodeRefStatuses filtering", () => {
+  it("excludes cross-node-blocked in-progress tickets", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, status: "inprogress", crossNodeBlockedBy: ["core:T-010"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, status: "open", type: "chore" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10, { crossNodeRefStatuses: { "core:T-010": "open" } });
+    expect(result.recommendations.find((r) => r.id === "T-001")).toBeUndefined();
+  });
+
+  it("includes in-progress tickets when cross-node refs are complete", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, status: "inprogress", crossNodeBlockedBy: ["core:T-010"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, status: "open", type: "chore" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10, { crossNodeRefStatuses: { "core:T-010": "complete" } });
+    const rec = result.recommendations.find((r) => r.id === "T-001");
+    expect(rec).toBeDefined();
+    expect(rec?.category).toBe("inprogress_ticket");
+  });
+
+  it("excludes cross-node-blocked tickets from high_impact_unblock", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, status: "open", crossNodeBlockedBy: ["core:T-010"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, status: "open", blockedBy: ["T-001"] }),
+        makeTicket({ id: "T-003", phase: "p1", order: 30, status: "open", blockedBy: ["T-001"] }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10, { crossNodeRefStatuses: { "core:T-010": "open" } });
+    const unblockRecs = result.recommendations.filter((r) => r.category === "high_impact_unblock");
+    expect(unblockRecs.find((r) => r.id === "T-001")).toBeUndefined();
+  });
+
+  it("includes cross-node-unblocked tickets in high_impact_unblock", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, status: "open", crossNodeBlockedBy: ["core:T-010"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, status: "open", blockedBy: ["T-001"] }),
+        makeTicket({ id: "T-003", phase: "p1", order: 30, status: "open", blockedBy: ["T-001"] }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10, { crossNodeRefStatuses: { "core:T-010": "complete" } });
+    const unblockRecs = result.recommendations.filter((r) => r.category === "high_impact_unblock");
+    expect(unblockRecs.find((r) => r.id === "T-001")).toBeDefined();
+  });
+
+  it("excludes cross-node-blocked chores from quick_win", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, type: "chore", status: "open", crossNodeBlockedBy: ["api:T-005"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, type: "chore", status: "open" }),
+        makeTicket({ id: "T-003", phase: "p1", order: 30, type: "chore", status: "open" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10, { crossNodeRefStatuses: { "api:T-005": "inprogress" } });
+    expect(result.recommendations.find((r) => r.id === "T-001")).toBeUndefined();
+    const t002 = result.recommendations.find((r) => r.id === "T-002");
+    expect(t002).toBeDefined();
+  });
+
+  it("treats missing cache as blocked (conservative)", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", phase: "p1", order: 10, type: "chore", status: "open", crossNodeBlockedBy: ["core:T-010"] }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, type: "chore", status: "open" }),
+        makeTicket({ id: "T-003", phase: "p1", order: 30, type: "chore", status: "open" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = recommend(state, 10);
+    expect(result.recommendations.find((r) => r.id === "T-001")).toBeUndefined();
+    const t002 = result.recommendations.find((r) => r.id === "T-002");
+    expect(t002).toBeDefined();
+  });
+});

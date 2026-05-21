@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { FederationState } from "./state.js";
+import type { CrossNodeRefStatus } from "./cross-node-resolver.js";
 
 export interface CachedNodeSummary {
   ticketCount: number;
@@ -18,6 +19,7 @@ export interface CachedNodeSummary {
 export interface FederationCache {
   lastScanTimestamp: string;
   nodes: Record<string, CachedNodeSummary>;
+  crossNodeRefStatuses?: Record<string, string>;
 }
 
 const CACHE_FILENAME = "federation-cache.json";
@@ -37,7 +39,11 @@ export function readFederationCache(storyDir: string): FederationCache | null {
   }
 }
 
-export function writeFederationCache(storyDir: string, state: FederationState): void {
+export function writeFederationCache(
+  storyDir: string,
+  state: FederationState,
+  refStatuses?: ReadonlyMap<string, CrossNodeRefStatus>,
+): void {
   const cache: FederationCache = {
     lastScanTimestamp: state.lastScanTimestamp,
     nodes: {},
@@ -58,6 +64,14 @@ export function writeFederationCache(storyDir: string, state: FederationState): 
       summary.unreachableReason = entry.unreachableReason;
     }
     cache.nodes[entry.name] = summary;
+  }
+
+  if (refStatuses && refStatuses.size > 0) {
+    const statuses: Record<string, string> = {};
+    for (const [ref, s] of refStatuses) {
+      statuses[ref] = s.resolved ? s.status : "unresolved";
+    }
+    cache.crossNodeRefStatuses = statuses;
   }
 
   const cachePath = join(storyDir, CACHE_FILENAME);

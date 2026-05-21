@@ -4,6 +4,7 @@ import { resolveAllNodes } from "../../federation/resolver.js";
 import { scanAllSummaries } from "../../federation/scanner.js";
 import { buildFederationState } from "../../federation/state.js";
 import { writeFederationCache } from "../../federation/cache.js";
+import { CrossNodeBlockingResolver } from "../../federation/cross-node-resolver.js";
 import { join } from "node:path";
 import type { CommandContext, CommandResult } from "../types.js";
 
@@ -25,8 +26,10 @@ export async function handleStatus(ctx: CommandContext): Promise<CommandResult> 
     const scanResults = await scanAllSummaries(resolvedNodes);
     const fedState = buildFederationState(config, resolvedNodes, scanResults);
 
+    const resolver = await CrossNodeBlockingResolver.build(ctx.state.tickets, resolvedNodes);
+
     try {
-      writeFederationCache(join(ctx.root, ".story"), fedState);
+      writeFederationCache(join(ctx.root, ".story"), fedState, resolver.resolvedStatuses);
     } catch {
       // best-effort cache write
     }

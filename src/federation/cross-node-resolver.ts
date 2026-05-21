@@ -102,4 +102,8 @@ export class CrossNodeBlockingResolver {
   getCrossNodeStatus(ref: string): CrossNodeRefStatus | undefined {
     return this.statuses.get(ref);
   }
+
+  get resolvedStatuses(): ReadonlyMap<string, CrossNodeRefStatus> {
+    return this.statuses;
+  }
 }
