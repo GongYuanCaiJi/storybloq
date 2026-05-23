@@ -50,6 +50,7 @@ This guard has precedence over every "do not ask the user" rule elsewhere in thi
 - `/story design` -> evaluate frontend design (read `design/design.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story design <platform>` -> evaluate for specific platform: web, ios, macos, android (read `design/design.md` in the same directory as this skill file)
 - `/story review-lenses` -> run multi-lens review on current diff (read `review-lenses/review-lenses.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`). Note: the autonomous guide invokes lenses automatically when `reviewBackends` includes `"lenses"` -- this command is for manual/debug use.
+- `/story federation` -> set up multi-repo orchestrator (read `federation-setup.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story help` -> show all capabilities (read `reference.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 
 If the user's intent doesn't match any of these, use the full context load.
@@ -415,7 +416,7 @@ Do NOT search source code for this. The full config.json schema is shown below. 
   "version": 2,
   "schemaVersion": 1,
   "project": "string",
-  "type": "string (npm, cargo, pip, etc.)",
+  "type": "string (npm, cargo, pip, orchestrator, etc.)",
   "language": "string",
   "features": {
     "tickets": true, "issues": true, "handovers": true,
@@ -473,6 +474,21 @@ Do NOT search source code for this. The full config.json schema is shown below. 
     },
     "requireSecretsGate": "boolean (default: false, require detect-secrets for lens reviews)",
     "requireAccessibility": "boolean (default: false, make accessibility findings blocking)"
+  },
+  "nodes": {
+    "<name (lowercase, alphanumeric, hyphens, underscores)>": {
+      "path": "string (required, existing directory -- absolute or ~/relative)",
+      "stack": "string (optional, max 40 chars, e.g. npm, swift-spm)",
+      "role": "string (optional, max 120 chars, human-readable purpose)",
+      "summary": "string (optional, max 200 chars, status snapshot)",
+      "health": "green | yellow | red | grey (default: grey)",
+      "dependsOn": "string[] (node names, build-order deps, validated for cycles)",
+      "kind": "string (optional, max 32 chars, e.g. library, service, app)",
+      "links": [{"to": "node-name", "via": "string (optional, max 60 chars, integration description)"}]
+    }
+  },
+  "federation": {
+    "allowNodeWrites": "boolean (default: false, permits orchestrator MCP tools to write to node .story/ dirs)"
   }
 }
 ```
@@ -485,4 +501,5 @@ Additional skill documentation, loaded on demand:
 - **`autonomous-mode.md`** -- Autonomous mode, review, plan, and guided execution tiers
 - **`reference.md`** -- Full CLI command and MCP tool reference
 - **`design/design.md`** -- Frontend design evaluation and implementation guidance, with platform references in `design/references/`
+- **`federation-setup.md`** -- Federation setup flow for multi-repo orchestrator initialization
 - **`review-lenses/review-lenses.md`** -- Multi-lens review orchestrator (8 specialized parallel reviewers), with lens prompts in `review-lenses/references/`

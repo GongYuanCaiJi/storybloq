@@ -288,7 +288,7 @@ export async function writeRoadmap(
   });
 }
 
-export async function writeConfig(
+export async function writeConfigUnlocked(
   config: Config,
   root: string,
 ): Promise<void> {
@@ -297,8 +297,16 @@ export async function writeConfig(
   const targetPath = join(wrapDir, "config.json");
   await guardPath(targetPath, wrapDir);
   const json = serializeJSON(parsed);
+  await atomicWrite(targetPath, json);
+}
+
+export async function writeConfig(
+  config: Config,
+  root: string,
+): Promise<void> {
+  const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
-    await atomicWrite(targetPath, json);
+    await writeConfigUnlocked(config, root);
   });
 }
 

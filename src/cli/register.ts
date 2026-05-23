@@ -79,6 +79,12 @@ import {
 import { handleRecommend } from "./commands/recommend.js";
 import { handleDispatchRecommend, handleDispatch } from "./commands/dispatch.js";
 import {
+  handleNodeAdd,
+  handleNodeRemove,
+  handleNodeUpdate,
+  handleNodeList,
+} from "./commands/node.js";
+import {
   handlePhaseList,
   handlePhaseCurrent,
   handlePhaseTickets,
@@ -2584,6 +2590,298 @@ export function registerLessonCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// node
+// ---------------------------------------------------------------------------
+
+export function registerNodeCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "node",
+    "Federation node operations",
+    (y) =>
+      y
+        .command(
+          "add <name>",
+          "Add a node to orchestrator config",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("name", {
+                  type: "string",
+                  demandOption: true,
+                  describe: "Node name (lowercase alphanumeric, hyphens, underscores)",
+                })
+                .option("path", {
+                  type: "string",
+                  demandOption: true,
+                  describe: "Path to node directory (absolute or ~/relative)",
+                })
+                .option("stack", {
+                  type: "string",
+                  describe: "Tech stack (e.g. npm, swift-spm, cargo)",
+                })
+                .option("role", {
+                  type: "string",
+                  describe: "Human-readable role description",
+                })
+                .option("kind", {
+                  type: "string",
+                  describe: "Node kind (e.g. library, service, app)",
+                })
+                .option("summary", {
+                  type: "string",
+                  describe: "One-line status summary",
+                })
+                .option("depends-on", {
+                  type: "string",
+                  array: true,
+                  describe: "Node names this depends on",
+                })
+                .option("link", {
+                  type: "string",
+                  array: true,
+                  describe: "Runtime link (format: node or node:via_description)",
+                }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const root = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!root) {
+              writeOutput(formatError("not_found", "No .story/ project found.", format));
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const links = (argv.link as string[] | undefined)?.map((l) => {
+                const colonIdx = l.indexOf(":");
+                if (colonIdx === -1) return { to: l };
+                return { to: l.slice(0, colonIdx), via: l.slice(colonIdx + 1) };
+              });
+              const result = await handleNodeAdd(
+                {
+                  name: argv.name as string,
+                  path: argv.path as string,
+                  stack: argv.stack as string | undefined,
+                  role: argv.role as string | undefined,
+                  kind: argv.kind as string | undefined,
+                  summary: argv.summary as string | undefined,
+                  dependsOn: normalizeArrayOption(argv["depends-on"] as string[] | undefined)
+                    ?.flatMap((v) => v.split(","))
+                    .map((v) => v.trim())
+                    .filter(Boolean),
+                  links,
+                },
+                format,
+                root,
+              );
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
+              if (err instanceof CliValidationError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { ProjectLoaderError } = await import("../core/errors.js");
+              if (err instanceof ProjectLoaderError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
+          "remove <name>",
+          "Remove a node from orchestrator config",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("name", {
+                  type: "string",
+                  demandOption: true,
+                  describe: "Node name to remove",
+                })
+                .option("force", {
+                  type: "boolean",
+                  default: false,
+                  describe: "Remove even with dangling references",
+                })
+                .option("prune", {
+                  type: "boolean",
+                  default: false,
+                  describe: "Remove and clean dependsOn references in other nodes",
+                }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const root = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!root) {
+              writeOutput(formatError("not_found", "No .story/ project found.", format));
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const result = await handleNodeRemove(
+                argv.name as string,
+                {
+                  force: argv.force as boolean,
+                  prune: argv.prune as boolean,
+                },
+                format,
+                root,
+              );
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
+              if (err instanceof CliValidationError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { ProjectLoaderError } = await import("../core/errors.js");
+              if (err instanceof ProjectLoaderError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
+          "update <name>",
+          "Update an existing node's metadata",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("name", {
+                  type: "string",
+                  demandOption: true,
+                  describe: "Node name to update",
+                })
+                .option("path", {
+                  type: "string",
+                  describe: "New path to node directory",
+                })
+                .option("stack", {
+                  type: "string",
+                  describe: "New tech stack",
+                })
+                .option("role", {
+                  type: "string",
+                  describe: "New role description",
+                })
+                .option("kind", {
+                  type: "string",
+                  describe: "New node kind",
+                })
+                .option("summary", {
+                  type: "string",
+                  describe: "New status summary",
+                })
+                .option("depends-on", {
+                  type: "string",
+                  array: true,
+                  describe: "Replace dependsOn list",
+                })
+                .option("clear-depends-on", {
+                  type: "boolean",
+                  default: false,
+                  describe: "Clear all dependencies",
+                })
+                .option("link", {
+                  type: "string",
+                  array: true,
+                  describe: "Replace links (format: node or node:via_description)",
+                })
+                .option("clear-links", {
+                  type: "boolean",
+                  default: false,
+                  describe: "Clear all runtime links",
+                }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const root = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!root) {
+              writeOutput(formatError("not_found", "No .story/ project found.", format));
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const links = (argv.link as string[] | undefined)?.map((l) => {
+                const colonIdx = l.indexOf(":");
+                if (colonIdx === -1) return { to: l };
+                return { to: l.slice(0, colonIdx), via: l.slice(colonIdx + 1) };
+              });
+              const result = await handleNodeUpdate(
+                argv.name as string,
+                {
+                  path: argv.path as string | undefined,
+                  stack: argv.stack as string | undefined,
+                  role: argv.role as string | undefined,
+                  kind: argv.kind as string | undefined,
+                  summary: argv.summary as string | undefined,
+                  dependsOn: argv["depends-on"]
+                    ? normalizeArrayOption(argv["depends-on"] as string[])
+                        ?.flatMap((v) => v.split(","))
+                        .map((v) => v.trim())
+                        .filter(Boolean)
+                    : undefined,
+                  clearDependsOn: argv["clear-depends-on"] as boolean,
+                  links,
+                  clearLinks: argv["clear-links"] as boolean,
+                },
+                format,
+                root,
+              );
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
+              if (err instanceof CliValidationError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { ProjectLoaderError } = await import("../core/errors.js");
+              if (err instanceof ProjectLoaderError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
+          "list",
+          "List configured nodes",
+          (y2) => addFormatOption(y2),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, handleNodeList);
+          },
+        )
+        .demandCommand(1, "Specify a node subcommand: add, remove, update, list")
+        .strict(),
+    () => {},
+  );
+}
+
+// ---------------------------------------------------------------------------
 // selftest
 // ---------------------------------------------------------------------------
 
@@ -2793,7 +3091,51 @@ export function registerConfigCommand(yargs: Argv): Argv {
           }
         },
       )
-      .demandCommand(1, "Specify a config subcommand. Available: set-overrides"),
+      .command(
+        "set-federation",
+        "Set federation settings (orchestrator only)",
+        (y2) =>
+          y2
+            .option("allow-node-writes", {
+              type: "boolean",
+              describe: "Allow orchestrator MCP tools to write to node .story/ directories",
+            })
+            .option("format", {
+              choices: ["json", "md"] as const,
+              default: "md" as const,
+              describe: "Output format",
+            }),
+        async (argv) => {
+          const { handleConfigSetFederation } = await import("./commands/config-update.js");
+          const { writeOutput } = await import("./run.js");
+          const format = argv.format as "json" | "md";
+          const root = (
+            await import("../core/project-root-discovery.js")
+          ).discoverProjectRoot();
+          if (!root) {
+            writeOutput(formatError("not_found", "No .story/ project found.", format));
+            process.exitCode = ExitCode.USER_ERROR;
+            return;
+          }
+          try {
+            const result = await handleConfigSetFederation(root, format, {
+              allowNodeWrites: argv["allow-node-writes"] as boolean | undefined,
+            });
+            writeOutput(result.output);
+            if (result.errorCode) process.exitCode = 1;
+          } catch (err: unknown) {
+            const { ProjectLoaderError } = await import("../core/errors.js");
+            if (err instanceof ProjectLoaderError) {
+              writeOutput(formatError(err.code, err.message, format));
+            } else {
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+            }
+            process.exitCode = ExitCode.USER_ERROR;
+          }
+        },
+      )
+      .demandCommand(1, "Specify a config subcommand. Available: set-overrides, set-federation"),
   );
 }
 

@@ -11,6 +11,7 @@ import { NODE_NAME_REGEX } from "../models/federation-config.js";
 import { CROSS_NODE_REF_REGEX } from "../models/ticket.js";
 import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, type McpToolResult } from "./node-resolution.js";
 import { initProject } from "../core/init.js";
+import { handleNodeList } from "../cli/commands/node.js";
 import { resolveNodePath } from "../federation/resolver.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/session-types.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
@@ -939,6 +940,90 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
     } catch (err) {
       return { content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }
+  });
+
+  // --- Node add ---
+
+  server.registerTool("storybloq_node_add", {
+    description: "Add a federation node to an orchestrator project's config. The node directory must exist. Absolute paths outside the orchestrator workspace are allowed (federation spans repos).",
+    inputSchema: {
+      name: z.string().regex(NODE_NAME_REGEX).describe("Node name (lowercase alphanumeric, hyphens, underscores)"),
+      path: z.string().min(1).describe("Path to node directory (absolute or ~/relative). Must exist."),
+      stack: z.string().max(40).optional().describe("Tech stack (e.g. npm, swift-spm, cargo)"),
+      role: z.string().max(120).optional().describe("Human-readable role description"),
+      kind: z.string().max(32).optional().describe("Node kind (e.g. library, service, app)"),
+      summary: z.string().max(200).optional().describe("One-line status summary"),
+      dependsOn: z.array(z.string().regex(NODE_NAME_REGEX)).optional().describe("Node names this depends on (validated for cycles)"),
+      links: z.array(z.object({
+        to: z.string().regex(NODE_NAME_REGEX),
+        via: z.string().max(60).optional(),
+      })).optional().describe("Runtime links to other nodes"),
+    },
+  }, async (args) => {
+    const { handleNodeAdd } = await import("../cli/commands/node.js");
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
+      handleNodeAdd(
+        {
+          name: args.name,
+          path: args.path,
+          stack: args.stack,
+          role: args.role,
+          kind: args.kind,
+          summary: args.summary,
+          dependsOn: args.dependsOn,
+          links: args.links,
+        },
+        format,
+        root,
+      ),
+    );
+  });
+
+  // --- Node list ---
+
+  server.registerTool("storybloq_node_list", {
+    description: "List configured federation nodes in an orchestrator project",
+  }, () => runMcpReadTool(pinnedRoot, handleNodeList));
+
+  // --- Node update ---
+
+  server.registerTool("storybloq_node_update", {
+    description: "Update an existing federation node's metadata. Shallow-merges provided fields onto the existing node entry, preserving health and passthrough fields.",
+    inputSchema: {
+      name: z.string().regex(NODE_NAME_REGEX).describe("Node name to update"),
+      path: z.string().min(1).optional().describe("New path to node directory"),
+      stack: z.string().max(40).optional().describe("New tech stack"),
+      role: z.string().max(120).optional().describe("New role description"),
+      kind: z.string().max(32).optional().describe("New node kind"),
+      summary: z.string().max(200).optional().describe("New status summary"),
+      dependsOn: z.array(z.string().regex(NODE_NAME_REGEX)).optional().describe("Replace dependsOn list (validated for cycles)"),
+      clearDependsOn: z.boolean().optional().describe("Clear all dependencies"),
+      links: z.array(z.object({
+        to: z.string().regex(NODE_NAME_REGEX),
+        via: z.string().max(60).optional(),
+      })).optional().describe("Replace runtime links"),
+      clearLinks: z.boolean().optional().describe("Clear all runtime links"),
+    },
+  }, async (args) => {
+    const { handleNodeUpdate } = await import("../cli/commands/node.js");
+    return runMcpWriteTool(pinnedRoot, (root, format) =>
+      handleNodeUpdate(
+        args.name,
+        {
+          path: args.path,
+          stack: args.stack,
+          role: args.role,
+          kind: args.kind,
+          summary: args.summary,
+          dependsOn: args.dependsOn,
+          clearDependsOn: args.clearDependsOn,
+          links: args.links,
+          clearLinks: args.clearLinks,
+        },
+        format,
+        root,
+      ),
+    );
   });
 
   // --- Selftest ---

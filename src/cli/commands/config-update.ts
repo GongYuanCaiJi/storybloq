@@ -110,3 +110,56 @@ export async function handleConfigSetOverrides(
   const lines = Object.entries(resultOverrides).map(([k, v]) => `  ${k}: ${JSON.stringify(v)}`);
   return { output: `Recipe overrides updated:\n${lines.join("\n")}` };
 }
+
+export async function handleConfigSetFederation(
+  root: string,
+  format: OutputFormat,
+  options: { allowNodeWrites?: boolean },
+): Promise<CommandResult> {
+  if (options.allowNodeWrites === undefined) {
+    return {
+      output: format === "json"
+        ? JSON.stringify({ version: 1, error: "Provide --allow-node-writes or --no-allow-node-writes" })
+        : "Error: Provide --allow-node-writes or --no-allow-node-writes",
+      errorCode: "invalid_input",
+    };
+  }
+
+  let resultFederation: Record<string, unknown> | null = null;
+
+  await withProjectLock(root, { strict: false }, async () => {
+    const configPath = join(root, ".story", "config.json");
+    const readResult = tryReadFile(configPath);
+    if (!readResult.ok) throw new ProjectLoaderError("io_error", `Cannot read config: ${readResult.error.message}`, readResult.error);
+    const raw = JSON.parse(readResult.content) as Record<string, unknown>;
+
+    if (raw.type !== "orchestrator") {
+      throw new ProjectLoaderError(
+        "invalid_input",
+        "set-federation is only available on orchestrator projects.",
+      );
+    }
+
+    const existing = (raw.federation ?? {}) as Record<string, unknown>;
+    raw.federation = { ...existing, allowNodeWrites: options.allowNodeWrites };
+
+    const validated = ConfigSchema.safeParse(raw);
+    if (!validated.success) {
+      const message = validated.error.issues.map((i) => i.message).join("; ");
+      throw new ProjectLoaderError("invalid_input", `Invalid config after merge: ${message}`);
+    }
+
+    await guardPath(configPath, root);
+    await atomicWrite(configPath, JSON.stringify(raw, null, 2) + "\n");
+
+    resultFederation = raw.federation as Record<string, unknown>;
+  });
+
+  if (format === "json") {
+    return { output: JSON.stringify({ version: 1, data: { federation: resultFederation } }, null, 2) };
+  }
+
+  return {
+    output: `Federation settings updated: allowNodeWrites = ${options.allowNodeWrites}`,
+  };
+}

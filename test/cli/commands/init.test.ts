@@ -96,13 +96,14 @@ describe("init command logic", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it("creates empty roadmap phases when phases: [] is passed", async () => {
+  it("creates default phase when phases: [] is passed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "init-test-"));
     tmpDirs.push(dir);
     await initProject(dir, { name: "empty-phases", phases: [] });
     const raw = await readFile(join(dir, ".story", "roadmap.json"), "utf-8");
     const roadmap = JSON.parse(raw);
-    expect(roadmap.phases).toEqual([]);
+    expect(roadmap.phases).toHaveLength(1);
+    expect(roadmap.phases[0].id).toBe("p0");
     expect(roadmap.title).toBe("empty-phases");
   });
 

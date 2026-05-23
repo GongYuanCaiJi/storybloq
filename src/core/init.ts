@@ -73,6 +73,8 @@ export async function initProject(
   // Today's date
   const today = new Date().toISOString().slice(0, 10);
 
+  const isOrchestrator = (options.type ?? "generic") === "orchestrator";
+
   const config: Config = {
     version: 2,
     schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -86,19 +88,31 @@ export async function initProject(
       roadmap: true,
       reviews: true,
     },
+    ...(isOrchestrator && {
+      nodes: {},
+      federation: { allowNodeWrites: false },
+    }),
   };
 
-  const roadmap: Roadmap = {
-    title: options.name,
-    date: today,
-    phases: options.phases ?? [
-      {
+  const defaultPhase: Phase = isOrchestrator
+    ? {
+        id: "milestones",
+        label: "MILESTONES",
+        name: "Product Milestones",
+        description:
+          "Cross-node coordination milestones. Each milestone uses crossNodeBlockedBy to track dependencies across the federation.",
+      }
+    : {
         id: "p0",
         label: "PHASE 0",
         name: "Setup",
         description: "Initial project setup.",
-      },
-    ],
+      };
+
+  const roadmap: Roadmap = {
+    title: options.name,
+    date: today,
+    phases: options.phases && options.phases.length > 0 ? options.phases : [defaultPhase],
     blockers: [],
   };
 

@@ -45,7 +45,8 @@ describe("init bootstrap — MCP degraded mode flow", () => {
 
     const { state } = await loadProject(dir);
     expect(state.config.project).toBe("loadable");
-    expect(state.roadmap.phases).toEqual([]);
+    expect(state.roadmap.phases).toHaveLength(1);
+    expect(state.roadmap.phases[0]!.id).toBe("p0");
     expect(state.tickets).toEqual([]);
     expect(state.issues).toEqual([]);
   });
