@@ -3,7 +3,7 @@
  * Tests StageContext, registry, recipe loader, and pipeline helpers.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -186,6 +186,28 @@ describe("StageContext", () => {
     const onDisk = JSON.parse(readFileSync(join(sessionDir, "state.json"), "utf-8"));
     expect(onDisk.state).toBe("PLAN");
     expect(onDisk.revision).toBe(1);
+  });
+
+  it("writeState refreshes status.json when state field changes", () => {
+    const state = makeState({ status: "active", state: "PICK_TICKET", revision: 0 });
+    const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
+    const statusPath = join(testRoot, ".story", "status.json");
+
+    ctx.writeState({ state: "PLAN", previousState: "PICK_TICKET" });
+
+    const parsed = JSON.parse(readFileSync(statusPath, "utf-8"));
+    expect(parsed.sessionActive).toBe(true);
+    expect(parsed.state).toBe("PLAN");
+  });
+
+  it("writeState does NOT refresh status.json when state field is unchanged", () => {
+    const state = makeState({ status: "active", state: "IMPLEMENT", revision: 0 });
+    const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
+    const statusPath = join(testRoot, ".story", "status.json");
+
+    ctx.writeState({ stuckRetryCount: 1 } as Partial<FullSessionState>);
+
+    expect(existsSync(statusPath)).toBe(false);
   });
 
   it("appendEvent writes to events.log", () => {

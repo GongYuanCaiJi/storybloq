@@ -269,16 +269,21 @@ describe("StatusWriter (T-264)", () => {
 
   // ── writeState opt-in refresh ──────────────────────────────────
 
-  describe("writeState opt-in refresh contract", () => {
-    it("default writeState (no opts) does NOT refresh status.json", () => {
+  describe("writeState refresh contract", () => {
+    it("refreshStatusForSession updates status.json with current state", () => {
       const statusPath = join(root, ".story", "status.json");
-      writeFileSync(statusPath, JSON.stringify({ sessionActive: false, schemaVersion: 1, source: "hook" }), "utf-8");
+      const state = makeSessionState({ status: "active", state: "PLAN" });
+      refreshStatusForSession(root, sessionDir, state as never, "guide");
 
-      const before = readFileSync(statusPath, "utf-8");
-      // writeState without { refreshStatus: true } should not call refreshStatusForSession
-      // Verified by confirming status.json is unchanged after direct building-block calls
-      const after = readFileSync(statusPath, "utf-8");
-      expect(after).toBe(before);
+      expect(existsSync(statusPath)).toBe(true);
+      const parsed = JSON.parse(readFileSync(statusPath, "utf-8"));
+      expect(parsed.state).toBe("PLAN");
+
+      const state2 = makeSessionState({ status: "active", state: "IMPLEMENT" });
+      refreshStatusForSession(root, sessionDir, state2 as never, "guide");
+
+      const parsed2 = JSON.parse(readFileSync(statusPath, "utf-8"));
+      expect(parsed2.state).toBe("IMPLEMENT");
     });
 
     it("explicit refreshStatus: true triggers status.json update", () => {

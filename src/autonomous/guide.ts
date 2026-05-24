@@ -1525,7 +1525,9 @@ async function runPipelineStage(
 
   const ctx = new StageContext(root, dir, state, recipe);
   const advance = await stage.report(ctx, report);
-  return processAdvance(ctx, stage, advance);
+  const result = await processAdvance(ctx, stage, advance);
+  try { refreshStatusForSession(root, dir, ctx.state, "guide"); } catch { /* best-effort */ }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -103,10 +103,11 @@ export class StageContext {
    * Updates the internal snapshot so subsequent reads via `this.state` are consistent.
    */
   writeState(updates: Partial<FullSessionState>, opts?: { refreshStatus?: boolean }): FullSessionState {
+    const prevState = this._state.state;
     const merged = { ...this._state, ...updates } as FullSessionState;
     const written = writeSessionSync(this.dir, merged);
     this._state = written;
-    if (opts?.refreshStatus) {
+    if (opts?.refreshStatus || written.state !== prevState) {
       try { refreshStatusForSession(this.root, this.dir, written, "guide"); } catch { /* best-effort */ }
     }
     return written;
