@@ -153,26 +153,56 @@ Narrate:
 -> storybloq . "client" already has .story/, skipping
 ```
 
-## Step 5: Create Orchestrator Milestones
+## Step 5: Design Orchestrator Phases and Milestones
 
-**Important:** `storybloq init --type orchestrator` already created a "milestones" phase. Use it for all orchestrator tickets. Do NOT create additional phases in the orchestrator -- orchestrator phases are for cross-node coordination milestones only. Per-node work belongs in each node's own phases.
+**Important:** `storybloq init --type orchestrator` created a default "milestones" phase. For simple projects (2-3 nodes), use this single phase. For larger projects (4+ nodes or complex dependency topology), replace it with multiple phases that capture the orchestrator's own lifecycle -- the coordination journey from design through completion.
 
-Create milestone tickets in the existing "milestones" phase using `crossNodeBlockedBy`:
+The orchestrator does NOT duplicate per-node work. Its phases represent cross-node coordination stages, not implementation phases. Each milestone ticket gates on specific node tickets via `crossNodeBlockedBy`.
 
+### Simple projects (2-3 nodes): use the existing milestones phase
+
+Create milestone tickets in the "milestones" phase:
 ```
-storybloq ticket create --title "Foundation ready" --type task --phase milestones
-storybloq ticket update T-001 --cross-node-blocked-by engine:T-001,client:T-001
-```
-
-Or via MCP:
-```
-storybloq_ticket_create: title "Foundation ready", type "task", phase "milestones"
-storybloq_ticket_update: id "T-001", crossNodeBlockedBy ["engine:T-001", "client:T-001"]
+storybloq ticket create --title "Core connectivity verified" --type task --phase milestones
+storybloq ticket update T-001 --cross-node-blocked-by server:T-010,client:T-008
 ```
 
-**Placeholder refs are OK.** The cross-node refs (like `engine:T-001`) reference tickets in node projects. These tickets don't need to exist yet -- they will resolve once node tickets are created during per-node setup (Step 6). This is the expected flow: create milestones first with placeholder refs, then populate nodes.
+### Larger projects (4+ nodes): replace with lifecycle phases
 
-Only create milestones that make sense for the user's project. Ask what the major cross-repo coordination points are, or infer from the dependency topology. Don't create generic ones.
+Delete the default milestones phase and create phases that reflect the platform's coordination lifecycle. Common pattern:
+
+| Phase | Purpose | Example tickets |
+|-------|---------|----------------|
+| design | Architecture specs, protocol definitions, review resolution | Wire protocol spec, architecture decision records |
+| infrastructure | Shared CI, test fixtures, Docker images | Protocol fixture files, contract test CI templates |
+| foundation | Core connectivity proven across key nodes | "Server core operational" (cross: server:T-020), "Client operational" (cross: client:T-012) |
+| platform | Major features integrated across nodes | "Studio MVP operational" (cross: studio:T-009), "Mobile SDK operational" (cross: mobile:T-008) |
+| completion | Full feature set, hardening, release readiness | "Platform hardened" (cross: all nodes), "v1.0 release ready" |
+| documentation | Shared docs (API reference, deploy guide) | API reference, deployment guide, contributor guide |
+
+Create the phases:
+```
+storybloq phase delete milestones
+storybloq phase create --id design --name "Design" --label "DESIGN" --description "Architecture specs, protocol definitions" --at-start
+storybloq phase create --id infrastructure --name "Infrastructure" --label "INFRA" --description "Shared CI, test fixtures" --after design
+storybloq phase create --id foundation --name "Foundation" --label "FOUNDATION" --description "Core connectivity proven" --after infrastructure
+...
+```
+
+Then create milestone tickets in each phase with `crossNodeBlockedBy`:
+```
+storybloq ticket create --title "Wire protocol v1 spec" --type task --phase design
+storybloq ticket create --title "Server core operational" --type feature --phase foundation
+storybloq ticket update T-002 --cross-node-blocked-by server:T-020
+```
+
+### Guidelines for all projects
+
+- **Use `crossNodeBlockedBy` on every coordination milestone.** This is what makes orchestrator tickets meaningful -- they gate on real node work. Example: `--cross-node-blocked-by engine:T-020,client:T-012`
+- **Placeholder refs are OK.** Node tickets don't need to exist yet -- refs resolve once created during per-node setup (Step 6).
+- **Ask the user** what the major cross-repo coordination points are, or infer from the dependency topology and build order.
+- **Don't create generic phase-label tickets** like "Phase 1 complete." Each milestone should describe a concrete coordination outcome: "Wire protocol contract verified," "Studio playground streams via client SDK."
+- **Set `blockedBy` between orchestrator tickets** to capture the dependency chain between milestones (e.g., foundation milestones block platform milestones).
 
 ## Step 6: Per-Node Setup
 
@@ -187,7 +217,8 @@ Use `AskUserQuestion`:
   - "Skip" -- the user will set up nodes later by cd-ing into each and running `/story`
 
 If "Yes": for each node, either:
-- Use MCP tools with the `node` parameter from the orchestrator: `storybloq_ticket_create` with `node: "engine"`, `storybloq_phase_create` with `node: "engine"`, etc. (requires `allowNodeWrites: true`). The `node` parameter is available on MCP tools only, not CLI commands.
+- Use `--node` from the orchestrator directory (requires `allowNodeWrites: true`): `storybloq phase create --node engine --id foundation --name "Foundation" --label "PHASE 1" --description "..." --at-start`, `storybloq ticket create --node engine --title "..." --type task --phase foundation`
+- Or use MCP tools with the `node` parameter: `storybloq_ticket_create` with `node: "engine"`, `storybloq_phase_create` with `node: "engine"`, etc.
 - Or instruct the user to open a new terminal in each node directory and run `/story`
 
 After setup is complete, run `storybloq status` from the orchestrator to show the full federation view.
