@@ -749,6 +749,11 @@ export function registerTicketCommand(yargs: Argv): Argv {
                   array: true,
                   describe: "IDs of blocking tickets",
                 })
+                .option("cross-node-blocked-by", {
+                  type: "string",
+                  array: true,
+                  describe: "Cross-node blocking refs (e.g. engine:T-001). Null string clears.",
+                })
                 .option("parent-ticket", {
                   type: "string",
                   describe: "Parent ticket ID",
@@ -777,6 +782,15 @@ export function registerTicketCommand(yargs: Argv): Argv {
               if (argv.stdin) {
                 description = await readStdinContent();
               }
+              const rawCrossNode = argv["cross-node-blocked-by"] as string[] | undefined;
+              let crossNodeBlockedBy: string[] | null | undefined;
+              if (rawCrossNode) {
+                const flat = normalizeArrayOption(rawCrossNode)
+                  ?.flatMap((v) => v.split(","))
+                  .map((v) => v.trim())
+                  .filter(Boolean);
+                crossNodeBlockedBy = flat && flat.length > 0 ? flat : null;
+              }
               const result = await handleTicketUpdate(
                 id,
                 {
@@ -789,6 +803,7 @@ export function registerTicketCommand(yargs: Argv): Argv {
                   blockedBy: argv["blocked-by"]
                     ? normalizeArrayOption(argv["blocked-by"] as string[])
                     : undefined,
+                  crossNodeBlockedBy,
                   parentTicket: argv["parent-ticket"] === "" ? null : argv["parent-ticket"] as string | undefined,
                 },
                 format,
