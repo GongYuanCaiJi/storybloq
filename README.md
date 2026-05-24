@@ -40,7 +40,7 @@ The real cost isn't wasted setup time. It's repeated mistakes, relitigated desig
 Every project gets a `.story/` directory of JSON and markdown files. Tickets, issues, roadmap phases, session handovers, and lessons learned all live there, tracked by git, readable by any AI.
 
 - **CLI:** `storybloq` - inspect and mutate `.story/` from the terminal.
-- **MCP server:** 49 tools Claude Code and Codex can call directly, no subprocess spawning.
+- **MCP server:** 53 tools Claude Code and Codex can call directly, no subprocess spawning.
 - **Skill:** `/story` in Claude Code or `$story` in Codex loads project state at the start of every session.
 - **Mac app:** native sidebar that watches `.story/` and updates live while your AI client works (separate product, free on the App Store).
 
@@ -82,6 +82,8 @@ cd your-project
 storybloq init --name "your-project"
 ```
 
+For multi-repo projects, see [Federation](#federation) below.
+
 That scaffolds:
 
 ```
@@ -117,6 +119,36 @@ Outside Claude Code, the same state is one `storybloq` invocation away.
   <img src="https://raw.githubusercontent.com/Storybloq/storybloq/main/assets/autonomous.png" alt="Autonomous mode running a ticket through plan, implement, test, review" />
 </p>
 
+## Federation
+
+Federation coordinates AI agent work across multiple repos. One project becomes the orchestrator. It declares which repos (nodes) are part of the system, how they depend on each other, and how they communicate at runtime. Each node keeps its own `.story/` with its own tickets, issues, and handovers. The orchestrator reads across all of them.
+
+```bash
+# Create an orchestrator
+storybloq init --type orchestrator --name "my-platform"
+
+# Register nodes
+storybloq node add api --path ../api --stack typescript --role "REST backend"
+storybloq node add web --path ../web --stack nextjs --depends-on api
+storybloq node add sdk --path ../sdk --stack typescript
+```
+
+Three relationship types connect nodes:
+
+- **`dependsOn`** on node config: build-order edges. The web app depends on the API.
+- **`links`** on node config: runtime integration. The web app calls the API over HTTP.
+- **`crossNodeBlockedBy`** on tickets: a ticket in one repo is blocked until a ticket in another repo is complete. Example: `"crossNodeBlockedBy": ["api:T-012"]`.
+
+From the orchestrator directory:
+
+```bash
+storybloq status              # aggregated view across all nodes
+storybloq recommend           # federation-aware suggestions (bottlenecks, stale nodes, blockers)
+storybloq ticket list --node api   # list tickets in the api node without cd-ing
+```
+
+The recommendation engine generates federation-specific suggestions: nodes blocking downstream work, bottleneck nodes depended on by many others, nodes with no handover in two weeks. Tickets with `crossNodeBlockedBy` refs never surface in recommendations until the blocking ticket is complete.
+
 ## CLI reference
 
 All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` for scripting, read the markdown variant directly.
@@ -125,7 +157,7 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 
 | Command | Description |
 |---------|-------------|
-| `storybloq init [--name] [--force]` | Scaffold `.story/` in the current directory |
+| `storybloq init [--name] [--type orchestrator] [--force]` | Scaffold `.story/` (add `--type orchestrator` for multi-repo) |
 | `storybloq status` | Project summary with phase statuses, counts, and risks |
 | `storybloq validate` | Reference integrity + schema checks |
 | `storybloq setup --client claude\|codex\|all [--skip-hooks]` | Install Storybloq skills, register MCP, and configure client hooks |
@@ -152,8 +184,8 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq ticket get <id>` | Full ticket detail |
 | `storybloq ticket next` | Highest-priority unblocked ticket |
 | `storybloq ticket blocked` | All currently blocked tickets |
-| `storybloq ticket create --title --type --phase [--description] [--blocked-by] [--parent-ticket]` | Create |
-| `storybloq ticket update <id> [--status] [--title] [--phase] [--order] ...` | Update |
+| `storybloq ticket create --title --type --phase [--description] [--blocked-by] [--parent-ticket] [--node <name>]` | Create (use `--node` from orchestrator) |
+| `storybloq ticket update <id> [--status] [--title] [--phase] [--cross-node-blocked-by] [--node <name>] ...` | Update |
 | `storybloq ticket meta get\|set\|unset <id> [path] [value]` | Manage custom passthrough metadata |
 | `storybloq ticket delete <id> [--force]` | Delete |
 
@@ -186,6 +218,17 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq snapshot` · `storybloq recap` | Capture state and diff against the last snapshot |
 | `storybloq export [--phase <id>] [--all] [--format json\|md]` | Self-contained project document |
 
+### Federation (orchestrator projects)
+
+| Command | Description |
+|---------|-------------|
+| `storybloq init --type orchestrator` | Scaffold an orchestrator `.story/` with a nodes map |
+| `storybloq node add <name> --path <dir> [--stack] [--role] [--depends-on] [--link]` | Register a node repo |
+| `storybloq node remove <name> [--force \| --prune]` | Unregister a node (checks for dependents first) |
+| `storybloq node update <name> [--stack] [--role] [--depends-on] [--health]` | Update node metadata |
+| `storybloq node list` | Table of all configured nodes |
+| `storybloq config set-federation --allow-node-writes` | Allow orchestrator to write into node repos |
+
 ## MCP server reference
 
 Register with Claude Code or Codex (done automatically by setup):
@@ -197,7 +240,7 @@ codex mcp add storybloq --env STORYBLOQ_CLIENT=codex -- storybloq --mcp
 
 The server imports the same TypeScript modules as the CLI directly, so there's no subprocess overhead. It auto-discovers the project root by walking up from the working directory to the nearest `.story/` parent.
 
-**49 tools** grouped by responsibility:
+**53 tools** grouped by responsibility:
 
 ### Read (no side effects)
 
@@ -214,6 +257,12 @@ The server imports the same TypeScript modules as the CLI directly, so there's n
 `storybloq_review_lenses_prepare` · `storybloq_review_lenses_judge` · `storybloq_review_lenses_synthesize` orchestrate the multi-lens review loop (requires [@storybloq/lenses](https://github.com/Storybloq/lenses)).
 
 `storybloq_session_report` · `storybloq_register_subprocess` · `storybloq_unregister_subprocess` surface session health to the Mac app.
+
+### Federation (orchestrator projects)
+
+`storybloq_node_init` bootstraps `.story/` in a node repo from the orchestrator context.
+
+`storybloq_node_add` · `storybloq_node_list` · `storybloq_node_update` manage the orchestrator's node registry.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Storybloq/storybloq/main/assets/handover.png" alt="Handover timeline with AI-summarized date groups" />
@@ -282,7 +331,8 @@ Full type definitions ship with the package (`exports.types`).
   "createdDate": "2026-04-12",
   "completedDate": null,
   "blockedBy": [],
-  "parentTicket": null
+  "parentTicket": null,
+  "crossNodeBlockedBy": []
 }
 ```
 
