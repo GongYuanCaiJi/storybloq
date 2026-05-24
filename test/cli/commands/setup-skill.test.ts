@@ -1365,10 +1365,14 @@ describe("Codex setup helpers", () => {
 
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).toContain("storybloq_status");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).toContain("storybloq_session_report");
+    expect(CODEX_READ_ONLY_APPROVAL_TOOLS).toContain("storybloq_node_list");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_snapshot");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_selftest");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_autonomous_guide");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_ticket_create");
+    expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_node_add");
+    expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_node_update");
+    expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_node_init");
     expect(CODEX_READ_ONLY_APPROVAL_TOOLS).not.toContain("storybloq_register_subprocess");
   });
 

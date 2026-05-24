@@ -697,6 +697,7 @@ export const CODEX_READ_ONLY_APPROVAL_TOOLS = [
   "storybloq_recommend",
   "storybloq_export",
   "storybloq_session_report",
+  "storybloq_node_list",
 ] as const;
 
 function commandErrorText(err: unknown): string {
