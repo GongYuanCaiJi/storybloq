@@ -154,7 +154,7 @@ export async function initProject(
  * Creates the file if it doesn't exist. Idempotent — skips entries already present.
  */
 /** Ephemeral .story/ entries that should always be gitignored. Single source of truth. */
-export const STORY_GITIGNORE_ENTRIES = ["snapshots/", "status.json", "sessions/"];
+export const STORY_GITIGNORE_ENTRIES = ["snapshots/", "status.json", "sessions/", "federation-cache.json"];
 
 /**
  * Ensures a .gitignore file contains the specified entries.

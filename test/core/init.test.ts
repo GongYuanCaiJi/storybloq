@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { initProject } from "../../src/core/init.js";
+import { initProject, STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
 import { loadProject } from "../../src/core/project-loader.js";
 import { ProjectLoaderError, CURRENT_SCHEMA_VERSION } from "../../src/core/errors.js";
 
@@ -128,5 +128,9 @@ describe("initProject", () => {
     const { state } = await loadProject(testRoot);
     expect(state.config.type).toBe("generic");
     expect(state.config.language).toBe("unknown");
+  });
+
+  it("STORY_GITIGNORE_ENTRIES includes federation-cache.json", () => {
+    expect(STORY_GITIGNORE_ENTRIES).toContain("federation-cache.json");
   });
 });
