@@ -1,0 +1,94 @@
+import { describe, it, expect } from "vitest";
+import { computeGcPlan } from "../../src/core/gc.js";
+import { makeTicket, makeIssue, makeNote, makeLesson, makeState, makePhase, makeRoadmap } from "./test-factories.js";
+
+const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+describe("computeGcPlan", () => {
+  it("finds tombstoned items past retention", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+      ],
+      issues: [
+        makeIssue({ id: "ISS-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "bob" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.eligible.length).toBe(2);
+    expect(plan.eligible.map((c) => c.id).sort()).toEqual(["ISS-001", "T-001"]);
+  });
+
+  it("skips items within retention period", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: tenDaysAgo, deletedBy: "alice" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.candidates).toHaveLength(0);
+    expect(plan.eligible).toHaveLength(0);
+  });
+
+  it("blocks candidates with active references", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+        makeTicket({ id: "T-002", blockedBy: ["T-001"] }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked).toHaveLength(1);
+    expect(plan.blocked[0]!.id).toBe("T-001");
+    expect(plan.blocked[0]!.activeReferences.length).toBeGreaterThan(0);
+    expect(plan.eligible).toHaveLength(0);
+  });
+
+  it("handles empty state", () => {
+    const state = makeState({});
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.candidates).toHaveLength(0);
+    expect(plan.eligible).toHaveLength(0);
+    expect(plan.blocked).toHaveLength(0);
+    expect(plan.warnings).toHaveLength(0);
+  });
+
+  it("respects custom retention days", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: tenDaysAgo, deletedBy: "alice" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 5 });
+    expect(plan.eligible).toHaveLength(1);
+    expect(plan.eligible[0]!.id).toBe("T-001");
+  });
+
+  it("warns on missing/invalid/future deletedAt", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedBy: "alice" }),
+        makeTicket({ id: "T-002", lifecycle: "deleted", deletedAt: "not-a-date", deletedBy: "bob" }),
+        makeTicket({ id: "T-003", lifecycle: "deleted", deletedAt: tomorrow, deletedBy: "carol" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.candidates).toHaveLength(0);
+    expect(plan.eligible).toHaveLength(0);
+    expect(plan.warnings.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("ignores references from other deleted items", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+        makeTicket({ id: "T-002", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "bob", blockedBy: ["T-001"] }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.eligible.map((c) => c.id).sort()).toEqual(["T-001", "T-002"]);
+    expect(plan.blocked).toHaveLength(0);
+  });
+});

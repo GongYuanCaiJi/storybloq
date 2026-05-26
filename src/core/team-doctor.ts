@@ -292,6 +292,31 @@ function checkStaleClaims(state: ProjectState): DoctorFinding[] {
   return findings;
 }
 
+function checkStaleTombstones(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
+  const now = Date.now();
+  const retentionMs = 30 * 24 * 60 * 60 * 1000;
+  let count = 0;
+  for (const collection of [state.tickets, state.issues, state.notes, state.lessons]) {
+    for (const item of collection) {
+      const rec = item as Record<string, unknown>;
+      if (rec.lifecycle !== "deleted") continue;
+      const deletedAt = rec.deletedAt;
+      if (typeof deletedAt !== "string") continue;
+      const ts = Date.parse(deletedAt);
+      if (Number.isNaN(ts) || ts > now) continue;
+      if (now - ts >= retentionMs) count++;
+    }
+  }
+  if (count === 0) return [];
+  return [{
+    severity: "info",
+    code: "stale_tombstones",
+    message: `${count} tombstoned item(s) past retention period (run storybloq gc)`,
+    entity: null,
+    repair: { command: ["storybloq", "gc"] },
+  }];
+}
+
 registerDoctorCheck(checkDuplicateCanonicalIds);
 registerDoctorCheck(checkDuplicateDisplayIds);
 registerDoctorCheck(checkMissingDisplayId);
@@ -299,3 +324,4 @@ registerDoctorCheck(checkUnresolvableRefs);
 registerDoctorCheck(checkCliVersion);
 registerDoctorCheck(checkLoadWarnings);
 registerDoctorCheck(checkStaleClaims);
+registerDoctorCheck(checkStaleTombstones);

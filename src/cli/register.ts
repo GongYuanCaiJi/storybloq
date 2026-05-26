@@ -236,6 +236,62 @@ export function registerReconcileCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// gc
+// ---------------------------------------------------------------------------
+
+export function registerGcCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "gc",
+    "Remove tombstoned files past retention period",
+    (y) =>
+      y
+        .option("apply", {
+          type: "boolean",
+          default: false,
+          describe: "Actually delete files (default is dry-run)",
+        })
+        .option("force", {
+          type: "boolean",
+          default: false,
+          describe: "Remove referenced tombstones too",
+        })
+        .option("retention-days", {
+          type: "number",
+          default: 30,
+          describe: "Retention period in days",
+        })
+        .option("format", {
+          type: "string",
+          choices: ["md", "json"],
+          default: "md",
+          describe: "Output format",
+        }),
+    async (argv) => {
+      const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+      if (!root) {
+        writeOutput("No .story/ project found.");
+        process.exitCode = ExitCode.USER_ERROR;
+        return;
+      }
+      try {
+        const { handleGc } = await import("./commands/gc.js");
+        const result = await handleGc(root, {
+          apply: argv.apply as boolean,
+          force: argv.force as boolean,
+          retentionDays: argv["retention-days"] as number,
+          format: (argv.format as "md" | "json") ?? "md",
+        });
+        writeOutput(result.output);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        writeOutput(message);
+        process.exitCode = ExitCode.USER_ERROR;
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // team
 // ---------------------------------------------------------------------------
 
