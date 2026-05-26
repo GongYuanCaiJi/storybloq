@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { threeWayMerge } from "../../core/merge-driver.js";
+import { threeWayMerge, mergeConfig, mergeRoadmap, type MergeResult } from "../../core/merge-driver.js";
 import type { EntityType } from "../../core/field-classification.js";
 
 function entityTypeFromPath(pathname: string): EntityType | null {
@@ -14,14 +14,28 @@ function entityTypeFromPath(pathname: string): EntityType | null {
   }
 }
 
+type MergeStrategy =
+  | { kind: "entity"; entityType: EntityType }
+  | { kind: "config" }
+  | { kind: "roadmap" };
+
+function strategyFromPath(pathname: string): MergeStrategy | null {
+  const file = basename(pathname);
+  if (file === "config.json") return { kind: "config" };
+  if (file === "roadmap.json") return { kind: "roadmap" };
+  const entityType = entityTypeFromPath(pathname);
+  if (entityType) return { kind: "entity", entityType };
+  return null;
+}
+
 export function handleMergeDriver(
   ancestorPath: string,
   oursPath: string,
   theirsPath: string,
   pathname: string,
 ): number {
-  const entityType = entityTypeFromPath(pathname);
-  if (!entityType) return 2;
+  const strategy = strategyFromPath(pathname);
+  if (!strategy) return 2;
 
   let base: Record<string, unknown>;
   let ours: Record<string, unknown>;
@@ -35,7 +49,22 @@ export function handleMergeDriver(
     return 2;
   }
 
-  const result = threeWayMerge(base, ours, theirs, entityType);
+  if (typeof base !== "object" || base === null || Array.isArray(base)) return 2;
+  if (typeof ours !== "object" || ours === null || Array.isArray(ours)) return 2;
+  if (typeof theirs !== "object" || theirs === null || Array.isArray(theirs)) return 2;
+
+  let result: MergeResult;
+  try {
+    if (strategy.kind === "config") {
+      result = mergeConfig(base, ours, theirs);
+    } else if (strategy.kind === "roadmap") {
+      result = mergeRoadmap(base, ours, theirs);
+    } else {
+      result = threeWayMerge(base, ours, theirs, strategy.entityType);
+    }
+  } catch {
+    return 2;
+  }
 
   try {
     writeFileSync(oursPath, JSON.stringify(result.merged, null, 2) + "\n", "utf-8");

@@ -3,7 +3,7 @@ import { getMergeRules, getCoupledGroups, type EntityType, type MergeRule } from
 export interface ConflictEntry {
   fieldPath: string;
   field?: string;
-  kind: "field" | "coupled" | "delete-edit";
+  kind: "field" | "coupled" | "delete-edit" | "array-element";
   base: unknown;
   ours: unknown;
   theirs: unknown;
@@ -228,6 +228,509 @@ export function threeWayMerge(
 
   if (conflicts.length > 0 || existingConflicts.length > 0) {
     merged._conflicts = [...existingConflicts, ...conflicts];
+  }
+
+  return { merged, conflicts, clean: conflicts.length === 0 };
+}
+
+function stripConflicts(obj: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...obj };
+  delete copy._conflicts;
+  return copy;
+}
+
+function jsonType(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (Array.isArray(v)) return "array";
+  return typeof v;
+}
+
+function deepMergeObjects(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+  path: string,
+  conflicts: ConflictEntry[],
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+  const baseKeys = Object.keys(base);
+  const oursOnly = Object.keys(ours).filter((k) => !(k in base));
+  const theirsOnly = Object.keys(theirs).filter((k) => !(k in base) && !(k in ours));
+  const allKeys = [...baseKeys, ...oursOnly, ...theirsOnly];
+
+  for (const key of allKeys) {
+    const pointer = `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+    const bVal = base[key];
+    const oVal = ours[key];
+    const tVal = theirs[key];
+    const bHas = key in base;
+    const oHas = key in ours;
+    const tHas = key in theirs;
+
+    if (!bHas && oHas && tHas) {
+      if (deepEqual(oVal, tVal)) {
+        merged[key] = oVal;
+      } else {
+        merged[key] = oVal;
+        conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: undefined, ours: oVal, theirs: tVal });
+      }
+      continue;
+    }
+
+    if (!bHas && oHas && !tHas) { merged[key] = oVal; continue; }
+    if (!bHas && !oHas && tHas) { merged[key] = tVal; continue; }
+
+    if (bHas && !oHas && !tHas) { continue; }
+    if (bHas && !oHas && tHas) {
+      if (deepEqual(bVal, tVal)) { continue; }
+      conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: undefined, theirs: tVal });
+      merged[key] = bVal;
+      continue;
+    }
+    if (bHas && oHas && !tHas) {
+      if (deepEqual(bVal, oVal)) { continue; }
+      conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: oVal, theirs: undefined });
+      merged[key] = oVal;
+      continue;
+    }
+
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+
+    const bType = jsonType(bVal);
+    const oType = jsonType(oVal);
+    const tType = jsonType(tVal);
+
+    if (oType !== tType) {
+      merged[key] = oVal;
+      conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+      continue;
+    }
+
+    if (oType === "object" && bType === "object") {
+      merged[key] = deepMergeObjects(
+        bVal as Record<string, unknown>,
+        oVal as Record<string, unknown>,
+        tVal as Record<string, unknown>,
+        pointer,
+        conflicts,
+      );
+      continue;
+    }
+
+    merged[key] = oVal;
+    conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+  }
+
+  return merged;
+}
+
+function validateKeyedArray(arr: unknown[], keyField: string): void {
+  const seen = new Set<string>();
+  for (const item of arr) {
+    if (typeof item !== "object" || item === null) throw new Error("Array element is not an object");
+    const key = (item as Record<string, unknown>)[keyField];
+    if (typeof key !== "string" || key === "") throw new Error(`Missing or empty ${keyField} in array element`);
+    if (seen.has(key)) throw new Error(`Duplicate ${keyField} "${key}" in array`);
+    seen.add(key);
+  }
+}
+
+function toMap(arr: unknown[], keyField: string): Map<string, Record<string, unknown>> {
+  const map = new Map<string, Record<string, unknown>>();
+  for (const item of arr) {
+    const obj = item as Record<string, unknown>;
+    map.set(obj[keyField] as string, obj);
+  }
+  return map;
+}
+
+function orderKeys(arr: unknown[], keyField: string): string[] {
+  return arr.map((item) => (item as Record<string, unknown>)[keyField] as string);
+}
+
+interface KeyedArrayOpts {
+  elementMerge?: boolean;
+  blockerMode?: boolean;
+}
+
+function keyedArrayMerge(
+  base: unknown[],
+  ours: unknown[],
+  theirs: unknown[],
+  keyField: string,
+  parentPointer: string,
+  conflicts: ConflictEntry[],
+  opts: KeyedArrayOpts = {},
+): unknown[] {
+  validateKeyedArray(base, keyField);
+  validateKeyedArray(ours, keyField);
+  validateKeyedArray(theirs, keyField);
+
+  const baseMap = toMap(base, keyField);
+  const oursMap = toMap(ours, keyField);
+  const theirsMap = toMap(theirs, keyField);
+
+  const baseOrder = orderKeys(base, keyField);
+  const oursOrder = orderKeys(ours, keyField);
+  const theirsOrder = orderKeys(theirs, keyField);
+
+  const baseIds = new Set(baseOrder);
+  const oursIds = new Set(oursOrder);
+  const theirsIds = new Set(theirsOrder);
+
+  const sharedWithBase = baseOrder.filter((id) => oursIds.has(id) || theirsIds.has(id));
+  const oursSharedOrder = oursOrder.filter((id) => baseIds.has(id));
+  const theirsSharedOrder = theirsOrder.filter((id) => baseIds.has(id));
+  const baseSharedOrder = baseOrder.filter((id) => oursIds.has(id) && theirsIds.has(id));
+
+  const oursReordered = !deepEqual(oursSharedOrder, baseSharedOrder.filter((id) => oursIds.has(id)));
+  const theirsReordered = !deepEqual(theirsSharedOrder, baseSharedOrder.filter((id) => theirsIds.has(id)));
+
+  let mergedOrder: string[];
+
+  if (oursReordered && theirsReordered && !deepEqual(oursSharedOrder, theirsSharedOrder)) {
+    conflicts.push({
+      fieldPath: parentPointer,
+      field: parentPointer.replace(/^\//, ""),
+      kind: "field",
+      base: baseOrder,
+      ours: oursOrder,
+      theirs: theirsOrder,
+    });
+    mergedOrder = [...baseOrder];
+    const addedByOurs = oursOrder.filter((id) => !baseIds.has(id));
+    const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id) && !oursIds.has(id));
+    mergedOrder.push(...addedByOurs, ...addedByTheirs);
+  } else if (oursReordered) {
+    mergedOrder = [...oursSharedOrder];
+    const addedByOurs = oursOrder.filter((id) => !baseIds.has(id));
+    const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id) && !oursIds.has(id));
+    mergedOrder.push(...addedByOurs, ...addedByTheirs);
+  } else if (theirsReordered) {
+    mergedOrder = [...theirsSharedOrder];
+    const addedByOurs = oursOrder.filter((id) => !baseIds.has(id) && !theirsIds.has(id));
+    const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id));
+    mergedOrder.push(...addedByOurs, ...addedByTheirs);
+  } else {
+    mergedOrder = [...baseSharedOrder.filter((id) => oursIds.has(id) || theirsIds.has(id))];
+    const addedByOurs = oursOrder.filter((id) => !baseIds.has(id));
+    const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id) && !oursIds.has(id));
+    mergedOrder.push(...addedByOurs, ...addedByTheirs);
+  }
+
+  const removedByOurs = new Set(baseOrder.filter((id) => !oursIds.has(id)));
+  const removedByTheirs = new Set(baseOrder.filter((id) => !theirsIds.has(id)));
+
+  const result: unknown[] = [];
+
+  for (const id of mergedOrder) {
+    if (removedByOurs.has(id) && removedByTheirs.has(id)) continue;
+
+    if (removedByOurs.has(id)) {
+      const theirsEl = theirsMap.get(id)!;
+      const baseEl = baseMap.get(id)!;
+      if (deepEqual(baseEl, theirsEl)) continue;
+      const idx = result.length;
+      conflicts.push({
+        fieldPath: `${parentPointer}/${idx}`,
+        field: `${parentPointer.replace(/^\//, "")}[${keyField}=${id}]`,
+        kind: "delete-edit",
+        base: baseEl,
+        ours: undefined,
+        theirs: theirsEl,
+      });
+      result.push(baseEl);
+      continue;
+    }
+
+    if (removedByTheirs.has(id)) {
+      const oursEl = oursMap.get(id)!;
+      const baseEl = baseMap.get(id)!;
+      if (deepEqual(baseEl, oursEl)) continue;
+      const idx = result.length;
+      conflicts.push({
+        fieldPath: `${parentPointer}/${idx}`,
+        field: `${parentPointer.replace(/^\//, "")}[${keyField}=${id}]`,
+        kind: "delete-edit",
+        base: baseEl,
+        ours: oursEl,
+        theirs: undefined,
+      });
+      result.push(baseEl);
+      continue;
+    }
+
+    const baseEl = baseMap.get(id);
+    const oursEl = oursMap.get(id);
+    const theirsEl = theirsMap.get(id);
+
+    if (!baseEl) {
+      if (oursEl && theirsEl) {
+        if (deepEqual(oursEl, theirsEl)) {
+          result.push(oursEl);
+        } else {
+          const idx = result.length;
+          conflicts.push({
+            fieldPath: `${parentPointer}/${idx}`,
+            field: `${parentPointer.replace(/^\//, "")}[${keyField}=${id}]`,
+            kind: "array-element",
+            base: undefined,
+            ours: oursEl,
+            theirs: theirsEl,
+          });
+          result.push(oursEl);
+        }
+      } else {
+        result.push(oursEl ?? theirsEl);
+      }
+      continue;
+    }
+
+    if (!oursEl || !theirsEl) {
+      result.push(oursEl ?? theirsEl ?? baseEl);
+      continue;
+    }
+
+    if (deepEqual(baseEl, oursEl) && deepEqual(baseEl, theirsEl)) {
+      result.push(baseEl);
+      continue;
+    }
+    if (deepEqual(baseEl, oursEl)) { result.push(theirsEl); continue; }
+    if (deepEqual(baseEl, theirsEl)) { result.push(oursEl); continue; }
+    if (deepEqual(oursEl, theirsEl)) { result.push(oursEl); continue; }
+
+    if (opts.blockerMode) {
+      const merged = mergeBlockerElement(baseEl, oursEl, theirsEl, `${parentPointer}/${result.length}`, conflicts);
+      result.push(merged);
+      continue;
+    }
+
+    if (opts.elementMerge) {
+      const merged = deepMergeObjects(baseEl, oursEl, theirsEl, `${parentPointer}/${result.length}`, conflicts);
+      result.push(merged);
+      continue;
+    }
+
+    const idx = result.length;
+    conflicts.push({
+      fieldPath: `${parentPointer}/${idx}`,
+      field: `${parentPointer.replace(/^\//, "")}[${keyField}=${id}]`,
+      kind: "array-element",
+      base: baseEl,
+      ours: oursEl,
+      theirs: theirsEl,
+    });
+    result.push(oursEl);
+  }
+
+  return result;
+}
+
+function mergeBlockerElement(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+  path: string,
+  conflicts: ConflictEntry[],
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+
+  const bCleared = base.cleared === true || (base.clearedDate != null);
+  const oCleared = ours.cleared === true || (ours.clearedDate != null);
+  const tCleared = theirs.cleared === true || (theirs.clearedDate != null);
+
+  merged.cleared = oCleared || tCleared || bCleared;
+
+  const oClearedDate = typeof ours.clearedDate === "string" ? ours.clearedDate : null;
+  const tClearedDate = typeof theirs.clearedDate === "string" ? theirs.clearedDate : null;
+  if (oClearedDate && tClearedDate) {
+    merged.clearedDate = oClearedDate <= tClearedDate ? oClearedDate : tClearedDate;
+  } else {
+    merged.clearedDate = oClearedDate ?? tClearedDate ?? base.clearedDate ?? null;
+  }
+
+  if (base.createdDate !== undefined) merged.createdDate = base.createdDate;
+
+  const specialKeys = new Set(["cleared", "clearedDate", "createdDate", "name"]);
+  merged.name = base.name;
+
+  const allKeys = new Set([...Object.keys(base), ...Object.keys(ours), ...Object.keys(theirs)]);
+  for (const key of allKeys) {
+    if (specialKeys.has(key)) continue;
+    const bVal = base[key];
+    const oVal = ours[key];
+    const tVal = theirs[key];
+
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+
+    merged[key] = oVal;
+    conflicts.push({
+      fieldPath: `${path}/${key.replace(/~/g, "~0").replace(/\//g, "~1")}`,
+      field: key,
+      kind: "field",
+      base: bVal,
+      ours: oVal,
+      theirs: tVal,
+    });
+  }
+
+  return merged;
+}
+
+const CONFIG_DEEP_MERGE_KEYS = new Set(["features", "recipeOverrides", "team", "federation"]);
+const CONFIG_NODES_KEY = "nodes";
+
+export function mergeConfig(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+): MergeResult {
+  const b = stripConflicts(base);
+  const o = stripConflicts(ours);
+  const t = stripConflicts(theirs);
+  const conflicts: ConflictEntry[] = [];
+  const merged: Record<string, unknown> = {};
+
+  const baseKeys = Object.keys(b);
+  const oursOnly = Object.keys(o).filter((k) => !(k in b));
+  const theirsOnly = Object.keys(t).filter((k) => !(k in b) && !(k in o));
+  const allKeys = [...baseKeys, ...oursOnly, ...theirsOnly];
+
+  for (const key of allKeys) {
+    const pointer = toPointer(key);
+    const bVal = b[key];
+    const oVal = o[key];
+    const tVal = t[key];
+    const bHas = key in b;
+    const oHas = key in o;
+    const tHas = key in t;
+
+    if (!bHas && oHas && tHas) {
+      if (deepEqual(oVal, tVal)) {
+        merged[key] = oVal;
+      } else {
+        merged[key] = oVal;
+        conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: undefined, ours: oVal, theirs: tVal });
+      }
+      continue;
+    }
+    if (!bHas && oHas && !tHas) { merged[key] = oVal; continue; }
+    if (!bHas && !oHas && tHas) { merged[key] = tVal; continue; }
+    if (bHas && !oHas && !tHas) { continue; }
+    if (bHas && !oHas && tHas) {
+      if (deepEqual(bVal, tVal)) { continue; }
+      merged[key] = oVal;
+      conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: undefined, theirs: tVal });
+      continue;
+    }
+    if (bHas && oHas && !tHas) {
+      if (deepEqual(bVal, oVal)) { continue; }
+      merged[key] = oVal;
+      conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: oVal, theirs: undefined });
+      continue;
+    }
+
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+
+    const bType = jsonType(bVal);
+    const oType = jsonType(oVal);
+    const tType = jsonType(tVal);
+
+    const isKnownObjectKey = CONFIG_DEEP_MERGE_KEYS.has(key) || key === CONFIG_NODES_KEY;
+    if (isKnownObjectKey) {
+      for (const [val, label] of [[bVal, "base"], [oVal, "ours"], [tVal, "theirs"]] as const) {
+        if (val !== undefined && jsonType(val) !== "object") {
+          throw new Error(`Config key "${key}" must be an object (got ${jsonType(val)} in ${label})`);
+        }
+      }
+    }
+
+    if (oType === "object" && tType === "object" && bType === "object") {
+      merged[key] = deepMergeObjects(
+        bVal as Record<string, unknown>,
+        oVal as Record<string, unknown>,
+        tVal as Record<string, unknown>,
+        pointer,
+        conflicts,
+      );
+      continue;
+    }
+
+    merged[key] = oVal;
+    conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+  }
+
+  if (conflicts.length > 0) {
+    merged._conflicts = [...conflicts];
+  }
+
+  return { merged, conflicts, clean: conflicts.length === 0 };
+}
+
+export function mergeRoadmap(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+): MergeResult {
+  const b = stripConflicts(base);
+  const o = stripConflicts(ours);
+  const t = stripConflicts(theirs);
+  const conflicts: ConflictEntry[] = [];
+  const merged: Record<string, unknown> = {};
+
+  const scalarKeys = ["title", "date"];
+  for (const key of scalarKeys) {
+    const bVal = b[key];
+    const oVal = o[key];
+    const tVal = t[key];
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+    merged[key] = oVal;
+    conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+  }
+
+  for (const src of [b, o, t]) {
+    if (src.phases !== undefined && !Array.isArray(src.phases)) throw new Error("phases must be an array");
+    if (src.blockers !== undefined && !Array.isArray(src.blockers)) throw new Error("blockers must be an array");
+  }
+
+  const bPhases = Array.isArray(b.phases) ? b.phases : [];
+  const oPhases = Array.isArray(o.phases) ? o.phases : [];
+  const tPhases = Array.isArray(t.phases) ? t.phases : [];
+  merged.phases = keyedArrayMerge(bPhases, oPhases, tPhases, "id", "/phases", conflicts, { elementMerge: true });
+
+  const bBlockers = Array.isArray(b.blockers) ? b.blockers : [];
+  const oBlockers = Array.isArray(o.blockers) ? o.blockers : [];
+  const tBlockers = Array.isArray(t.blockers) ? t.blockers : [];
+  merged.blockers = keyedArrayMerge(bBlockers, oBlockers, tBlockers, "name", "/blockers", conflicts, { blockerMode: true });
+
+  const handledKeys = new Set(["title", "date", "phases", "blockers", "_conflicts"]);
+  const extraKeys = new Set([...Object.keys(b), ...Object.keys(o), ...Object.keys(t)].filter((k) => !handledKeys.has(k)));
+  for (const key of extraKeys) {
+    const bVal = b[key];
+    const oVal = o[key];
+    const tVal = t[key];
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+    merged[key] = oVal;
+    conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+  }
+
+  if (conflicts.length > 0) {
+    merged._conflicts = [...conflicts];
   }
 
   return { merged, conflicts, clean: conflicts.length === 0 };
