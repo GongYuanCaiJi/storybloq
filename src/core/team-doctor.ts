@@ -1,5 +1,6 @@
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
+import { isClaimStale } from "./claims.js";
 
 export type DoctorSeverity = "error" | "warning" | "info";
 
@@ -261,9 +262,40 @@ function checkLoadWarnings(_state: ProjectState, ctx: DoctorContext): DoctorFind
   }));
 }
 
+function checkStaleClaims(state: ProjectState): DoctorFinding[] {
+  const findings: DoctorFinding[] = [];
+  const threshold = state.config.team?.claimStalenessHours ?? 48;
+  const now = Date.now();
+
+  for (const t of state.tickets) {
+    if (!t.claim) continue;
+
+    if (t.status === "complete") {
+      findings.push({
+        severity: "warning",
+        code: "claim_on_complete",
+        message: `Ticket ${effectiveDisplayId(t)} is complete but still has claim by ${t.claim.user}`,
+        entity: t.id,
+        repair: { command: ["storybloq", "ticket", "unclaim", t.id] },
+      });
+    } else if (isClaimStale(t.claim, threshold, now)) {
+      findings.push({
+        severity: "warning",
+        code: "stale_claim",
+        message: `Ticket ${effectiveDisplayId(t)} has stale claim by ${t.claim.user} (since ${t.claim.since})`,
+        entity: t.id,
+        repair: { command: ["storybloq", "ticket", "unclaim", t.id] },
+      });
+    }
+  }
+
+  return findings;
+}
+
 registerDoctorCheck(checkDuplicateCanonicalIds);
 registerDoctorCheck(checkDuplicateDisplayIds);
 registerDoctorCheck(checkMissingDisplayId);
 registerDoctorCheck(checkUnresolvableRefs);
 registerDoctorCheck(checkCliVersion);
 registerDoctorCheck(checkLoadWarnings);
+registerDoctorCheck(checkStaleClaims);

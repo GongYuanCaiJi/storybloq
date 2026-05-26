@@ -38,6 +38,7 @@ export const ConfigSchema = z
       minCliVersion: z.string().optional(),
       minMacVersion: z.string().optional(),
       requiredFeatures: z.array(z.string()).optional(),
+      claimStalenessHours: z.number().finite().nonnegative().optional(),
     }).optional(),
   })
   .passthrough();
