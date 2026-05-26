@@ -399,6 +399,34 @@ export function registerTeamCommand(yargs: Argv): Argv {
           }
         },
       )
+      .command(
+        "reserve <type>",
+        "Reserve display IDs via remote git refs",
+        (y2) =>
+          y2
+            .positional("type", { type: "string", demandOption: true, choices: ["tickets", "issues", "notes", "lessons"], describe: "Entity type" })
+            .option("count", { type: "number", default: 1, describe: "Number of IDs to reserve (1-100)" })
+            .option("format", { type: "string", choices: ["md", "json"], default: "md" })
+            .check((argv) => {
+              const c = argv.count as number;
+              if (!Number.isSafeInteger(c) || c < 1 || c > 100) return "--count must be an integer from 1 to 100";
+              return true;
+            }),
+        async (argv) => {
+          const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+          if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+          try {
+            const { handleReserve } = await import("./commands/reserve.js");
+            const result = await handleReserve(root, argv.type as "tickets" | "issues" | "notes" | "lessons", argv.count as number, (argv.format as "md" | "json") ?? "md");
+            writeOutput(result.output);
+            if (result.exitCode) process.exitCode = result.exitCode;
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            writeOutput(message);
+            process.exitCode = ExitCode.USER_ERROR;
+          }
+        },
+      )
       .demandCommand(1, ""),
     () => {},
   );

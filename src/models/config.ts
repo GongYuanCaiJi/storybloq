@@ -39,6 +39,8 @@ export const ConfigSchema = z
       minMacVersion: z.string().optional(),
       requiredFeatures: z.array(z.string()).optional(),
       claimStalenessHours: z.number().finite().nonnegative().optional(),
+      idAllocator: z.enum(["local", "git-refs"]).optional(),
+      idAllocatorRemote: z.string().regex(/^[A-Za-z0-9._-]+$/).refine((v) => !v.startsWith("-"), "Remote name must not start with -").optional(),
     }).optional(),
   })
   .passthrough();
