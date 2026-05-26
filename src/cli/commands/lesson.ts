@@ -23,6 +23,29 @@ import {
   type LessonSource,
   type OutputFormat,
 } from "../../models/types.js";
+
+export const LESSON_CORE_METADATA_KEYS = new Set([
+  "id",
+  "title",
+  "content",
+  "context",
+  "source",
+  "tags",
+  "status",
+  "supersedes",
+  "reinforcements",
+  "lastValidated",
+  "createdDate",
+  "updatedDate",
+  "displayId",
+  "previousDisplayIds",
+  "rank",
+  "lifecycle",
+  "_conflicts",
+  "createdAt",
+  "deletedAt",
+  "deletedBy",
+]);
 import type { Lesson } from "../../models/lesson.js";
 import {
   todayISO,

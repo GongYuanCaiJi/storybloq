@@ -100,7 +100,7 @@ export async function loadProject(
   ) {
     throw new ProjectLoaderError(
       "version_mismatch",
-      `Config schemaVersion ${config.schemaVersion} exceeds max supported ${maxVersion}.`,
+      `Config schemaVersion ${config.schemaVersion} exceeds max supported ${maxVersion}. Run: npm update -g @storybloq/storybloq`,
     );
   }
 
@@ -565,7 +565,7 @@ export async function withProjectLock(
     ) {
       throw new ProjectLoaderError(
         "version_mismatch",
-        `Config schemaVersion ${config.schemaVersion} exceeds max supported ${CURRENT_SCHEMA_VERSION}.`,
+        `Config schemaVersion ${config.schemaVersion} exceeds max supported ${CURRENT_SCHEMA_VERSION}. Run: npm update -g @storybloq/storybloq`,
       );
     }
 

@@ -18,6 +18,24 @@ import {
   type NoteStatus,
   type OutputFormat,
 } from "../../models/types.js";
+
+export const NOTE_CORE_METADATA_KEYS = new Set([
+  "id",
+  "title",
+  "content",
+  "tags",
+  "status",
+  "createdDate",
+  "updatedDate",
+  "displayId",
+  "previousDisplayIds",
+  "rank",
+  "lifecycle",
+  "_conflicts",
+  "createdAt",
+  "deletedAt",
+  "deletedBy",
+]);
 import type { Note } from "../../models/note.js";
 import {
   todayISO,

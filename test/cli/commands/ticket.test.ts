@@ -497,6 +497,46 @@ describe("handleTicketMeta", () => {
     ).rejects.toThrow(CliValidationError);
   });
 
+  it("rejects team-mode protected field displayId", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+
+    await expect(
+      handleTicketMetaSet("T-001", "displayId", "T-999", "json", dir),
+    ).rejects.toThrow(CliValidationError);
+  });
+
+  it("rejects team-mode protected field _conflicts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+
+    await expect(
+      handleTicketMetaSet("T-001", "_conflicts", [], "json", dir),
+    ).rejects.toThrow(CliValidationError);
+  });
+
+  it("rejects team-mode protected field claim", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+
+    await expect(
+      handleTicketMetaSet("T-001", "claim", { user: "x" }, "json", dir),
+    ).rejects.toThrow(CliValidationError);
+  });
+
+  it("rejects team-mode protected field lifecycle", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+
+    await expect(
+      handleTicketMetaSet("T-001", "lifecycle", "deleted", "json", dir),
+    ).rejects.toThrow(CliValidationError);
+  });
+
   it("returns not_found for missing metadata path", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ticket-meta-"));
     tmpDirs.push(dir);

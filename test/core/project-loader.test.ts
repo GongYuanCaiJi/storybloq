@@ -325,6 +325,21 @@ describe("loadProject", () => {
       }
     });
 
+    it("version_mismatch error includes update instructions", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 99 },
+      });
+
+      try {
+        await loadProject(testRoot);
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect((err as ProjectLoaderError).message).toContain(
+          "npm update -g @storybloq/storybloq",
+        );
+      }
+    });
+
     it("accepts config without schemaVersion", async () => {
       testRoot = await createTestProject();
       const result = await loadProject(testRoot);

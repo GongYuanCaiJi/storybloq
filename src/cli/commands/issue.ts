@@ -53,6 +53,14 @@ const ISSUE_CORE_METADATA_KEYS = new Set([
   "createdBy",
   "assignedTo",
   "lastModifiedBy",
+  "displayId",
+  "previousDisplayIds",
+  "rank",
+  "lifecycle",
+  "_conflicts",
+  "createdAt",
+  "deletedAt",
+  "deletedBy",
 ]);
 
 // --- Read Handlers ---

@@ -57,6 +57,15 @@ const TICKET_CORE_METADATA_KEYS = new Set([
   "assignedTo",
   "lastModifiedBy",
   "claimedBySession",
+  "displayId",
+  "previousDisplayIds",
+  "rank",
+  "lifecycle",
+  "claim",
+  "_conflicts",
+  "createdAt",
+  "deletedAt",
+  "deletedBy",
 ]);
 
 // --- Read Handlers ---
