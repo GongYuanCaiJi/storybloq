@@ -93,14 +93,14 @@ export async function reserveDisplayId(
       ], { cwd: root, timeout: 15000 });
       return { displayId, reserved: true };
     } catch (err) {
-      await execFileAsync("git", ["tag", "-d", tagName], { cwd: root, timeout: 5000 }).catch(() => {});
       const stderr = (err as { stderr?: string }).stderr ?? "";
       if (stderr.includes("already exists") || stderr.includes("would clobber existing tag")) {
+        await execFileAsync("git", ["tag", "-d", tagName], { cwd: root, timeout: 5000 }).catch(() => {});
         next++;
         continue;
       }
       throw new Error(
-        `Failed to push tag "${tagName}" to remote "${remote}": ${stderr || (err instanceof Error ? err.message : String(err))}`,
+        `Failed to push tag "${tagName}" to remote "${remote}". Local tag "${tagName}" preserved for manual retry. ${stderr || (err instanceof Error ? err.message : String(err))}`,
       );
     }
   }

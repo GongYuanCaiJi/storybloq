@@ -625,7 +625,7 @@ export function mergeConfig(
     if (bHas && !oHas && !tHas) { continue; }
     if (bHas && !oHas && tHas) {
       if (deepEqual(bVal, tVal)) { continue; }
-      merged[key] = oVal;
+      merged[key] = bVal;
       conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: undefined, theirs: tVal });
       continue;
     }
@@ -636,15 +636,6 @@ export function mergeConfig(
       continue;
     }
 
-    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
-    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
-    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
-    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
-
-    const bType = jsonType(bVal);
-    const oType = jsonType(oVal);
-    const tType = jsonType(tVal);
-
     const isKnownObjectKey = CONFIG_DEEP_MERGE_KEYS.has(key) || key === CONFIG_NODES_KEY;
     if (isKnownObjectKey) {
       for (const [val, label] of [[bVal, "base"], [oVal, "ours"], [tVal, "theirs"]] as const) {
@@ -653,6 +644,15 @@ export function mergeConfig(
         }
       }
     }
+
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[key] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[key] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[key] = oVal; continue; }
+
+    const bType = jsonType(bVal);
+    const oType = jsonType(oVal);
+    const tType = jsonType(tVal);
 
     if (oType === "object" && tType === "object" && bType === "object") {
       merged[key] = deepMergeObjects(

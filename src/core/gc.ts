@@ -82,7 +82,7 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
   const candidateMap = new Map(candidates.map((c) => [c.id, c]));
 
   for (const t of state.tickets as readonly Ticket[]) {
-    if (!activeTickets.has(t.id)) continue;
+    if (candidateIds.has(t.id)) continue;
     for (const bid of t.blockedBy) {
       const c = candidateMap.get(bid);
       if (c) c.activeReferences.push(t.id);
@@ -94,7 +94,7 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
   }
 
   for (const i of state.issues as readonly Issue[]) {
-    if (!activeIssues.has(i.id)) continue;
+    if (candidateIds.has(i.id)) continue;
     for (const tref of i.relatedTickets) {
       const c = candidateMap.get(tref);
       if (c) c.activeReferences.push(i.id);

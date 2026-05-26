@@ -16,7 +16,10 @@ export function generateKeyBetween(a: string | null, b: string | null): string {
     if (firstChar > 0) {
       return DIGITS[Math.floor(firstChar / 2)]!;
     }
-    return midpoint("", b!);
+    if (b!.length <= 1) {
+      throw new Error(`Cannot generate key before minimum rank "${b}"`);
+    }
+    return b![0]! + midpoint("", b!.slice(1));
   }
 
   if (b === null) {

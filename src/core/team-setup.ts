@@ -55,7 +55,7 @@ export async function writeGitattributes(storyDir: string): Promise<void> {
   const endIdx = existing.indexOf(BLOCK_END);
 
   let result: string;
-  if (beginIdx !== -1 && endIdx !== -1) {
+  if (beginIdx !== -1 && endIdx !== -1 && beginIdx < endIdx) {
     const before = existing.substring(0, beginIdx);
     const after = existing.substring(endIdx + BLOCK_END.length);
     result = before + blockContent + after;
