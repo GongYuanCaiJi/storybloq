@@ -30,6 +30,7 @@ import { formatError, ExitCode } from "../core/output-formatter.js";
 import { handleStatus } from "./commands/status.js";
 import { handleValidate } from "./commands/validate.js";
 import { handleRepair, computeRepairs } from "./commands/repair.js";
+import { handleReconcile } from "./commands/reconcile.js";
 import {
   handleHandoverList,
   handleHandoverLatest,
@@ -200,6 +201,34 @@ export function registerRepairCommand(yargs: Argv): Argv {
           }
           writeOutput(lines.join("\n"));
         });
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// reconcile
+// ---------------------------------------------------------------------------
+
+export function registerReconcileCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "reconcile",
+    "Detect and fix duplicate displayIds across all entity types",
+    (y) =>
+      y
+        .option("dry-run", { type: "boolean", default: false, describe: "Show what would change without writing" })
+        .option("ci", { type: "boolean", default: false, describe: "Exit non-zero if duplicates found, no mutations" })
+        .option("format", { type: "string", choices: ["md", "json"], default: "md", describe: "Output format" }),
+    async (argv) => {
+      const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+      const result = await handleReconcile(root, {
+        dryRun: argv["dry-run"] as boolean,
+        ci: argv.ci as boolean,
+        format: (argv.format as "md" | "json") ?? "md",
+      });
+      writeOutput(result.output);
+      if (result.exitCode !== undefined && result.exitCode !== 0) {
+        process.exitCode = result.exitCode;
       }
     },
   );

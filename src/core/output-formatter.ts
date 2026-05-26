@@ -11,6 +11,7 @@ import type { LoadWarning } from "./errors.js";
 import type { ValidationResult } from "./validation.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "./queries.js";
 import type { RecommendResult } from "./recommend.js";
+import type { ReconcileResult } from "./reconcile.js";
 import type { ActiveSessionSummary } from "./session-scan.js";
 import type { SelftestResult } from "../cli/commands/selftest.js";
 import { phasesWithStatus, isBlockerCleared } from "./queries.js";
@@ -1492,5 +1493,38 @@ export function formatRecommendations(
     );
   }
 
+  return lines.join("\n");
+}
+
+export function formatReconcileResult(
+  result: ReconcileResult,
+  format: OutputFormat,
+): string {
+  if (format === "json") {
+    return JSON.stringify(result.ok ? successEnvelope(result.plan) : { ok: false, errors: result.errors }, null, 2);
+  }
+  if (!result.ok) {
+    const lines = ["# Reconcile Failed", ""];
+    for (const err of result.errors) {
+      lines.push(`- ${escapeMarkdownInline(err)}`);
+    }
+    return lines.join("\n");
+  }
+  const { plan } = result;
+  if (plan.renames.length === 0) {
+    return "No duplicate displayIds found. Project is clean.";
+  }
+  const lines = ["# Reconcile Plan", "", `${plan.renames.length} rename(s) needed:`, ""];
+  lines.push("| Type | ID | Old DisplayId | New DisplayId | Reason |");
+  lines.push("|------|----|---------------|---------------|--------|");
+  for (const r of plan.renames) {
+    lines.push(`| ${r.entityType} | ${escapeMarkdownInline(r.id)} | ${escapeMarkdownInline(r.oldDisplayId)} | ${escapeMarkdownInline(r.newDisplayId)} | ${escapeMarkdownInline(r.reason)} |`);
+  }
+  if (plan.warnings.length > 0) {
+    lines.push("", "## Warnings", "");
+    for (const w of plan.warnings) {
+      lines.push(`- ${escapeMarkdownInline(w.message)}`);
+    }
+  }
   return lines.join("\n");
 }
