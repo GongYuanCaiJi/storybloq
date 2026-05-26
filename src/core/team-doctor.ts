@@ -375,6 +375,42 @@ function checkMergeDriverConfig(state: ProjectState, ctx: DoctorContext): Doctor
   return findings;
 }
 
+function checkReservationHealth(state: ProjectState, ctx: DoctorContext): DoctorFinding[] {
+  const rawTeam = (state.config as Record<string, unknown>).team;
+  const team = rawTeam && typeof rawTeam === "object" && !Array.isArray(rawTeam) ? rawTeam as Record<string, unknown> : undefined;
+  if (team?.idAllocator !== "git-refs") return [];
+
+  const { fetchLocalReservationTags, classifyReservations } = require("./reservation-check.js") as typeof import("./reservation-check.js");
+  const findings: DoctorFinding[] = [];
+
+  const result = fetchLocalReservationTags(ctx.root);
+  if (result.fetchError) {
+    findings.push({
+      severity: "warning",
+      code: "reservation_fetch_failed",
+      message: `Failed to fetch reservation tags: ${result.fetchError}`,
+      entity: null,
+      repair: null,
+    });
+    return findings;
+  }
+
+  const health = classifyReservations(result.tags, state);
+  for (const [entityType, orphanIds] of health.orphan) {
+    for (const displayId of orphanIds) {
+      findings.push({
+        severity: "info",
+        code: "orphan_reservation",
+        message: `Orphan reservation tag for ${entityType} ${displayId}: no item has this displayId`,
+        entity: displayId,
+        repair: null,
+      });
+    }
+  }
+
+  return findings;
+}
+
 registerDoctorCheck(checkDuplicateCanonicalIds);
 registerDoctorCheck(checkDuplicateDisplayIds);
 registerDoctorCheck(checkMissingDisplayId);
@@ -385,3 +421,4 @@ registerDoctorCheck(checkStaleClaims);
 registerDoctorCheck(checkStaleTombstones);
 registerDoctorCheck(checkConflictsPresent);
 registerDoctorCheck(checkMergeDriverConfig);
+registerDoctorCheck(checkReservationHealth);
