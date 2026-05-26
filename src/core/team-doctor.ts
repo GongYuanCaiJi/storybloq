@@ -317,6 +317,31 @@ function checkStaleTombstones(state: ProjectState, _ctx: DoctorContext): DoctorF
   }];
 }
 
+function checkConflictsPresent(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
+  const items: { type: string; id: string; count: number }[] = [];
+  for (const { type, collection } of [
+    { type: "ticket", collection: state.tickets },
+    { type: "issue", collection: state.issues },
+    { type: "note", collection: state.notes },
+    { type: "lesson", collection: state.lessons },
+  ] as const) {
+    for (const item of collection) {
+      const conflicts = (item as Record<string, unknown>)._conflicts;
+      if (Array.isArray(conflicts) && conflicts.length > 0) {
+        items.push({ type, id: item.id, count: conflicts.length });
+      }
+    }
+  }
+  if (items.length === 0) return [];
+  return [{
+    severity: "error",
+    code: "conflicts_present",
+    message: `${items.length} item(s) have unresolved _conflicts: ${items.map((i) => i.id).join(", ")}. All writes are blocked until resolved.`,
+    entity: null,
+    repair: { command: ["storybloq", "resolve"] },
+  }];
+}
+
 registerDoctorCheck(checkDuplicateCanonicalIds);
 registerDoctorCheck(checkDuplicateDisplayIds);
 registerDoctorCheck(checkMissingDisplayId);
@@ -325,3 +350,4 @@ registerDoctorCheck(checkCliVersion);
 registerDoctorCheck(checkLoadWarnings);
 registerDoctorCheck(checkStaleClaims);
 registerDoctorCheck(checkStaleTombstones);
+registerDoctorCheck(checkConflictsPresent);

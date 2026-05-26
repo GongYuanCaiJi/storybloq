@@ -253,6 +253,7 @@ export async function writeTicket(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeTicketUnlocked(ticket, root);
   });
 }
@@ -290,6 +291,7 @@ export async function writeIssue(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeIssueUnlocked(issue, root);
   });
 }
@@ -317,6 +319,7 @@ export async function writeRoadmap(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeRoadmapUnlocked(roadmap, root);
   });
 }
@@ -339,8 +342,20 @@ export async function writeConfig(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeConfigUnlocked(config, root);
   });
+}
+
+async function assertNoConflictsFromDisk(root: string): Promise<void> {
+  try {
+    const { state } = await loadProjectUnlocked(resolve(root));
+    const { assertNoConflicts } = await import("./conflicts.js");
+    assertNoConflicts(state);
+  } catch (err) {
+    if (err instanceof ProjectLoaderError && err.code === "not_found") return;
+    throw err;
+  }
 }
 
 async function isTeamMode(root: string): Promise<boolean | "error"> {
@@ -384,6 +399,8 @@ export async function deleteTicket(
   await guardPath(targetPath, wrapDir);
 
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
+
     const teamModeResult = options?.hard ? false : await isTeamMode(root);
     if (teamModeResult === "error" && !options?.hard) {
       throw new ProjectLoaderError("io_error", `Cannot determine team mode for ${id}: failed to read .story/config.json. Use --hard to force physical removal.`);
@@ -453,6 +470,8 @@ export async function deleteIssue(
   await guardPath(targetPath, wrapDir);
 
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
+
     const teamModeResult = options?.hard ? false : await isTeamMode(root);
     if (teamModeResult === "error" && !options?.hard) {
       throw new ProjectLoaderError("io_error", `Cannot determine team mode for ${id}: failed to read .story/config.json. Use --hard to force physical removal.`);
@@ -513,6 +532,7 @@ export async function writeNote(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeNoteUnlocked(note, root);
   });
 }
@@ -533,6 +553,8 @@ export async function deleteNote(
   await guardPath(targetPath, wrapDir);
 
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
+
     const teamModeResult = options?.hard ? false : await isTeamMode(root);
     if (teamModeResult === "error" && !options?.hard) {
       throw new ProjectLoaderError("io_error", `Cannot determine team mode for ${id}: failed to read .story/config.json. Use --hard to force physical removal.`);
@@ -593,6 +615,7 @@ export async function writeLesson(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await writeLessonUnlocked(lesson, root);
   });
 }
@@ -648,6 +671,7 @@ export async function deleteLesson(
 ): Promise<void> {
   const wrapDir = resolve(root, ".story");
   await withLock(wrapDir, async () => {
+    await assertNoConflictsFromDisk(root);
     await deleteLessonUnlocked(id, root, options);
   });
 }
@@ -658,26 +682,28 @@ export interface WithProjectLockOptions {
   strict?: boolean;
 }
 
+interface InternalLockOptions extends WithProjectLockOptions {
+  _skipConflictCheck?: boolean;
+}
+
 /**
  * Acquires the project lock, loads fresh state, optionally enforces strict mode,
  * then calls the handler. Released in finally.
  * Use for create/update operations that need atomic load→validate→write.
  */
-export async function withProjectLock(
+async function withProjectLockInternal(
   root: string,
-  options: WithProjectLockOptions,
+  options: InternalLockOptions,
   handler: (result: LoadResult) => Promise<void>,
 ): Promise<void> {
   const absRoot = resolve(root);
   const wrapDir = join(absRoot, ".story");
 
   await withLock(wrapDir, async () => {
-    // Run transaction recovery before reading (same as loadProject)
     await doRecoverTransaction(wrapDir);
 
     const result = await loadProjectUnlocked(absRoot);
 
-    // Check schemaVersion (same guard as loadProject)
     const config = result.state.config;
     if (
       config.schemaVersion !== undefined &&
@@ -701,8 +727,28 @@ export async function withProjectLock(
       }
     }
 
+    if (!options._skipConflictCheck) {
+      const { assertNoConflicts } = await import("./conflicts.js");
+      assertNoConflicts(result.state);
+    }
+
     await handler(result);
   });
+}
+
+export async function withProjectLock(
+  root: string,
+  options: WithProjectLockOptions,
+  handler: (result: LoadResult) => Promise<void>,
+): Promise<void> {
+  return withProjectLockInternal(root, options, handler);
+}
+
+export async function withConflictResolutionLock(
+  root: string,
+  handler: (result: LoadResult) => Promise<void>,
+): Promise<void> {
+  return withProjectLockInternal(root, { strict: false, _skipConflictCheck: true }, handler);
 }
 
 // --- Transaction Journal ---
