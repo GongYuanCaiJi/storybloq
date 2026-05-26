@@ -455,6 +455,27 @@ export function registerTeamCommand(yargs: Argv): Argv {
         },
       )
       .command(
+        "init",
+        "Enable team mode on this project",
+        (y2) =>
+          y2
+            .option("claim-staleness-hours", { type: "number", describe: "Hours before a claim is considered stale (default 48)" })
+            .option("id-allocator", { type: "string", choices: ["local", "git-refs"], describe: "ID allocation strategy (default local)" })
+            .option("format", { type: "string", choices: ["md", "json"], default: "md", describe: "Output format" }),
+        async (argv) => {
+          const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+          if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+          const { handleTeamInit } = await import("./commands/team-init.js");
+          const result = await handleTeamInit(root, {
+            claimStalenessHours: argv["claim-staleness-hours"] as number | undefined,
+            idAllocator: argv["id-allocator"] as "local" | "git-refs" | undefined,
+            format: (argv.format as "md" | "json") ?? "md",
+          });
+          writeOutput(result.output);
+          if (result.exitCode !== 0) process.exitCode = result.exitCode;
+        },
+      )
+      .command(
         "setup",
         "Install git merge driver and .gitattributes for team mode",
         (y2) =>
