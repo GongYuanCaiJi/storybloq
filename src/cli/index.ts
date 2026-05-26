@@ -62,6 +62,8 @@ async function runCli(): Promise<void> {
     registerSessionCommand,
     registerRepairCommand,
     registerReconcileCommand,
+    registerConflictsCommand,
+    registerResolveCommand,
     registerGcCommand,
     registerTeamCommand,
     registerMigrateCommand,
@@ -119,6 +121,8 @@ async function runCli(): Promise<void> {
   cli = registerValidateCommand(cli);
   cli = registerRepairCommand(cli);
   cli = registerReconcileCommand(cli);
+  cli = registerConflictsCommand(cli);
+  cli = registerResolveCommand(cli);
   cli = registerGcCommand(cli);
   cli = registerTeamCommand(cli);
   cli = registerMigrateCommand(cli);

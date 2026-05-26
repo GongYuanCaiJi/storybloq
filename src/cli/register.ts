@@ -236,6 +236,86 @@ export function registerReconcileCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// conflicts + resolve
+// ---------------------------------------------------------------------------
+
+export function registerConflictsCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "conflicts",
+    "View merge conflicts in .story/ items",
+    (y) =>
+      y
+        .command(
+          "list",
+          "List all items with unresolved conflicts",
+          (y2) => y2.option("format", { type: "string", choices: ["md", "json"], default: "md" }),
+          async (argv) => {
+            const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+            if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+            const { handleConflictsList } = await import("./commands/conflicts.js");
+            const result = await handleConflictsList(root, (argv.format as "md" | "json") ?? "md");
+            writeOutput(result.output);
+          },
+        )
+        .command(
+          "show <id>",
+          "Show field-level conflict detail for an item",
+          (y2) =>
+            y2
+              .positional("id", { type: "string", demandOption: true, describe: "Entity ID" })
+              .option("format", { type: "string", choices: ["md", "json"], default: "md" }),
+          async (argv) => {
+            const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+            if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+            const { handleConflictsShow } = await import("./commands/conflicts.js");
+            const result = await handleConflictsShow(argv.id as string, root, (argv.format as "md" | "json") ?? "md");
+            writeOutput(result.output);
+            if (result.exitCode) process.exitCode = result.exitCode;
+          },
+        )
+        .demandCommand(1, ""),
+    () => {},
+  );
+}
+
+export function registerResolveCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "resolve <id>",
+    "Resolve merge conflicts on a .story/ item",
+    (y) =>
+      y
+        .positional("id", { type: "string", demandOption: true, describe: "Entity ID" })
+        .option("field", { type: "string", describe: "Resolve a specific field" })
+        .option("use", { type: "string", choices: ["ours", "theirs"], describe: "Pick a side" })
+        .option("value", { type: "string", describe: "Custom value (JSON)" })
+        .option("format", { type: "string", choices: ["md", "json"], default: "md" }),
+    async (argv) => {
+      const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+      if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+      try {
+        const { handleResolve } = await import("./commands/conflicts.js");
+        let parsedValue: unknown;
+        if (argv.value !== undefined) {
+          try { parsedValue = JSON.parse(argv.value as string); } catch { parsedValue = argv.value; }
+        }
+        const result = await handleResolve(argv.id as string, root, {
+          field: argv.field as string | undefined,
+          use: argv.use as "ours" | "theirs" | undefined,
+          value: parsedValue,
+          format: (argv.format as "md" | "json") ?? "md",
+        });
+        writeOutput(result.output);
+        if (result.exitCode) process.exitCode = result.exitCode;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        writeOutput(message);
+        process.exitCode = ExitCode.USER_ERROR;
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // gc
 // ---------------------------------------------------------------------------
 
