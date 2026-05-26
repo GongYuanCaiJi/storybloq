@@ -611,6 +611,15 @@ export function mergeConfig(
     const oHas = key in o;
     const tHas = key in t;
 
+    const isKnownObjectKey = CONFIG_DEEP_MERGE_KEYS.has(key) || key === CONFIG_NODES_KEY;
+    if (isKnownObjectKey) {
+      for (const [val, label] of [[bVal, "base"], [oVal, "ours"], [tVal, "theirs"]] as const) {
+        if (val !== undefined && jsonType(val) !== "object") {
+          throw new Error(`Config key "${key}" must be an object (got ${jsonType(val)} in ${label})`);
+        }
+      }
+    }
+
     if (!bHas && oHas && tHas) {
       if (deepEqual(oVal, tVal)) {
         merged[key] = oVal;
@@ -634,15 +643,6 @@ export function mergeConfig(
       merged[key] = oVal;
       conflicts.push({ fieldPath: pointer, field: key, kind: "delete-edit", base: bVal, ours: oVal, theirs: undefined });
       continue;
-    }
-
-    const isKnownObjectKey = CONFIG_DEEP_MERGE_KEYS.has(key) || key === CONFIG_NODES_KEY;
-    if (isKnownObjectKey) {
-      for (const [val, label] of [[bVal, "base"], [oVal, "ours"], [tVal, "theirs"]] as const) {
-        if (val !== undefined && jsonType(val) !== "object") {
-          throw new Error(`Config key "${key}" must be an object (got ${jsonType(val)} in ${label})`);
-        }
-      }
     }
 
     if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[key] = bVal; continue; }
