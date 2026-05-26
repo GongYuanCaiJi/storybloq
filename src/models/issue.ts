@@ -2,9 +2,11 @@ import { z } from "zod";
 import {
   ISSUE_STATUSES,
   ISSUE_SEVERITIES,
+  LIFECYCLE_VALUES,
   DateSchema,
   IssueIdSchema,
   TicketIdSchema,
+  ConflictEntrySchema,
 } from "./types.js";
 
 export const IssueSchema = z
@@ -27,6 +29,14 @@ export const IssueSchema = z
     createdBy: z.string().nullable().optional(),
     assignedTo: z.string().nullable().optional(),
     lastModifiedBy: z.string().nullable().optional(),
+    displayId: z.string().optional(),
+    previousDisplayIds: z.array(z.string()).optional(),
+    lifecycle: z.enum(LIFECYCLE_VALUES).optional(),
+    rank: z.string().optional(),
+    createdAt: z.string().optional(),
+    deletedAt: z.string().optional(),
+    deletedBy: z.string().optional(),
+    _conflicts: z.array(ConflictEntrySchema).optional(),
   })
   .passthrough();
 

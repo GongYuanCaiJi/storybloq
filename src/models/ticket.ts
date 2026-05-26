@@ -2,8 +2,11 @@ import { z } from "zod";
 import {
   TICKET_STATUSES,
   TICKET_TYPES,
+  LIFECYCLE_VALUES,
   DateSchema,
   TicketIdSchema,
+  ConflictEntrySchema,
+  ClaimSchema,
 } from "./types.js";
 
 export const CROSS_NODE_REF_REGEX = /^[a-z][a-z0-9_-]{0,63}:(T-\d+[a-z]?|ISS-\d+)$/;
@@ -29,6 +32,15 @@ export const TicketSchema = z
     // ISS-027: Autonomous session ownership — set when ticket claimed as inprogress
     claimedBySession: z.string().nullable().optional(),
     crossNodeBlockedBy: z.array(z.string().regex(CROSS_NODE_REF_REGEX, "Cross-node ref must match node:ID format")).optional(),
+    displayId: z.string().optional(),
+    previousDisplayIds: z.array(z.string()).optional(),
+    lifecycle: z.enum(LIFECYCLE_VALUES).optional(),
+    rank: z.string().optional(),
+    createdAt: z.string().optional(),
+    deletedAt: z.string().optional(),
+    deletedBy: z.string().optional(),
+    _conflicts: z.array(ConflictEntrySchema).optional(),
+    claim: ClaimSchema.optional(),
   })
   .passthrough();
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LESSON_STATUSES, LESSON_SOURCES, DateSchema, LessonIdSchema } from "./types.js";
+import { LESSON_STATUSES, LESSON_SOURCES, LIFECYCLE_VALUES, DateSchema, LessonIdSchema, ConflictEntrySchema } from "./types.js";
 
 export const LessonSchema = z
   .object({
@@ -15,6 +15,14 @@ export const LessonSchema = z
     updatedDate: DateSchema,
     supersedes: LessonIdSchema.nullable(),
     status: z.enum(LESSON_STATUSES),
+    displayId: z.string().optional(),
+    previousDisplayIds: z.array(z.string()).optional(),
+    lifecycle: z.enum(LIFECYCLE_VALUES).optional(),
+    rank: z.string().optional(),
+    createdAt: z.string().optional(),
+    deletedAt: z.string().optional(),
+    deletedBy: z.string().optional(),
+    _conflicts: z.array(ConflictEntrySchema).optional(),
   })
   .passthrough();
 

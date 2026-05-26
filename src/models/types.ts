@@ -44,6 +44,29 @@ export const LessonIdSchema = z
   .string()
   .regex(LESSON_ID_REGEX, "Lesson ID must match L-NNN");
 
+// --- Team-mode enums ---
+
+export const LIFECYCLE_VALUES = ["active", "archived", "deleted"] as const;
+export type Lifecycle = (typeof LIFECYCLE_VALUES)[number];
+
+export const ConflictEntrySchema = z.object({
+  fieldPath: z.string(),
+  field: z.string().optional(),
+  kind: z.enum(["field", "array-element", "coupled", "delete-edit"]),
+  group: z.string().optional(),
+  base: z.unknown(),
+  ours: z.unknown(),
+  theirs: z.unknown(),
+}).passthrough();
+export type ConflictEntry = z.infer<typeof ConflictEntrySchema>;
+
+export const ClaimSchema = z.object({
+  user: z.string(),
+  branch: z.string(),
+  since: z.string(),
+});
+export type Claim = z.infer<typeof ClaimSchema>;
+
 // --- Output/error types ---
 
 export const OUTPUT_FORMATS = ["json", "md"] as const;
