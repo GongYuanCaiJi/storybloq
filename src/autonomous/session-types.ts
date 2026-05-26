@@ -106,6 +106,7 @@ export function deriveWorkspaceId(projectRoot: string): string {
 /** Shape of currentIssue in both SessionState and StatusPayloadActive. */
 export interface CurrentIssueRef {
   readonly id: string;
+  readonly displayId?: string;
   readonly title: string;
   readonly severity: string;
 }
@@ -128,6 +129,8 @@ export interface SessionState {
   readonly currentIssue?: CurrentIssueRef | null;
   readonly completedTickets?: ReadonlyArray<{ readonly id: string; readonly displayId?: string }>;
   readonly resolvedIssues?: ReadonlyArray<string>;
+  readonly resolvedIssueDisplayIds?: Readonly<Record<string, string>>;
+  readonly targetWorkDisplayIds?: Readonly<Record<string, string>>;
   readonly contextPressure?: {
     readonly level: string;
   };
@@ -397,12 +400,16 @@ export const SessionStateSchema = z.object({
   // T-153: Current issue being fixed (null when working on a ticket)
   currentIssue: z.object({
     id: z.string(),
+    displayId: z.string().optional(),
     title: z.string(),
     severity: z.string(),
   }).nullable().default(null),
 
   // T-153: Issues resolved this session
   resolvedIssues: z.array(z.string()).default([]),
+
+  // T-382: Cached display IDs for resolved issues (canonical -> display)
+  resolvedIssueDisplayIds: z.record(z.string()).default({}),
 
   // Completed tickets this session
   completedTickets: z.array(z.object({
@@ -560,8 +567,11 @@ export const SessionStateSchema = z.object({
   }).nullable().default(null),
   pipelinePhase: z.enum(["ticket", "postComplete"]).default("ticket"),
 
-  // T-188: Targeted auto mode — constrains PICK_TICKET to specific items
+  // T-188: Targeted auto mode -- constrains PICK_TICKET to specific items
   targetWork: z.array(z.string().regex(TARGET_WORK_ID_REGEX)).max(150).default([]),
+
+  // T-382: Cached display IDs for target work items (canonical -> display)
+  targetWorkDisplayIds: z.record(z.string()).default({}),
 
   // T-124: Test stage baseline and retry tracking
   testBaseline: z.object({

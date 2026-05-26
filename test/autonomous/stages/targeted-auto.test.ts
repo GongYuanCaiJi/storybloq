@@ -187,7 +187,7 @@ describe("stuck detection (firstReady-based)", () => {
       ],
     });
     const { firstReady } = buildTargetedCandidatesText(["T-001", "T-002"], ps);
-    expect(firstReady).toEqual({ id: "T-001", kind: "ticket" });
+    expect(firstReady).toEqual({ id: "T-001", displayId: "T-001", kind: "ticket" });
   });
 
   it("stuck when mutual-blocking cycle (T-001 blocks T-002, T-002 blocks T-001)", () => {
@@ -237,7 +237,7 @@ describe("stuck detection (firstReady-based)", () => {
       ],
     });
     const { firstReady } = buildTargetedCandidatesText(["ISS-001", "ISS-002"], ps);
-    expect(firstReady).toEqual({ id: "ISS-002", kind: "issue" });
+    expect(firstReady).toEqual({ id: "ISS-002", displayId: "ISS-002", kind: "issue" });
   });
 });
 
@@ -262,7 +262,7 @@ describe("buildTargetedCandidatesText", () => {
     expect(text).toContain("blocked by T-999");
     expect(text).toContain("ISS-001: Open issue");
     expect(text).toContain("(issue, high)");
-    expect(firstReady).toEqual({ id: "T-001", kind: "ticket" });
+    expect(firstReady).toEqual({ id: "T-001", displayId: "T-001", kind: "ticket" });
   });
 
   it("firstReady is an issue when all tickets are blocked", () => {
@@ -271,7 +271,7 @@ describe("buildTargetedCandidatesText", () => {
       issues: [makeIssue({ id: "ISS-001", title: "Ready issue", severity: "medium" })],
     });
     const { firstReady } = buildTargetedCandidatesText(["T-001", "ISS-001"], ps);
-    expect(firstReady).toEqual({ id: "ISS-001", kind: "issue" });
+    expect(firstReady).toEqual({ id: "ISS-001", displayId: "ISS-001", kind: "issue" });
   });
 });
 

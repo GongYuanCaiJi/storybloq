@@ -62,37 +62,44 @@ function issueStatusLabel(status: string): string {
 export function buildTargetedCandidatesText(
   remaining: string[],
   projectState: ProjectState,
-): { text: string; firstReady: { id: string; kind: "ticket" | "issue" } | null } {
+): { text: string; firstReady: { id: string; displayId: string; kind: "ticket" | "issue" } | null } {
   const lines: string[] = [];
-  let firstReady: { id: string; kind: "ticket" | "issue" } | null = null;
+  let firstReady: { id: string; displayId: string; kind: "ticket" | "issue" } | null = null;
 
   for (let i = 0; i < remaining.length; i++) {
     const id = remaining[i]!;
 
-    if (id.startsWith("ISS-")) {
-      const issue = projectState.issues.find(iss => iss.id === id);
-      if (!issue) {
-        lines.push(`${i + 1}. **${id}** -- not found`);
-        continue;
-      }
-      lines.push(`${i + 1}. **${issue.id}: ${issue.title}** (issue, ${issue.severity}) -- ${issueStatusLabel(issue.status)}`);
+    const issueResult = projectState.resolveIssueRef(id);
+    if (issueResult.kind === "found") {
+      const issue = issueResult.item;
+      const displayId = (issue as Record<string, unknown>).displayId as string | undefined ?? issue.id;
+      lines.push(`${i + 1}. **${displayId}: ${issue.title}** (issue, ${issue.severity}) -- ${issueStatusLabel(issue.status)}`);
       if (!firstReady && (issue.status === "open" || issue.status === "inprogress")) {
-        firstReady = { id: issue.id, kind: "issue" };
+        firstReady = { id: issue.id, displayId, kind: "issue" };
       }
-    } else {
-      const ticket = projectState.ticketByID(id);
-      if (!ticket) {
-        lines.push(`${i + 1}. **${id}** -- not found`);
-        continue;
-      }
+      continue;
+    }
+
+    const ticketResult = projectState.resolveTicketRef(id);
+    if (ticketResult.kind === "found") {
+      const ticket = ticketResult.item;
+      const displayId = (ticket as Record<string, unknown>).displayId as string | undefined ?? ticket.id;
       const blocked = projectState.isBlocked(ticket);
       const complete = ticket.status === "complete";
-      const status = complete ? "already complete" : blocked ? `blocked by ${ticket.blockedBy.join(", ")}` : "ready";
-      lines.push(`${i + 1}. **${ticket.id}: ${ticket.title}** (${ticket.type}) -- ${status}`);
+      const blockerIds = ticket.blockedBy.map((bId) => {
+        const bResult = projectState.resolveTicketRef(bId);
+        if (bResult.kind === "found") return (bResult.item as Record<string, unknown>).displayId as string | undefined ?? bResult.item.id;
+        return bId;
+      });
+      const status = complete ? "already complete" : blocked ? `blocked by ${blockerIds.join(", ")}` : "ready";
+      lines.push(`${i + 1}. **${displayId}: ${ticket.title}** (${ticket.type}) -- ${status}`);
       if (!firstReady && !blocked && !complete && (ticket.status === "open" || ticket.status === "inprogress")) {
-        firstReady = { id: ticket.id, kind: "ticket" };
+        firstReady = { id: ticket.id, displayId, kind: "ticket" };
       }
+      continue;
     }
+
+    lines.push(`${i + 1}. **${id}** -- not found`);
   }
 
   return { text: lines.join("\n"), firstReady };
@@ -106,18 +113,19 @@ export function buildTargetedPickInstruction(
   remaining: string[],
   projectState: ProjectState,
   sessionId: string,
-  precomputed?: { text: string; firstReady: { id: string; kind: "ticket" | "issue" } | null },
+  precomputed?: { text: string; firstReady: { id: string; displayId: string; kind: "ticket" | "issue" } | null },
 ): string {
   const { text, firstReady } = precomputed ?? buildTargetedCandidatesText(remaining, projectState);
 
+  const displayLabel = firstReady?.displayId ?? firstReady?.id;
   const pickExample = firstReady
     ? firstReady.kind === "ticket"
-      ? `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "${firstReady.id}" } }`
-      : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "issue_picked", "issueId": "${firstReady.id}" } }`
+      ? `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "${displayLabel}" } }`
+      : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "issue_picked", "issueId": "${displayLabel}" } }`
     : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "T-XXX" } }`;
 
   const pickPrompt = firstReady
-    ? `Pick **${firstReady.id}** (next target) by calling \`storybloq_autonomous_guide\` now:`
+    ? `Pick **${displayLabel}** (next target) by calling \`storybloq_autonomous_guide\` now:`
     : "Pick a target by calling `storybloq_autonomous_guide` now:";
 
   return [
