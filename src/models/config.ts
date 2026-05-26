@@ -34,6 +34,11 @@ export const ConfigSchema = z
     nodes: z.record(z.string(), z.unknown()).optional(),
     orchestrator: z.string().optional(),
     federation: z.record(z.unknown()).optional(),
+    team: z.object({
+      minCliVersion: z.string().optional(),
+      minMacVersion: z.string().optional(),
+      requiredFeatures: z.array(z.string()).optional(),
+    }).optional(),
   })
   .passthrough();
 
