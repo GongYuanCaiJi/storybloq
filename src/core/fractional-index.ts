@@ -19,7 +19,11 @@ export function generateKeyBetween(a: string | null, b: string | null): string {
     if (b!.length <= 1) {
       throw new Error(`Cannot generate key before minimum rank "${b}"`);
     }
-    return b![0]! + generateKeyBetween(null, b!.slice(1));
+    const rest = b!.slice(1);
+    if (rest.split("").every((c) => charIndex(c) === 0)) {
+      return b!.slice(0, -1);
+    }
+    return b![0]! + generateKeyBetween(null, rest);
   }
 
   if (b === null) {
