@@ -1,5 +1,5 @@
 import { validateProject } from "../../core/validation.js";
-import { resolveAndNormalizeTicketRefs, resolveAndNormalizeIssueRef, RefResolutionError } from "../../core/ref-normalization.js";
+import { resolveAndNormalizeTicketRef, resolveAndNormalizeIssueRef, RefResolutionError } from "../../core/ref-normalization.js";
 import { ProjectState } from "../../core/project-state.js";
 import {
   withProjectLock,
@@ -168,7 +168,7 @@ function validateAndResolveRelatedTickets(ids: string[], state: ProjectState): s
   const resolved: string[] = [];
   for (const tid of ids) {
     try {
-      resolved.push(resolveAndNormalizeTicketRefs(state, [tid])[0]!);
+      resolved.push(resolveAndNormalizeTicketRef(state, tid));
     } catch (err) {
       if (err instanceof RefResolutionError) {
         const code = err.reason === "ambiguous" ? "invalid_input" : "not_found";
