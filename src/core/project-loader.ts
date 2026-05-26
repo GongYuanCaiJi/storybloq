@@ -4,12 +4,14 @@ import {
   writeFile,
   rename,
   unlink,
+  link,
   stat,
   realpath,
   lstat,
   open,
   mkdir,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join, resolve, relative, extname, dirname, basename } from "node:path";
 import lockfile from "proper-lockfile";
@@ -943,12 +945,46 @@ export function serializeJSON(obj: unknown): string {
   return JSON.stringify(sortKeysDeep(obj), null, 2) + "\n";
 }
 
-/** Atomic write: write to temp file, then rename. */
+/** Atomic create: write to temp file, then link (fails if target exists). */
+export async function atomicCreate(
+  targetPath: string,
+  content: string,
+): Promise<void> {
+  const tempPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: import("node:fs/promises").FileHandle | undefined;
+  try {
+    fd = await open(tempPath, "wx", 0o600);
+    await fd.writeFile(content, "utf-8");
+    await fd.sync();
+    await fd.close();
+    fd = undefined;
+    await link(tempPath, targetPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      throw new ProjectLoaderError(
+        "file_exists",
+        `File already exists: ${basename(targetPath)}`,
+        err,
+      );
+    }
+    throw new ProjectLoaderError(
+      "io_error",
+      `Failed to create ${basename(targetPath)}`,
+      err,
+    );
+  } finally {
+    if (fd) { try { await fd.close(); } catch { /* ignore */ } }
+    try { await unlink(tempPath); } catch { /* best-effort temp cleanup */ }
+  }
+}
+
+/** Atomic write: write to temp file, then rename (overwrites). */
 export async function atomicWrite(
   targetPath: string,
   content: string,
 ): Promise<void> {
-  const tempPath = `${targetPath}.${process.pid}.tmp`;
+  const tempPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(tempPath, content, "utf-8");
     await rename(tempPath, targetPath);

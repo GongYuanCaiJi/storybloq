@@ -57,6 +57,7 @@ export const ERROR_CODES = [
   "invalid_input",
   "conflict",
   "version_mismatch",
+  "file_exists",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

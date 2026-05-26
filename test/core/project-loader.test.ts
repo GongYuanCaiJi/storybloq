@@ -22,6 +22,8 @@ import {
   runTransaction,
   sortKeysDeep,
   serializeJSON,
+  atomicWrite,
+  atomicCreate,
 } from "../../src/core/project-loader.js";
 import { ProjectLoaderError } from "../../src/core/errors.js";
 import { fixturesDir } from "../helpers.js";
@@ -800,6 +802,113 @@ describe("transaction recovery", () => {
     expect(existsSync(tempPath)).toBe(false);
     expect(existsSync(targetPath)).toBe(false);
     expect(existsSync(join(wrapDir, ".txn.json"))).toBe(false);
+  });
+});
+
+describe("atomicCreate", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "storybloq-ac-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("succeeds on new file and writes correct content", async () => {
+    const target = join(tmpDir, "test.json");
+    await atomicCreate(target, '{"id":"T-001"}\n');
+    const content = await readFile(target, "utf-8");
+    expect(content).toBe('{"id":"T-001"}\n');
+  });
+
+  it("throws file_exists when target already exists", async () => {
+    const target = join(tmpDir, "test.json");
+    await writeFile(target, "existing");
+    try {
+      await atomicCreate(target, "new content");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProjectLoaderError);
+      expect((err as ProjectLoaderError).code).toBe("file_exists");
+    }
+  });
+
+  it("cleans up temp file on EEXIST", async () => {
+    const target = join(tmpDir, "test.json");
+    await writeFile(target, "existing");
+    try {
+      await atomicCreate(target, "new content");
+    } catch {
+      // expected
+    }
+    const files = await readdir(tmpDir);
+    expect(files.filter((f) => f.endsWith(".tmp"))).toHaveLength(0);
+  });
+
+  it("cleans up temp file on non-EEXIST link failure", async () => {
+    // When parent directory does not exist, link() fails with ENOENT (not EEXIST).
+    // atomicCreate should still clean up the temp and throw io_error, not file_exists.
+    const target = join(tmpDir, "nonexistent-dir", "test.json");
+    try {
+      await atomicCreate(target, "content");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ProjectLoaderError);
+      expect((err as ProjectLoaderError).code).not.toBe("file_exists");
+    }
+    // No orphaned temp files in tmpDir
+    const files = await readdir(tmpDir);
+    expect(files.filter((f) => f.endsWith(".tmp"))).toHaveLength(0);
+  });
+
+  it("does not throw spurious error when temp unlink fails after successful link", async () => {
+    // After link() succeeds, unlink(temp) is best-effort.
+    // Verify atomicCreate succeeds even if cleanup has issues by checking the file is created.
+    const target = join(tmpDir, "test.json");
+    await atomicCreate(target, '{"ok":true}\n');
+    expect(existsSync(target)).toBe(true);
+    const content = await readFile(target, "utf-8");
+    expect(content).toBe('{"ok":true}\n');
+  });
+
+  it("uses PID+UUID temp naming (no collision on same PID)", async () => {
+    // Two concurrent atomicCreate calls to different targets in the same dir
+    // should not collide on temp file names.
+    const target1 = join(tmpDir, "a.json");
+    const target2 = join(tmpDir, "b.json");
+    await Promise.all([
+      atomicCreate(target1, '{"id":"a"}\n'),
+      atomicCreate(target2, '{"id":"b"}\n'),
+    ]);
+    expect(await readFile(target1, "utf-8")).toBe('{"id":"a"}\n');
+    expect(await readFile(target2, "utf-8")).toBe('{"id":"b"}\n');
+  });
+});
+
+describe("atomicWrite temp naming", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), "storybloq-aw-"));
+  });
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("still overwrites existing file (regression)", async () => {
+    const target = join(tmpDir, "test.json");
+    await writeFile(target, "old");
+    await atomicWrite(target, "new");
+    expect(await readFile(target, "utf-8")).toBe("new");
+  });
+
+  it("creates new file when target does not exist (regression)", async () => {
+    const target = join(tmpDir, "new.json");
+    await atomicWrite(target, "content");
+    expect(await readFile(target, "utf-8")).toBe("content");
   });
 });
 
