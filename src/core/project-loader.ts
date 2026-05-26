@@ -913,6 +913,17 @@ async function loadDirectory<T>(
         });
         continue;
       }
+      const data = result.data as Record<string, unknown>;
+      if (typeof data.id === "string") {
+        const stem = basename(entry, ".json");
+        if (stem !== data.id) {
+          warnings.push({
+            file: relPath,
+            message: `Filename stem "${stem}" does not match content id "${data.id}"`,
+            type: "filename_id_mismatch",
+          });
+        }
+      }
       results.push(result.data);
     } catch (err) {
       warnings.push({

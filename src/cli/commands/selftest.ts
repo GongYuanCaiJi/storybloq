@@ -1,5 +1,9 @@
 import {
   loadProject,
+  withProjectLock,
+  writeTicketUnlocked,
+  writeIssueUnlocked,
+  writeNoteUnlocked,
   writeTicket,
   writeIssue,
   writeNote,
@@ -56,24 +60,25 @@ export async function handleSelftest(
     // --- Ticket cycle ---
     let ticketId: string | undefined;
     try {
-      const { state } = await loadProject(root);
-      ticketId = nextTicketID(state.tickets);
-      const today = todayISO();
-      const ticket: Ticket = {
-        id: ticketId,
-        title: "selftest ticket",
-        type: "chore",
-        status: "open",
-        phase: null,
-        order: 0,
-        description: "Integration smoke test — will be deleted.",
-        createdDate: today,
-        completedDate: null,
-        blockedBy: [],
-        parentTicket: null,
-      };
-      await writeTicket(ticket, root);
-      createdIds.push({ type: "ticket", id: ticketId });
+      await withProjectLock(root, { strict: false }, async (result) => {
+        ticketId = nextTicketID(result.state.tickets);
+        const today = todayISO();
+        const ticket: Ticket = {
+          id: ticketId,
+          title: "selftest ticket",
+          type: "chore",
+          status: "open",
+          phase: null,
+          order: 0,
+          description: "Integration smoke test -- will be deleted.",
+          createdDate: today,
+          completedDate: null,
+          blockedBy: [],
+          parentTicket: null,
+        };
+        await writeTicketUnlocked(ticket, root);
+      });
+      createdIds.push({ type: "ticket", id: ticketId! });
       record("ticket", "create", true, `Created ${ticketId}`);
     } catch (err) {
       record("ticket", "create", false, errMsg(err));
@@ -131,26 +136,27 @@ export async function handleSelftest(
     // --- Issue cycle ---
     let issueId: string | undefined;
     try {
-      const { state } = await loadProject(root);
-      issueId = nextIssueID(state.issues);
-      const today = todayISO();
-      const issue: Issue = {
-        id: issueId,
-        title: "selftest issue",
-        status: "open",
-        severity: "low",
-        components: [],
-        impact: "Integration smoke test — will be deleted.",
-        resolution: null,
-        location: [],
-        discoveredDate: today,
-        resolvedDate: null,
-        relatedTickets: [],
-        order: 0,
-        phase: null,
-      };
-      await writeIssue(issue, root);
-      createdIds.push({ type: "issue", id: issueId });
+      await withProjectLock(root, { strict: false }, async (result) => {
+        issueId = nextIssueID(result.state.issues);
+        const today = todayISO();
+        const issue: Issue = {
+          id: issueId,
+          title: "selftest issue",
+          status: "open",
+          severity: "low",
+          components: [],
+          impact: "Integration smoke test -- will be deleted.",
+          resolution: null,
+          location: [],
+          discoveredDate: today,
+          resolvedDate: null,
+          relatedTickets: [],
+          order: 0,
+          phase: null,
+        };
+        await writeIssueUnlocked(issue, root);
+      });
+      createdIds.push({ type: "issue", id: issueId! });
       record("issue", "create", true, `Created ${issueId}`);
     } catch (err) {
       record("issue", "create", false, errMsg(err));
@@ -208,20 +214,21 @@ export async function handleSelftest(
     // --- Note cycle ---
     let noteId: string | undefined;
     try {
-      const { state } = await loadProject(root);
-      noteId = nextNoteID(state.notes);
-      const today = todayISO();
-      const note: Note = {
-        id: noteId,
-        title: "selftest note",
-        content: "Integration smoke test — will be deleted.",
-        tags: [],
-        status: "active",
-        createdDate: today,
-        updatedDate: today,
-      };
-      await writeNote(note, root);
-      createdIds.push({ type: "note", id: noteId });
+      await withProjectLock(root, { strict: false }, async (result) => {
+        noteId = nextNoteID(result.state.notes);
+        const today = todayISO();
+        const note: Note = {
+          id: noteId,
+          title: "selftest note",
+          content: "Integration smoke test -- will be deleted.",
+          tags: [],
+          status: "active",
+          createdDate: today,
+          updatedDate: today,
+        };
+        await writeNoteUnlocked(note, root);
+      });
+      createdIds.push({ type: "note", id: noteId! });
       record("note", "create", true, `Created ${noteId}`);
     } catch (err) {
       record("note", "create", false, errMsg(err));

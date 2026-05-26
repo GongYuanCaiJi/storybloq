@@ -402,6 +402,36 @@ describe("loadProject", () => {
   });
 });
 
+describe("filename_id_mismatch", () => {
+  it("warns when filename stem does not match content id", async () => {
+    testRoot = await createTestProject({
+      tickets: {
+        "T-001.json": { ...validTicket, id: "T-002", title: "Mismatched" },
+      },
+    });
+
+    const result = await loadProject(testRoot);
+    const mismatchWarning = result.warnings.find(
+      (w) => w.type === "filename_id_mismatch",
+    );
+    expect(mismatchWarning).toBeDefined();
+    expect(mismatchWarning!.message).toContain("T-001");
+    expect(mismatchWarning!.message).toContain("T-002");
+  });
+
+  it("does not warn when filename stem matches content id", async () => {
+    testRoot = await createTestProject({
+      tickets: { "T-001.json": validTicket },
+    });
+
+    const result = await loadProject(testRoot);
+    const mismatchWarning = result.warnings.find(
+      (w) => w.type === "filename_id_mismatch",
+    );
+    expect(mismatchWarning).toBeUndefined();
+  });
+});
+
 describe("write operations", () => {
   describe("writeTicket", () => {
     it("writes ticket and reads it back identically", async () => {
