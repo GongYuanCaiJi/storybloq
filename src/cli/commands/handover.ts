@@ -1,5 +1,5 @@
 import { readHandover } from "../../core/handover-parser.js";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -121,6 +121,19 @@ export function normalizeSlug(raw: string): string {
   return slug;
 }
 
+function detectTeamMode(absRoot: string): boolean {
+  try {
+    const configPath = join(absRoot, ".story", "config.json");
+    const raw = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw) as Record<string, unknown>;
+    const team = config.team;
+    return team != null && typeof team === "object" && !Array.isArray(team);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
 /**
  * Creates a handover markdown file.
  * Runs inside withProjectLock for atomic filename allocation + write.
@@ -145,57 +158,82 @@ export async function handleHandoverCreate(
     await mkdir(handoversDir, { recursive: true });
     const wrapDir = join(absRoot, ".story");
 
-    // Find next globally monotonic sequence number for this date.
-    // Format: YYYY-MM-DD-NN-<slug>.md — sequence before slug ensures
-    // handover latest returns the most recently created file regardless of slug.
-    const datePrefix = `${date}-`;
-    const seqRegex = new RegExp(`^${date}-(\\d{2})-`);
-    let maxSeq = 0;
+    const isTeamMode = detectTeamMode(absRoot);
 
-    const { readdirSync } = await import("node:fs");
-    try {
-      for (const f of readdirSync(handoversDir)) {
-        const m = f.match(seqRegex);
-        if (m) {
-          const n = parseInt(m[1]!, 10);
-          if (n > maxSeq) maxSeq = n;
+    if (isTeamMode) {
+      const { generateTeamHandoverFilename } = await import("../../core/handover-filename.js");
+      const { writeFileSync, linkSync, unlinkSync } = await import("node:fs");
+      const { randomBytes } = await import("node:crypto");
+      let attempt = 0;
+      while (attempt < 5) {
+        const candidate = generateTeamHandoverFilename(slug);
+        const candidatePath = join(handoversDir, candidate);
+        const tmpPath = join(handoversDir, `.tmp-${randomBytes(4).toString("hex")}`);
+        let tmpCreated = false;
+        try {
+          await parseHandoverFilename(candidate, handoversDir);
+          await guardPath(candidatePath, wrapDir);
+          writeFileSync(tmpPath, content, "utf-8");
+          tmpCreated = true;
+          linkSync(tmpPath, candidatePath);
+          filename = candidate;
+          try { unlinkSync(tmpPath); } catch {}
+          tmpCreated = false;
+          break;
+        } catch (err: unknown) {
+          if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+            attempt++;
+            continue;
+          }
+          throw err;
+        } finally {
+          if (tmpCreated) {
+            try { unlinkSync(tmpPath); } catch {}
+          }
         }
       }
-    } catch {
-      // dir empty or unreadable — start at 0
-    }
-
-    let nextSeq = maxSeq + 1;
-    if (nextSeq > 99) {
-      throw new CliValidationError(
-        "conflict",
-        `Too many handovers for ${date}; limit is 99 per day`,
-      );
-    }
-
-    let candidate = `${date}-${String(nextSeq).padStart(2, "0")}-${slug}.md`;
-    let candidatePath = join(handoversDir, candidate);
-
-    // Write protection: never overwrite an existing handover file.
-    // Handovers are append-only. If the candidate already exists
-    // (e.g. race condition or manually created file), increment
-    // the sequence number until we find a free slot.
-    while (existsSync(candidatePath)) {
-      nextSeq++;
-      if (nextSeq > 99) {
-        throw new CliValidationError(
-          "conflict",
-          `Too many handovers for ${date}; limit is 99 per day`,
-        );
+      if (!filename) {
+        throw new CliValidationError("conflict", "Failed to create unique handover filename after 5 retries");
       }
-      candidate = `${date}-${String(nextSeq).padStart(2, "0")}-${slug}.md`;
-      candidatePath = join(handoversDir, candidate);
-    }
+    } else {
+      const seqRegex = new RegExp(`^${date}-(\\d{2})-`);
+      let maxSeq = 0;
 
-    await parseHandoverFilename(candidate, handoversDir);
-    await guardPath(candidatePath, wrapDir);
-    await atomicWrite(candidatePath, content);
-    filename = candidate;
+      const { readdirSync } = await import("node:fs");
+      try {
+        for (const f of readdirSync(handoversDir)) {
+          const m = f.match(seqRegex);
+          if (m) {
+            const n = parseInt(m[1]!, 10);
+            if (n > maxSeq) maxSeq = n;
+          }
+        }
+      } catch {
+        // dir empty or unreadable
+      }
+
+      let nextSeq = maxSeq + 1;
+      if (nextSeq > 99) {
+        throw new CliValidationError("conflict", `Too many handovers for ${date}; limit is 99 per day`);
+      }
+
+      let candidate = `${date}-${String(nextSeq).padStart(2, "0")}-${slug}.md`;
+      let candidatePath = join(handoversDir, candidate);
+
+      while (existsSync(candidatePath)) {
+        nextSeq++;
+        if (nextSeq > 99) {
+          throw new CliValidationError("conflict", `Too many handovers for ${date}; limit is 99 per day`);
+        }
+        candidate = `${date}-${String(nextSeq).padStart(2, "0")}-${slug}.md`;
+        candidatePath = join(handoversDir, candidate);
+      }
+
+      await parseHandoverFilename(candidate, handoversDir);
+      await guardPath(candidatePath, wrapDir);
+      await atomicWrite(candidatePath, content);
+      filename = candidate;
+    }
   });
 
   return { output: formatHandoverCreateResult(filename!, format) };

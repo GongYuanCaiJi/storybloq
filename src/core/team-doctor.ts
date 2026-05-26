@@ -411,6 +411,27 @@ function checkReservationHealth(state: ProjectState, ctx: DoctorContext): Doctor
   return findings;
 }
 
+const TEAM_HANDOVER_REGEX = /^\d{4}-\d{2}-\d{2}-\d{6}-[0-9a-f]{8}-/;
+
+function checkHandoverFilenamePolicy(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
+  const rawTeam = (state.config as Record<string, unknown>).team;
+  if (!rawTeam || typeof rawTeam !== "object" || Array.isArray(rawTeam)) return [];
+
+  const findings: DoctorFinding[] = [];
+  for (const name of state.handoverFilenames) {
+    if (!TEAM_HANDOVER_REGEX.test(name)) {
+      findings.push({
+        severity: "info",
+        code: "legacy_handover_filename",
+        message: `Handover "${name}" uses legacy sequential filename format`,
+        entity: name,
+        repair: null,
+      });
+    }
+  }
+  return findings;
+}
+
 registerDoctorCheck(checkDuplicateCanonicalIds);
 registerDoctorCheck(checkDuplicateDisplayIds);
 registerDoctorCheck(checkMissingDisplayId);
@@ -422,3 +443,4 @@ registerDoctorCheck(checkStaleTombstones);
 registerDoctorCheck(checkConflictsPresent);
 registerDoctorCheck(checkMergeDriverConfig);
 registerDoctorCheck(checkReservationHealth);
+registerDoctorCheck(checkHandoverFilenamePolicy);
