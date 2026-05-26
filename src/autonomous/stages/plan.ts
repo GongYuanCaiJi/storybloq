@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
 import { assessRisk, requiredRounds, nextReviewer } from "../review-depth.js";
+import { canClaim } from "../../core/claims.js";
 import {
   currentStorybloqClient,
   nativeCodexReportInstruction,
@@ -125,7 +126,14 @@ export class PlanStage implements WorkflowStage {
           if (ticket.status === "inprogress" && ticketClaim === ctx.state.sessionId) return;
           if (ticket.status !== "open") { claimFailed = true; return; }
           if (ticketClaim && ticketClaim !== ctx.state.sessionId) { claimFailed = true; return; }
-          const updated = { ...ticket, status: "inprogress" as const, claimedBySession: ctx.state.sessionId };
+          const draftClaim = (ctx.state as Record<string, unknown>).pendingTicketClaim as { user: string; branch: string; since: string } | undefined;
+          if (ticket.claim && draftClaim) {
+            const claimCheck = canClaim(ticket, draftClaim.user, draftClaim.branch);
+            if (!claimCheck.allowed) { claimFailed = true; return; }
+          } else if (ticket.claim && !draftClaim) {
+            claimFailed = true; return;
+          }
+          const updated = { ...ticket, status: "inprogress" as const, claimedBySession: ctx.state.sessionId, ...(draftClaim ? { claim: draftClaim } : {}) };
           await writeTicketUnlocked(updated, ctx.root);
         });
       } catch {

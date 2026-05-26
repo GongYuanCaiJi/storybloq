@@ -2149,7 +2149,8 @@ async function handleCancel(root: string, args: GuideInput): Promise<McpToolResu
         if (ticket && ticket.status === "inprogress") {
           const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
           if (!ticketClaim || ticketClaim === cancelInfo.state.sessionId) {
-            await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null }, root);
+            const clearClaim = !ticket.claim || ticketClaim === cancelInfo.state.sessionId;
+            await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, ...(clearClaim ? { claim: undefined } : {}) }, root);
             ticketReleased = true;
           } else {
             ticketConflict = true;

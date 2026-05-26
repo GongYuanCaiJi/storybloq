@@ -336,6 +336,11 @@ export async function gitCheckRefFormat(cwd: string, refName: string): Promise<G
   });
 }
 
+export async function gitUserEmail(cwd: string): Promise<string | null> {
+  const result = await git(cwd, ["config", "user.email"], (out) => out.trim());
+  return result.ok && result.data ? result.data : null;
+}
+
 // ---------------------------------------------------------------------------
 // Parsers
 // ---------------------------------------------------------------------------

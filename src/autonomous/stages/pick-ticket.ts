@@ -4,6 +4,8 @@ import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./t
 import type { GuideReportInput } from "../session-types.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
 import { detectBranchAffinity, checkAffinityMismatch, buildAffinityAnnotation, buildMismatchHandoverInstruction, createTicketBranch, refreshGitWorkingState } from "../branch-affinity.js";
+import { canClaim, buildClaim } from "../../core/claims.js";
+import { gitUserEmail } from "../git-inspector.js";
 
 /**
  * PICK_TICKET stage -- Claude selects the next ticket to work on.
@@ -199,6 +201,18 @@ export class PickTicketStage implements WorkflowStage {
       }
     }
 
+    // T-375: Claim check -- reject tickets claimed by others
+    const email = await gitUserEmail(ctx.root);
+    if (ticket.claim) {
+      if (!email) {
+        return { action: "retry", instruction: `Ticket ${ticketId} is claimed by ${ticket.claim.user}. Configure git user.email to verify identity, or pick a different ticket.` };
+      }
+      const claimResult = canClaim(ticket, email, ctx.state.git?.branch ?? "unknown");
+      if (!claimResult.allowed) {
+        return { action: "retry", instruction: `Ticket ${ticketId} is claimed by ${claimResult.claimedBy} on branch ${ticket.claim.branch}. Pick a different ticket.` };
+      }
+    }
+
     // T-328 Part 2: Per-ticket branch creation
     if (ctx.state.resolvedBranchStrategy === "per-ticket") {
       const headResult = await import("../git-inspector.js").then(m => m.gitHead(ctx.root));
@@ -234,12 +248,17 @@ export class PickTicketStage implements WorkflowStage {
     const planPath = join(ctx.dir, "plan.md");
     try { if (existsSync(planPath)) unlinkSync(planPath); } catch { /* best-effort */ }
 
+    // T-375: Build claim using final branch (after per-ticket branch creation)
+    const finalBranch = ctx.state.git?.branch ?? "unknown";
+    const claimObj = email ? buildClaim(email, finalBranch, new Date().toISOString()) : undefined;
+
     // Stage field updates (persisted atomically with state transition by processAdvance)
     ctx.updateDraft({
       ticket: { id: ticket.id, title: ticket.title, claimed: true },
       reviews: { plan: [], code: [] },
       finalizeCheckpoint: null,
       ticketStartedAt: new Date().toISOString(),
+      ...(claimObj ? { pendingTicketClaim: claimObj } : {}),
     });
 
     // Produce PLAN instruction (advance with result for hybrid dispatch)
