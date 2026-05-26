@@ -1,8 +1,8 @@
 import { realpathSync } from "node:fs";
 import { z } from "zod";
 
-/** Combined ticket + issue ID regex for targetWork validation. */
-export const TARGET_WORK_ID_REGEX = /^(T-\d+[a-z]?|ISS-\d+)$/;
+/** Combined ticket + issue ID regex for targetWork validation (sequential + canonical). */
+export const TARGET_WORK_ID_REGEX = /^(T-\d+[a-z]?|ISS-\d+|t-[0-9a-hjkmnp-tvwxyz]{16}|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
 
 /**
  * ISS-556: Canonical dispositions for lens-review findings.
