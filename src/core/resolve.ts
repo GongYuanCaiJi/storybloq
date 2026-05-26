@@ -12,6 +12,19 @@ export interface ResolveResult {
   fullyResolved: boolean;
 }
 
+function fieldName(c: ConflictEntry): string {
+  return (c as Record<string, unknown>).field as string | undefined
+    ?? c.fieldPath.replace(/^\//, "");
+}
+
+function matchesField(c: ConflictEntry, input: string): boolean {
+  if (c.fieldPath === input) return true;
+  const plain = input.replace(/^\//, "");
+  if (c.fieldPath === `/${plain}`) return true;
+  if ((c as Record<string, unknown>).field === plain) return true;
+  return false;
+}
+
 export function resolveConflicts(
   entity: Record<string, unknown>,
   options: ResolveOptions,
@@ -25,7 +38,7 @@ export function resolveConflicts(
   const remaining: ConflictEntry[] = [];
 
   if (options.field) {
-    const target = conflicts.find((c) => c.fieldPath === options.field);
+    const target = conflicts.find((c) => matchesField(c, options.field!));
     if (!target) {
       throw new Error(`No conflict found for field "${options.field}"`);
     }
@@ -40,27 +53,30 @@ export function resolveConflicts(
       }
       for (const c of conflicts) {
         if (c.kind === "coupled" && c.group === target.group) {
-          entity[c.fieldPath] = side === "ours" ? c.ours : c.theirs;
-          resolved.push(c.fieldPath);
+          const name = fieldName(c);
+          entity[name] = side === "ours" ? c.ours : c.theirs;
+          resolved.push(name);
         } else {
           remaining.push(c);
         }
       }
     } else {
+      const name = fieldName(target);
       const value = options.value !== undefined
         ? options.value
         : options.use === "ours" ? target.ours : target.theirs;
-      entity[target.fieldPath] = value;
-      resolved.push(target.fieldPath);
+      entity[name] = value;
+      resolved.push(name);
       for (const c of conflicts) {
-        if (c.fieldPath !== target.fieldPath) remaining.push(c);
+        if (c !== target) remaining.push(c);
       }
     }
   } else if (options.use) {
     const side = options.use;
     for (const c of conflicts) {
-      entity[c.fieldPath] = side === "ours" ? c.ours : c.theirs;
-      resolved.push(c.fieldPath);
+      const name = fieldName(c);
+      entity[name] = side === "ours" ? c.ours : c.theirs;
+      resolved.push(name);
     }
   } else {
     throw new Error("Must specify --use or --field");

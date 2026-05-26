@@ -68,7 +68,7 @@ describe("T-385: threeWayMerge", () => {
       const result = threeWayMerge(base, ours, theirs, "ticket");
       expect(result.clean).toBe(false);
       expect(result.conflicts.length).toBeGreaterThan(0);
-      const titleConflict = result.conflicts.find((c) => c.fieldPath === "title");
+      const titleConflict = result.conflicts.find((c) => c.fieldPath === "/title");
       expect(titleConflict).toBeDefined();
       expect(titleConflict!.base).toBe("Original");
       expect(titleConflict!.ours).toBe("Our version");
@@ -146,7 +146,7 @@ describe("T-385: threeWayMerge", () => {
       const theirs = ticket({ status: "complete", completedDate: "2026-05-26", lifecycle: "active" });
       const result = threeWayMerge(base, ours, theirs, "ticket");
       expect(result.clean).toBe(false);
-      const statusConflict = result.conflicts.find((c) => c.fieldPath === "status");
+      const statusConflict = result.conflicts.find((c) => c.fieldPath === "/status");
       expect(statusConflict).toBeDefined();
       expect(statusConflict!.kind).toBe("coupled");
       expect(statusConflict!.group).toBe("ticket-status");
@@ -194,7 +194,7 @@ describe("T-385: threeWayMerge", () => {
       const theirs = ticket({ customField: "theirs" });
       const result = threeWayMerge(base, ours, theirs, "ticket");
       expect(result.clean).toBe(false);
-      expect(result.conflicts.some((c) => c.fieldPath === "customField")).toBe(true);
+      expect(result.conflicts.some((c) => c.fieldPath === "/customField")).toBe(true);
     });
   });
 });

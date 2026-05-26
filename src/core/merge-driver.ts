@@ -2,11 +2,16 @@ import { getMergeRules, getCoupledGroups, type EntityType, type MergeRule } from
 
 export interface ConflictEntry {
   fieldPath: string;
+  field?: string;
   kind: "field" | "coupled" | "delete-edit";
   base: unknown;
   ours: unknown;
   theirs: unknown;
   group?: string;
+}
+
+function toPointer(fieldName: string): string {
+  return `/${fieldName.replace(/~/g, "~0").replace(/\//g, "~1")}`;
 }
 
 export interface MergeResult {
@@ -100,14 +105,14 @@ export function threeWayMerge(
   }
 
   if (baseDeleted && !theirsDeleted && hasNonTombstoneChanges(base, theirs)) {
-    conflicts.push({ fieldPath: "_entity", kind: "delete-edit", base: "active", ours: "deleted", theirs: "edited" });
+    conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "deleted", theirs: "edited" });
     Object.assign(merged, base);
     merged._conflicts = [...existingConflicts, ...conflicts];
     return { merged, conflicts, clean: false };
   }
 
   if (theirsDeleted && !baseDeleted && hasNonTombstoneChanges(base, ours)) {
-    conflicts.push({ fieldPath: "_entity", kind: "delete-edit", base: "active", ours: "edited", theirs: "deleted" });
+    conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "edited", theirs: "deleted" });
     Object.assign(merged, base);
     merged._conflicts = [...existingConflicts, ...conflicts];
     return { merged, conflicts, clean: false };
@@ -137,7 +142,8 @@ export function threeWayMerge(
         merged[m] = base[m];
         handledByCoupled.add(m);
         conflicts.push({
-          fieldPath: m,
+          fieldPath: toPointer(m),
+          field: m,
           kind: "coupled",
           base: base[m],
           ours: ours[m],
@@ -179,7 +185,7 @@ export function threeWayMerge(
 
     if (!rule || rule.kind === "hard-conflict") {
       merged[key] = bVal;
-      conflicts.push({ fieldPath: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+      conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
       continue;
     }
 
