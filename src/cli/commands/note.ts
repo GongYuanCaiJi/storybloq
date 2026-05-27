@@ -3,7 +3,8 @@ import {
   writeNoteUnlocked,
   deleteNote,
 } from "../../core/project-loader.js";
-import { nextNoteID } from "../../core/id-allocation.js";
+import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
+import { resolveAndNormalizeNoteRef } from "../../core/ref-normalization.js";
 import {
   formatNoteList,
   formatNote,
@@ -89,7 +90,17 @@ export function handleNoteGet(
   id: string,
   ctx: CommandContext,
 ): CommandResult {
-  const note = ctx.state.noteByID(id);
+  let resolvedId: string;
+  try {
+    resolvedId = resolveAndNormalizeNoteRef(ctx.state, id);
+  } catch {
+    return {
+      output: formatError("not_found", `Note ${id} not found`, ctx.format),
+      exitCode: ExitCode.USER_ERROR,
+      errorCode: "not_found",
+    };
+  }
+  const note = ctx.state.noteByID(resolvedId);
   if (!note) {
     return {
       output: formatError("not_found", `Note ${id} not found`, ctx.format),
@@ -118,11 +129,15 @@ export async function handleNoteCreate(
   let createdNote: Note | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const id = nextNoteID(state.notes);
+    const isTeam = state.config.team?.enabled === true;
+    const { id, displayId } = isTeam
+      ? allocateTeamNoteId(state.notes)
+      : { id: nextNoteID(state.notes), displayId: undefined as string | undefined };
     const today = todayISO();
     const tags = args.tags ? normalizeTags(args.tags) : [];
     const note: Note = {
       id,
+      ...(displayId != null && { displayId }),
       title: args.title && args.title.trim() !== "" ? args.title : null,
       content: args.content,
       tags,
@@ -164,7 +179,8 @@ export async function handleNoteUpdate(
   let updatedNote: Note | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const existing = state.noteByID(id);
+    const resolvedId = resolveAndNormalizeNoteRef(state, id);
+    const existing = state.noteByID(resolvedId);
     if (!existing) {
       throw new CliValidationError("not_found", `Note ${id} not found`);
     }

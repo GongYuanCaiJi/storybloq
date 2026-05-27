@@ -31,7 +31,9 @@ export function validateProject(state: ProjectState): ValidationResult {
   const findings: ValidationFinding[] = [];
   const phaseIDs = new Set(state.roadmap.phases.map((p) => p.id));
   const ticketIDs = new Set<string>();
+  const allTicketRefs = new Set<string>();
   const issueIDs = new Set<string>();
+  const allIssueRefs = new Set<string>();
   const deletedTicketIDs = new Set<string>();
   for (const t of state.tickets) {
     if ((t as Record<string, unknown>).lifecycle === "deleted") {
@@ -44,6 +46,14 @@ export function validateProject(state: ProjectState): ValidationResult {
   for (const t of state.tickets) {
     ticketIDCounts.set(t.id, (ticketIDCounts.get(t.id) ?? 0) + 1);
     ticketIDs.add(t.id);
+    allTicketRefs.add(t.id);
+    const rec = t as Record<string, unknown>;
+    if (typeof rec.displayId === "string") allTicketRefs.add(rec.displayId);
+    if (Array.isArray(rec.previousDisplayIds)) {
+      for (const prev of rec.previousDisplayIds) {
+        if (typeof prev === "string") allTicketRefs.add(prev);
+      }
+    }
   }
   for (const [id, count] of ticketIDCounts) {
     if (count > 1) {
@@ -61,6 +71,14 @@ export function validateProject(state: ProjectState): ValidationResult {
   for (const i of state.issues) {
     issueIDCounts.set(i.id, (issueIDCounts.get(i.id) ?? 0) + 1);
     issueIDs.add(i.id);
+    allIssueRefs.add(i.id);
+    const irec = i as Record<string, unknown>;
+    if (typeof irec.displayId === "string") allIssueRefs.add(irec.displayId);
+    if (Array.isArray(irec.previousDisplayIds)) {
+      for (const prev of irec.previousDisplayIds) {
+        if (typeof prev === "string") allIssueRefs.add(prev);
+      }
+    }
   }
   for (const [id, count] of issueIDCounts) {
     if (count > 1) {
@@ -168,7 +186,7 @@ export function validateProject(state: ProjectState): ValidationResult {
           message: `Ticket ${t.id} references itself in blockedBy.`,
           entity: t.id,
         });
-      } else if (!ticketIDs.has(bid)) {
+      } else if (!allTicketRefs.has(bid)) {
         findings.push({
           level: "error",
           code: "invalid_blocked_by_ref",
@@ -201,7 +219,7 @@ export function validateProject(state: ProjectState): ValidationResult {
           message: `Ticket ${t.id} references itself as parentTicket.`,
           entity: t.id,
         });
-      } else if (!ticketIDs.has(t.parentTicket)) {
+      } else if (!allTicketRefs.has(t.parentTicket)) {
         findings.push({
           level: "error",
           code: "invalid_parent_ref",
@@ -228,7 +246,7 @@ export function validateProject(state: ProjectState): ValidationResult {
   // Issue reference checks
   for (const i of state.issues) {
     for (const tref of i.relatedTickets) {
-      if (!ticketIDs.has(tref)) {
+      if (!allTicketRefs.has(tref)) {
         findings.push({
           level: "error",
           code: "invalid_related_ticket_ref",

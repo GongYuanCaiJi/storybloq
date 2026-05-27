@@ -16,7 +16,9 @@ export async function handleTeamDoctor(
   let exitCode: number = ExitCode.OK;
 
   await withProjectLock(root, { strict: false }, async ({ state, warnings }) => {
-    const isTeamMode = (state.config.schemaVersion ?? 1) >= 2;
+    const isTeamMode = state.config.team?.enabled === true
+      || ((state.config.team != null && Object.keys(state.config.team).length > 0)
+          && (state.config.schemaVersion ?? 1) >= 2);
 
     const ctx: DoctorContext = {
       root,
@@ -32,7 +34,7 @@ export async function handleTeamDoctor(
       // Version unavailable
     }
 
-    const result = runDoctor(state, ctx);
+    const result = await runDoctor(state, ctx);
     output = formatDoctorResult(result, options.format);
 
     if (options.ci && result.errorCount > 0) {

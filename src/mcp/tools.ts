@@ -58,6 +58,8 @@ import {
   TICKET_CANONICAL_ID_REGEX,
   NOTE_ID_REGEX,
   LESSON_ID_REGEX,
+  NoteIdSchema,
+  LessonIdSchema,
   TicketRefSchema,
   IssueRefSchema,
   TICKET_STATUSES,
@@ -723,7 +725,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   server.registerTool("storybloq_note_get", {
     description: "Get a note by ID",
     inputSchema: {
-      id: z.string().regex(NOTE_ID_REGEX).describe("Note ID (e.g. N-001)"),
+      id: NoteIdSchema.describe("Note ID (e.g. N-001 or n-[canonical])"),
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleNoteGet(args.id, ctx)));
 
@@ -749,7 +751,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   server.registerTool("storybloq_note_update", {
     description: "Update an existing note",
     inputSchema: {
-      id: z.string().regex(NOTE_ID_REGEX).describe("Note ID (e.g. N-001)"),
+      id: NoteIdSchema.describe("Note ID (e.g. N-001 or n-[canonical])"),
       content: z.string().optional().describe("New content"),
       title: z.string().nullable().optional().describe("New title (null to clear)"),
       tags: z.array(z.string()).optional().describe("New tags (replaces existing)"),
@@ -786,7 +788,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   server.registerTool("storybloq_lesson_get", {
     description: "Get a lesson by ID",
     inputSchema: {
-      id: z.string().regex(LESSON_ID_REGEX).describe("Lesson ID (e.g. L-001)"),
+      id: LessonIdSchema.describe("Lesson ID (e.g. L-001 or l-[canonical])"),
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleLessonGet(args.id, ctx)));
 
@@ -803,7 +805,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       context: z.string().describe("What happened that produced this lesson (evidence, ticket/issue refs)"),
       source: z.enum(LESSON_SOURCES).describe("Lesson source: review, correction, postmortem, manual"),
       tags: z.array(z.string()).optional().describe("Tags for the lesson"),
-      supersedes: z.string().regex(LESSON_ID_REGEX).optional().describe("ID of lesson this supersedes"),
+      supersedes: LessonIdSchema.optional().describe("ID of lesson this supersedes"),
     },
   }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
     handleLessonCreate(
@@ -823,7 +825,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   server.registerTool("storybloq_lesson_update", {
     description: "Update an existing lesson",
     inputSchema: {
-      id: z.string().regex(LESSON_ID_REGEX).describe("Lesson ID (e.g. L-001)"),
+      id: LessonIdSchema.describe("Lesson ID (e.g. L-001 or l-[canonical])"),
       title: z.string().optional().describe("New title"),
       content: z.string().optional().describe("New content"),
       context: z.string().optional().describe("New context"),
@@ -849,7 +851,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   server.registerTool("storybloq_lesson_reinforce", {
     description: "Reinforce a lesson — increment reinforcement count and update lastValidated date",
     inputSchema: {
-      id: z.string().regex(LESSON_ID_REGEX).describe("Lesson ID (e.g. L-001)"),
+      id: LessonIdSchema.describe("Lesson ID (e.g. L-001 or l-[canonical])"),
     },
   }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
     handleLessonReinforce(args.id, format, root),

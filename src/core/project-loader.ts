@@ -230,7 +230,7 @@ export async function writeTicketUnlocked(
   options?: { createOnly?: boolean },
 ): Promise<void> {
   const parsed = TicketSchema.parse(ticket);
-  if (!TICKET_ID_REGEX.test(parsed.id)) {
+  if (!TICKET_ID_REGEX.test(parsed.id) && !TICKET_CANONICAL_ID_REGEX.test(parsed.id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid ticket ID: ${parsed.id}`,
@@ -268,7 +268,7 @@ export async function writeIssueUnlocked(
   options?: { createOnly?: boolean },
 ): Promise<void> {
   const parsed = IssueSchema.parse(issue);
-  if (!ISSUE_ID_REGEX.test(parsed.id)) {
+  if (!ISSUE_ID_REGEX.test(parsed.id) && !ISSUE_CANONICAL_ID_REGEX.test(parsed.id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid issue ID: ${parsed.id}`,
@@ -362,7 +362,14 @@ async function isTeamMode(root: string): Promise<boolean | "error"> {
   try {
     const raw = await readFile(join(resolve(root, ".story"), "config.json"), "utf-8");
     const config = JSON.parse(raw);
-    return typeof config.schemaVersion === "number" && config.schemaVersion >= 2;
+    if (config.team?.enabled === true) return true;
+    const team = config.team;
+    if (team != null && typeof team === "object" && !Array.isArray(team)
+        && Object.keys(team as object).length > 0
+        && typeof config.schemaVersion === "number" && config.schemaVersion >= 2) {
+      return true;
+    }
+    return false;
   } catch {
     return "error";
   }
@@ -388,7 +395,7 @@ export async function deleteTicket(
   root: string,
   options?: DeleteOptions,
 ): Promise<void> {
-  if (!TICKET_ID_REGEX.test(id)) {
+  if (!TICKET_ID_REGEX.test(id) && !TICKET_CANONICAL_ID_REGEX.test(id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid ticket ID: ${id}`,
@@ -443,7 +450,12 @@ export async function deleteTicket(
     }
 
     if (teamMode) {
-      const raw = JSON.parse(await readFile(targetPath, "utf-8"));
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(await readFile(targetPath, "utf-8")) as Record<string, unknown>;
+      } catch {
+        throw new ProjectLoaderError("io_error", `Failed to parse tickets/${id}.json for tombstone write`);
+      }
       raw.lifecycle = "deleted";
       raw.deletedAt = new Date().toISOString();
       raw.deletedBy = await resolveActor(root, options?.actor);
@@ -459,7 +471,7 @@ export async function deleteIssue(
   root: string,
   options?: DeleteOptions,
 ): Promise<void> {
-  if (!ISSUE_ID_REGEX.test(id)) {
+  if (!ISSUE_ID_REGEX.test(id) && !ISSUE_CANONICAL_ID_REGEX.test(id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid issue ID: ${id}`,
@@ -487,7 +499,12 @@ export async function deleteIssue(
       );
     }
     if (teamMode) {
-      const raw = JSON.parse(await readFile(targetPath, "utf-8"));
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(await readFile(targetPath, "utf-8")) as Record<string, unknown>;
+      } catch {
+        throw new ProjectLoaderError("io_error", `Failed to parse issues/${id}.json for tombstone write`);
+      }
       raw.lifecycle = "deleted";
       raw.deletedAt = new Date().toISOString();
       raw.deletedBy = await resolveActor(root, options?.actor);
@@ -508,7 +525,7 @@ export async function writeNoteUnlocked(
   options?: { createOnly?: boolean },
 ): Promise<void> {
   const parsed = NoteSchema.parse(note);
-  if (!NOTE_ID_REGEX.test(parsed.id)) {
+  if (!NOTE_ID_REGEX.test(parsed.id) && !NOTE_CANONICAL_ID_REGEX.test(parsed.id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid note ID: ${parsed.id}`,
@@ -542,7 +559,7 @@ export async function deleteNote(
   root: string,
   options?: DeleteOptions,
 ): Promise<void> {
-  if (!NOTE_ID_REGEX.test(id)) {
+  if (!NOTE_ID_REGEX.test(id) && !NOTE_CANONICAL_ID_REGEX.test(id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid note ID: ${id}`,
@@ -570,7 +587,12 @@ export async function deleteNote(
       );
     }
     if (teamMode) {
-      const raw = JSON.parse(await readFile(targetPath, "utf-8"));
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(await readFile(targetPath, "utf-8")) as Record<string, unknown>;
+      } catch {
+        throw new ProjectLoaderError("io_error", `Failed to parse notes/${id}.json for tombstone write`);
+      }
       raw.lifecycle = "deleted";
       raw.deletedAt = new Date().toISOString();
       raw.deletedBy = await resolveActor(root, options?.actor);
@@ -591,7 +613,7 @@ export async function writeLessonUnlocked(
   options?: { createOnly?: boolean },
 ): Promise<void> {
   const parsed = LessonSchema.parse(lesson);
-  if (!LESSON_ID_REGEX.test(parsed.id)) {
+  if (!LESSON_ID_REGEX.test(parsed.id) && !LESSON_CANONICAL_ID_REGEX.test(parsed.id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid lesson ID: ${parsed.id}`,
@@ -629,7 +651,7 @@ export async function deleteLessonUnlocked(
   root: string,
   options?: DeleteOptions,
 ): Promise<void> {
-  if (!LESSON_ID_REGEX.test(id)) {
+  if (!LESSON_ID_REGEX.test(id) && !LESSON_CANONICAL_ID_REGEX.test(id)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Invalid lesson ID: ${id}`,
@@ -654,7 +676,12 @@ export async function deleteLessonUnlocked(
   }
   const teamMode = teamModeResult === true;
   if (teamMode) {
-    const raw = JSON.parse(await readFile(targetPath, "utf-8"));
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(await readFile(targetPath, "utf-8")) as Record<string, unknown>;
+    } catch {
+      throw new ProjectLoaderError("io_error", `Failed to parse lessons/${id}.json for tombstone write`);
+    }
     raw.lifecycle = "deleted";
     raw.deletedAt = new Date().toISOString();
     raw.deletedBy = await resolveActor(root, options?.actor);

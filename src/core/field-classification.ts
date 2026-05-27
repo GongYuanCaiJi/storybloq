@@ -4,7 +4,7 @@ export type MergeRule =
   | { kind: "monotonic"; compare: "max" }
   | { kind: "latest-wins"; timestampField: string }
   | { kind: "hard-conflict" }
-  | { kind: "coupled"; group: string; members: string[] };
+  | { kind: "coupled"; group: string; members: string[]; latestWinsField?: string };
 
 export type EntityType = "ticket" | "issue" | "note" | "lesson";
 
@@ -28,8 +28,10 @@ const TICKET_RULES: Record<string, MergeRule> = {
   displayId: { kind: "hard-conflict" },
   assignedTo: { kind: "hard-conflict" },
   lastModifiedBy: { kind: "hard-conflict" },
-  claimedBySession: { kind: "hard-conflict" },
-  updatedDate: { kind: "hard-conflict" },
+  updatedDate: { kind: "monotonic", compare: "max" },
+
+  claimedBySession: { kind: "coupled", group: "ticket-claim", members: ["claimedBySession", "claim"], latestWinsField: "claim.since" },
+  claim: { kind: "coupled", group: "ticket-claim", members: ["claimedBySession", "claim"], latestWinsField: "claim.since" },
 
   status: { kind: "coupled", group: "ticket-status", members: ["status", "completedDate", "lifecycle"] },
   completedDate: { kind: "coupled", group: "ticket-status", members: ["status", "completedDate", "lifecycle"] },
@@ -37,8 +39,6 @@ const TICKET_RULES: Record<string, MergeRule> = {
 
   deletedAt: { kind: "hard-conflict" },
   deletedBy: { kind: "hard-conflict" },
-
-  claim: { kind: "latest-wins", timestampField: "since" },
 };
 
 const ISSUE_RULES: Record<string, MergeRule> = {
@@ -63,10 +63,10 @@ const ISSUE_RULES: Record<string, MergeRule> = {
   assignedTo: { kind: "hard-conflict" },
   lastModifiedBy: { kind: "hard-conflict" },
 
-  status: { kind: "coupled", group: "issue-status", members: ["status", "resolvedDate"] },
-  resolvedDate: { kind: "coupled", group: "issue-status", members: ["status", "resolvedDate"] },
+  status: { kind: "coupled", group: "issue-status", members: ["status", "resolvedDate", "lifecycle"] },
+  resolvedDate: { kind: "coupled", group: "issue-status", members: ["status", "resolvedDate", "lifecycle"] },
 
-  lifecycle: { kind: "hard-conflict" },
+  lifecycle: { kind: "coupled", group: "issue-status", members: ["status", "resolvedDate", "lifecycle"] },
   deletedAt: { kind: "hard-conflict" },
   deletedBy: { kind: "hard-conflict" },
 };
@@ -83,7 +83,7 @@ const NOTE_RULES: Record<string, MergeRule> = {
   title: { kind: "hard-conflict" },
   content: { kind: "hard-conflict" },
   status: { kind: "hard-conflict" },
-  updatedDate: { kind: "hard-conflict" },
+  updatedDate: { kind: "monotonic", compare: "max" },
   displayId: { kind: "hard-conflict" },
   rank: { kind: "hard-conflict" },
   lifecycle: { kind: "hard-conflict" },
@@ -107,7 +107,7 @@ const LESSON_RULES: Record<string, MergeRule> = {
   context: { kind: "hard-conflict" },
   source: { kind: "hard-conflict" },
   lastValidated: { kind: "hard-conflict" },
-  updatedDate: { kind: "hard-conflict" },
+  updatedDate: { kind: "monotonic", compare: "max" },
   supersedes: { kind: "hard-conflict" },
   status: { kind: "hard-conflict" },
   displayId: { kind: "hard-conflict" },
@@ -128,14 +128,14 @@ export function getMergeRules(entityType: EntityType | string): Record<string, M
   return RULES_BY_TYPE[entityType] ?? {};
 }
 
-export function getCoupledGroups(entityType: EntityType): Array<{ group: string; members: string[] }> {
+export function getCoupledGroups(entityType: EntityType): Array<{ group: string; members: string[]; latestWinsField?: string }> {
   const rules = getMergeRules(entityType);
   const seen = new Set<string>();
-  const groups: Array<{ group: string; members: string[] }> = [];
+  const groups: Array<{ group: string; members: string[]; latestWinsField?: string }> = [];
   for (const rule of Object.values(rules)) {
     if (rule.kind === "coupled" && !seen.has(rule.group)) {
       seen.add(rule.group);
-      groups.push({ group: rule.group, members: [...rule.members] });
+      groups.push({ group: rule.group, members: [...rule.members], latestWinsField: rule.latestWinsField });
     }
   }
   return groups;

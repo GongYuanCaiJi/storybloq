@@ -3,6 +3,7 @@ import { discoverProjectRoot, loadProject } from "../core/index.js";
 import { ProjectLoaderError, INTEGRITY_WARNING_TYPES, type LoadWarning } from "../core/errors.js";
 import { ExitCode, formatError } from "../core/output-formatter.js";
 import { CliValidationError } from "./helpers.js";
+import { RefResolutionError } from "../core/ref-normalization.js";
 import type { OutputFormat } from "../models/types.js";
 import type { CommandContext, CommandResult, DeleteCommandContext } from "./types.js";
 
@@ -88,7 +89,13 @@ export async function runReadCommand(
       process.exitCode = ExitCode.USER_ERROR;
       return;
     }
-    // Unknown error — catch-all
+    if (err instanceof RefResolutionError) {
+      const code = err.reason === "missing" ? "not_found" : "conflict";
+      writeOutput(formatError(code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    // Unknown error -- catch-all
     const message = err instanceof Error ? err.message : String(err);
     writeOutput(formatError("io_error", message, format));
     process.exitCode = ExitCode.USER_ERROR;
@@ -120,6 +127,12 @@ export async function runReadCommandWithRoot(
     }
     if (err instanceof CliValidationError) {
       writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    if (err instanceof RefResolutionError) {
+      const code = err.reason === "missing" ? "not_found" : "conflict";
+      writeOutput(formatError(code, err.message, format));
       process.exitCode = ExitCode.USER_ERROR;
       return;
     }
@@ -176,6 +189,12 @@ export async function runDeleteCommand(
     }
     if (err instanceof CliValidationError) {
       writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    if (err instanceof RefResolutionError) {
+      const code = err.reason === "missing" ? "not_found" : "conflict";
+      writeOutput(formatError(code, err.message, format));
       process.exitCode = ExitCode.USER_ERROR;
       return;
     }

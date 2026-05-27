@@ -80,15 +80,35 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
 
   const candidateIds = new Set(candidates.map((c) => c.id));
   const candidateMap = new Map(candidates.map((c) => [c.id, c]));
+  const candidateByRef = new Map<string, GcCandidate>();
+  for (const c of candidates) {
+    candidateByRef.set(c.id, c);
+    const rec = (state.tickets as readonly Record<string, unknown>[]).find((t) => t.id === c.id)
+      ?? (state.issues as readonly Record<string, unknown>[]).find((i) => i.id === c.id)
+      ?? (state.notes as readonly Record<string, unknown>[]).find((n) => n.id === c.id)
+      ?? (state.lessons as readonly Record<string, unknown>[]).find((l) => l.id === c.id);
+    if (rec) {
+      if (typeof rec.displayId === "string") candidateByRef.set(rec.displayId, c);
+      if (Array.isArray(rec.previousDisplayIds)) {
+        for (const prev of rec.previousDisplayIds) {
+          if (typeof prev === "string") candidateByRef.set(prev, c);
+        }
+      }
+    }
+  }
+
+  function findCandidate(ref: string): GcCandidate | undefined {
+    return candidateByRef.get(ref);
+  }
 
   for (const t of state.tickets as readonly Ticket[]) {
     if (candidateIds.has(t.id)) continue;
     for (const bid of t.blockedBy) {
-      const c = candidateMap.get(bid);
+      const c = findCandidate(bid);
       if (c) c.activeReferences.push(t.id);
     }
-    if (t.parentTicket && candidateIds.has(t.parentTicket)) {
-      const c = candidateMap.get(t.parentTicket);
+    if (t.parentTicket) {
+      const c = findCandidate(t.parentTicket);
       if (c) c.activeReferences.push(t.id);
     }
   }
@@ -96,7 +116,7 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
   for (const i of state.issues as readonly Issue[]) {
     if (candidateIds.has(i.id)) continue;
     for (const tref of i.relatedTickets) {
-      const c = candidateMap.get(tref);
+      const c = findCandidate(tref);
       if (c) c.activeReferences.push(i.id);
     }
   }

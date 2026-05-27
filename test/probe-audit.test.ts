@@ -36,13 +36,14 @@ describe("probe: merge-driver edge cases", () => {
     expect(r.merged.rank).toBe("V");
   });
 
-  it("both sides add different value -- hard conflict", () => {
+  it("both sides add different value -- hard conflict with fieldPath", () => {
     const base = { id: "t-1", title: "x" };
     const ours = { id: "t-1", title: "x", rank: "A" };
     const theirs = { id: "t-1", title: "x", rank: "Z" };
     const r = threeWayMerge(base, ours, theirs, "ticket");
     expect(r.clean).toBe(false);
     expect(r.conflicts.length).toBeGreaterThan(0);
+    expect(r.conflicts[0]!.fieldPath).toBe("/rank");
   });
 
   it("commutative merge -- union of arrays", () => {
@@ -75,10 +76,20 @@ describe("probe: merge-driver edge cases", () => {
     expect(r.conflicts.some((c) => c.kind === "delete-edit")).toBe(true);
   });
 
-  it("latest-wins claim -- later timestamp wins", () => {
-    const base = { id: "t-1", claim: { user: "alice", branch: "a", since: "2026-01-01T00:00:00Z" } };
-    const ours = { id: "t-1", claim: { user: "bob", branch: "b", since: "2026-01-02T00:00:00Z" } };
-    const theirs = { id: "t-1", claim: { user: "carol", branch: "c", since: "2026-01-03T00:00:00Z" } };
+  it("coupled claim -- both sides change, latest-wins by claim.since", () => {
+    const base = { id: "t-1", claim: { user: "alice", branch: "a", since: "2026-01-01T00:00:00Z" }, claimedBySession: "s1" };
+    const ours = { id: "t-1", claim: { user: "bob", branch: "b", since: "2026-01-02T00:00:00Z" }, claimedBySession: "s2" };
+    const theirs = { id: "t-1", claim: { user: "carol", branch: "c", since: "2026-01-03T00:00:00Z" }, claimedBySession: "s3" };
+    const r = threeWayMerge(base, ours, theirs, "ticket");
+    expect(r.clean).toBe(true);
+    expect(r.merged.claim).toEqual(theirs.claim);
+    expect(r.merged.claimedBySession).toBe("s3");
+  });
+
+  it("coupled claim -- one side changes, other doesn't, clean merge", () => {
+    const base = { id: "t-1", claim: { user: "alice", branch: "a", since: "2026-01-01T00:00:00Z" }, claimedBySession: "s1" };
+    const ours = base;
+    const theirs = { id: "t-1", claim: { user: "carol", branch: "c", since: "2026-01-03T00:00:00Z" }, claimedBySession: "s3" };
     const r = threeWayMerge(base, ours, theirs, "ticket");
     expect(r.clean).toBe(true);
     expect((r.merged.claim as Record<string, unknown>).user).toBe("carol");
@@ -95,19 +106,27 @@ describe("probe: merge-driver edge cases", () => {
 });
 
 describe("probe: mergeConfig edge cases", () => {
-  it("config delete-vs-edit preserves base value", () => {
+  it("config delete-vs-edit preserves base value and records conflict", () => {
     const base = { schemaVersion: 2, team: { claimStalenessHours: 48 } };
     const ours = { schemaVersion: 2 };
     const theirs = { schemaVersion: 2, team: { claimStalenessHours: 72 } };
     const r = mergeConfig(base, ours, theirs);
     expect(r.clean).toBe(false);
     expect(r.merged.team).toEqual({ claimStalenessHours: 48 });
+    expect(r.conflicts.some((c) => c.kind === "delete-edit" && c.field === "team")).toBe(true);
   });
 
-  it("config known-object key as scalar throws even on one-sided add", () => {
+  it("config known-object key as scalar in ours throws", () => {
     const base = { schemaVersion: 2 };
     const ours = { schemaVersion: 2, team: "invalid" };
     const theirs = { schemaVersion: 2 };
+    expect(() => mergeConfig(base, ours, theirs)).toThrow(/must be an object/);
+  });
+
+  it("config known-object key as scalar in theirs throws", () => {
+    const base = { schemaVersion: 2 };
+    const ours = { schemaVersion: 2 };
+    const theirs = { schemaVersion: 2, team: 42 };
     expect(() => mergeConfig(base, ours, theirs)).toThrow(/must be an object/);
   });
 
@@ -171,6 +190,39 @@ describe("probe: GC reference chain safety", () => {
     expect(parentCandidate!.activeReferences.length).toBeGreaterThan(0);
     expect(plan.eligible.find((c) => c.id === "t-old-parent")).toBeUndefined();
   });
+
+  it("candidate referencing candidate does not block GC", () => {
+    const state = {
+      tickets: [
+        { id: "t-a", lifecycle: "deleted", deletedAt: "2025-01-01", deletedBy: "x", blockedBy: [], status: "open" },
+        { id: "t-b", lifecycle: "deleted", deletedAt: "2025-01-01", deletedBy: "x", blockedBy: [], parentTicket: "t-a", status: "open" },
+      ],
+      issues: [],
+      notes: [],
+      lessons: [],
+      activeTickets: [],
+      activeIssues: [],
+    } as any;
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.eligible).toHaveLength(2);
+  });
+
+  it("non-candidate blockedBy reference blocks GC", () => {
+    const state = {
+      tickets: [
+        { id: "t-old", lifecycle: "deleted", deletedAt: "2025-01-01", deletedBy: "x", blockedBy: [], status: "open" },
+        { id: "t-active", lifecycle: "active", blockedBy: ["t-old"], status: "open" },
+      ],
+      issues: [],
+      notes: [],
+      lessons: [],
+      activeTickets: [{ id: "t-active" }],
+      activeIssues: [],
+    } as any;
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked.find((c) => c.id === "t-old")).toBeDefined();
+    expect(plan.blocked[0]!.activeReferences).toContain("t-active");
+  });
 });
 
 describe("probe: fractional-index comprehensive", () => {
@@ -226,6 +278,22 @@ describe("probe: fractional-index comprehensive", () => {
     expect(mid < b).toBe(true);
   });
 
+  it("generateKeyBetween('z', null) extends with MID", () => {
+    const r = generateKeyBetween("z", null);
+    expect(r).toBe("zV");
+    expect(r > "z").toBe(true);
+  });
+
+  it("generateKeyBetween('V', null) returns midpoint to max", () => {
+    const r = generateKeyBetween("V", null);
+    expect(r > "V").toBe(true);
+  });
+
+  it("generateKeyBetween(null, '0z') preserves ordering", () => {
+    const r = generateKeyBetween(null, "0z");
+    expect(r < "0z").toBe(true);
+  });
+
   it("compareByRank: ranked before unranked", () => {
     const ranked = { id: "t-2", rank: "V" };
     const unranked = { id: "t-1", order: 1 };
@@ -261,23 +329,30 @@ describe("probe: claims edge cases", () => {
     expect(r.claimedBy).toBe("alice");
   });
 
-  it("filterClaimedFromRecommendations -- null user returns all", () => {
+  it("filterClaimedFromRecommendations -- null user filters all claimed", () => {
     const recs = [{ id: "t-1" }, { id: "t-2" }] as any;
     const claims = new Map([["t-1", { user: "alice", branch: "a", since: "" }]]);
-    expect(filterClaimedFromRecommendations(recs, claims, null)).toHaveLength(2);
+    expect(filterClaimedFromRecommendations(recs, claims, null)).toHaveLength(1);
   });
 });
 
 describe("probe: conflicts module", () => {
   it("hasConflicts detects _conflicts array", () => {
-    const state = { tickets: [{ id: "t-1", _conflicts: [{ fieldPath: "/title" }] }], issues: [], notes: [], lessons: [] } as any;
+    const state = { tickets: [{ id: "t-1", _conflicts: [{ fieldPath: "/title" }] }], issues: [], notes: [], lessons: [], config: {}, roadmap: {} } as any;
     const r = hasConflicts(state);
     expect(r.hasConflicts).toBe(true);
     expect(r.items[0]!.conflictCount).toBe(1);
   });
 
+  it("hasConflicts detects config/roadmap conflicts", () => {
+    const state = { tickets: [], issues: [], notes: [], lessons: [], config: { _conflicts: [{ fieldPath: "/project" }] }, roadmap: {} } as any;
+    const r = hasConflicts(state);
+    expect(r.hasConflicts).toBe(true);
+    expect(r.items[0]!.type).toBe("config");
+  });
+
   it("assertNoConflicts throws with summary", () => {
-    const state = { tickets: [{ id: "t-1", _conflicts: [{}] }], issues: [], notes: [], lessons: [] } as any;
+    const state = { tickets: [{ id: "t-1", _conflicts: [{}] }], issues: [], notes: [], lessons: [], config: {}, roadmap: {} } as any;
     expect(() => assertNoConflicts(state)).toThrow(/t-1/);
   });
 });
@@ -357,5 +432,49 @@ describe("probe: resolveRef", () => {
     const r = resolveRef("T-001", primary, secondary, items);
     expect(r.kind).toBe("found");
     if (r.kind === "found") expect(r.matchedBy).toBe("previousDisplayId");
+  });
+});
+
+describe("probe: reconcile plan", () => {
+  it("computeReconcilePlan detects duplicate displayIds", () => {
+    const state = {
+      tickets: [
+        { id: "t-aaa", displayId: "T-001", createdDate: "2026-01-01", blockedBy: [] },
+        { id: "t-bbb", displayId: "T-001", createdDate: "2026-01-02", blockedBy: [] },
+      ],
+      issues: [],
+      notes: [],
+      lessons: [],
+      roadmap: { phases: [] },
+      phaseTickets: () => [],
+      config: {},
+    } as any;
+    const result = computeReconcilePlan(state);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.renames).toHaveLength(1);
+      expect(result.plan.renames[0]!.id).toBe("t-bbb");
+    }
+  });
+
+  it("earlier timestamp wins tie-break", () => {
+    const state = {
+      tickets: [
+        { id: "t-late", displayId: "T-005", createdDate: "2026-06-01", blockedBy: [] },
+        { id: "t-early", displayId: "T-005", createdDate: "2026-01-01", blockedBy: [] },
+      ],
+      issues: [],
+      notes: [],
+      lessons: [],
+      roadmap: { phases: [] },
+      phaseTickets: () => [],
+      config: {},
+    } as any;
+    const result = computeReconcilePlan(state);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.renames).toHaveLength(1);
+      expect(result.plan.renames[0]!.id).toBe("t-late");
+    }
   });
 });

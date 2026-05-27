@@ -422,9 +422,14 @@ export class FinalizeStage implements WorkflowStage {
     // (so session limits and checkpoint handovers apply uniformly)
     const currentIssue = ctx.state.currentIssue;
     if (currentIssue) {
+      const issueDisplayId = (currentIssue as Record<string, unknown>).displayId as string | undefined;
       ctx.writeState({
         finalizeCheckpoint: "committed",
         resolvedIssues: [...(ctx.state.resolvedIssues ?? []), currentIssue.id],
+        resolvedIssueDisplayIds: {
+          ...(ctx.state.resolvedIssueDisplayIds ?? {}),
+          ...(issueDisplayId ? { [currentIssue.id]: issueDisplayId } : {}),
+        },
         currentIssue: null,
         ticketStartedAt: null,
         git: {

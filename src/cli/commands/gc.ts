@@ -25,7 +25,10 @@ export async function handleGc(
     let applied: string[] = [];
     let plan: GcPlan | undefined;
 
+    const errors: Array<{ id: string; error: string }> = [];
+
     await withProjectLock(root, { strict: false }, async ({ state }) => {
+      const { guardPath } = await import("../../core/project-loader.js");
       plan = computeGcPlan(state, { retentionDays });
       const toRemove = options.force ? plan.candidates : plan.eligible;
       const wrapDir = resolve(root, ".story");
@@ -33,10 +36,21 @@ export async function handleGc(
       for (const c of toRemove) {
         const subdir = c.type === "ticket" ? "tickets" : c.type === "issue" ? "issues" : c.type === "note" ? "notes" : "lessons";
         const targetPath = join(wrapDir, subdir, `${c.id}.json`);
-        await unlink(targetPath);
-        applied.push(c.id);
+        try {
+          await guardPath(targetPath, wrapDir);
+          await unlink(targetPath);
+          applied.push(c.id);
+        } catch (err) {
+          errors.push({ id: c.id, error: err instanceof Error ? err.message : String(err) });
+        }
       }
     });
+
+    if (errors.length > 0) {
+      const errLines = errors.map((e) => `  - ${e.id}: ${e.error}`).join("\n");
+      const base = formatGcResult(plan!, applied, format);
+      return { output: `${base}\n\n### Errors\n${errLines}`, exitCode: 1 };
+    }
 
     return { output: formatGcResult(plan!, applied, format) };
   }

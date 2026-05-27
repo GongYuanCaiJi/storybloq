@@ -60,10 +60,15 @@ export async function writeGitattributes(storyDir: string): Promise<void> {
     const after = existing.substring(endIdx + BLOCK_END.length);
     result = before + blockContent + after;
   } else {
-    if (existing.length > 0 && !existing.endsWith("\n")) {
-      existing += "\n";
+    let cleaned = existing;
+    if (beginIdx !== -1 || endIdx !== -1) {
+      cleaned = cleaned.replace(new RegExp(`^[^\\S\\n]*${BLOCK_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\S\\n]*\\n?`, "gm"), "");
+      cleaned = cleaned.replace(new RegExp(`^[^\\S\\n]*${BLOCK_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\S\\n]*\\n?`, "gm"), "");
     }
-    result = existing + blockContent + "\n";
+    if (cleaned.length > 0 && !cleaned.endsWith("\n")) {
+      cleaned += "\n";
+    }
+    result = cleaned + blockContent + "\n";
   }
 
   writeFileSync(filePath, result, "utf-8");
@@ -71,8 +76,18 @@ export async function writeGitattributes(storyDir: string): Promise<void> {
 
 export async function updateConfigVersion(storyDir: string): Promise<void> {
   const configPath = join(storyDir, "config.json");
-  const raw = readFileSync(configPath, "utf-8");
-  const config = JSON.parse(raw) as Record<string, unknown>;
+  let raw: string;
+  try {
+    raw = readFileSync(configPath, "utf-8");
+  } catch (err) {
+    throw new Error(`Failed to read ${configPath}: ${(err as Error).message}`);
+  }
+  let config: Record<string, unknown>;
+  try {
+    config = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new Error(`Failed to parse ${configPath}: invalid JSON`);
+  }
 
   if (!config.team || typeof config.team !== "object") {
     config.team = {};

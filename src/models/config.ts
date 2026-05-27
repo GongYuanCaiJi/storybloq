@@ -35,12 +35,14 @@ export const ConfigSchema = z
     orchestrator: z.string().optional(),
     federation: z.record(z.unknown()).optional(),
     team: z.object({
+      enabled: z.boolean().optional(),
       minCliVersion: z.string().optional(),
       minMacVersion: z.string().optional(),
       requiredFeatures: z.array(z.string()).optional(),
       claimStalenessHours: z.number().finite().nonnegative().optional(),
       idAllocator: z.enum(["local", "git-refs"]).optional(),
       idAllocatorRemote: z.string().regex(/^[A-Za-z0-9._-]+$/).refine((v) => !v.startsWith("-"), "Remote name must not start with -").optional(),
+      mergeDriverVersion: z.number().int().optional(),
     }).optional(),
   })
   .passthrough();

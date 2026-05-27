@@ -2,7 +2,7 @@ import type { ProjectState } from "./project-state.js";
 import { ProjectLoaderError } from "./errors.js";
 
 export interface ConflictedItem {
-  type: "ticket" | "issue" | "note" | "lesson";
+  type: "ticket" | "issue" | "note" | "lesson" | "config" | "roadmap";
   id: string;
   conflictCount: number;
 }
@@ -28,6 +28,15 @@ export function hasConflicts(state: ProjectState): ConflictsReport {
   scan(state.issues, "issue");
   scan(state.notes, "note");
   scan(state.lessons, "lesson");
+
+  const configConflicts = (state.config as Record<string, unknown>)._conflicts;
+  if (Array.isArray(configConflicts) && configConflicts.length > 0) {
+    items.push({ type: "config", id: "config.json", conflictCount: configConflicts.length });
+  }
+  const roadmapConflicts = (state.roadmap as Record<string, unknown>)._conflicts;
+  if (Array.isArray(roadmapConflicts) && roadmapConflicts.length > 0) {
+    items.push({ type: "roadmap", id: "roadmap.json", conflictCount: roadmapConflicts.length });
+  }
 
   return { hasConflicts: items.length > 0, items };
 }

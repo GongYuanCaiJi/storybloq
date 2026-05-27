@@ -9,8 +9,8 @@ import {
   ClaimSchema,
 } from "./types.js";
 
-export const CROSS_NODE_REF_REGEX = /^[a-z][a-z0-9_-]{0,63}:(T-\d+[a-z]?|ISS-\d+)$/;
-export const CROSS_NODE_REF_CAPTURE_REGEX = /^([a-z][a-z0-9_-]{0,63}):(T-\d+[a-z]?|ISS-\d+)$/;
+export const CROSS_NODE_REF_REGEX = /^[a-z][a-z0-9_-]{0,63}:(T-\d+[a-z]?|t-[0-9a-hjkmnp-tvwxyz]{16}|ISS-\d+|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
+export const CROSS_NODE_REF_CAPTURE_REGEX = /^([a-z][a-z0-9_-]{0,63}):(T-\d+[a-z]?|t-[0-9a-hjkmnp-tvwxyz]{16}|ISS-\d+|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
 
 export const TicketSchema = z
   .object({

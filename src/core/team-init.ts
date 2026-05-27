@@ -31,7 +31,8 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
   const config = JSON.parse(raw) as Record<string, unknown>;
 
   const prevSchema = typeof config.schemaVersion === "number" ? config.schemaVersion : 1;
-  if (prevSchema < 2) {
+  const schemaUpgraded = prevSchema < 2;
+  if (schemaUpgraded) {
     config.schemaVersion = 2;
   }
 
@@ -40,17 +41,32 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
   }
   const team = config.team as Record<string, unknown>;
 
+  team.enabled = true;
+
   if (team.claimStalenessHours === undefined) {
     team.claimStalenessHours = opts.claimStalenessHours ?? 48;
   }
   if (team.idAllocator === undefined) {
     team.idAllocator = opts.idAllocator ?? "local";
   }
+  if (team.requiredFeatures === undefined) {
+    team.requiredFeatures = ["merge-driver"];
+  }
+  if (team.minCliVersion === undefined) {
+    try {
+      const { createRequire } = await import("node:module");
+      const require = createRequire(import.meta.url);
+      const pkg = require("../../package.json") as { version: string };
+      team.minCliVersion = pkg.version;
+    } catch {
+      // Non-critical: version gate is best-effort
+    }
+  }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 
   return {
-    schemaVersionSet: true,
+    schemaVersionSet: schemaUpgraded,
     teamConfigured: true,
     mergeDriverInstalled: setupResult.driverInstalled,
     gitattributesWritten: setupResult.gitattributesWritten,

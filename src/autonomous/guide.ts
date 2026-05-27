@@ -2271,9 +2271,9 @@ async function handleCancel(root: string, args: GuideInput): Promise<McpToolResu
     const openIssues = projectState.issues.filter(i => i.status === "open" || i.status === "inprogress").slice(0, 5);
     const remainingWork = {
       tickets: nextResult.kind === "found"
-        ? nextResult.candidates.map(c => ({ id: c.ticket.id, title: c.ticket.title }))
+        ? nextResult.candidates.map(c => ({ id: (c.ticket as Record<string, unknown>).displayId as string | undefined ?? c.ticket.id, title: c.ticket.title }))
         : [],
-      issues: openIssues.map(i => ({ id: i.id, title: i.title, severity: i.severity })),
+      issues: openIssues.map(i => ({ id: (i as Record<string, unknown>).displayId as string | undefined ?? i.id, title: i.title, severity: i.severity })),
     };
     reportSection = "\n\n" + formatCompactReport({ state: written, endedAt: new Date().toISOString(), remainingWork });
   } catch { /* best-effort */ }
@@ -2331,9 +2331,12 @@ function guideResult(
   },
 ): McpToolResult {
   const summary: SessionSummary = {
-    ticket: state.ticket ? `${state.ticket.id}: ${state.ticket.title}` : "none",
+    ticket: state.ticket ? `${(state.ticket as Record<string, unknown>).displayId as string | undefined ?? state.ticket.id}: ${state.ticket.title}` : "none",
     risk: state.ticket?.risk ?? "unknown",
-    completed: [...state.completedTickets.map((t) => t.id), ...(state.resolvedIssues ?? [])],
+    completed: [
+      ...state.completedTickets.map((t) => (t as Record<string, unknown>).displayId as string | undefined ?? t.id),
+      ...(state.resolvedIssues ?? []).map((id) => state.resolvedIssueDisplayIds?.[id] ?? id),
+    ],
     currentStep: currentState,
     contextPressure: state.contextPressure?.level ?? "low",
     branch: state.git?.branch ?? null,

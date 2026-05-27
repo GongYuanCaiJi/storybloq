@@ -8,6 +8,7 @@ export function resolveRef<T extends { id: string }>(
   primaryIndex: Map<string, T>,
   secondaryIndex: Map<string, T[]>,
   items: readonly T[],
+  prevDisplayIndex?: ReadonlyMap<string, T[]>,
 ): ResolveResult<T> {
   const byId = primaryIndex.get(ref);
   if (byId) return { kind: "found", item: byId, matchedBy: "id" };
@@ -18,15 +19,42 @@ export function resolveRef<T extends { id: string }>(
     if (byDisplay.length > 1) return { kind: "ambiguous", matches: byDisplay };
   }
 
-  const prevMatches: T[] = [];
-  for (const item of items) {
-    const prev = (item as Record<string, unknown>).previousDisplayIds;
-    if (Array.isArray(prev) && prev.includes(ref)) {
-      prevMatches.push(item);
+  if (prevDisplayIndex) {
+    const prevMatches = prevDisplayIndex.get(ref);
+    if (prevMatches) {
+      if (prevMatches.length === 1) return { kind: "found", item: prevMatches[0]!, matchedBy: "previousDisplayId" };
+      if (prevMatches.length > 1) return { kind: "ambiguous", matches: prevMatches };
     }
+  } else {
+    const prevMatches: T[] = [];
+    for (const item of items) {
+      const prev = (item as Record<string, unknown>).previousDisplayIds;
+      if (Array.isArray(prev) && prev.includes(ref)) {
+        prevMatches.push(item);
+      }
+    }
+    if (prevMatches.length === 1) return { kind: "found", item: prevMatches[0]!, matchedBy: "previousDisplayId" };
+    if (prevMatches.length > 1) return { kind: "ambiguous", matches: prevMatches };
   }
-  if (prevMatches.length === 1) return { kind: "found", item: prevMatches[0]!, matchedBy: "previousDisplayId" };
-  if (prevMatches.length > 1) return { kind: "ambiguous", matches: prevMatches };
 
   return { kind: "missing" };
+}
+
+export function buildPrevDisplayIndex<T>(
+  items: readonly T[],
+): Map<string, T[]> {
+  const index = new Map<string, T[]>();
+  for (const item of items) {
+    const prev = (item as Record<string, unknown>).previousDisplayIds;
+    if (Array.isArray(prev)) {
+      for (const p of prev) {
+        if (typeof p === "string") {
+          const existing = index.get(p);
+          if (existing) { existing.push(item); }
+          else { index.set(p, [item]); }
+        }
+      }
+    }
+  }
+  return index;
 }

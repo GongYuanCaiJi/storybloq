@@ -100,7 +100,11 @@ export async function reserveDisplayId(
         continue;
       }
       throw new Error(
-        `Failed to push tag "${tagName}" to remote "${remote}". Local tag "${tagName}" preserved for manual retry. ${stderr || (err instanceof Error ? err.message : String(err))}`,
+        `Failed to push tag "${tagName}" to remote "${remote}". ` +
+        `Local tag "${tagName}" preserved for manual retry. ` +
+        `IMPORTANT: before the next allocation, either push it (git push ${remote} refs/tags/${tagName}) ` +
+        `or delete it (git tag -d ${tagName}) to avoid ID gaps. ` +
+        `${stderr || (err instanceof Error ? err.message : String(err))}`,
       );
     }
   }
@@ -149,9 +153,17 @@ export async function listReservations(
   const { promisify } = await import("node:util");
   const execFileAsync = promisify(execFile);
 
-  await execFileAsync("git", [
-    "fetch", remote, `+${refNamespace}/*:${refNamespace}/*`,
-  ], { cwd: root, timeout: 15000 });
+  try {
+    await execFileAsync("git", [
+      "fetch", remote, `+${refNamespace}/*:${refNamespace}/*`,
+    ], { cwd: root, timeout: 15000 });
+  } catch (err) {
+    throw new Error(
+      `Cannot reach remote "${remote}" for listing reservations. ` +
+      `Check network connectivity and tag-fetch permissions. ` +
+      `${(err instanceof Error ? err.message : String(err))}`,
+    );
+  }
 
   const { stdout } = await execFileAsync("git", [
     "tag", "-l", `storybloq/ids/${type}s/*`,

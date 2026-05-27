@@ -50,11 +50,15 @@ function effectiveDisplayId(item: Resolvable): string {
 }
 
 function getEntityTimestamp(entityType: EntityType, entity: Record<string, unknown>): string | null {
+  // Prefer sub-day ISO 8601 createdAt when available
+  const createdAt = entity.createdAt;
+  if (typeof createdAt === "string" && createdAt !== "" && !isNaN(Date.parse(createdAt))) {
+    return createdAt;
+  }
   const field = entityType === "issue" ? "discoveredDate" : "createdDate";
   const value = entity[field];
   if (typeof value !== "string" || value === "") return null;
-  const parsed = Date.parse(value);
-  if (isNaN(parsed)) return null;
+  if (isNaN(Date.parse(value))) return null;
   return value;
 }
 
@@ -103,8 +107,9 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
   displayPrefix: string,
   numericRegex: RegExp,
 ): { renames: ReconcileRename[]; nextSeq: number } {
+  const activeItems = items.filter((item) => (item as Record<string, unknown>).lifecycle !== "deleted");
   const groups = new Map<string, T[]>();
-  for (const item of items) {
+  for (const item of activeItems) {
     const did = effectiveDisplayId(item);
     let group = groups.get(did);
     if (!group) {
@@ -114,7 +119,7 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
     group.push(item);
   }
 
-  let nextSeq = maxSequentialNumber(items as readonly Resolvable[], numericRegex) + 1;
+  let nextSeq = maxSequentialNumber(activeItems as readonly Resolvable[], numericRegex) + 1;
   const renames: ReconcileRename[] = [];
 
   for (const [displayId, group] of groups) {

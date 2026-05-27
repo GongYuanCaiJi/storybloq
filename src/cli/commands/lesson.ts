@@ -3,7 +3,8 @@ import {
   writeLessonUnlocked,
   deleteLessonUnlocked,
 } from "../../core/project-loader.js";
-import { nextLessonID } from "../../core/id-allocation.js";
+import { nextLessonID, allocateTeamLessonId } from "../../core/id-allocation.js";
+import { resolveAndNormalizeLessonRef } from "../../core/ref-normalization.js";
 import { buildLessonDigest } from "../../core/lessons.js";
 import {
   formatLessonList,
@@ -108,7 +109,17 @@ export function handleLessonGet(
   id: string,
   ctx: CommandContext,
 ): CommandResult {
-  const lesson = ctx.state.lessonByID(id);
+  let resolvedId: string;
+  try {
+    resolvedId = resolveAndNormalizeLessonRef(ctx.state, id);
+  } catch {
+    return {
+      output: formatError("not_found", `Lesson ${id} not found`, ctx.format),
+      exitCode: ExitCode.USER_ERROR,
+      errorCode: "not_found",
+    };
+  }
+  const lesson = ctx.state.lessonByID(resolvedId);
   if (!lesson) {
     return {
       output: formatError("not_found", `Lesson ${id} not found`, ctx.format),
@@ -156,23 +167,30 @@ export async function handleLessonCreate(
   let createdLesson: Lesson | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const id = nextLessonID(state.lessons);
+    const isTeam = state.config.team?.enabled === true;
+    const { id, displayId } = isTeam
+      ? allocateTeamLessonId(state.lessons)
+      : { id: nextLessonID(state.lessons), displayId: undefined as string | undefined };
     const today = todayISO();
     const tags = args.tags ? normalizeTags(args.tags) : [];
 
-    // Validate supersedes target exists
+    // Validate and resolve supersedes target
+    let resolvedSupersedes: string | null = null;
     if (args.supersedes) {
-      const target = state.lessonByID(args.supersedes);
+      const resolvedSupersedesId = resolveAndNormalizeLessonRef(state, args.supersedes);
+      const target = state.lessonByID(resolvedSupersedesId);
       if (!target) {
         throw new CliValidationError(
           "not_found",
           `Supersedes target ${args.supersedes} not found`,
         );
       }
+      resolvedSupersedes = resolvedSupersedesId;
     }
 
     const lesson: Lesson = {
       id,
+      ...(displayId != null && { displayId }),
       title: args.title,
       content: args.content,
       context: args.context,
@@ -182,15 +200,14 @@ export async function handleLessonCreate(
       lastValidated: today,
       createdDate: today,
       updatedDate: today,
-      supersedes: args.supersedes ?? null,
+      supersedes: resolvedSupersedes,
       status: "active",
     };
 
     await writeLessonUnlocked(lesson, root, { createOnly: true });
 
-    // Auto-supersede target if specified
-    if (args.supersedes) {
-      const target = state.lessonByID(args.supersedes);
+    if (resolvedSupersedes) {
+      const target = state.lessonByID(resolvedSupersedes);
       if (target && target.status !== "superseded") {
         const updated: Lesson = {
           ...target,
@@ -237,7 +254,8 @@ export async function handleLessonUpdate(
   let updatedLesson: Lesson | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const existing = state.lessonByID(id);
+    const resolvedId = resolveAndNormalizeLessonRef(state, id);
+    const existing = state.lessonByID(resolvedId);
     if (!existing) {
       throw new CliValidationError("not_found", `Lesson ${id} not found`);
     }
@@ -275,7 +293,8 @@ export async function handleLessonReinforce(
   let reinforcedLesson: Lesson | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const existing = state.lessonByID(id);
+    const resolvedId = resolveAndNormalizeLessonRef(state, id);
+    const existing = state.lessonByID(resolvedId);
     if (!existing) {
       throw new CliValidationError("not_found", `Lesson ${id} not found`);
     }

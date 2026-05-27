@@ -91,4 +91,44 @@ describe("computeGcPlan", () => {
     expect(plan.eligible.map((c) => c.id).sort()).toEqual(["T-001", "T-002"]);
     expect(plan.blocked).toHaveLength(0);
   });
+
+  it("finds tombstoned notes past retention", () => {
+    const state = makeState({
+      notes: [
+        makeNote({ id: "N-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.eligible).toHaveLength(1);
+    expect(plan.eligible[0]!.id).toBe("N-001");
+    expect(plan.eligible[0]!.type).toBe("note");
+  });
+
+  it("finds tombstoned lessons past retention", () => {
+    const state = makeState({
+      lessons: [
+        makeLesson({ id: "L-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "bob" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.eligible).toHaveLength(1);
+    expect(plan.eligible[0]!.id).toBe("L-001");
+    expect(plan.eligible[0]!.type).toBe("lesson");
+  });
+
+  it("blocks GC when issue.relatedTickets references deleted ticket", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+      ],
+      issues: [
+        makeIssue({ id: "ISS-001", relatedTickets: ["T-001"] }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked).toHaveLength(1);
+    expect(plan.blocked[0]!.id).toBe("T-001");
+    expect(plan.blocked[0]!.activeReferences).toContain("ISS-001");
+    expect(plan.eligible).toHaveLength(0);
+  });
 });

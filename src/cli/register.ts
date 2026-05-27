@@ -50,6 +50,8 @@ import {
   handleTicketMetaSet,
   handleTicketMetaUnset,
   handleTicketDelete,
+  handleTicketUnclaim,
+  handleTicketStart,
 } from "./commands/ticket.js";
 import {
   handleIssueList,
@@ -168,9 +170,12 @@ export function registerRepairCommand(yargs: Argv): Argv {
   return yargs.command(
     "repair",
     "Fix stale references in .story/ data",
-    (y) => y.option("dry-run", { type: "boolean", default: false, describe: "Show what would be fixed without writing" }),
+    (y) => y
+      .option("dry-run", { type: "boolean", default: false, describe: "Show what would be fixed without writing" })
+      .option("canonicalize-refs", { type: "boolean", default: false, describe: "Rewrite display-ID refs to canonical form" }),
     async (argv) => {
       const dryRun = argv["dry-run"] as boolean;
+      const canonicalizeRefs = argv["canonicalize-refs"] as boolean;
       if (dryRun) {
         await runReadCommand("md", (ctx) => handleRepair(ctx, true));
       } else {
@@ -178,7 +183,7 @@ export function registerRepairCommand(yargs: Argv): Argv {
         const { withProjectLock, writeTicketUnlocked, writeIssueUnlocked, runTransactionUnlocked } = await import("../core/project-loader.js");
         const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
         await withProjectLock(root, { strict: false }, async ({ state, warnings }) => {
-          const result = computeRepairs(state, warnings);
+          const result = computeRepairs(state, warnings, { canonicalizeRefs });
           if (result.error) {
             writeOutput(result.error);
             process.exitCode = ExitCode.USER_ERROR;
@@ -188,14 +193,17 @@ export function registerRepairCommand(yargs: Argv): Argv {
             writeOutput("No stale references found. Project is clean.");
             return;
           }
-          await runTransactionUnlocked(root, async () => {
-            for (const ticket of result.tickets) {
-              await writeTicketUnlocked(ticket, root);
-            }
-            for (const issue of result.issues) {
-              await writeIssueUnlocked(issue, root);
-            }
-          });
+          const { resolve } = await import("node:path");
+          const { serializeJSON } = await import("../core/project-loader.js");
+          const storyDir = resolve(root, ".story");
+          const ops: Array<{ op: "write"; target: string; content: string }> = [];
+          for (const ticket of result.tickets) {
+            ops.push({ op: "write", target: resolve(storyDir, "tickets", `${ticket.id}.json`), content: serializeJSON(ticket) });
+          }
+          for (const issue of result.issues) {
+            ops.push({ op: "write", target: resolve(storyDir, "issues", `${issue.id}.json`), content: serializeJSON(issue) });
+          }
+          await runTransactionUnlocked(root, ops);
           const lines = [`Fixed ${result.fixes.length} stale reference(s):`, ""];
           for (const fix of result.fixes) {
             lines.push(`- ${fix.entity}.${fix.field}: ${fix.description}`);
@@ -219,12 +227,14 @@ export function registerReconcileCommand(yargs: Argv): Argv {
       y
         .option("dry-run", { type: "boolean", default: false, describe: "Show what would change without writing" })
         .option("ci", { type: "boolean", default: false, describe: "Exit non-zero if duplicates found, no mutations" })
+        .option("rebalance-ranks", { type: "boolean", default: false, describe: "Also rebalance fractional ranks" })
         .option("format", { type: "string", choices: ["md", "json"], default: "md", describe: "Output format" }),
     async (argv) => {
       const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
       const result = await handleReconcile(root, {
         dryRun: argv["dry-run"] as boolean,
         ci: argv.ci as boolean,
+        rebalanceRanks: argv["rebalance-ranks"] as boolean,
         format: (argv.format as "md" | "json") ?? "md",
       });
       writeOutput(result.output);
@@ -489,6 +499,43 @@ export function registerTeamCommand(yargs: Argv): Argv {
           writeOutput(result.output);
           if (result.exitCode !== 0) process.exitCode = result.exitCode;
         },
+      )
+      .command(
+        "config",
+        "Show or set team configuration",
+        (y) =>
+          y
+            .command(
+              "show",
+              "Show current team configuration",
+              (y2) => addFormatOption(y2),
+              async (argv) => {
+                const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+                if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+                const { handleTeamConfigShow } = await import("./commands/team-config.js");
+                const result = handleTeamConfigShow(root, parseOutputFormat(argv.format));
+                writeOutput(result.output);
+              },
+            )
+            .command(
+              "set <key> <value>",
+              "Set a team configuration value",
+              (y2) =>
+                addFormatOption(
+                  y2
+                    .positional("key", { type: "string", demandOption: true, describe: "Config key" })
+                    .positional("value", { type: "string", demandOption: true, describe: "Config value (JSON or string)" }),
+                ),
+              async (argv) => {
+                const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+                if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
+                const { handleTeamConfigSet } = await import("./commands/team-config.js");
+                const result = await handleTeamConfigSet(root, argv.key as string, argv.value as string, parseOutputFormat(argv.format));
+                writeOutput(result.output);
+              },
+            )
+            .demandCommand(1, "Specify: show or set"),
+        () => {},
       )
       .demandCommand(1, ""),
     () => {},
@@ -1326,14 +1373,124 @@ export function registerTicketCommand(yargs: Argv): Argv {
             const id = parseTicketId(argv.id as string);
             const force = argv.force as boolean;
             const hard = argv.hard as boolean;
-            await runDeleteCommand(format, force, async (ctx) =>
-              handleTicketDelete(id, force, format, ctx.root, hard),
-            );
+            const { resolveAndNormalizeTicketRef } = await import("../core/ref-normalization.js");
+            await runDeleteCommand(format, force, async (ctx) => {
+              const resolvedId = resolveAndNormalizeTicketRef(ctx.state, id);
+              return handleTicketDelete(resolvedId, force, format, ctx.root, hard);
+            });
+          },
+        )
+        .command(
+          "unclaim <id>",
+          "Remove claim from a ticket",
+          (y2) => addFormatOption(
+            y2.positional("id", { type: "string", demandOption: true, describe: "Ticket ID" }),
+          ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const id = parseTicketId(argv.id as string);
+            const orchRoot = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!orchRoot) {
+              writeOutput(
+                formatError(
+                  "not_found",
+                  "No .story/ project found.",
+                  format,
+                ),
+              );
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            const eff = resolveRootWithNode(orchRoot, undefined, true, format);
+            if (!eff.ok) {
+              writeOutput(eff.output);
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const result = await handleTicketUnclaim(id, format, eff.root);
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
+              if (err instanceof CliValidationError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { ProjectLoaderError } = await import(
+                "../core/errors.js"
+              );
+              if (err instanceof ProjectLoaderError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const message =
+                err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
+          "start <id>",
+          "Claim a ticket and set status to inprogress",
+          (y2) => addFormatOption(
+            y2.positional("id", { type: "string", demandOption: true, describe: "Ticket ID" }),
+          ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const id = parseTicketId(argv.id as string);
+            const orchRoot = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!orchRoot) {
+              writeOutput(
+                formatError(
+                  "not_found",
+                  "No .story/ project found.",
+                  format,
+                ),
+              );
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            const eff = resolveRootWithNode(orchRoot, undefined, true, format);
+            if (!eff.ok) {
+              writeOutput(eff.output);
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const result = await handleTicketStart(id, format, eff.root);
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
+              if (err instanceof CliValidationError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { ProjectLoaderError } = await import(
+                "../core/errors.js"
+              );
+              if (err instanceof ProjectLoaderError) {
+                writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const message =
+                err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
           },
         )
         .demandCommand(
           1,
-          "Specify a ticket subcommand: list, get, next, blocked, create, update, meta, delete",
+          "Specify a ticket subcommand: list, get, next, blocked, create, update, meta, delete, start, unclaim",
         )
         .strict(),
     () => {},
@@ -1760,9 +1917,11 @@ export function registerIssueCommand(yargs: Argv): Argv {
             const format = parseOutputFormat(argv.format);
             const id = parseIssueId(argv.id as string);
             const hard = argv.hard as boolean;
-            await runDeleteCommand(format, false, async (ctx) =>
-              handleIssueDelete(id, format, ctx.root, hard),
-            );
+            const { resolveAndNormalizeIssueRef } = await import("../core/ref-normalization.js");
+            await runDeleteCommand(format, false, async (ctx) => {
+              const resolvedId = resolveAndNormalizeIssueRef(ctx.state, id);
+              return handleIssueDelete(resolvedId, format, ctx.root, hard);
+            });
           },
         )
         .demandCommand(
@@ -2535,9 +2694,11 @@ export function registerNoteCommand(yargs: Argv): Argv {
             const format = parseOutputFormat(argv.format);
             const id = parseNoteId(argv.id as string);
             const hard = argv.hard as boolean;
-            await runDeleteCommand(format, false, async (ctx) =>
-              handleNoteDelete(id, format, ctx.root, hard),
-            );
+            const { resolveAndNormalizeNoteRef } = await import("../core/ref-normalization.js");
+            await runDeleteCommand(format, false, async (ctx) => {
+              const resolvedId = resolveAndNormalizeNoteRef(ctx.state, id);
+              return handleNoteDelete(resolvedId, format, ctx.root, hard);
+            });
           },
         )
         .demandCommand(
@@ -2997,7 +3158,11 @@ export function registerLessonCommand(yargs: Argv): Argv {
               return;
             }
             try {
-              const result = await handleLessonDelete(id, format, root, hard);
+              const { resolveAndNormalizeLessonRef, RefResolutionError } = await import("../core/ref-normalization.js");
+              const { loadProject } = await import("../core/index.js");
+              const { state } = await loadProject(root);
+              const resolvedId = resolveAndNormalizeLessonRef(state, id);
+              const result = await handleLessonDelete(resolvedId, format, root, hard);
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {
@@ -3009,6 +3174,13 @@ export function registerLessonCommand(yargs: Argv): Argv {
               const { ProjectLoaderError } = await import("../core/errors.js");
               if (err instanceof ProjectLoaderError) {
                 writeOutput(formatError(err.code, err.message, format));
+                process.exitCode = ExitCode.USER_ERROR;
+                return;
+              }
+              const { RefResolutionError } = await import("../core/ref-normalization.js");
+              if (err instanceof RefResolutionError) {
+                const code = err.reason === "missing" ? "not_found" : "conflict";
+                writeOutput(formatError(code, err.message, format));
                 process.exitCode = ExitCode.USER_ERROR;
                 return;
               }

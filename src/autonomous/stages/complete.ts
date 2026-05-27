@@ -47,7 +47,7 @@ export class CompleteStage implements WorkflowStage {
           instruction: [
             `# Ticket Complete -- ${mode} mode session ending`,
             "",
-            `Ticket **${ctx.state.ticket?.id}** completed. Write a brief session handover.`,
+            `Ticket **${(ctx.state.ticket as Record<string, unknown> | undefined)?.displayId as string | undefined ?? ctx.state.ticket?.id}** completed. Write a brief session handover.`,
             "",
             'Call me with completedAction: "handover_written" and include the content in handoverContent.',
           ].join("\n"),
@@ -124,8 +124,8 @@ export class CompleteStage implements WorkflowStage {
 
     try {
       const { handleHandoverCreate } = await import("../../cli/commands/handover.js");
-      const completedIds = ctx.state.completedTickets.map((t) => t.id).join(", ");
-      const resolvedIds = (ctx.state.resolvedIssues ?? []).join(", ");
+      const completedIds = ctx.state.completedTickets.map((t) => (t as Record<string, unknown>).displayId as string | undefined ?? t.id).join(", ");
+      const resolvedIds = (ctx.state.resolvedIssues ?? []).map((id) => ctx.state.resolvedIssueDisplayIds?.[id] ?? id).join(", ");
       const content = [
         `# Checkpoint -- ${totalWorkDone} items completed`,
         "",
@@ -248,9 +248,10 @@ export class CompleteStage implements WorkflowStage {
     const candidates = nextTickets(projectState, 5);
     let candidatesText = "";
     if (candidates.kind === "found") {
-      candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } }, i: number) =>
-        `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
-      ).join("\n");
+      candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } }, i: number) => {
+        const did = (c.ticket as Record<string, unknown>).displayId as string | undefined ?? c.ticket.id;
+        return `${i + 1}. **${did}: ${c.ticket.title}** (${c.ticket.type})`;
+      }).join("\n");
     }
 
     // T-328: Branch affinity annotation
@@ -261,6 +262,7 @@ export class CompleteStage implements WorkflowStage {
     }
 
     const topCandidate = candidates.kind === "found" ? candidates.candidates[0] : null;
+    const topDisplayId = topCandidate ? ((topCandidate.ticket as Record<string, unknown>).displayId as string | undefined ?? topCandidate.ticket.id) : null;
 
     return {
       action: "goto",
@@ -274,7 +276,7 @@ export class CompleteStage implements WorkflowStage {
           candidatesText,
           "",
           topCandidate
-            ? `Pick **${topCandidate.ticket.id}** (highest priority) by calling \`storybloq_autonomous_guide\` now:`
+            ? `Pick **${topDisplayId}** (highest priority) by calling \`storybloq_autonomous_guide\` now:`
             : "Pick a ticket by calling `storybloq_autonomous_guide` now:",
           '```json',
           topCandidate

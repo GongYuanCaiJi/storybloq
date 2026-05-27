@@ -38,6 +38,7 @@ export function generateKeyBetween(a: string | null, b: string | null): string {
 }
 
 function midpoint(a: string, b: string): string {
+  if (a >= b) throw new Error(`midpoint requires a < b, got a="${a}", b="${b}"`);
   const maxLen = Math.max(a.length, b.length);
 
   for (let i = 0; i < maxLen; i++) {
@@ -57,7 +58,7 @@ function midpoint(a: string, b: string): string {
     }
   }
 
-  return a.slice(0, maxLen) + MID;
+  throw new Error(`Cannot generate key between "${a}" and "${b}"`);
 }
 
 function midpointSuffix(a: string, _b: string): string {

@@ -66,6 +66,23 @@ export class HandoverStage implements WorkflowStage {
       }
     }
 
+    // Release ticket claim on normal session end (parity with cancel path)
+    const ticketId = ctx.state.ticket?.id;
+    if (ticketId) {
+      try {
+        const { withProjectLock, writeTicketUnlocked } = await import("../../core/project-loader.js");
+        await withProjectLock(ctx.root, { strict: false }, async ({ state: projectState }) => {
+          const ticket = projectState.ticketByID(ticketId);
+          if (ticket) {
+            const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
+            if (ticketClaim === ctx.state.sessionId) {
+              await writeTicketUnlocked({ ...ticket, claimedBySession: null } as typeof ticket, ctx.root);
+            }
+          }
+        });
+      } catch { /* best-effort */ }
+    }
+
     // ISS-037: final drain of pending deferrals before session end
     await ctx.drainDeferrals();
     const hasUnfiled = (ctx.state.pendingDeferrals ?? []).length > 0;
@@ -96,16 +113,16 @@ export class HandoverStage implements WorkflowStage {
       const openIssues = projectState.issues.filter(i => i.status === "open" || i.status === "inprogress").slice(0, 5);
       const remainingWork = {
         tickets: nextResult.kind === "found"
-          ? nextResult.candidates.map(c => ({ id: c.ticket.id, title: c.ticket.title }))
+          ? nextResult.candidates.map(c => ({ id: (c.ticket as Record<string, unknown>).displayId as string | undefined ?? c.ticket.id, title: c.ticket.title }))
           : [],
-        issues: openIssues.map(i => ({ id: i.id, title: i.title, severity: i.severity })),
+        issues: openIssues.map(i => ({ id: (i as Record<string, unknown>).displayId as string | undefined ?? i.id, title: i.title, severity: i.severity })),
       };
       reportSection = "\n\n" + formatCompactReport({ state: ctx.state, endedAt: new Date().toISOString(), remainingWork });
     } catch { /* best-effort */ }
 
     const ticketsDone = ctx.state.completedTickets.length;
     const issuesDone = (ctx.state.resolvedIssues ?? []).length;
-    const resolvedList = (ctx.state.resolvedIssues ?? []).map((id) => `- ${id} (resolved)`).join("\n");
+    const resolvedList = (ctx.state.resolvedIssues ?? []).map((id) => `- ${ctx.state.resolvedIssueDisplayIds?.[id] ?? id} (resolved)`).join("\n");
     // Terminal — return advance but the walker will see SESSION_END is terminal
     return {
       action: "advance",
@@ -115,7 +132,7 @@ export class HandoverStage implements WorkflowStage {
           "",
           `${ticketsDone} ticket(s) and ${issuesDone} issue(s) completed.${handoverFailed ? " Handover creation failed — fallback saved to session directory." : " Handover written."}${stashPopFailed ? " Auto-stash pop failed — run `git stash pop` manually." : ""} Session ended.`,
           "",
-          ctx.state.completedTickets.map((t) => `- ${t.id}${t.title ? `: ${t.title}` : ""} (${t.commitHash ?? "no commit"})`).join("\n"),
+          ctx.state.completedTickets.map((t) => `- ${(t as Record<string, unknown>).displayId as string | undefined ?? t.id}${t.title ? `: ${t.title}` : ""} (${t.commitHash ?? "no commit"})`).join("\n"),
           ...(resolvedList ? [resolvedList] : []),
         ].join("\n") + reportSection,
         reminders: [],

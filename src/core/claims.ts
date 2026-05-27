@@ -54,12 +54,13 @@ export function filterClaimedFromRecommendations(
   claims: ReadonlyMap<string, Claim>,
   currentUser: string | null,
 ): Recommendation[] {
-  if (currentUser === null || claims.size === 0) {
+  if (claims.size === 0) {
     return [...recommendations];
   }
   return recommendations.filter((rec) => {
     const claim = claims.get(rec.id);
     if (!claim) return true;
+    if (currentUser === null) return false;
     return claim.user === currentUser;
   });
 }

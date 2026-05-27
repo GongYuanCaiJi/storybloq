@@ -24,7 +24,7 @@ export interface DoctorContext {
   loadWarnings: readonly LoadWarning[];
 }
 
-export type DoctorCheck = (state: ProjectState, ctx: DoctorContext) => DoctorFinding[];
+export type DoctorCheck = (state: ProjectState, ctx: DoctorContext) => DoctorFinding[] | Promise<DoctorFinding[]>;
 
 export const defaultChecks: DoctorCheck[] = [];
 
@@ -39,11 +39,11 @@ export interface DoctorResult {
   infoCount: number;
 }
 
-export function runDoctor(
+export async function runDoctor(
   state: ProjectState,
   ctx: DoctorContext,
   checks?: DoctorCheck[],
-): DoctorResult {
+): Promise<DoctorResult> {
   const activeChecks = checks ?? defaultChecks;
   const findings: DoctorFinding[] = [];
 
@@ -59,7 +59,7 @@ export function runDoctor(
   }
 
   for (const check of activeChecks) {
-    findings.push(...check(state, ctx));
+    findings.push(...(await check(state, ctx)));
   }
 
   return buildResult(findings);
@@ -342,19 +342,22 @@ function checkConflictsPresent(state: ProjectState, _ctx: DoctorContext): Doctor
   }];
 }
 
-function checkMergeDriverConfig(state: ProjectState, ctx: DoctorContext): DoctorFinding[] {
+async function checkMergeDriverConfig(state: ProjectState, ctx: DoctorContext): Promise<DoctorFinding[]> {
   const rawTeam = (state.config as Record<string, unknown>).team;
   const team = rawTeam && typeof rawTeam === "object" && !Array.isArray(rawTeam) ? rawTeam as Record<string, unknown> : undefined;
   if (!team?.mergeDriverVersion) return [];
 
-  const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-  const { existsSync, readFileSync } = require("node:fs") as typeof import("node:fs");
-  const { join } = require("node:path") as typeof import("node:path");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { readFile, stat } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const execFileAsync = promisify(execFile);
   const findings: DoctorFinding[] = [];
   const storyDir = join(ctx.root, ".story");
 
   try {
-    const driver = execFileSync("git", ["config", "--local", "--get", "merge.storybloq-json.driver"], { cwd: ctx.root, encoding: "utf-8", timeout: 5000 }).trim();
+    const { stdout } = await execFileAsync("git", ["config", "--local", "--get", "merge.storybloq-json.driver"], { cwd: ctx.root, timeout: 5000 });
+    const driver = stdout.trim();
     if (driver !== "storybloq merge-driver %O %A %B %P") {
       findings.push({ severity: "warning", code: "merge_driver_mismatch", message: `Merge driver command mismatch: "${driver}"`, entity: null, repair: { command: ["storybloq", "team", "setup"] } });
     }
@@ -363,24 +366,25 @@ function checkMergeDriverConfig(state: ProjectState, ctx: DoctorContext): Doctor
   }
 
   const attrsPath = join(storyDir, ".gitattributes");
-  if (!existsSync(attrsPath)) {
-    findings.push({ severity: "warning", code: "gitattributes_missing", message: ".story/.gitattributes not found. Run storybloq team setup.", entity: null, repair: { command: ["storybloq", "team", "setup"] } });
-  } else {
-    const content = readFileSync(attrsPath, "utf-8");
+  try {
+    await stat(attrsPath);
+    const content = await readFile(attrsPath, "utf-8");
     if (!content.includes("# storybloq-merge-begin")) {
       findings.push({ severity: "warning", code: "gitattributes_no_block", message: ".story/.gitattributes missing managed merge block.", entity: null, repair: { command: ["storybloq", "team", "setup"] } });
     }
+  } catch {
+    findings.push({ severity: "warning", code: "gitattributes_missing", message: ".story/.gitattributes not found. Run storybloq team setup.", entity: null, repair: { command: ["storybloq", "team", "setup"] } });
   }
 
   return findings;
 }
 
-function checkReservationHealth(state: ProjectState, ctx: DoctorContext): DoctorFinding[] {
+async function checkReservationHealth(state: ProjectState, ctx: DoctorContext): Promise<DoctorFinding[]> {
   const rawTeam = (state.config as Record<string, unknown>).team;
   const team = rawTeam && typeof rawTeam === "object" && !Array.isArray(rawTeam) ? rawTeam as Record<string, unknown> : undefined;
   if (team?.idAllocator !== "git-refs") return [];
 
-  const { fetchLocalReservationTags, classifyReservations } = require("./reservation-check.js") as typeof import("./reservation-check.js");
+  const { fetchLocalReservationTags, classifyReservations } = await import("./reservation-check.js");
   const findings: DoctorFinding[] = [];
 
   const result = fetchLocalReservationTags(ctx.root);

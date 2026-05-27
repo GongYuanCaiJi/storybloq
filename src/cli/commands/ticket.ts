@@ -1,6 +1,7 @@
 import { nextTicket, nextTickets, blockedTickets } from "../../core/queries.js";
-import { nextTicketID, nextOrder } from "../../core/id-allocation.js";
+import { nextTicketID, nextOrder, allocateTeamTicketId } from "../../core/id-allocation.js";
 import { resolveAndNormalizeTicketRef, RefResolutionError } from "../../core/ref-normalization.js";
+import { clearClaimOnComplete, buildClaim, canClaim } from "../../core/claims.js";
 import { validateProject } from "../../core/validation.js";
 import { ProjectState } from "../../core/project-state.js";
 import {
@@ -311,10 +312,14 @@ export async function handleTicketCreate(
       ? validateAndResolveParentTicket(args.parentTicket, "", state)
       : undefined;
 
-    const id = nextTicketID(state.tickets);
+    const isTeam = state.config.team?.enabled === true;
+    const { id, displayId } = isTeam
+      ? allocateTeamTicketId(state.tickets)
+      : { id: nextTicketID(state.tickets), displayId: undefined as string | undefined };
     const order = nextOrder(args.phase, state);
     const ticket: Ticket = {
       id,
+      ...(displayId != null && { displayId }),
       title: args.title,
       description: args.description,
       type: args.type as TicketType,
@@ -416,9 +421,10 @@ export async function handleTicketUpdate(
       ...statusChanges,
     };
 
-    validatePostWriteState(ticket, state, false);
-    await writeTicketUnlocked(ticket, root);
-    updatedTicket = ticket;
+    const finalTicket = clearClaimOnComplete(ticket);
+    validatePostWriteState(finalTicket, state, false);
+    await writeTicketUnlocked(finalTicket, root);
+    updatedTicket = finalTicket;
   });
 
   if (!updatedTicket) throw new Error("Ticket not updated");
@@ -519,4 +525,77 @@ export async function handleTicketDelete(
     return { output: JSON.stringify(successEnvelope({ id, deleted: true }), null, 2) };
   }
   return { output: `Deleted ticket ${id}.` };
+}
+
+export async function handleTicketUnclaim(
+  id: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  let updatedTicket: Ticket | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const resolvedId = resolveAndNormalizeTicketRef(state, id);
+    const existing = state.ticketByID(resolvedId);
+    if (!existing) throw new CliValidationError("not_found", `Ticket ${id} not found`);
+    if (!existing.claim && !(existing as Record<string, unknown>).claimedBySession) {
+      updatedTicket = existing;
+      return;
+    }
+    const ticket: Ticket = { ...existing, claim: undefined } as unknown as Ticket;
+    (ticket as Record<string, unknown>).claimedBySession = undefined;
+    await writeTicketUnlocked(ticket, root);
+    updatedTicket = ticket;
+  });
+  if (!updatedTicket) throw new Error("Ticket not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
+  }
+  return { output: `Unclaimed ticket ${(updatedTicket as Record<string, unknown>).displayId as string | undefined ?? updatedTicket.id}` };
+}
+
+export async function handleTicketStart(
+  id: string,
+  format: string,
+  root: string,
+): Promise<CommandResult> {
+  let updatedTicket: Ticket | undefined;
+  await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const resolvedId = resolveAndNormalizeTicketRef(state, id);
+    const existing = state.ticketByID(resolvedId);
+    if (!existing) throw new CliValidationError("not_found", `Ticket ${id} not found`);
+    if (existing.status === "complete") {
+      throw new CliValidationError("invalid_input", `Ticket ${id} is already complete`);
+    }
+
+    let email: string | undefined;
+    let branch = "unknown";
+    try {
+      const { gitUserEmail, gitHead } = await import("../../autonomous/git-inspector.js");
+      email = await gitUserEmail(root) ?? undefined;
+      const head = await gitHead(root);
+      if (head.ok && head.data.branch) branch = head.data.branch;
+    } catch { /* git not available */ }
+
+    if (existing.claim && email) {
+      const check = canClaim(existing, email, branch);
+      if (!check.allowed) {
+        throw new CliValidationError("conflict", `Ticket ${id} is claimed by ${check.claimedBy}`);
+      }
+    }
+
+    const claim = email ? buildClaim(email, branch, new Date().toISOString()) : undefined;
+    const ticket: Ticket = {
+      ...existing,
+      status: "inprogress" as TicketStatus,
+      ...(claim ? { claim } : {}),
+    };
+    validatePostWriteState(ticket, state, false);
+    await writeTicketUnlocked(ticket, root);
+    updatedTicket = ticket;
+  });
+  if (!updatedTicket) throw new Error("Ticket not updated");
+  if (format === "json") {
+    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
+  }
+  return { output: `Started ticket ${(updatedTicket as Record<string, unknown>).displayId as string | undefined ?? updatedTicket.id}: ${updatedTicket.title}` };
 }

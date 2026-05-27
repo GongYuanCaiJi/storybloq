@@ -134,6 +134,6 @@ describe("filterClaimedFromRecommendations", () => {
       ["T-001", { user: "bob@example.com", branch: "feature/bar", since: now }],
     ]);
     const filtered = filterClaimedFromRecommendations(recs, claims, null);
-    expect(filtered).toHaveLength(1);
+    expect(filtered).toHaveLength(0);
   });
 });

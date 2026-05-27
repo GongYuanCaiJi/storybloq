@@ -5,7 +5,7 @@ import type { Lesson } from "../models/lesson.js";
 import type { Roadmap } from "../models/roadmap.js";
 import type { Config } from "../models/config.js";
 import type { IssueSeverity } from "../models/types.js";
-import { resolveRef, type ResolveResult } from "./resolver.js";
+import { resolveRef, buildPrevDisplayIndex, type ResolveResult } from "./resolver.js";
 import { compareByRank } from "./fractional-index.js";
 
 export type PhaseStatus = "notstarted" | "inprogress" | "complete";
@@ -40,6 +40,9 @@ export class ProjectState {
   private readonly leafTicketsByPhase: Map<string | null, Ticket[]>;
   private readonly childrenByParent: Map<string, Ticket[]>;
   private readonly reverseBlocksMap: Map<string, Ticket[]>;
+  private readonly deletionChildrenByParent: Map<string, Ticket[]>;
+  private readonly deletionReverseBlocks: Map<string, Ticket[]>;
+  private readonly issuesByRelatedTicket: Map<string, Issue[]>;
   private readonly ticketsByID: Map<string, Ticket>;
   private readonly issuesByID: Map<string, Issue>;
   private readonly notesByID: Map<string, Note>;
@@ -48,6 +51,10 @@ export class ProjectState {
   private readonly issuesByDisplayID: Map<string, Issue[]>;
   private readonly notesByDisplayID: Map<string, Note[]>;
   private readonly lessonsByDisplayID: Map<string, Lesson[]>;
+  private readonly ticketsByPrevDisplayID: Map<string, Ticket[]>;
+  private readonly issuesByPrevDisplayID: Map<string, Issue[]>;
+  private readonly notesByPrevDisplayID: Map<string, Note[]>;
+  private readonly lessonsByPrevDisplayID: Map<string, Lesson[]>;
 
   // --- Counts ---
   readonly totalTicketCount: number;
@@ -84,11 +91,40 @@ export class ProjectState {
     this.activeNotes = input.notes.filter((n) => isActiveLifecycle(n));
     this.activeLessons = this.lessons.filter((l) => isActiveLifecycle(l));
 
+    // Step 0b: Local resolver for ref normalization during graph construction
+    const localById = new Map<string, string>();
+    const localByDisplay = new Map<string, string[]>();
+    const localByPrev = new Map<string, string[]>();
+    for (const t of input.tickets) {
+      localById.set(t.id, t.id);
+      const did = (t as Record<string, unknown>).displayId as string | undefined;
+      if (did) localByDisplay.set(did, [...(localByDisplay.get(did) ?? []), t.id]);
+      for (const prev of ((t as Record<string, unknown>).previousDisplayIds as string[] | undefined) ?? []) {
+        localByPrev.set(prev, [...(localByPrev.get(prev) ?? []), t.id]);
+      }
+    }
+    function localResolve(ref: string): string {
+      if (localById.has(ref)) return ref;
+      const byDisplay = localByDisplay.get(ref);
+      if (byDisplay?.length === 1) return byDisplay[0]!;
+      const byPrev = localByPrev.get(ref);
+      if (byPrev?.length === 1) return byPrev[0]!;
+      return ref;
+    }
+    function localResolveAll(ref: string): string[] {
+      if (localById.has(ref)) return [ref];
+      const byDisplay = localByDisplay.get(ref);
+      if (byDisplay && byDisplay.length > 0) return byDisplay;
+      const byPrev = localByPrev.get(ref);
+      if (byPrev && byPrev.length > 0) return byPrev;
+      return [ref];
+    }
+
     // Step 1: Umbrella IDs -- only active tickets count as parents
     const parentIDs = new Set<string>();
     for (const t of this.activeTickets) {
       if (t.parentTicket != null) {
-        parentIDs.add(t.parentTicket);
+        parentIDs.add(localResolve(t.parentTicket));
       }
     }
     this.umbrellaIDs = parentIDs;
@@ -116,33 +152,51 @@ export class ProjectState {
     }
     this.leafTicketsByPhase = byPhase;
 
-    // Step 4: Children by parent (reverse of parentTicket)
+    // Step 4: Children by parent (display/derived: single-resolution)
     const children = new Map<string, Ticket[]>();
+    const delChildren = new Map<string, Ticket[]>();
     for (const t of input.tickets) {
       if (t.parentTicket != null) {
-        const arr = children.get(t.parentTicket);
-        if (arr) {
-          arr.push(t);
-        } else {
-          children.set(t.parentTicket, [t]);
+        const resolved = localResolve(t.parentTicket);
+        const arr = children.get(resolved);
+        if (arr) { arr.push(t); } else { children.set(resolved, [t]); }
+        for (const rid of localResolveAll(t.parentTicket)) {
+          const darr = delChildren.get(rid);
+          if (darr) { darr.push(t); } else { delChildren.set(rid, [t]); }
         }
       }
     }
     this.childrenByParent = children;
+    this.deletionChildrenByParent = delChildren;
 
-    // Step 5: Reverse blocks map (blockerID → tickets blocked by it)
+    // Step 5: Reverse blocks map (display: single-resolution, deletion: all matches)
     const reverseBlocks = new Map<string, Ticket[]>();
+    const delReverseBlocks = new Map<string, Ticket[]>();
     for (const t of input.tickets) {
       for (const blockerID of t.blockedBy) {
-        const arr = reverseBlocks.get(blockerID);
-        if (arr) {
-          arr.push(t);
-        } else {
-          reverseBlocks.set(blockerID, [t]);
+        const resolved = localResolve(blockerID);
+        const arr = reverseBlocks.get(resolved);
+        if (arr) { arr.push(t); } else { reverseBlocks.set(resolved, [t]); }
+        for (const rid of localResolveAll(blockerID)) {
+          const darr = delReverseBlocks.get(rid);
+          if (darr) { darr.push(t); } else { delReverseBlocks.set(rid, [t]); }
         }
       }
     }
     this.reverseBlocksMap = reverseBlocks;
+    this.deletionReverseBlocks = delReverseBlocks;
+
+    // Step 5b: Issues by related ticket (deletion-safety)
+    const issuesByRelTicket = new Map<string, Issue[]>();
+    for (const i of input.issues) {
+      for (const tref of i.relatedTickets) {
+        for (const rid of localResolveAll(tref)) {
+          const arr = issuesByRelTicket.get(rid);
+          if (arr) { arr.push(i); } else { issuesByRelTicket.set(rid, [i]); }
+        }
+      }
+    }
+    this.issuesByRelatedTicket = issuesByRelTicket;
 
     // Step 6: Lookup indexes
     // Tickets: first-wins (matching Swift uniquingKeysWith: { first, _ in first })
@@ -180,6 +234,10 @@ export class ProjectState {
     this.issuesByDisplayID = buildDisplayIndex(input.issues);
     this.notesByDisplayID = buildDisplayIndex(input.notes);
     this.lessonsByDisplayID = buildDisplayIndex(this.lessons);
+    this.ticketsByPrevDisplayID = buildPrevDisplayIndex(input.tickets);
+    this.issuesByPrevDisplayID = buildPrevDisplayIndex(input.issues);
+    this.notesByPrevDisplayID = buildPrevDisplayIndex(input.notes);
+    this.lessonsByPrevDisplayID = buildPrevDisplayIndex(this.lessons);
 
     // Step 7: Counts
     this.totalTicketCount = this.leafTickets.length;
@@ -255,12 +313,12 @@ export class ProjectState {
    */
   isBlocked(ticket: Ticket): boolean {
     if (ticket.blockedBy.length === 0) return false;
-    return ticket.blockedBy.some((blockerID) => {
-      const blocker = this.ticketsByID.get(blockerID);
-      if (!blocker) return true; // unknown = blocked
-      if (isDeleted(blocker)) return false; // deleted = resolved
-      return blocker.status !== "complete";
-    });
+    for (const ref of ticket.blockedBy) {
+      const resolved = this.resolveTicketRef(ref);
+      if (resolved.kind === "missing" || resolved.kind === "ambiguous") return true;
+      if (resolved.kind === "found" && !isDeleted(resolved.item) && resolved.item.status !== "complete") return true;
+    }
+    return false;
   }
 
   get blockedCount(): number {
@@ -302,19 +360,19 @@ export class ProjectState {
   // --- Resolver ---
 
   resolveTicketRef(ref: string): ResolveResult<Ticket> {
-    return resolveRef(ref, this.ticketsByID, this.ticketsByDisplayID, this.tickets);
+    return resolveRef(ref, this.ticketsByID, this.ticketsByDisplayID, this.tickets, this.ticketsByPrevDisplayID);
   }
 
   resolveIssueRef(ref: string): ResolveResult<Issue> {
-    return resolveRef(ref, this.issuesByID, this.issuesByDisplayID, this.issues);
+    return resolveRef(ref, this.issuesByID, this.issuesByDisplayID, this.issues, this.issuesByPrevDisplayID);
   }
 
   resolveNoteRef(ref: string): ResolveResult<Note> {
-    return resolveRef(ref, this.notesByID, this.notesByDisplayID, this.notes);
+    return resolveRef(ref, this.notesByID, this.notesByDisplayID, this.notes, this.notesByPrevDisplayID);
   }
 
   resolveLessonRef(ref: string): ResolveResult<Lesson> {
-    return resolveRef(ref, this.lessonsByID, this.lessonsByDisplayID, this.lessons);
+    return resolveRef(ref, this.lessonsByID, this.lessonsByDisplayID, this.lessons, this.lessonsByPrevDisplayID);
   }
 
   resolvedBlockerRefs(ticket: Ticket): ResolveResult<Ticket>[] {
@@ -331,12 +389,7 @@ export class ProjectState {
   }
 
   isBlockedByResolver(ticket: Ticket): boolean {
-    for (const ref of ticket.blockedBy) {
-      const resolved = this.resolveTicketRef(ref);
-      if (resolved.kind === "missing" || resolved.kind === "ambiguous") return true;
-      if (resolved.kind === "found" && !isDeleted(resolved.item) && resolved.item.status !== "complete") return true;
-    }
-    return false;
+    return this.isBlocked(ticket);
   }
 
   resolvedParentRef(ticket: Ticket): ResolveResult<Ticket> | null {
@@ -352,21 +405,19 @@ export class ProjectState {
 
   // --- Deletion Safety ---
 
-  /** IDs of tickets that list `ticketId` in their blockedBy. */
+  /** IDs of tickets that list `ticketId` in their blockedBy (conservative: includes ambiguous refs). */
   ticketsBlocking(ticketId: string): string[] {
-    return (this.reverseBlocksMap.get(ticketId) ?? []).map((t) => t.id);
+    return (this.deletionReverseBlocks.get(ticketId) ?? []).map((t) => t.id);
   }
 
-  /** IDs of tickets that have `ticketId` as their parentTicket. */
+  /** IDs of tickets that have `ticketId` as their parentTicket (conservative: includes ambiguous refs). */
   childrenOf(ticketId: string): string[] {
-    return (this.childrenByParent.get(ticketId) ?? []).map((t) => t.id);
+    return (this.deletionChildrenByParent.get(ticketId) ?? []).map((t) => t.id);
   }
 
-  /** IDs of issues that reference `ticketId` in relatedTickets. */
+  /** IDs of issues that reference `ticketId` in relatedTickets (conservative: includes ambiguous refs). */
   issuesReferencing(ticketId: string): string[] {
-    return this.issues
-      .filter((i) => i.relatedTickets.includes(ticketId))
-      .map((i) => i.id);
+    return (this.issuesByRelatedTicket.get(ticketId) ?? []).map((i) => i.id);
   }
 
   // --- Private ---

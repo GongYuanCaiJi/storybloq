@@ -11,10 +11,18 @@ export async function handleRecommend(ctx: CommandContext, count: number): Promi
   const baseOptions = buildRecommendOptions(ctx);
   const fedState = await loadFederationState(ctx.root, ctx.state.config);
   const cache = readFederationCache(join(ctx.root, ".story"));
+
+  let currentUser: string | undefined;
+  try {
+    const { gitUserEmail } = await import("../../autonomous/git-inspector.js");
+    currentUser = (await gitUserEmail(ctx.root)) ?? undefined;
+  } catch { /* git not available */ }
+
   const options: RecommendOptions = {
     ...baseOptions,
     ...(fedState ? { federationState: fedState } : {}),
     ...(cache?.crossNodeRefStatuses ? { crossNodeRefStatuses: cache.crossNodeRefStatuses } : {}),
+    ...(currentUser ? { currentUser } : {}),
   };
   const result = recommend(ctx.state, count, options);
   return { output: formatRecommendations(result, ctx.state, ctx.format) };

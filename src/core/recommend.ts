@@ -18,6 +18,8 @@ import {
   isCrossNodeBlocked,
 } from "./queries.js";
 import { validateProject } from "./validation.js";
+import { filterClaimedFromRecommendations } from "./claims.js";
+import type { Claim } from "../models/types.js";
 
 // --- Types ---
 
@@ -43,6 +45,7 @@ export interface RecommendOptions {
   readonly previousOpenIssueCount?: number;
   readonly federationState?: FederationState;
   readonly crossNodeRefStatuses?: Record<string, string>;
+  readonly currentUser?: string;
 }
 
 export type RecommendItemKind = "ticket" | "issue" | "action";
@@ -174,9 +177,16 @@ export function recommend(
     return a.id.localeCompare(b.id);
   });
 
+  const claims = new Map<string, Claim>();
+  for (const t of state.tickets) {
+    const claim = (t as Record<string, unknown>).claim as Claim | undefined;
+    if (claim) claims.set(t.id, claim);
+  }
+  const visible = filterClaimedFromRecommendations(all, claims, options?.currentUser ?? null);
+
   return {
-    recommendations: all.slice(0, effectiveCount),
-    totalCandidates: all.length,
+    recommendations: visible.slice(0, effectiveCount),
+    totalCandidates: visible.length,
   };
 }
 

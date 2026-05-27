@@ -6,7 +6,7 @@ import {
   writeIssueUnlocked,
   deleteIssue,
 } from "../../core/project-loader.js";
-import { nextIssueID } from "../../core/id-allocation.js";
+import { nextIssueID, allocateTeamIssueId } from "../../core/id-allocation.js";
 import {
   formatIssueList,
   formatIssue,
@@ -266,9 +266,13 @@ export async function handleIssueCreate(
       ? validateAndResolveRelatedTickets(args.relatedTickets, state)
       : [];
 
-    const id = nextIssueID(state.issues);
+    const isTeam = state.config.team?.enabled === true;
+    const { id, displayId } = isTeam
+      ? allocateTeamIssueId(state.issues)
+      : { id: nextIssueID(state.issues), displayId: undefined as string | undefined };
     const issue: Issue = {
       id,
+      ...(displayId != null && { displayId }),
       title: args.title,
       status: "open",
       severity: args.severity as IssueSeverity,

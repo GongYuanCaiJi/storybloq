@@ -127,7 +127,14 @@ function detectTeamMode(absRoot: string): boolean {
     const raw = readFileSync(configPath, "utf-8");
     const config = JSON.parse(raw) as Record<string, unknown>;
     const team = config.team;
-    return team != null && typeof team === "object" && !Array.isArray(team);
+    if (team != null && typeof team === "object" && !Array.isArray(team)) {
+      if ((team as Record<string, unknown>).enabled === true) return true;
+      if (Object.keys(team as object).length > 0
+          && typeof config.schemaVersion === "number" && (config.schemaVersion as number) >= 2) {
+        return true;
+      }
+    }
+    return false;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;

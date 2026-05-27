@@ -83,35 +83,38 @@ export function threeWayMerge(
   const merged: Record<string, unknown> = {};
 
   const existingConflicts: unknown[] = [];
+  const seenConflictKeys = new Set<string>();
   for (const src of [base, ours, theirs]) {
     if (Array.isArray(src._conflicts)) {
       for (const c of src._conflicts) {
-        const key = JSON.stringify({ fp: (c as Record<string, unknown>).fieldPath, k: (c as Record<string, unknown>).kind, g: (c as Record<string, unknown>).group });
-        if (!existingConflicts.some((e) => JSON.stringify({ fp: (e as Record<string, unknown>).fieldPath, k: (e as Record<string, unknown>).kind, g: (e as Record<string, unknown>).group }) === key)) {
+        const cr = c as Record<string, unknown>;
+        const key = `${cr.fieldPath}\0${cr.kind}\0${cr.group ?? ""}`;
+        if (!seenConflictKeys.has(key)) {
+          seenConflictKeys.add(key);
           existingConflicts.push(c);
         }
       }
     }
   }
 
-  const baseDeleted = !isDeleted(base) && isDeleted(ours);
+  const oursDeleted = !isDeleted(base) && isDeleted(ours);
   const theirsDeleted = !isDeleted(base) && isDeleted(theirs);
 
-  if (baseDeleted && theirsDeleted) {
+  if (oursDeleted && theirsDeleted) {
     Object.assign(merged, ours);
     delete merged._conflicts;
     if (existingConflicts.length > 0) merged._conflicts = existingConflicts;
     return { merged, conflicts, clean: conflicts.length === 0 };
   }
 
-  if (baseDeleted && !theirsDeleted && hasNonTombstoneChanges(base, theirs)) {
+  if (oursDeleted && !theirsDeleted && hasNonTombstoneChanges(base, theirs)) {
     conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "deleted", theirs: "edited" });
     Object.assign(merged, base);
     merged._conflicts = [...existingConflicts, ...conflicts];
     return { merged, conflicts, clean: false };
   }
 
-  if (theirsDeleted && !baseDeleted && hasNonTombstoneChanges(base, ours)) {
+  if (theirsDeleted && !oursDeleted && hasNonTombstoneChanges(base, ours)) {
     conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "edited", theirs: "deleted" });
     Object.assign(merged, base);
     merged._conflicts = [...existingConflicts, ...conflicts];
@@ -137,6 +140,12 @@ export function threeWayMerge(
       for (const m of group.members) { merged[m] = ours[m]; handledByCoupled.add(m); }
     } else if (deepEqual(oursSnapshot, theirsSnapshot)) {
       for (const m of group.members) { merged[m] = ours[m]; handledByCoupled.add(m); }
+    } else if (group.latestWinsField) {
+      const [member, tsKey] = group.latestWinsField.split(".");
+      const oTs = String(((ours[member!] as Record<string, unknown> | null)?.[tsKey!]) ?? "");
+      const tTs = String(((theirs[member!] as Record<string, unknown> | null)?.[tsKey!]) ?? "");
+      const winner = oTs >= tTs ? ours : theirs;
+      for (const m of group.members) { merged[m] = winner[m]; handledByCoupled.add(m); }
     } else {
       for (const m of group.members) {
         merged[m] = base[m];
@@ -190,7 +199,7 @@ export function threeWayMerge(
     }
 
     if (rule.kind === "identity") {
-      merged[key] = bVal;
+      merged[key] = bVal !== undefined ? bVal : (oVal ?? tVal);
       continue;
     }
 
@@ -203,9 +212,13 @@ export function threeWayMerge(
     }
 
     if (rule.kind === "monotonic") {
-      const oNum = typeof oVal === "number" ? oVal : 0;
-      const tNum = typeof tVal === "number" ? tVal : 0;
-      merged[key] = Math.max(oNum, tNum);
+      if (typeof oVal === "string" && typeof tVal === "string") {
+        merged[key] = oVal >= tVal ? oVal : tVal;
+      } else if (typeof oVal === "number" && typeof tVal === "number") {
+        merged[key] = Math.max(oVal, tVal);
+      } else {
+        merged[key] = oVal ?? tVal ?? bVal;
+      }
       continue;
     }
 
@@ -223,7 +236,7 @@ export function threeWayMerge(
     }
 
     merged[key] = bVal;
-    conflicts.push({ fieldPath: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+    conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
   }
 
   if (conflicts.length > 0 || existingConflicts.length > 0) {

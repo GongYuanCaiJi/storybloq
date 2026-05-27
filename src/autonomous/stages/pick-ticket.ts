@@ -75,8 +75,8 @@ export class PickTicketStage implements WorkflowStage {
 
     let candidatesText = "";
     if (candidates.kind === "found") {
-      candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } }, i: number) =>
-        `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
+      candidatesText = candidates.candidates.map((c: { ticket: { id: string; title: string; type: string } & Record<string, unknown> }, i: number) =>
+        `${i + 1}. **${(c.ticket.displayId as string | undefined) ?? c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
       ).join("\n");
     }
 
@@ -94,12 +94,12 @@ export class PickTicketStage implements WorkflowStage {
     let issuesText = "";
     if (highIssues.length > 0) {
       issuesText = "\n\n## Open Issues (high+ severity)\n\n" + highIssues.map(
-        (i, idx) => `${idx + 1}. **${i.id}: ${i.title}** (${i.severity})`,
+        (i, idx) => `${idx + 1}. **${(i as Record<string, unknown>).displayId as string | undefined ?? i.id}: ${i.title}** (${i.severity})`,
       ).join("\n");
     }
     if (otherIssues.length > 0) {
       issuesText += "\n\n## Open Issues (medium/low)\n\n" + otherIssues.map(
-        (i, idx) => `${idx + 1}. **${i.id}: ${i.title}** (${i.severity})`,
+        (i, idx) => `${idx + 1}. **${(i as Record<string, unknown>).displayId as string | undefined ?? i.id}: ${i.title}** (${i.severity})`,
       ).join("\n");
     }
 
@@ -121,7 +121,7 @@ export class PickTicketStage implements WorkflowStage {
         issuesText,
         "",
         topCandidate
-          ? `Pick **${topCandidate.ticket.id}** (highest priority) or an open issue by calling \`storybloq_autonomous_guide\` now:`
+          ? `Pick **${(topCandidate.ticket as Record<string, unknown>).displayId as string | undefined ?? topCandidate.ticket.id}** (highest priority) or an open issue by calling \`storybloq_autonomous_guide\` now:`
           : hasIssues
             ? `Pick an issue to fix by calling \`storybloq_autonomous_guide\` now:`
             : "Pick a ticket by calling `storybloq_autonomous_guide` now:",
@@ -370,7 +370,7 @@ export class PickTicketStage implements WorkflowStage {
     ctx.writeState({ pendingProjectMutation: null });
 
     ctx.updateDraft({
-      currentIssue: { id: issue.id, title: issue.title, severity: issue.severity },
+      currentIssue: { id: issue.id, displayId: (issue as Record<string, unknown>).displayId as string | undefined, title: issue.title, severity: issue.severity },
       ticket: undefined,
       reviews: { plan: [], code: [] },
       finalizeCheckpoint: null,
