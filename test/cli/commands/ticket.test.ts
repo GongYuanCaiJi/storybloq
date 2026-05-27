@@ -377,6 +377,24 @@ describe("handleTicketUpdate", () => {
     expect(parsed.data.completedDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
+  it("status→complete clears claim and claimedBySession on disk (G-6)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-update-"));
+    tmpDirs.push(dir);
+    await setupProject(dir);
+    const ticketPath = join(dir, ".story", "tickets", "T-001.json");
+    const raw = JSON.parse(await readFile(ticketPath, "utf-8"));
+    raw.claim = { user: "alice@test.com", branch: "feat/x", since: "2026-05-26T10:00:00Z" };
+    raw.claimedBySession = "sess-abc";
+    await writeFile(ticketPath, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+
+    await handleTicketUpdate("T-001", { status: "complete" }, "json", dir);
+
+    const disk = JSON.parse(await readFile(ticketPath, "utf-8"));
+    expect(disk.status).toBe("complete");
+    expect(disk.claim).toBeUndefined();
+    expect(disk.claimedBySession).toBeUndefined();
+  });
+
   it("returns not_found for missing ticket", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ticket-update-"));
     tmpDirs.push(dir);
