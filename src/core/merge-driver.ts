@@ -394,13 +394,13 @@ function keyedArrayMerge(
   const oursIds = new Set(oursOrder);
   const theirsIds = new Set(theirsOrder);
 
-  const sharedWithBase = baseOrder.filter((id) => oursIds.has(id) || theirsIds.has(id));
   const oursSharedOrder = oursOrder.filter((id) => baseIds.has(id));
   const theirsSharedOrder = theirsOrder.filter((id) => baseIds.has(id));
-  const baseSharedOrder = baseOrder.filter((id) => oursIds.has(id) && theirsIds.has(id));
+  const baseOursOrder = baseOrder.filter((id) => oursIds.has(id));
+  const baseTheirsOrder = baseOrder.filter((id) => theirsIds.has(id));
 
-  const oursReordered = !deepEqual(oursSharedOrder, baseSharedOrder.filter((id) => oursIds.has(id)));
-  const theirsReordered = !deepEqual(theirsSharedOrder, baseSharedOrder.filter((id) => theirsIds.has(id)));
+  const oursReordered = !deepEqual(oursSharedOrder, baseOursOrder);
+  const theirsReordered = !deepEqual(theirsSharedOrder, baseTheirsOrder);
 
   let mergedOrder: string[];
 
@@ -428,7 +428,7 @@ function keyedArrayMerge(
     const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id));
     mergedOrder.push(...addedByOurs, ...addedByTheirs);
   } else {
-    mergedOrder = [...baseSharedOrder.filter((id) => oursIds.has(id) || theirsIds.has(id))];
+    mergedOrder = [...baseOrder.filter((id) => oursIds.has(id) || theirsIds.has(id))];
     const addedByOurs = oursOrder.filter((id) => !baseIds.has(id));
     const addedByTheirs = theirsOrder.filter((id) => !baseIds.has(id) && !oursIds.has(id));
     mergedOrder.push(...addedByOurs, ...addedByTheirs);

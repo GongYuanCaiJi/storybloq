@@ -173,22 +173,22 @@ export async function handleSessionShow(
   lines.push(`Mode:    ${state.mode ?? "auto"}`);
   lines.push(`Recipe:  ${state.recipe}`);
   lines.push(`Lease:   ${formatLease(state.lease?.expiresAt)} (${state.lease?.expiresAt ?? "n/a"})`);
-  const ticket = (state as FullSessionState & { ticket?: { id?: string; title?: string } }).ticket;
+  const ticket = (state as FullSessionState & { ticket?: { id?: string; displayId?: string; title?: string } }).ticket;
   if (ticket?.id) {
-    lines.push(`Ticket:  ${ticket.id} — ${ticket.title ?? ""}`);
+    lines.push(`Ticket:  ${ticket.displayId ?? ticket.id} — ${ticket.title ?? ""}`);
   }
   if (state.completedTickets.length) {
     lines.push("");
     lines.push("Completed tickets:");
     for (const t of state.completedTickets) {
-      lines.push(`  ${t.id} (${t.commitHash?.slice(0, 8) ?? "no-hash"})`);
+      lines.push(`  ${t.displayId ?? t.id} (${t.commitHash?.slice(0, 8) ?? "no-hash"})`);
     }
   }
   if ((state.resolvedIssues ?? []).length) {
     lines.push("");
     lines.push("Resolved issues:");
-    for (const i of state.resolvedIssues ?? []) {
-      lines.push(`  ${i.id}`);
+    for (const id of state.resolvedIssues ?? []) {
+      lines.push(`  ${state.resolvedIssueDisplayIds?.[id] ?? id}`);
     }
   }
   if (events.length) {

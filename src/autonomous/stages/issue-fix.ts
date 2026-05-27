@@ -19,6 +19,7 @@ export class IssueFixStage implements WorkflowStage {
     if (!issue) {
       return { action: "goto", target: "PICK_TICKET" };
     }
+    const issueLabel = issue.displayId ?? issue.id;
 
     // Load full issue details from project state
     let projectState;
@@ -30,7 +31,7 @@ export class IssueFixStage implements WorkflowStage {
         instruction: [
           "# Fix Issue",
           "",
-          `**${issue.id}**: ${issue.title} (severity: ${issue.severity})`,
+          `**${issueLabel}**: ${issue.title} (severity: ${issue.severity})`,
           "",
           "(Warning: could not load full issue details from .story/ -- using session state.)",
           "",
@@ -52,14 +53,14 @@ export class IssueFixStage implements WorkflowStage {
 
     const details = fullIssue
       ? [
-          `**${fullIssue.id}**: ${fullIssue.title}`,
+          `**${(fullIssue as Record<string, unknown>).displayId as string | undefined ?? fullIssue.id}**: ${fullIssue.title}`,
           "",
           `Severity: ${fullIssue.severity}`,
           fullIssue.impact ? `Impact: ${fullIssue.impact}` : "",
           fullIssue.components.length > 0 ? `Components: ${fullIssue.components.join(", ")}` : "",
           fullIssue.location.length > 0 ? `Location: ${fullIssue.location.join(", ")}` : "",
         ].filter(Boolean).join("\n")
-      : `**${issue.id}**: ${issue.title} (severity: ${issue.severity})`;
+      : `**${issueLabel}**: ${issue.title} (severity: ${issue.severity})`;
 
     return {
       instruction: [
@@ -87,6 +88,7 @@ export class IssueFixStage implements WorkflowStage {
     if (!issue) {
       return { action: "goto", target: "PICK_TICKET" };
     }
+    const issueLabel = issue.displayId ?? issue.id;
 
     // Verify the issue was actually resolved in project state
     let projectState;
@@ -99,7 +101,7 @@ export class IssueFixStage implements WorkflowStage {
     if (!current || current.status !== "resolved") {
       return {
         action: "retry",
-        instruction: `Issue ${issue.id} is still ${current?.status ?? "missing"}. Update its status to "resolved" in .story/issues/${issue.id}.json with a resolution description and resolvedDate, then report again.`,
+        instruction: `Issue ${issueLabel} is still ${current?.status ?? "missing"}. Update its status to "resolved" in .story/issues/${issue.id}.json with a resolution description and resolvedDate, then report again.`,
         reminders: ["Set status to 'resolved', add resolution text, set resolvedDate."],
       };
     }

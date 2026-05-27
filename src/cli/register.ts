@@ -1376,7 +1376,8 @@ export function registerTicketCommand(yargs: Argv): Argv {
             const { resolveAndNormalizeTicketRef } = await import("../core/ref-normalization.js");
             await runDeleteCommand(format, force, async (ctx) => {
               const resolvedId = resolveAndNormalizeTicketRef(ctx.state, id);
-              return handleTicketDelete(resolvedId, force, format, ctx.root, hard);
+              const ticket = ctx.state.ticketByID(resolvedId);
+              return handleTicketDelete(resolvedId, force, format, ctx.root, hard, ticket?.displayId ?? resolvedId);
             });
           },
         )
@@ -1920,7 +1921,8 @@ export function registerIssueCommand(yargs: Argv): Argv {
             const { resolveAndNormalizeIssueRef } = await import("../core/ref-normalization.js");
             await runDeleteCommand(format, false, async (ctx) => {
               const resolvedId = resolveAndNormalizeIssueRef(ctx.state, id);
-              return handleIssueDelete(resolvedId, format, ctx.root, hard);
+              const issue = ctx.state.issueByID(resolvedId);
+              return handleIssueDelete(resolvedId, format, ctx.root, hard, issue?.displayId ?? resolvedId);
             });
           },
         )
@@ -2697,7 +2699,8 @@ export function registerNoteCommand(yargs: Argv): Argv {
             const { resolveAndNormalizeNoteRef } = await import("../core/ref-normalization.js");
             await runDeleteCommand(format, false, async (ctx) => {
               const resolvedId = resolveAndNormalizeNoteRef(ctx.state, id);
-              return handleNoteDelete(resolvedId, format, ctx.root, hard);
+              const note = ctx.state.noteByID(resolvedId);
+              return handleNoteDelete(resolvedId, format, ctx.root, hard, note?.displayId ?? resolvedId);
             });
           },
         )
@@ -3162,7 +3165,8 @@ export function registerLessonCommand(yargs: Argv): Argv {
               const { loadProject } = await import("../core/index.js");
               const { state } = await loadProject(root);
               const resolvedId = resolveAndNormalizeLessonRef(state, id);
-              const result = await handleLessonDelete(resolvedId, format, root, hard);
+              const lesson = state.lessonByID(resolvedId);
+              const result = await handleLessonDelete(resolvedId, format, root, hard, lesson?.displayId ?? resolvedId);
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {

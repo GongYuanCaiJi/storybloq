@@ -12,6 +12,7 @@ import type { FullSessionState } from "../../../src/autonomous/session-types.js"
 import {
   getRemainingTargets,
   buildTargetedCandidatesText,
+  buildTargetedPickInstruction,
 } from "../../../src/autonomous/target-work.js";
 import { makeTicket, makeIssue, makeState as makeProjectState } from "../../core/test-factories.js";
 
@@ -272,6 +273,17 @@ describe("buildTargetedCandidatesText", () => {
     });
     const { firstReady } = buildTargetedCandidatesText(["T-001", "ISS-001"], ps);
     expect(firstReady).toEqual({ id: "ISS-001", displayId: "ISS-001", kind: "issue" });
+  });
+
+  it("uses display ID in visible prompt and canonical ID in report JSON", () => {
+    const ps = makeProjectState({
+      tickets: [makeTicket({ id: "t-abc1234567890def", displayId: "T-042", title: "Canonical ticket" })],
+    });
+    const precomputed = buildTargetedCandidatesText(["t-abc1234567890def"], ps);
+    const instruction = buildTargetedPickInstruction(["t-abc1234567890def"], ps, "session-1", precomputed);
+    expect(instruction).toContain("Pick **T-042**");
+    expect(instruction).toContain('"ticketId": "t-abc1234567890def"');
+    expect(instruction).not.toContain('"ticketId": "T-042"');
   });
 });
 

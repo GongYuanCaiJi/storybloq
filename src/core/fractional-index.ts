@@ -96,7 +96,6 @@ export function compareByRank(
   if (aHasRank && bHasRank) {
     const cmp = a.rank! < b.rank! ? -1 : a.rank! > b.rank! ? 1 : 0;
     if (cmp !== 0) return cmp;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   }
 
   if (aHasRank && !bHasRank) return -1;

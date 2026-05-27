@@ -1135,6 +1135,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
         previousState: "INIT",
         ticket: {
           id: ticket.id,
+          displayId: ticketResolution.displayId,
           title: ticket.title,
           risk: assessRisk(ticket).risk,
           claimed: true,
@@ -1175,9 +1176,9 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
           ? `\`git diff ${mergeBase}\``
           : `\`git diff HEAD\` AND \`git ls-files --others --exclude-standard\``;
         instruction = [
-          `# ${modeLabels[mode]} — ${ticket.id}: ${ticket.title}`,
+          `# ${modeLabels[mode]} — ${ticketResolution.displayId}: ${ticket.title}`,
           "",
-          `Reviewing code for ticket **${ticket.id}**. Capture the diff and run a code review.`,
+          `Reviewing code for ticket **${ticketResolution.displayId}**. Capture the diff and run a code review.`,
           "",
           `Capture diff with: ${diffCommand}`,
           "",
@@ -1190,9 +1191,9 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
         ].join("\n");
       } else {
         instruction = [
-          `# ${modeLabels[mode]} — ${ticket.id}: ${ticket.title}`,
+          `# ${modeLabels[mode]} — ${ticketResolution.displayId}: ${ticket.title}`,
           "",
-          `Write an implementation plan for ticket **${ticket.id}**: ${ticket.title}`,
+          `Write an implementation plan for ticket **${ticketResolution.displayId}**: ${ticket.title}`,
           ticket.description ? `\n**Description:**\n${ticket.description}` : "",
           "",
           `Write the plan as a markdown file at \`.story/sessions/${updated.sessionId}/plan.md\`.`,
@@ -1285,7 +1286,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
     let candidatesText = "";
     if (nextResult.kind === "found") {
       candidatesText = nextResult.candidates.map((c, i) =>
-        `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type}, phase: ${c.ticket.phase ?? "unphased"})${c.unblockImpact.wouldUnblock.length > 0 ? ` — unblocks ${c.unblockImpact.wouldUnblock.map((t) => t.id).join(", ")}` : ""}`,
+        `${i + 1}. **${displayTicket(c.ticket)}: ${c.ticket.title}** (${c.ticket.type}, phase: ${c.ticket.phase ?? "unphased"})${c.unblockImpact.wouldUnblock.length > 0 ? ` — unblocks ${c.unblockImpact.wouldUnblock.map((t) => displayTicket(t)).join(", ")}` : ""}`,
       ).join("\n");
     } else if (nextResult.kind === "all_complete") {
       candidatesText = "All tickets are complete. No work to do.";
@@ -1309,7 +1310,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
     let issuesText = "";
     if (highIssues.length > 0) {
       issuesText = "\n\n## Open Issues (high+ severity)\n\n" + highIssues.map(
-        (i, idx) => `${idx + 1}. **${i.id}: ${i.title}** (${i.severity})`,
+        (i, idx) => `${idx + 1}. **${displayIssue(i)}: ${i.title}** (${i.severity})`,
       ).join("\n");
     }
 
@@ -1347,7 +1348,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
       recsText,
       "",
       topCandidate
-        ? `Pick **${topCandidate.ticket.id}** (highest priority) or an open issue by calling \`storybloq_autonomous_guide\` now:`
+        ? `Pick **${displayTicket(topCandidate.ticket)}** (highest priority) or an open issue by calling \`storybloq_autonomous_guide\` now:`
         : hasHighIssues
           ? "Pick an issue to fix by calling `storybloq_autonomous_guide` now:"
           : "Pick a ticket by calling `storybloq_autonomous_guide` now:",
@@ -1789,14 +1790,14 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
 
       // Standard auto mode -- load candidates
       let candidatesText = "No ticket candidates available.";
-      let topCandidate: { ticket: { id: string; title: string } } | null = null;
+      let topCandidate: { ticket: { id: string; title: string } & Record<string, unknown> } | null = null;
       try {
         const { state: ps } = await loadProject(root);
         const result = nextTickets(ps, 5);
         if (result.kind === "found") {
           topCandidate = result.candidates[0] ?? null;
           candidatesText = result.candidates.map((c, i) =>
-            `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
+            `${i + 1}. **${displayTicket(c.ticket)}: ${c.ticket.title}** (${c.ticket.type})`,
           ).join("\n");
         }
       } catch { /* use default */ }
@@ -1818,7 +1819,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
           candidatesText,
           "",
           topCandidate
-            ? `Pick **${topCandidate.ticket.id}** by calling \`storybloq_autonomous_guide\` now:`
+            ? `Pick **${displayTicket(topCandidate.ticket)}** by calling \`storybloq_autonomous_guide\` now:`
             : "Pick a ticket now:",
           '```json',
           topCandidate
@@ -1831,7 +1832,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
     }
 
     if (mapping.state === "PLAN") {
-      const ticketInfo = driftWritten.ticket ? `for ${driftWritten.ticket.id}: ${driftWritten.ticket.title}` : "";
+      const ticketInfo = driftWritten.ticket ? `for ${displaySessionTicket(driftWritten.ticket)}: ${driftWritten.ticket.title}` : "";
       return guideResult(driftWritten, "PLAN", {
         instruction: [
           `# Resumed After Compact — HEAD Mismatch`,
@@ -1848,7 +1849,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
     }
 
     if (mapping.state === "IMPLEMENT") {
-      const ticketInfo = driftWritten.ticket ? `for ${driftWritten.ticket.id}: ${driftWritten.ticket.title}` : "";
+      const ticketInfo = driftWritten.ticket ? `for ${displaySessionTicket(driftWritten.ticket)}: ${driftWritten.ticket.title}` : "";
       return guideResult(driftWritten, "IMPLEMENT", {
         instruction: [
           `# Resumed After Compact — HEAD Mismatch`,
@@ -1949,14 +1950,14 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
 
     // Standard auto mode
     let candidatesText = "No ticket candidates available.";
-    let topCandidate: { ticket: { id: string; title: string } } | null = null;
+    let topCandidate: { ticket: { id: string; title: string } & Record<string, unknown> } | null = null;
     try {
       const { state: ps } = await loadProject(root);
       const result = nextTickets(ps, 5);
       if (result.kind === "found") {
         topCandidate = result.candidates[0] ?? null;
         candidatesText = result.candidates.map((c, i) =>
-          `${i + 1}. **${c.ticket.id}: ${c.ticket.title}** (${c.ticket.type})`,
+          `${i + 1}. **${displayTicket(c.ticket)}: ${c.ticket.title}** (${c.ticket.type})`,
         ).join("\n");
       }
     } catch { /* use default text */ }
@@ -1979,7 +1980,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         candidatesText,
         "",
         topCandidate
-          ? `Pick **${topCandidate.ticket.id}** by calling \`storybloq_autonomous_guide\` now:`
+          ? `Pick **${displayTicket(topCandidate.ticket)}** by calling \`storybloq_autonomous_guide\` now:`
           : "Pick a ticket now:",
         '```json',
         topCandidate
@@ -2022,7 +2023,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         "# Resumed After Compact",
         "",
         `Session restored at state: **${resumeState}**.`,
-        written.ticket ? `Working on: **${written.ticket.id}: ${written.ticket.title}**` : "",
+        written.ticket ? `Working on: **${displaySessionTicket(written.ticket)}: ${written.ticket.title}**` : "",
         "",
         modeContext,
         "",
@@ -2046,7 +2047,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
       "# Resumed After Compact",
       "",
       `Session restored at state: **${resumeState}**.`,
-      written.ticket ? `Working on: **${written.ticket.id}: ${written.ticket.title}**` : "No ticket in progress.",
+      written.ticket ? `Working on: **${displaySessionTicket(written.ticket)}: ${written.ticket.title}**` : "No ticket in progress.",
       "",
       "Continue where you left off. Call me when you complete the current step.",
       "",
@@ -2196,8 +2197,7 @@ async function handleCancel(root: string, args: GuideInput): Promise<McpToolResu
         if (ticket && ticket.status === "inprogress") {
           const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
           if (!ticketClaim || ticketClaim === cancelInfo.state.sessionId) {
-            const clearClaim = !ticket.claim || ticketClaim === cancelInfo.state.sessionId;
-            await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, ...(clearClaim ? { claim: undefined } : {}) }, root);
+            await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, claim: undefined }, root);
             ticketReleased = true;
           } else {
             ticketConflict = true;
@@ -2379,6 +2379,18 @@ function guideResult(
   ].filter(Boolean);
 
   return { content: [{ type: "text", text: parts.join("\n") }] };
+}
+
+function displayTicket(ticket: { id: string } & Record<string, unknown>): string {
+  return typeof ticket.displayId === "string" ? ticket.displayId : ticket.id;
+}
+
+function displayIssue(issue: { id: string } & Record<string, unknown>): string {
+  return typeof issue.displayId === "string" ? issue.displayId : issue.id;
+}
+
+function displaySessionTicket(ticket: { id: string; displayId?: string }): string {
+  return ticket.displayId ?? ticket.id;
 }
 
 function guideError(err: unknown): McpToolResult {

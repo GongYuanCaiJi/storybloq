@@ -131,4 +131,18 @@ describe("computeGcPlan", () => {
     expect(plan.blocked[0]!.activeReferences).toContain("ISS-001");
     expect(plan.eligible).toHaveLength(0);
   });
+
+  it("ignores relatedTickets references from tombstoned issues", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+      ],
+      issues: [
+        makeIssue({ id: "ISS-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "bob", relatedTickets: ["T-001"] }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked).toHaveLength(0);
+    expect(plan.eligible.map((c) => c.id).sort()).toEqual(["ISS-001", "T-001"]);
+  });
 });

@@ -76,7 +76,7 @@ export class HandoverStage implements WorkflowStage {
           if (ticket) {
             const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
             if (ticketClaim === ctx.state.sessionId) {
-              await writeTicketUnlocked({ ...ticket, claimedBySession: null } as typeof ticket, ctx.root);
+              await writeTicketUnlocked({ ...ticket, claimedBySession: null, claim: undefined } as typeof ticket, ctx.root);
             }
           }
         });

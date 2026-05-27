@@ -72,7 +72,7 @@ export class FinalizeStage implements WorkflowStage {
         "Code review passed. Time to commit.",
         "",
         "1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)",
-        ctx.state.ticket ? `2. Update ticket ${ctx.state.ticket.id} status to "complete" in .story/` : "",
+        ctx.state.ticket ? `2. Update ticket ${ticketLabel(ctx)} status to "complete" in .story/` : "",
         ctx.state.currentIssue ? `2. Ensure .story/issues/${ctx.state.currentIssue.id}.json is updated with status: "resolved"` : "",
         "3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`",
         "4. Call me with completedAction: \"files_staged\"",
@@ -134,7 +134,7 @@ export class FinalizeStage implements WorkflowStage {
           "Files staged. Now commit.",
           "",
           ctx.state.ticket
-            ? `Commit with message: "feat: <description> (${ctx.state.ticket.id})"`
+            ? `Commit with message: "feat: <description> (${ticketLabel(ctx)})"`
             : "Commit with a descriptive message.",
           "",
           'Call me with completedAction: "commit_done" and include the commitHash.',
@@ -240,7 +240,7 @@ export class FinalizeStage implements WorkflowStage {
         "Files staged. Now commit.",
         "",
         ctx.state.ticket
-          ? `Commit with message: "feat: <description> (${ctx.state.ticket.id})"`
+          ? `Commit with message: "feat: <description> (${ticketLabel(ctx)})"`
           : "Commit with a descriptive message.",
         "",
         'Call me with completedAction: "commit_done" and include the commitHash.',
@@ -315,7 +315,7 @@ export class FinalizeStage implements WorkflowStage {
         "Pre-commit passed. Now commit.",
         "",
         ctx.state.ticket
-          ? `Commit with message: "feat: <description> (${ctx.state.ticket.id})"`
+          ? `Commit with message: "feat: <description> (${ticketLabel(ctx)})"`
           : "Commit with a descriptive message.",
         "",
         'Call me with completedAction: "commit_done" and include the commitHash.',
@@ -448,6 +448,7 @@ export class FinalizeStage implements WorkflowStage {
     const completedTicket = ctx.state.ticket
       ? {
           id: ctx.state.ticket.id,
+          displayId: ctx.state.ticket.displayId,
           title: ctx.state.ticket.title,
           commitHash: normalizedHash,
           risk: ctx.state.ticket.risk,
@@ -475,4 +476,8 @@ export class FinalizeStage implements WorkflowStage {
 
     return { action: "advance" };
   }
+}
+
+function ticketLabel(ctx: StageContext): string {
+  return ctx.state.ticket?.displayId ?? ctx.state.ticket?.id ?? "unknown";
 }

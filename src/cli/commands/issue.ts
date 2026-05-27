@@ -7,6 +7,7 @@ import {
   deleteIssue,
 } from "../../core/project-loader.js";
 import { nextIssueID, allocateTeamIssueId } from "../../core/id-allocation.js";
+import { reserveDisplayId } from "../../core/remote-refs.js";
 import {
   formatIssueList,
   formatIssue,
@@ -267,9 +268,19 @@ export async function handleIssueCreate(
       : [];
 
     const isTeam = state.config.team?.enabled === true;
-    const { id, displayId } = isTeam
-      ? allocateTeamIssueId(state.issues)
-      : { id: nextIssueID(state.issues), displayId: undefined as string | undefined };
+    let id: string;
+    let displayId: string | undefined;
+    if (isTeam) {
+      const alloc = allocateTeamIssueId(state.issues);
+      id = alloc.id;
+      displayId = state.config.team?.idAllocator === "git-refs"
+        ? (await reserveDisplayId(root, "issue", state, id)).displayId
+        : alloc.displayId;
+    } else {
+      id = nextIssueID(state.issues);
+      displayId = undefined;
+    }
+    const createdAt = new Date().toISOString();
     const issue: Issue = {
       id,
       ...(displayId != null && { displayId }),
@@ -280,7 +291,8 @@ export async function handleIssueCreate(
       impact: args.impact,
       resolution: null,
       location: args.location,
-      discoveredDate: todayISO(),
+      discoveredDate: createdAt.slice(0, 10),
+      ...(isTeam && { createdAt }),
       resolvedDate: null,
       relatedTickets: resolvedRelated,
       phase: args.phase ?? null,
@@ -295,7 +307,7 @@ export async function handleIssueCreate(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(createdIssue), null, 2) };
   }
-  return { output: `Created issue ${createdIssue.id}: ${createdIssue.title}` };
+  return { output: `Created issue ${createdIssue.displayId ?? createdIssue.id}: ${createdIssue.title}` };
 }
 
 export async function handleIssueUpdate(
@@ -385,7 +397,7 @@ export async function handleIssueUpdate(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
   }
-  return { output: `Updated issue ${updatedIssue.id}: ${updatedIssue.title}` };
+  return { output: `Updated issue ${updatedIssue.displayId ?? updatedIssue.id}: ${updatedIssue.title}` };
 }
 
 export async function handleIssueMetaSet(
@@ -423,7 +435,7 @@ export async function handleIssueMetaSet(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
   }
-  return { output: `Updated metadata ${path} on issue ${updatedIssue.id}` };
+  return { output: `Updated metadata ${path} on issue ${updatedIssue.displayId ?? updatedIssue.id}` };
 }
 
 export async function handleIssueMetaUnset(
@@ -459,7 +471,7 @@ export async function handleIssueMetaUnset(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
   }
-  return { output: `Unset metadata ${path} on issue ${updatedIssue.id}` };
+  return { output: `Unset metadata ${path} on issue ${updatedIssue.displayId ?? updatedIssue.id}` };
 }
 
 export async function handleIssueDelete(
@@ -467,10 +479,11 @@ export async function handleIssueDelete(
   format: string,
   root: string,
   hard?: boolean,
+  displayLabel?: string,
 ): Promise<CommandResult> {
   await deleteIssue(id, root, { hard });
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope({ id, deleted: true }), null, 2) };
   }
-  return { output: `Deleted issue ${id}.` };
+  return { output: `Deleted issue ${displayLabel ?? id}.` };
 }

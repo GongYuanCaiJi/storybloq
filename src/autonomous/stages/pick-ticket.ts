@@ -222,7 +222,7 @@ export class PickTicketStage implements WorkflowStage {
       const result = await createTicketBranch(
         ctx.root,
         ctx.state.git ?? { branch: null, mergeBase: null },
-        { id: ticket.id, title: ticket.title },
+        { id: ticket.id, displayId: (ticket as Record<string, unknown>).displayId as string | undefined, title: ticket.title },
         "story",
       );
       if (!result.ok) {
@@ -251,10 +251,12 @@ export class PickTicketStage implements WorkflowStage {
     // T-375: Build claim using final branch (after per-ticket branch creation)
     const finalBranch = ctx.state.git?.branch ?? "unknown";
     const claimObj = email ? buildClaim(email, finalBranch, new Date().toISOString()) : undefined;
+    const ticketDisplayId = (ticket as Record<string, unknown>).displayId as string | undefined;
+    const ticketLabel = ticketDisplayId ?? ticket.id;
 
     // Stage field updates (persisted atomically with state transition by processAdvance)
     ctx.updateDraft({
-      ticket: { id: ticket.id, title: ticket.title, claimed: true },
+      ticket: { id: ticket.id, displayId: ticketDisplayId, title: ticket.title, claimed: true },
       reviews: { plan: [], code: [] },
       finalizeCheckpoint: null,
       ticketStartedAt: new Date().toISOString(),
@@ -266,7 +268,7 @@ export class PickTicketStage implements WorkflowStage {
       action: "advance",
       result: {
         instruction: [
-          `# Plan for ${ticket.id}: ${ticket.title}`,
+          `# Plan for ${ticketLabel}: ${ticket.title}`,
           "",
           ticket.description ? `## Ticket Description\n\n${ticket.description}` : "",
           "",
@@ -335,7 +337,7 @@ export class PickTicketStage implements WorkflowStage {
       const result = await createTicketBranch(
         ctx.root,
         ctx.state.git ?? { branch: null, mergeBase: null },
-        { id: issue.id, title: issue.title },
+        { id: issue.id, displayId: (issue as Record<string, unknown>).displayId as string | undefined, title: issue.title },
         "fix",
       );
       if (!result.ok) {

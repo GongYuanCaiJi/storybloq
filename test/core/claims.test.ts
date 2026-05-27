@@ -77,9 +77,11 @@ describe("clearClaimOnComplete", () => {
       id: "T-001",
       status: "complete",
       claim: { user: "alice@example.com", branch: "feature/foo", since: now },
+      claimedBySession: "session-1",
     }) as Ticket;
     const result = clearClaimOnComplete(ticket);
     expect(result.claim).toBeUndefined();
+    expect(result.claimedBySession).toBeUndefined();
   });
 
   it("preserves claim when ticket is not complete", () => {

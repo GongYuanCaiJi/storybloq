@@ -67,7 +67,7 @@ export class PlanStage implements WorkflowStage {
           await withProjectLock(ctx.root, { strict: false }, async ({ state: ps }) => {
             const ticket = ps.ticketByID(ticketId);
             if (ticket && (ticket as Record<string, unknown>).claimedBySession === ctx.state.sessionId) {
-              writeTicketUnlocked(ctx.root, { ...ticket, status: "open", claimedBySession: undefined } as Record<string, unknown>);
+              await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, claim: undefined }, ctx.root);
             }
           });
         } catch { /* best-effort */ }

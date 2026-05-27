@@ -3,15 +3,17 @@ import type { ProjectState } from "./project-state.js";
 
 export interface ReservationTagResult {
   tags: Map<string, Set<string>>;
+  owners: Map<string, Map<string, string | null>>;
   fetchError?: string;
 }
 
 export interface ReservationHealth {
   valid: Map<string, Set<string>>;
   orphan: Map<string, Set<string>>;
+  mismatched: Map<string, Set<string>>;
 }
 
-const TAG_PREFIX = "storybloq/ids/";
+const REF_PREFIX = "refs/storybloq/ids/";
 
 const TYPE_MAP: Record<string, string> = {
   tickets: "ticket",
@@ -20,9 +22,9 @@ const TYPE_MAP: Record<string, string> = {
   lessons: "lesson",
 };
 
-function parseTag(tagName: string): { entityType: string; displayId: string } | null {
-  if (!tagName.startsWith(TAG_PREFIX)) return null;
-  const rest = tagName.substring(TAG_PREFIX.length);
+function parseRef(refName: string): { entityType: string; displayId: string } | null {
+  if (!refName.startsWith(REF_PREFIX)) return null;
+  const rest = refName.substring(REF_PREFIX.length);
   const slashIdx = rest.indexOf("/");
   if (slashIdx === -1) return null;
   const plural = rest.substring(0, slashIdx);
@@ -34,20 +36,23 @@ function parseTag(tagName: string): { entityType: string; displayId: string } | 
 
 export function fetchLocalReservationTags(root: string): ReservationTagResult {
   const tags = new Map<string, Set<string>>();
+  const owners = new Map<string, Map<string, string | null>>();
 
   try {
-    const stdout = execFileSync("git", ["tag", "-l", "storybloq/ids/*"], {
+    const stdout = execFileSync("git", ["for-each-ref", "--format=%(refname) %(objectname)", "refs/storybloq/ids"], {
       cwd: root,
       encoding: "utf-8",
       timeout: 5000,
     }).trim();
 
-    if (!stdout) return { tags };
+    if (!stdout) return { tags, owners };
 
     for (const line of stdout.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
-      const parsed = parseTag(trimmed);
+      const [refName, objectId] = trimmed.split(/\s+/, 2);
+      if (!refName) continue;
+      const parsed = parseRef(refName);
       if (!parsed) continue;
       let set = tags.get(parsed.entityType);
       if (!set) {
@@ -55,29 +60,56 @@ export function fetchLocalReservationTags(root: string): ReservationTagResult {
         tags.set(parsed.entityType, set);
       }
       set.add(parsed.displayId);
+      let ownerByDisplay = owners.get(parsed.entityType);
+      if (!ownerByDisplay) {
+        ownerByDisplay = new Map();
+        owners.set(parsed.entityType, ownerByDisplay);
+      }
+      ownerByDisplay.set(parsed.displayId, readOwner(root, objectId));
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    return { tags, fetchError: message };
+    return { tags, owners, fetchError: message };
   }
 
-  return { tags };
+  return { tags, owners };
 }
 
-function effectiveDisplayIds(items: readonly { id: string; displayId?: string | null }[]): Set<string> {
-  const set = new Set<string>();
-  for (const item of items) {
-    set.add(item.displayId ?? item.id);
+function readOwner(root: string, objectId?: string): string | null {
+  if (!objectId) return null;
+  try {
+    const payload = execFileSync("git", ["cat-file", "-p", objectId], {
+      cwd: root,
+      encoding: "utf-8",
+      timeout: 5000,
+    });
+    const parsed = JSON.parse(payload) as { ownerId?: unknown };
+    return typeof parsed.ownerId === "string" ? parsed.ownerId : null;
+  } catch {
+    return null;
   }
-  return set;
+}
+
+function itemsByDisplayId(items: readonly { id: string; displayId?: string | null }[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const item of items) {
+    const displayId = item.displayId ?? item.id;
+    const ids = map.get(displayId);
+    if (ids) ids.push(item.id);
+    else map.set(displayId, [item.id]);
+  }
+  return map;
 }
 
 export function classifyReservations(
-  tags: Map<string, Set<string>>,
+  tagsOrResult: Map<string, Set<string>> | ReservationTagResult,
   state: ProjectState,
 ): ReservationHealth {
+  const tags = tagsOrResult instanceof Map ? tagsOrResult : tagsOrResult.tags;
+  const owners = tagsOrResult instanceof Map ? new Map<string, Map<string, string | null>>() : tagsOrResult.owners;
   const valid = new Map<string, Set<string>>();
   const orphan = new Map<string, Set<string>>();
+  const mismatched = new Map<string, Set<string>>();
 
   const itemsByType: Record<string, readonly { id: string; displayId?: string | null }[]> = {
     ticket: state.tickets,
@@ -90,21 +122,28 @@ export function classifyReservations(
     const items = itemsByType[entityType];
     if (!items) continue;
 
-    const existingIds = effectiveDisplayIds(items);
+    const existingIds = itemsByDisplayId(items);
     const validSet = new Set<string>();
     const orphanSet = new Set<string>();
+    const mismatchedSet = new Set<string>();
+    const ownerByDisplay = owners.get(entityType);
 
     for (const displayId of reservedIds) {
-      if (existingIds.has(displayId)) {
-        validSet.add(displayId);
-      } else {
+      const ownerId = ownerByDisplay?.get(displayId) ?? null;
+      const itemIds = existingIds.get(displayId);
+      if (!itemIds) {
         orphanSet.add(displayId);
+      } else if (ownerId && !itemIds.includes(ownerId)) {
+        mismatchedSet.add(displayId);
+      } else {
+        validSet.add(displayId);
       }
     }
 
     if (validSet.size > 0) valid.set(entityType, validSet);
     if (orphanSet.size > 0) orphan.set(entityType, orphanSet);
+    if (mismatchedSet.size > 0) mismatched.set(entityType, mismatchedSet);
   }
 
-  return { valid, orphan };
+  return { valid, orphan, mismatched };
 }

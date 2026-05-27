@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,6 +26,13 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     format: "md",
     ...overrides,
   };
+}
+
+async function enableTeamMode(dir: string): Promise<void> {
+  const configPath = join(dir, ".story", "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf-8"));
+  config.team = { ...(config.team ?? {}), enabled: true };
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
 // --- List ---
@@ -189,6 +196,27 @@ describe("handleLessonCreate", () => {
     expect(lesson.status).toBe("active");
     expect(lesson.reinforcements).toBe(0);
     expect(lesson.supersedes).toBeNull();
+  });
+
+  it("creates canonical IDs with display IDs in explicit team mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "lesson-create-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    await enableTeamMode(dir);
+
+    const result = await handleLessonCreate(
+      { title: "Team lesson", content: "Always test.", context: "T-133", source: "manual" },
+      "json", dir,
+    );
+
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.id).toMatch(/^l-[a-z0-9]{16}$/);
+    expect(parsed.data.displayId).toBe("L-001");
+    expect(parsed.data.createdAt).toEqual(expect.any(String));
+    const raw = await readFile(join(dir, ".story", "lessons", `${parsed.data.id}.json`), "utf-8");
+    const lesson = JSON.parse(raw);
+    expect(lesson.title).toBe("Team lesson");
+    await expect(readFile(join(dir, ".story", "lessons", "L-001.json"), "utf-8")).rejects.toThrow();
   });
 
   it("creates sequential IDs", async () => {
@@ -366,6 +394,7 @@ describe("handleLessonDelete", () => {
     const dir = await mkdtemp(join(tmpdir(), "lesson-delete-"));
     tmpDirs.push(dir);
     await initProject(dir, { name: "test" });
+    await enableTeamMode(dir);
     await handleLessonCreate(
       { title: "Original", content: "Old.", context: "T-001", source: "manual" },
       "md", dir,

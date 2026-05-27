@@ -17,6 +17,8 @@ import {
 import { parseHandoverFilename, todayISO, CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import type { OutputFormat } from "../../models/types.js";
+import { ConfigSchema } from "../../models/config.js";
+import { isTeamModeConfig } from "../../core/team-capabilities.js";
 
 export function handleHandoverList(ctx: CommandContext): CommandResult {
   return { output: formatHandoverList(ctx.state.handoverFilenames, ctx.format) };
@@ -125,16 +127,8 @@ function detectTeamMode(absRoot: string): boolean {
   try {
     const configPath = join(absRoot, ".story", "config.json");
     const raw = readFileSync(configPath, "utf-8");
-    const config = JSON.parse(raw) as Record<string, unknown>;
-    const team = config.team;
-    if (team != null && typeof team === "object" && !Array.isArray(team)) {
-      if ((team as Record<string, unknown>).enabled === true) return true;
-      if (Object.keys(team as object).length > 0
-          && typeof config.schemaVersion === "number" && (config.schemaVersion as number) >= 2) {
-        return true;
-      }
-    }
-    return false;
+    const config = ConfigSchema.parse(JSON.parse(raw));
+    return isTeamModeConfig(config);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;

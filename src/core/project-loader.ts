@@ -37,6 +37,7 @@ import {
   type LoadWarningType,
 } from "./errors.js";
 import { listHandovers } from "./handover-parser.js";
+import { assertTeamWriteCapabilities, isTeamModeConfig } from "./team-capabilities.js";
 import type { ZodType } from "zod";
 
 // --- Public Types ---
@@ -350,6 +351,7 @@ export async function writeConfig(
 async function assertNoConflictsFromDisk(root: string): Promise<void> {
   try {
     const { state } = await loadProjectUnlocked(resolve(root));
+    assertTeamWriteCapabilities(state.config);
     const { assertNoConflicts } = await import("./conflicts.js");
     assertNoConflicts(state);
   } catch (err) {
@@ -361,15 +363,8 @@ async function assertNoConflictsFromDisk(root: string): Promise<void> {
 async function isTeamMode(root: string): Promise<boolean | "error"> {
   try {
     const raw = await readFile(join(resolve(root, ".story"), "config.json"), "utf-8");
-    const config = JSON.parse(raw);
-    if (config.team?.enabled === true) return true;
-    const team = config.team;
-    if (team != null && typeof team === "object" && !Array.isArray(team)
-        && Object.keys(team as object).length > 0
-        && typeof config.schemaVersion === "number" && config.schemaVersion >= 2) {
-      return true;
-    }
-    return false;
+    const config = ConfigSchema.passthrough().parse(JSON.parse(raw));
+    return isTeamModeConfig(config);
   } catch {
     return "error";
   }
@@ -741,6 +736,7 @@ async function withProjectLockInternal(
         `Config schemaVersion ${config.schemaVersion} exceeds max supported ${CURRENT_SCHEMA_VERSION}. Run: npm update -g @storybloq/storybloq`,
       );
     }
+    assertTeamWriteCapabilities(config);
 
     if (options.strict) {
       const integrityWarning = result.warnings.find((w) =>

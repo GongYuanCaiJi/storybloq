@@ -16,7 +16,37 @@ function createTempGitRepo(): string {
 function writeConfig(root: string, config: Record<string, unknown>): void {
   const storyDir = join(root, ".story");
   mkdirSync(storyDir, { recursive: true });
+  for (const dir of ["tickets", "issues", "handovers", "notes", "lessons"]) {
+    mkdirSync(join(storyDir, dir), { recursive: true });
+  }
   writeFileSync(join(storyDir, "config.json"), JSON.stringify(config, null, 2) + "\n", "utf-8");
+  writeFileSync(
+    join(storyDir, "roadmap.json"),
+    JSON.stringify({
+      title: "test",
+      date: "2026-01-01",
+      phases: [{ id: "p0", label: "PHASE 0", name: "Setup", description: "Setup." }],
+      blockers: [],
+    }, null, 2) + "\n",
+    "utf-8",
+  );
+}
+
+function baseConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 2,
+    project: "test",
+    type: "npm",
+    language: "ts",
+    features: {
+      tickets: true,
+      issues: true,
+      handovers: true,
+      roadmap: true,
+      reviews: true,
+    },
+    ...overrides,
+  };
 }
 
 function readConfig(root: string): Record<string, unknown> {
@@ -26,7 +56,7 @@ function readConfig(root: string): Record<string, unknown> {
 describe("T-366: team-init", () => {
   it("sets schemaVersion to 2", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, {});
     const config = readConfig(root);
     expect(config.schemaVersion).toBe(2);
@@ -34,7 +64,7 @@ describe("T-366: team-init", () => {
 
   it("sets team defaults", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, {});
     const config = readConfig(root);
     const team = config.team as Record<string, unknown>;
@@ -45,12 +75,10 @@ describe("T-366: team-init", () => {
 
   it("preserves existing config fields", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, {
-      version: 2, project: "test", type: "npm", language: "ts",
-      features: { tickets: true },
+    writeConfig(root, baseConfig({
       customField: "preserved",
       recipe: "coding",
-    });
+    }));
     await teamInit(root, {});
     const config = readConfig(root);
     expect(config.customField).toBe("preserved");
@@ -60,11 +88,9 @@ describe("T-366: team-init", () => {
 
   it("preserves existing team fields", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, {
-      version: 2, project: "test", type: "npm", language: "ts",
-      features: { tickets: true },
+    writeConfig(root, baseConfig({
       team: { minCliVersion: "2.0.0", idAllocator: "git-refs" },
-    });
+    }));
     await teamInit(root, {});
     const config = readConfig(root);
     const team = config.team as Record<string, unknown>;
@@ -74,7 +100,7 @@ describe("T-366: team-init", () => {
 
   it("installs merge driver", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, {});
     const driver = execFileSync("git", ["config", "--local", "--get", "merge.storybloq-json.driver"], { cwd: root, encoding: "utf-8" }).trim();
     expect(driver).toBe("storybloq merge-driver %O %A %B %P");
@@ -82,7 +108,7 @@ describe("T-366: team-init", () => {
 
   it("writes gitattributes", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, {});
     const attrs = readFileSync(join(root, ".story", ".gitattributes"), "utf-8");
     expect(attrs).toContain("tickets/*.json merge=storybloq-json");
@@ -95,7 +121,7 @@ describe("T-366: team-init", () => {
 
   it("idempotent: second run preserves state", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, {});
     const first = readConfig(root);
     await teamInit(root, {});
@@ -107,7 +133,7 @@ describe("T-366: team-init", () => {
 
   it("accepts custom options", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+    writeConfig(root, baseConfig());
     await teamInit(root, { claimStalenessHours: 24, idAllocator: "git-refs" });
     const config = readConfig(root);
     const team = config.team as Record<string, unknown>;

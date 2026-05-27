@@ -4,6 +4,7 @@ import {
   deleteNote,
 } from "../../core/project-loader.js";
 import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
+import { reserveDisplayId } from "../../core/remote-refs.js";
 import { resolveAndNormalizeNoteRef } from "../../core/ref-normalization.js";
 import {
   formatNoteList,
@@ -130,10 +131,20 @@ export async function handleNoteCreate(
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
     const isTeam = state.config.team?.enabled === true;
-    const { id, displayId } = isTeam
-      ? allocateTeamNoteId(state.notes)
-      : { id: nextNoteID(state.notes), displayId: undefined as string | undefined };
-    const today = todayISO();
+    let id: string;
+    let displayId: string | undefined;
+    if (isTeam) {
+      const alloc = allocateTeamNoteId(state.notes);
+      id = alloc.id;
+      displayId = state.config.team?.idAllocator === "git-refs"
+        ? (await reserveDisplayId(root, "note", state, id)).displayId
+        : alloc.displayId;
+    } else {
+      id = nextNoteID(state.notes);
+      displayId = undefined;
+    }
+    const createdAt = new Date().toISOString();
+    const today = createdAt.slice(0, 10);
     const tags = args.tags ? normalizeTags(args.tags) : [];
     const note: Note = {
       id,
@@ -143,6 +154,7 @@ export async function handleNoteCreate(
       tags,
       status: "active",
       createdDate: today,
+      ...(isTeam && { createdAt }),
       updatedDate: today,
     };
 
@@ -217,7 +229,8 @@ export async function handleNoteDelete(
   format: OutputFormat,
   root: string,
   hard?: boolean,
+  displayLabel?: string,
 ): Promise<CommandResult> {
   await deleteNote(id, root, { hard });
-  return { output: formatNoteDeleteResult(id, format) };
+  return { output: formatNoteDeleteResult(format === "json" ? id : displayLabel ?? id, format) };
 }

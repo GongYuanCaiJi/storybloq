@@ -138,10 +138,10 @@ export interface BranchCreationResult {
 export async function createTicketBranch(
   root: string,
   gitState: { branch: string | null; mergeBase: string | null; initHead?: string },
-  ticket: { id: string; title: string },
+  ticket: { id: string; displayId?: string; title: string },
   prefix: "story" | "fix" = "story",
 ): Promise<GitResult<BranchCreationResult>> {
-  const branchName = buildTicketBranchName(ticket.id, ticket.title, prefix);
+  const branchName = buildTicketBranchName(ticket.displayId ?? ticket.id, ticket.title, prefix);
 
   // 1. Idempotency: already on correct branch?
   if (gitState.branch === branchName) {

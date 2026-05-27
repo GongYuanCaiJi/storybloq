@@ -172,7 +172,7 @@ describe("probe: mergeRoadmap keyed array edge cases", () => {
 });
 
 describe("probe: GC reference chain safety", () => {
-  it("retained tombstone referencing candidate blocks GC", () => {
+  it("retained tombstone referencing candidate does not block GC", () => {
     const state = {
       tickets: [
         { id: "t-old-parent", lifecycle: "deleted", deletedAt: "2025-01-01", deletedBy: "x", blockedBy: [], status: "open" },
@@ -187,8 +187,8 @@ describe("probe: GC reference chain safety", () => {
     const plan = computeGcPlan(state, { retentionDays: 30 });
     const parentCandidate = plan.candidates.find((c) => c.id === "t-old-parent");
     expect(parentCandidate).toBeDefined();
-    expect(parentCandidate!.activeReferences.length).toBeGreaterThan(0);
-    expect(plan.eligible.find((c) => c.id === "t-old-parent")).toBeUndefined();
+    expect(parentCandidate!.activeReferences).toHaveLength(0);
+    expect(plan.eligible.find((c) => c.id === "t-old-parent")).toBeDefined();
   });
 
   it("candidate referencing candidate does not block GC", () => {
@@ -216,7 +216,7 @@ describe("probe: GC reference chain safety", () => {
       issues: [],
       notes: [],
       lessons: [],
-      activeTickets: [{ id: "t-active" }],
+      activeTickets: [{ id: "t-active", lifecycle: "active", blockedBy: ["t-old"], status: "open" }],
       activeIssues: [],
     } as any;
     const plan = computeGcPlan(state, { retentionDays: 30 });

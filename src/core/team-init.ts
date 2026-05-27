@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { teamSetup } from "./team-setup.js";
+import { withProjectLock, writeConfigUnlocked } from "./project-loader.js";
 
 export interface TeamInitOptions {
   claimStalenessHours?: number;
@@ -27,43 +28,40 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
 
   const setupResult = await teamSetup(root);
 
-  const raw = readFileSync(configPath, "utf-8");
-  const config = JSON.parse(raw) as Record<string, unknown>;
+  let schemaUpgraded = false;
+  await withProjectLock(root, { strict: false }, async ({ state }) => {
+    const config = { ...state.config, team: { ...(state.config.team ?? {}) } };
 
-  const prevSchema = typeof config.schemaVersion === "number" ? config.schemaVersion : 1;
-  const schemaUpgraded = prevSchema < 2;
-  if (schemaUpgraded) {
-    config.schemaVersion = 2;
-  }
-
-  if (!config.team || typeof config.team !== "object" || Array.isArray(config.team)) {
-    config.team = {};
-  }
-  const team = config.team as Record<string, unknown>;
-
-  team.enabled = true;
-
-  if (team.claimStalenessHours === undefined) {
-    team.claimStalenessHours = opts.claimStalenessHours ?? 48;
-  }
-  if (team.idAllocator === undefined) {
-    team.idAllocator = opts.idAllocator ?? "local";
-  }
-  if (team.requiredFeatures === undefined) {
-    team.requiredFeatures = ["merge-driver"];
-  }
-  if (team.minCliVersion === undefined) {
-    try {
-      const { createRequire } = await import("node:module");
-      const require = createRequire(import.meta.url);
-      const pkg = require("../../package.json") as { version: string };
-      team.minCliVersion = pkg.version;
-    } catch {
-      // Non-critical: version gate is best-effort
+    const prevSchema = typeof config.schemaVersion === "number" ? config.schemaVersion : 1;
+    schemaUpgraded = prevSchema < 2;
+    if (schemaUpgraded) {
+      config.schemaVersion = 2;
     }
-  }
 
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+    config.team.enabled = true;
+
+    if (config.team.claimStalenessHours === undefined) {
+      config.team.claimStalenessHours = opts.claimStalenessHours ?? 48;
+    }
+    if (config.team.idAllocator === undefined) {
+      config.team.idAllocator = opts.idAllocator ?? "local";
+    }
+    if (config.team.requiredFeatures === undefined) {
+      config.team.requiredFeatures = ["merge-driver"];
+    }
+    if (config.team.minCliVersion === undefined) {
+      try {
+        const { createRequire } = await import("node:module");
+        const require = createRequire(import.meta.url);
+        const pkg = require("../../package.json") as { version: string };
+        config.team.minCliVersion = pkg.version;
+      } catch {
+        // Non-critical: version gate is best-effort
+      }
+    }
+
+    await writeConfigUnlocked(config, root);
+  });
 
   return {
     schemaVersionSet: schemaUpgraded,

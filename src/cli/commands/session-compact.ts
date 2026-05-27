@@ -255,7 +255,7 @@ export async function handleSessionStop(root: string, sessionId?: string): Promi
           if (ticket && ticket.status === "inprogress") {
             const claim = (ticket as Record<string, unknown>).claimedBySession;
             if (!claim || claim === info!.state.sessionId) {
-              await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null }, root);
+              await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, claim: undefined }, root);
               ticketReleased = true;
             }
           }

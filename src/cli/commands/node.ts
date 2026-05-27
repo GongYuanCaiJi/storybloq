@@ -270,7 +270,7 @@ export async function handleNodeRemove(
       const refs = Array.isArray(ticket.crossNodeBlockedBy) ? ticket.crossNodeBlockedBy as string[] : [];
       for (const ref of refs) {
         if (ref.startsWith(prefix)) {
-          crossNodeRefs.push(`${ticket.id} -> ${ref}`);
+          crossNodeRefs.push(`${ticket.displayId ?? ticket.id} -> ${ref}`);
         }
       }
     }

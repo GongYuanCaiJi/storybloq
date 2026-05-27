@@ -94,4 +94,18 @@ describe("T-390: reconcile rebalance", () => {
     const result = computeRebalancePlan(state);
     expect(result.changes).toHaveLength(0);
   });
+
+  it("equal ranks fall back to order before display ID and canonical ID", () => {
+    const items = [
+      { id: "t-canonical0000002", displayId: "T-002", rank: "V", order: 20 },
+      { id: "t-canonical0000001", displayId: "T-001", rank: "V", order: 10 },
+      { id: "t-canonical0000003", displayId: "T-003", rank: "V", order: 10 },
+    ];
+    items.sort(compareByRank);
+    expect(items.map((i) => i.id)).toEqual([
+      "t-canonical0000001",
+      "t-canonical0000003",
+      "t-canonical0000002",
+    ]);
+  });
 });

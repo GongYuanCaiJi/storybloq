@@ -20,7 +20,7 @@ function sanitize(input: string, maxLen = 120): string {
 }
 
 export function writeResumeMarker(root: string, sessionId: string, state: {
-  ticket?: { id: string; title: string } | null;
+  ticket?: { id: string; displayId?: string; title: string } | null;
   completedTickets: { id: string }[];
   resolvedIssues?: string[];
   preCompactState?: string | null;
@@ -30,7 +30,7 @@ export function writeResumeMarker(root: string, sessionId: string, state: {
     mkdirSync(rulesDir, { recursive: true });
 
     const ticketInfo = state.ticket
-      ? `Working on: ${sanitize(state.ticket.id, 20)} (${sanitize(state.ticket.title)})`
+      ? `Working on: ${sanitize(state.ticket.displayId ?? state.ticket.id, 20)} (${sanitize(state.ticket.title)})`
       : "Between tickets";
     const progress = `Progress: ${state.completedTickets.length} tickets completed, ${(state.resolvedIssues ?? []).length} issues resolved`;
 

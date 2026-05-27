@@ -58,7 +58,12 @@ export function buildActivePayload(
     // ISS-490: Use optional chaining instead of non-null assertion.
     targetWork: session.targetWork?.length ? session.targetWork.map((id) => targetDisplayIds[id] ?? id) : null,
     currentIssue: session.currentIssue
-      ? { id: session.currentIssue.displayId ?? session.currentIssue.id, title: session.currentIssue.title, severity: session.currentIssue.severity }
+      ? {
+        id: session.currentIssue.id,
+        ...(session.currentIssue.displayId ? { displayId: session.currentIssue.displayId } : {}),
+        title: session.currentIssue.title,
+        severity: session.currentIssue.severity,
+      }
       : null,
   };
 }

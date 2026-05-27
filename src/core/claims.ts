@@ -42,8 +42,8 @@ export function isClaimStale(
 }
 
 export function clearClaimOnComplete(ticket: Ticket): Ticket {
-  if (ticket.status === "complete" && ticket.claim) {
-    const { claim: _, ...rest } = ticket;
+  if (ticket.status === "complete" && (ticket.claim || ticket.claimedBySession != null)) {
+    const { claim: _, claimedBySession: _claimedBySession, ...rest } = ticket;
     return rest as Ticket;
   }
   return ticket;

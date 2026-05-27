@@ -120,8 +120,8 @@ export function buildTargetedPickInstruction(
   const displayLabel = firstReady?.displayId ?? firstReady?.id;
   const pickExample = firstReady
     ? firstReady.kind === "ticket"
-      ? `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "${displayLabel}" } }`
-      : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "issue_picked", "issueId": "${displayLabel}" } }`
+      ? `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "${firstReady.id}" } }`
+      : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "issue_picked", "issueId": "${firstReady.id}" } }`
     : `{ "sessionId": "${sessionId}", "action": "report", "report": { "completedAction": "ticket_picked", "ticketId": "T-XXX" } }`;
 
   const pickPrompt = firstReady

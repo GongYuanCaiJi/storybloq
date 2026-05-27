@@ -197,6 +197,27 @@ describe("T-387: mergeRoadmap", () => {
       expect(ids[1]).toBe("alpha");
     });
 
+    it("one side deletes while the other keeps base order without false reorder conflict", () => {
+      const base = roadmap({
+        phases: [
+          { id: "a", label: "A", name: "A", description: "A" },
+          { id: "b", label: "B", name: "B", description: "B" },
+          { id: "c", label: "C", name: "C", description: "C" },
+        ],
+      });
+      const ours = roadmap({ phases: base.phases });
+      const theirs = roadmap({
+        phases: [
+          { id: "a", label: "A", name: "A", description: "A" },
+          { id: "c", label: "C", name: "C", description: "C" },
+        ],
+      });
+      const result = mergeRoadmap(base, ours, theirs);
+      expect(result.clean).toBe(true);
+      expect(result.conflicts.some((c) => c.fieldPath === "/phases")).toBe(false);
+      expect((result.merged.phases as Array<Record<string, unknown>>).map((p) => p.id)).toEqual(["a", "c"]);
+    });
+
     it("both sides reorder differently = conflict", () => {
       const base = roadmap({
         phases: [

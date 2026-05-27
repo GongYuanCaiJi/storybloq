@@ -26,6 +26,12 @@ export interface ReconcileWarning {
   message: string;
 }
 
+export interface ReconcileContext {
+  reservations?: Partial<Record<EntityType, ReadonlyMap<string, string>>>;
+  protectedOwners?: Partial<Record<EntityType, ReadonlySet<string>>>;
+  warnings?: ReconcileWarning[];
+}
+
 export interface ReconcilePlan {
   renames: ReconcileRename[];
   warnings: ReconcileWarning[];
@@ -79,11 +85,25 @@ function compareEntities(
   entityType: EntityType,
   a: EntityWithTimestamp & Record<string, unknown>,
   b: EntityWithTimestamp & Record<string, unknown>,
+  displayId: string,
+  context?: ReconcileContext,
 ): number {
   const aLegacy = hasLegacyPriority(entityType, a);
   const bLegacy = hasLegacyPriority(entityType, b);
   if (aLegacy && !bLegacy) return -1;
   if (!aLegacy && bLegacy) return 1;
+
+  const reservationOwner = context?.reservations?.[entityType]?.get(displayId);
+  const aReservationOwner = reservationOwner === a.id;
+  const bReservationOwner = reservationOwner === b.id;
+  if (aReservationOwner && !bReservationOwner) return -1;
+  if (!aReservationOwner && bReservationOwner) return 1;
+
+  const protectedOwners = context?.protectedOwners?.[entityType];
+  const aProtectedOwner = protectedOwners?.has(a.id) === true;
+  const bProtectedOwner = protectedOwners?.has(b.id) === true;
+  if (aProtectedOwner && !bProtectedOwner) return -1;
+  if (!aProtectedOwner && bProtectedOwner) return 1;
 
   const aTs = getEntityTimestamp(entityType, a);
   const bTs = getEntityTimestamp(entityType, b);
@@ -96,6 +116,33 @@ function compareEntities(
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+function winningReason(
+  entityType: EntityType,
+  displayId: string,
+  winner: EntityWithTimestamp & Record<string, unknown>,
+  loser: EntityWithTimestamp & Record<string, unknown>,
+  context?: ReconcileContext,
+): string {
+  const winnerLegacy = hasLegacyPriority(entityType, winner);
+  const loserLegacy = hasLegacyPriority(entityType, loser);
+  if (winnerLegacy && !loserLegacy) return "legacy ID priority";
+
+  const reservationOwner = context?.reservations?.[entityType]?.get(displayId);
+  if (reservationOwner === winner.id && reservationOwner !== loser.id) return "valid reservation";
+
+  const protectedOwners = context?.protectedOwners?.[entityType];
+  const winnerProtected = protectedOwners?.has(winner.id) === true;
+  const loserProtected = protectedOwners?.has(loser.id) === true;
+  if (winnerProtected && !loserProtected) return "protected branch ownership";
+
+  const winnerTs = getEntityTimestamp(entityType, winner);
+  const loserTs = getEntityTimestamp(entityType, loser);
+  if (winnerTs !== null && loserTs === null) return "valid timestamp vs missing";
+  if (winnerTs !== null && loserTs !== null && winnerTs !== loserTs) return "earlier timestamp";
+
+  return "lower canonical ID";
+}
+
 function hasConflicts(entity: EntityWithTimestamp): boolean {
   const c = entity._conflicts;
   return Array.isArray(c) && c.length > 0;
@@ -106,6 +153,7 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
   items: readonly T[],
   displayPrefix: string,
   numericRegex: RegExp,
+  context?: ReconcileContext,
 ): { renames: ReconcileRename[]; nextSeq: number } {
   const activeItems = items.filter((item) => (item as Record<string, unknown>).lifecycle !== "deleted");
   const groups = new Map<string, T[]>();
@@ -125,7 +173,7 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
   for (const [displayId, group] of groups) {
     if (group.length <= 1) continue;
 
-    const sorted = [...group].sort((a, b) => compareEntities(entityType, a, b));
+    const sorted = [...group].sort((a, b) => compareEntities(entityType, a, b, displayId, context));
     const winner = sorted[0]!;
     const losers = sorted.slice(1);
 
@@ -133,16 +181,7 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
       const newDisplayId = `${displayPrefix}${String(nextSeq).padStart(3, "0")}`;
       nextSeq++;
 
-      const winnerLabel = hasLegacyPriority(entityType, winner)
-        ? "legacy ID priority"
-        : getEntityTimestamp(entityType, winner as Record<string, unknown>) !== null &&
-            getEntityTimestamp(entityType, loser as Record<string, unknown>) === null
-          ? "valid timestamp vs missing"
-          : getEntityTimestamp(entityType, winner as Record<string, unknown>) !== null &&
-              getEntityTimestamp(entityType, loser as Record<string, unknown>) !== null &&
-              getEntityTimestamp(entityType, winner as Record<string, unknown>) !== getEntityTimestamp(entityType, loser as Record<string, unknown>)
-            ? "earlier timestamp"
-            : "lower canonical ID";
+      const winnerLabel = winningReason(entityType, displayId, winner, loser, context);
 
       renames.push({
         entityType,
@@ -157,7 +196,7 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
   return { renames, nextSeq };
 }
 
-export function computeReconcilePlan(state: ProjectState): ReconcileResult {
+export function computeReconcilePlan(state: ProjectState, context?: ReconcileContext): ReconcileResult {
   const errors: string[] = [];
 
   for (const t of state.tickets) {
@@ -185,32 +224,13 @@ export function computeReconcilePlan(state: ProjectState): ReconcileResult {
     return { ok: false, errors };
   }
 
-  const tickets = reconcileEntityType("ticket", state.tickets as (Ticket & Record<string, unknown>)[], "T-", TICKET_NUMERIC_REGEX);
-  const issues = reconcileEntityType("issue", state.issues as (Issue & Record<string, unknown>)[], "ISS-", ISSUE_NUMERIC_REGEX);
-  const notes = reconcileEntityType("note", state.notes as (Note & Record<string, unknown>)[], "N-", NOTE_NUMERIC_REGEX);
-  const lessons = reconcileEntityType("lesson", state.lessons as (Lesson & Record<string, unknown>)[], "L-", LESSON_NUMERIC_REGEX);
+  const tickets = reconcileEntityType("ticket", state.tickets as (Ticket & Record<string, unknown>)[], "T-", TICKET_NUMERIC_REGEX, context);
+  const issues = reconcileEntityType("issue", state.issues as (Issue & Record<string, unknown>)[], "ISS-", ISSUE_NUMERIC_REGEX, context);
+  const notes = reconcileEntityType("note", state.notes as (Note & Record<string, unknown>)[], "N-", NOTE_NUMERIC_REGEX, context);
+  const lessons = reconcileEntityType("lesson", state.lessons as (Lesson & Record<string, unknown>)[], "L-", LESSON_NUMERIC_REGEX, context);
 
   const renames = [...tickets.renames, ...issues.renames, ...notes.renames, ...lessons.renames];
-  const warnings: ReconcileWarning[] = [];
-
-  const renamedDisplayIds = new Set(renames.map((r) => r.oldDisplayId));
-  for (const t of state.tickets) {
-    for (const ref of t.blockedBy) {
-      if (renamedDisplayIds.has(ref)) {
-        warnings.push({ message: `Ticket ${effectiveDisplayId(t)} has blockedBy ref '${ref}' which was renumbered. Verify ref is canonical.` });
-      }
-    }
-    if (t.parentTicket && renamedDisplayIds.has(t.parentTicket)) {
-      warnings.push({ message: `Ticket ${effectiveDisplayId(t)} has parentTicket ref '${t.parentTicket}' which was renumbered. Verify ref is canonical.` });
-    }
-  }
-  for (const i of state.issues) {
-    for (const ref of i.relatedTickets) {
-      if (renamedDisplayIds.has(ref)) {
-        warnings.push({ message: `Issue ${effectiveDisplayId(i)} has relatedTickets ref '${ref}' which was renumbered. Verify ref is canonical.` });
-      }
-    }
-  }
+  const warnings: ReconcileWarning[] = [...(context?.warnings ?? [])];
 
   return { ok: true, plan: { renames, warnings } };
 }

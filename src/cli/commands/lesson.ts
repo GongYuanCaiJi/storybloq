@@ -4,8 +4,10 @@ import {
   deleteLessonUnlocked,
 } from "../../core/project-loader.js";
 import { nextLessonID, allocateTeamLessonId } from "../../core/id-allocation.js";
+import { reserveDisplayId } from "../../core/remote-refs.js";
 import { resolveAndNormalizeLessonRef } from "../../core/ref-normalization.js";
 import { buildLessonDigest } from "../../core/lessons.js";
+import { isTeamModeConfig } from "../../core/team-capabilities.js";
 import {
   formatLessonList,
   formatLesson,
@@ -127,7 +129,7 @@ export function handleLessonGet(
       errorCode: "not_found",
     };
   }
-  return { output: formatLesson(lesson, ctx.format) };
+  return { output: formatLesson(lesson, ctx.format, ctx.state) };
 }
 
 export function handleLessonDigest(
@@ -168,10 +170,20 @@ export async function handleLessonCreate(
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
     const isTeam = state.config.team?.enabled === true;
-    const { id, displayId } = isTeam
-      ? allocateTeamLessonId(state.lessons)
-      : { id: nextLessonID(state.lessons), displayId: undefined as string | undefined };
-    const today = todayISO();
+    let id: string;
+    let displayId: string | undefined;
+    if (isTeam) {
+      const alloc = allocateTeamLessonId(state.lessons);
+      id = alloc.id;
+      displayId = state.config.team?.idAllocator === "git-refs"
+        ? (await reserveDisplayId(root, "lesson", state, id)).displayId
+        : alloc.displayId;
+    } else {
+      id = nextLessonID(state.lessons);
+      displayId = undefined;
+    }
+    const createdAt = new Date().toISOString();
+    const today = createdAt.slice(0, 10);
     const tags = args.tags ? normalizeTags(args.tags) : [];
 
     // Validate and resolve supersedes target
@@ -199,6 +211,7 @@ export async function handleLessonCreate(
       reinforcements: 0,
       lastValidated: today,
       createdDate: today,
+      ...(isTeam && { createdAt }),
       updatedDate: today,
       supersedes: resolvedSupersedes,
       status: "active",
@@ -320,24 +333,29 @@ export async function handleLessonDelete(
   format: OutputFormat,
   root: string,
   hard?: boolean,
+  displayLabel?: string,
 ): Promise<CommandResult> {
+  let resolvedId = id;
+  let resolvedDisplayLabel = displayLabel;
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const existing = state.lessonByID(id);
+    resolvedId = resolveAndNormalizeLessonRef(state, id);
+    const existing = state.lessonByID(resolvedId);
     if (!existing) {
       throw new CliValidationError("not_found", `Lesson ${id} not found`);
     }
-    const willHardDelete = hard || (state.config.schemaVersion == null || state.config.schemaVersion < 2);
+    resolvedDisplayLabel = displayLabel ?? existing.displayId ?? resolvedId;
+    const willHardDelete = hard || !isTeamModeConfig(state.config);
     if (willHardDelete) {
-      const referencing = state.lessons.filter((l) => l.supersedes === id);
+      const referencing = state.lessons.filter((l) => l.supersedes === resolvedId);
       if (referencing.length > 0) {
         throw new CliValidationError(
           "conflict",
-          `Cannot delete ${id}: referenced by ${referencing.map((l) => l.id).join(", ")} via supersedes`,
+          `Cannot delete ${id}: referenced by ${referencing.map((l) => l.displayId ?? l.id).join(", ")} via supersedes`,
         );
       }
     }
-    await deleteLessonUnlocked(id, root, { hard });
+    await deleteLessonUnlocked(resolvedId, root, { hard });
   });
 
-  return { output: formatLessonDeleteResult(id, format) };
+  return { output: formatLessonDeleteResult(format === "json" ? resolvedId : resolvedDisplayLabel ?? id, format) };
 }

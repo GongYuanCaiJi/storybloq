@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { validateProject, mergeValidation } from "../../src/core/validation.js";
-import { makeTicket, makeIssue, makeNote, makeLesson, makeState, makeRoadmap, makePhase } from "./test-factories.js";
+import { makeTicket, makeIssue, makeNote, makeLesson, makeState, makeRoadmap, makePhase, minimalConfig } from "./test-factories.js";
 import { ProjectState } from "../../src/core/project-state.js";
 import type { Config } from "../../src/models/config.js";
 import type { LoadWarning } from "../../src/core/errors.js";
@@ -15,6 +15,31 @@ describe("validateProject", () => {
     const result = validateProject(state);
     expect(result.valid).toBe(true);
     expect(result.errorCount).toBe(0);
+  });
+
+  it("reports unresolved entity conflicts as validation errors", () => {
+    const ticket = makeTicket({ id: "T-001", phase: "p1" });
+    (ticket as Record<string, unknown>)._conflicts = [
+      { fieldPath: "/title", kind: "field", base: "A", ours: "B", theirs: "C" },
+    ];
+    const state = makeState({
+      tickets: [ticket],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = validateProject(state);
+    expect(result.valid).toBe(false);
+    expect(result.findings.some((f) => f.code === "unresolved_conflicts" && f.entity === "T-001")).toBe(true);
+  });
+
+  it("reports unresolved config and roadmap conflicts as validation errors", () => {
+    const state = makeState({
+      config: { ...minimalConfig, _conflicts: [{ fieldPath: "/project", kind: "field" }] } as Config,
+      roadmap: { ...makeRoadmap([makePhase({ id: "p1" })]), _conflicts: [{ fieldPath: "/phases", kind: "field" }] } as any,
+    });
+    const result = validateProject(state);
+    expect(result.valid).toBe(false);
+    expect(result.findings.some((f) => f.code === "unresolved_conflicts" && f.entity === "config.json")).toBe(true);
+    expect(result.findings.some((f) => f.code === "unresolved_conflicts" && f.entity === "roadmap.json")).toBe(true);
   });
 
   it("reports invalid phase ref", () => {
@@ -197,6 +222,17 @@ describe("validateProject", () => {
     expect(validateProject(state).findings.some((f) => f.code === "parent_cycle")).toBe(true);
   });
 
+  it("reports parentTicket cycle through display ID refs", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-001", phase: "p1", parentTicket: "T-002" }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-002", phase: "p1", parentTicket: "T-001" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    expect(validateProject(state).findings.some((f) => f.code === "parent_cycle")).toBe(true);
+  });
+
   it("reports blockedBy cycle as error", () => {
     const state = makeState({
       tickets: [
@@ -212,6 +248,17 @@ describe("validateProject", () => {
     expect(result.valid).toBe(false);
   });
 
+  it("reports blockedBy cycle through display ID refs", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-001", phase: "p1", blockedBy: ["T-002"] }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-002", phase: "p1", blockedBy: ["T-001"] }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    expect(validateProject(state).findings.some((f) => f.code === "blocked_by_cycle")).toBe(true);
+  });
+
   it("reports blockedBy referencing umbrella", () => {
     const state = makeState({
       tickets: [
@@ -222,6 +269,33 @@ describe("validateProject", () => {
       roadmap: makeRoadmap([makePhase({ id: "p1" })]),
     });
     expect(validateProject(state).findings.some((f) => f.code === "blocked_by_umbrella")).toBe(true);
+  });
+
+  it("reports blockedBy referencing umbrella through display ID refs", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "t-parent000000001", displayId: "T-001", phase: "p1" }),
+        makeTicket({ id: "t-child0000000002", displayId: "T-002", phase: "p1", parentTicket: "T-001" }),
+        makeTicket({ id: "t-blocked0000003", displayId: "T-003", phase: "p1", blockedBy: ["T-001"] }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    expect(validateProject(state).findings.some((f) => f.code === "blocked_by_umbrella")).toBe(true);
+  });
+
+  it("warns when refs resolve to deleted tickets by display ID", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "t-deleted0000001", displayId: "T-001", phase: "p1", lifecycle: "deleted" }),
+        makeTicket({ id: "t-blocked0000002", displayId: "T-002", phase: "p1", blockedBy: ["T-001"], parentTicket: "T-001" }),
+      ],
+      issues: [makeIssue({ id: "ISS-001", relatedTickets: ["T-001"] })],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const codes = validateProject(state).findings.map((f) => f.code);
+    expect(codes).toContain("blocked_by_deleted");
+    expect(codes).toContain("parent_deleted");
+    expect(codes).toContain("related_ticket_deleted");
   });
 
   it("warns on orphan open issue", () => {

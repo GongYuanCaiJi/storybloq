@@ -42,6 +42,7 @@ export const ConfigSchema = z
       claimStalenessHours: z.number().finite().nonnegative().optional(),
       idAllocator: z.enum(["local", "git-refs"]).optional(),
       idAllocatorRemote: z.string().regex(/^[A-Za-z0-9._-]+$/).refine((v) => !v.startsWith("-"), "Remote name must not start with -").optional(),
+      protectedRef: z.string().min(1).refine((v) => !v.startsWith("-"), "Protected ref must not start with -").optional(),
       mergeDriverVersion: z.number().int().optional(),
     }).optional(),
   })

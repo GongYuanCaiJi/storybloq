@@ -1,6 +1,7 @@
 import { runDoctor, type DoctorContext } from "../../core/team-doctor.js";
 import { formatDoctorResult, ExitCode } from "../../core/output-formatter.js";
 import { withProjectLock } from "../../core/project-loader.js";
+import { isTeamModeConfig } from "../../core/team-capabilities.js";
 import type { CommandResult } from "../types.js";
 
 export interface TeamDoctorOptions {
@@ -16,14 +17,10 @@ export async function handleTeamDoctor(
   let exitCode: number = ExitCode.OK;
 
   await withProjectLock(root, { strict: false }, async ({ state, warnings }) => {
-    const isTeamMode = state.config.team?.enabled === true
-      || ((state.config.team != null && Object.keys(state.config.team).length > 0)
-          && (state.config.schemaVersion ?? 1) >= 2);
-
     const ctx: DoctorContext = {
       root,
       cliVersion: null,
-      isTeamMode,
+      isTeamMode: isTeamModeConfig(state.config),
       loadWarnings: warnings,
     };
 

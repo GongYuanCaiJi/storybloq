@@ -25,6 +25,14 @@ function resolveTicketRefDisplay(ref: string, state: ProjectState): string {
   return ref;
 }
 
+function resolveLessonRefDisplay(ref: string, state: ProjectState): string {
+  const result = state.resolveLessonRef(ref);
+  if (result.kind === "found") {
+    return entityDisplayId(result.item);
+  }
+  return ref;
+}
+
 function entityDisplayId(item: { id: string; displayId?: string | null }): string {
   return item.displayId ?? item.id;
 }
@@ -332,7 +340,7 @@ export function formatTicket(
 
   const blocked = state.isBlocked(ticket) ? " [BLOCKED]" : "";
   const lines: string[] = [
-    `# ${escapeMarkdownInline(ticket.id)}: ${escapeMarkdownInline(ticket.title)}${blocked}`,
+    `# ${escapeMarkdownInline(entityDisplayId(ticket))}: ${escapeMarkdownInline(ticket.title)}${blocked}`,
     "",
     `Status: ${ticket.status} | Type: ${ticket.type} | Phase: ${ticket.phase ?? "none"} | Order: ${ticket.order}`,
     `Created: ${ticket.createdDate}${ticket.completedDate ? ` | Completed: ${ticket.completedDate}` : ""}`,
@@ -494,7 +502,7 @@ export function formatIssue(
   }
 
   const lines: string[] = [
-    `# ${escapeMarkdownInline(issue.id)}: ${escapeMarkdownInline(issue.title)}`,
+    `# ${escapeMarkdownInline(entityDisplayId(issue))}: ${escapeMarkdownInline(issue.title)}`,
     "",
     `Status: ${issue.status} | Severity: ${issue.severity}`,
     `Components: ${issue.components.join(", ") || "none"}`,
@@ -629,7 +637,7 @@ export function formatNote(
     return JSON.stringify(successEnvelope(note), null, 2);
   }
 
-  const title = note.title ?? `${note.createdDate} — ${note.id}`;
+  const title = note.title ?? `${note.createdDate} — ${entityDisplayId(note)}`;
   const statusBadge = note.status === "archived" ? " (archived)" : "";
   const lines: string[] = [
     `# ${escapeMarkdownInline(title)}${statusBadge}`,
@@ -654,14 +662,14 @@ export function formatNoteList(
   if (notes.length === 0) return "No notes found.";
   const lines: string[] = [];
   for (const n of notes) {
-    const title = n.title ?? n.id;
+    const title = n.title ?? entityDisplayId(n);
     const status = n.status === "archived" ? "[x]" : "[ ]";
     const tagInfo = n.status === "archived"
       ? " (archived)"
       : n.tags.length > 0
         ? ` (${n.tags.join(", ")})`
         : "";
-    lines.push(`${status} ${n.id}: ${escapeMarkdownInline(title)}${tagInfo}`);
+    lines.push(`${status} ${entityDisplayId(n)}: ${escapeMarkdownInline(title)}${tagInfo}`);
   }
   return lines.join("\n");
 }
@@ -673,7 +681,8 @@ export function formatNoteCreateResult(
   if (format === "json") {
     return JSON.stringify(successEnvelope(note), null, 2);
   }
-  return `Created note ${note.id}: ${note.title ?? note.id}`;
+  const displayId = entityDisplayId(note);
+  return `Created note ${displayId}: ${note.title ?? displayId}`;
 }
 
 export function formatNoteUpdateResult(
@@ -683,7 +692,8 @@ export function formatNoteUpdateResult(
   if (format === "json") {
     return JSON.stringify(successEnvelope(note), null, 2);
   }
-  return `Updated note ${note.id}: ${note.title ?? note.id}`;
+  const displayId = entityDisplayId(note);
+  return `Updated note ${displayId}: ${note.title ?? displayId}`;
 }
 
 export function formatNoteDeleteResult(
@@ -701,6 +711,7 @@ export function formatNoteDeleteResult(
 export function formatLesson(
   lesson: Lesson,
   format: OutputFormat,
+  state?: ProjectState,
 ): string {
   if (format === "json") {
     return JSON.stringify(successEnvelope(lesson), null, 2);
@@ -717,7 +728,7 @@ export function formatLesson(
   }
   lines.push(`Created: ${lesson.createdDate} | Updated: ${lesson.updatedDate} | Last validated: ${lesson.lastValidated}`);
   if (lesson.supersedes) {
-    lines.push(`Supersedes: ${lesson.supersedes}`);
+    lines.push(`Supersedes: ${state ? resolveLessonRefDisplay(lesson.supersedes, state) : lesson.supersedes}`);
   }
   lines.push("", "## Content", "", lesson.content);
   if (lesson.context) {
@@ -739,7 +750,7 @@ export function formatLessonList(
     const status = l.status === "active" ? "[ ]" : "[x]";
     const reinforced = l.reinforcements > 0 ? ` (×${l.reinforcements})` : "";
     const tagInfo = l.tags.length > 0 ? ` [${l.tags.join(", ")}]` : "";
-    lines.push(`${status} ${l.id}: ${escapeMarkdownInline(l.title)}${reinforced}${tagInfo}`);
+    lines.push(`${status} ${entityDisplayId(l)}: ${escapeMarkdownInline(l.title)}${reinforced}${tagInfo}`);
   }
   return lines.join("\n");
 }
@@ -762,7 +773,7 @@ export function formatLessonCreateResult(
   if (format === "json") {
     return JSON.stringify(successEnvelope(lesson), null, 2);
   }
-  return `Created lesson ${lesson.id}: ${lesson.title}`;
+  return `Created lesson ${entityDisplayId(lesson)}: ${lesson.title}`;
 }
 
 export function formatLessonUpdateResult(
@@ -772,7 +783,7 @@ export function formatLessonUpdateResult(
   if (format === "json") {
     return JSON.stringify(successEnvelope(lesson), null, 2);
   }
-  return `Updated lesson ${lesson.id}: ${lesson.title}`;
+  return `Updated lesson ${entityDisplayId(lesson)}: ${lesson.title}`;
 }
 
 export function formatLessonReinforceResult(
@@ -782,7 +793,7 @@ export function formatLessonReinforceResult(
   if (format === "json") {
     return JSON.stringify(successEnvelope(lesson), null, 2);
   }
-  return `Reinforced lesson ${lesson.id}: ${lesson.title} (×${lesson.reinforcements})`;
+  return `Reinforced lesson ${entityDisplayId(lesson)}: ${lesson.title} (×${lesson.reinforcements})`;
 }
 
 export function formatLessonDeleteResult(

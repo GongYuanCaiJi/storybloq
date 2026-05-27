@@ -1,11 +1,16 @@
-import { computeReconcilePlan, computeRebalancePlan, type ReconcileRename } from "../../core/reconcile.js";
-import { formatReconcileResult, ExitCode } from "../../core/output-formatter.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { computeReconcilePlan, computeRebalancePlan, type EntityType, type ReconcileContext, type ReconcileRename } from "../../core/reconcile.js";
+import { formatReconcileResult, ExitCode, successEnvelope, type ExitCodeValue } from "../../core/output-formatter.js";
 import { withProjectLock, runTransactionUnlocked } from "../../core/project-loader.js";
-import { nextNoteID, allocateTeamNoteId, maxSequentialNumber } from "../../core/id-allocation.js";
+import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
+import { listReservations } from "../../core/remote-refs.js";
+import type { ProjectState } from "../../core/project-state.js";
 import type { Note } from "../../models/note.js";
 import type { CommandResult } from "../types.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { isTeamModeConfig } from "../../core/team-capabilities.js";
 
 const NOTE_NUMERIC_REGEX = /^N-(\d+)$/;
 
@@ -16,17 +21,87 @@ export interface ReconcileOptions {
   readonly format: "md" | "json";
 }
 
-const ENTITY_DIRS: Record<string, string> = {
+const execFileAsync = promisify(execFile);
+
+const ENTITY_DIRS: Record<EntityType, string> = {
   ticket: "tickets",
   issue: "issues",
   note: "notes",
   lesson: "lessons",
 };
 
+const ENTITY_TYPES: readonly EntityType[] = ["ticket", "issue", "note", "lesson"];
+
 interface RankChange {
   id: string;
-  entityType: string;
+  entityType: EntityType;
   newRank: string;
+}
+
+async function gitStdout(root: string, args: string[], timeout = 5000): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd: root,
+    encoding: "utf-8",
+    timeout,
+  });
+  return String(stdout);
+}
+
+async function buildReconcileContext(root: string, state: ProjectState): Promise<ReconcileContext> {
+  const warnings: NonNullable<ReconcileContext["warnings"]> = [];
+  const reservations: NonNullable<ReconcileContext["reservations"]> = {};
+  const protectedOwners: NonNullable<ReconcileContext["protectedOwners"]> = {};
+
+  const team = state.config.team;
+  if (!isTeamModeConfig(state.config) || !team) {
+    return { reservations, protectedOwners, warnings };
+  }
+
+  if (team.idAllocator === "git-refs") {
+    for (const entityType of ENTITY_TYPES) {
+      try {
+        const refs = await listReservations(root, entityType, state);
+        const owners = new Map<string, string>();
+        for (const ref of refs) {
+          if (ref.ownerId) owners.set(ref.displayId, ref.ownerId);
+        }
+        reservations[entityType] = owners;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        warnings.push({ message: `Could not inspect ${entityType} reservation refs: ${message}` });
+      }
+    }
+  }
+
+  const protectedRef = team.protectedRef ?? "origin/main";
+  try {
+    const mergeBase = (await gitStdout(root, ["merge-base", "HEAD", protectedRef], 10000)).trim();
+    if (mergeBase) {
+      for (const entityType of ENTITY_TYPES) {
+        const dir = ENTITY_DIRS[entityType];
+        try {
+          const stdout = await gitStdout(root, ["ls-tree", "-r", "--name-only", mergeBase, `.story/${dir}`], 10000);
+          const owners = new Set<string>();
+          for (const line of stdout.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed.endsWith(".json")) continue;
+            const fileName = trimmed.slice(trimmed.lastIndexOf("/") + 1);
+            owners.add(fileName.replace(/\.json$/, ""));
+          }
+          protectedOwners[entityType] = owners;
+        } catch {
+          protectedOwners[entityType] = new Set();
+        }
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    warnings.push({
+      message: `Could not inspect protected ref "${protectedRef}" for reconcile ownership. Falling back to timestamps and canonical IDs. ${message}`,
+    });
+  }
+
+  return { reservations, protectedOwners, warnings };
 }
 
 async function applyChanges(
@@ -73,51 +148,6 @@ async function applyChanges(
     operations.push({ op: "write", target: filePath, content: JSON.stringify(entity, null, 2) + "\n" });
   }
 
-  const renameMap = new Map<string, string>();
-  for (const rename of renames) {
-    renameMap.set(rename.oldDisplayId, rename.newDisplayId);
-  }
-  if (renameMap.size > 0) {
-    const allDirs = ["tickets", "issues"];
-    for (const dirName of allDirs) {
-      const dirPath = join(storyDir, dirName);
-      let dirFiles: string[];
-      try { dirFiles = await readdir(dirPath); } catch { continue; }
-      for (const fname of dirFiles) {
-        if (!fname.endsWith(".json")) continue;
-        const entityId = fname.replace(/\.json$/, "");
-        if (handled.has(entityId)) continue;
-        const fpath = join(dirPath, fname);
-        const rawContent = await readFile(fpath, "utf-8");
-        const obj = JSON.parse(rawContent) as Record<string, unknown>;
-        let changed = false;
-        if (Array.isArray(obj.blockedBy)) {
-          const updated = obj.blockedBy.map((ref: unknown) => {
-            const mapped = typeof ref === "string" ? renameMap.get(ref) : undefined;
-            if (mapped) { changed = true; return mapped; }
-            return ref;
-          });
-          if (changed) obj.blockedBy = updated;
-        }
-        if (typeof obj.parentTicket === "string" && renameMap.has(obj.parentTicket)) {
-          obj.parentTicket = renameMap.get(obj.parentTicket);
-          changed = true;
-        }
-        if (Array.isArray(obj.relatedTickets)) {
-          const updated = obj.relatedTickets.map((ref: unknown) => {
-            const mapped = typeof ref === "string" ? renameMap.get(ref) : undefined;
-            if (mapped) { changed = true; return mapped; }
-            return ref;
-          });
-          if (changed) obj.relatedTickets = updated;
-        }
-        if (changed) {
-          operations.push({ op: "write", target: fpath, content: JSON.stringify(obj, null, 2) + "\n" });
-        }
-      }
-    }
-  }
-
   if (extraOps) operations.push(...extraOps);
   if (operations.length > 0) {
     await runTransactionUnlocked(root, operations);
@@ -129,21 +159,29 @@ export async function handleReconcile(
   options: ReconcileOptions,
 ): Promise<CommandResult> {
   let output = "";
-  let exitCode: number = ExitCode.OK;
+  let exitCode: ExitCodeValue = ExitCode.OK;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
-    const result = computeReconcilePlan(state);
+    const context = await buildReconcileContext(root, state);
+    const result = computeReconcilePlan(state, context);
+    const rebalance = options.rebalanceRanks ? computeRebalancePlan(state) : null;
+    const rankChanges: RankChange[] = rebalance
+      ? rebalance.changes.map((c) => ({ id: c.id, entityType: c.entityType, newRank: c.newRank }))
+      : [];
+    const rebalanceMsg = rebalance && rebalance.changes.length > 0
+      ? `\nRebalanced ${rebalance.changes.length} rank(s) across ${rebalance.phasesRebalanced} phase(s).`
+      : "";
 
     if (!result.ok) {
       output = formatReconcileResult(result, options.format);
-      exitCode = ExitCode.ERROR;
+      exitCode = ExitCode.VALIDATION_ERROR;
       return;
     }
 
     if (options.ci) {
-      if (result.plan.renames.length > 0) {
-        output = formatReconcileResult(result, options.format);
-        exitCode = 1;
+      if (result.plan.renames.length > 0 || rankChanges.length > 0) {
+        output = formatReconcileOutput(result, options.format, rebalance);
+        exitCode = ExitCode.USER_ERROR;
       } else {
         output = "No duplicate displayIds found. Project is clean.";
         exitCode = ExitCode.OK;
@@ -151,70 +189,90 @@ export async function handleReconcile(
       return;
     }
 
-    if (options.dryRun || result.plan.renames.length === 0) {
-      output = formatReconcileResult(result, options.format);
+    if (options.dryRun || (result.plan.renames.length === 0 && rankChanges.length === 0)) {
+      output = formatReconcileOutput(result, options.format, rebalance);
       exitCode = ExitCode.OK;
       return;
     }
 
-    const lines = [
-      "# Reconcile Mapping",
-      "",
-      `Reconciled ${result.plan.renames.length} duplicate displayId(s).`,
-      "",
-      "| Entity | Old DisplayId | New DisplayId | Reason |",
-      "|--------|--------------|--------------|--------|",
-    ];
-    for (const r of result.plan.renames) {
-      lines.push(`| ${r.id} | ${r.oldDisplayId} | ${r.newDisplayId} | ${r.reason} |`);
-    }
-    const isTeam = state.config.team?.enabled === true;
-    let noteId: string;
-    let noteDisplayId: string | undefined;
-    if (isTeam) {
-      const alloc = allocateTeamNoteId(state.notes);
-      noteId = alloc.id;
-      const maxFromNoteRenames = result.plan.renames
-        .filter((r) => r.entityType === "note")
-        .reduce((max, r) => {
-          const m = r.newDisplayId.match(NOTE_NUMERIC_REGEX);
-          return m?.[1] ? Math.max(max, parseInt(m[1], 10)) : max;
-        }, 0);
-      const allocNum = parseInt(alloc.displayId.replace(/^N-0*/, ""), 10) || 0;
-      noteDisplayId = `N-${String(Math.max(allocNum, maxFromNoteRenames + 1)).padStart(3, "0")}`;
-    } else {
-      noteId = nextNoteID(state.notes);
-      noteDisplayId = undefined;
-    }
-    const today = new Date().toISOString().slice(0, 10);
-    const note: Note = {
-      id: noteId,
-      ...(noteDisplayId != null && { displayId: noteDisplayId }),
-      title: "Reconcile mapping",
-      content: lines.join("\n"),
-      tags: ["reconcile"],
-      status: "active",
-      createdDate: today,
-      updatedDate: today,
-    };
-    const noteFilePath = join(root, ".story", "notes", `${noteId}.json`);
-    const noteOp = { op: "write" as const, target: noteFilePath, content: JSON.stringify(note, null, 2) + "\n" };
+    const noteOp = result.plan.renames.length > 0 ? buildMappingNoteOp(root, state, result.plan.renames) : undefined;
+    await applyChanges(root, result.plan.renames, rankChanges, noteOp ? [noteOp] : []);
 
-    let rankChanges: RankChange[] = [];
-    let rebalanceMsg = "";
-    if (options.rebalanceRanks) {
-      const rebalance = computeRebalancePlan(state);
-      if (rebalance.changes.length > 0) {
-        rankChanges = rebalance.changes;
-        rebalanceMsg = `\nRebalanced ${rebalance.changes.length} rank(s) across ${rebalance.phasesRebalanced} phase(s).`;
-      }
-    }
-
-    await applyChanges(root, result.plan.renames, rankChanges, [noteOp]);
-
-    output = formatReconcileResult(result, options.format) + rebalanceMsg;
+    output = formatReconcileOutput(result, options.format, rebalance);
     exitCode = ExitCode.OK;
   });
 
   return { output, exitCode };
+}
+
+function buildMappingNoteOp(
+  root: string,
+  state: ProjectState,
+  renames: ReconcileRename[],
+): { op: "write"; target: string; content: string } {
+  const lines = [
+    "# Reconcile Mapping",
+    "",
+    `Reconciled ${renames.length} duplicate displayId(s).`,
+    "",
+    "| Entity | Old DisplayId | New DisplayId | Reason |",
+    "|--------|--------------|--------------|--------|",
+  ];
+  for (const r of renames) {
+    lines.push(`| ${r.id} | ${r.oldDisplayId} | ${r.newDisplayId} | ${r.reason} |`);
+  }
+  const isTeam = isTeamModeConfig(state.config);
+  let noteId: string;
+  let noteDisplayId: string | undefined;
+  if (isTeam) {
+    const alloc = allocateTeamNoteId(state.notes);
+    noteId = alloc.id;
+    const maxFromNoteRenames = renames
+      .filter((r) => r.entityType === "note")
+      .reduce((max, r) => {
+        const m = r.newDisplayId.match(NOTE_NUMERIC_REGEX);
+        return m?.[1] ? Math.max(max, parseInt(m[1], 10)) : max;
+      }, 0);
+    const allocNum = parseInt(alloc.displayId.replace(/^N-0*/, ""), 10) || 0;
+    noteDisplayId = `N-${String(Math.max(allocNum, maxFromNoteRenames + 1)).padStart(3, "0")}`;
+  } else {
+    noteId = nextNoteID(state.notes);
+    noteDisplayId = undefined;
+  }
+  const createdAt = new Date().toISOString();
+  const today = createdAt.slice(0, 10);
+  const note: Note = {
+    id: noteId,
+    ...(noteDisplayId != null && { displayId: noteDisplayId }),
+    title: "Reconcile mapping",
+    content: lines.join("\n"),
+    tags: ["reconcile"],
+    status: "active",
+    createdDate: today,
+    ...(isTeam && { createdAt }),
+    updatedDate: today,
+  };
+  const noteFilePath = join(root, ".story", "notes", `${noteId}.json`);
+  return { op: "write", target: noteFilePath, content: JSON.stringify(note, null, 2) + "\n" };
+}
+
+function formatReconcileOutput(
+  result: ReturnType<typeof computeReconcilePlan>,
+  format: "md" | "json",
+  rebalance: ReturnType<typeof computeRebalancePlan> | null,
+): string {
+  if (format === "json" && result.ok) {
+    return JSON.stringify(successEnvelope({
+      ...result.plan,
+      ...(rebalance ? {
+        rebalance: {
+          changes: rebalance.changes.length,
+          phasesRebalanced: rebalance.phasesRebalanced,
+        },
+      } : {}),
+    }), null, 2);
+  }
+  const base = formatReconcileResult(result, format);
+  if (!rebalance || rebalance.changes.length === 0) return base;
+  return `${base}\nRebalanced ${rebalance.changes.length} rank(s) across ${rebalance.phasesRebalanced} phase(s).`;
 }

@@ -35,7 +35,7 @@ export class CodeReviewStage implements WorkflowStage {
     const mergeBase = ctx.state.git.mergeBase;
     const isIssueFix = !!ctx.state.currentIssue;
     const issueHeader = isIssueFix
-      ? `Issue Fix Code Review (${ctx.state.currentIssue!.id})`
+      ? `Issue Fix Code Review (${ctx.state.currentIssue!.displayId ?? ctx.state.currentIssue!.id})`
       : "Code Review";
 
     const diffCommand = mergeBase
@@ -126,6 +126,7 @@ export class CodeReviewStage implements WorkflowStage {
   async report(ctx: StageContext, report: GuideReportInput): Promise<StageAdvance> {
     if (report.completedAction === "skip_ticket") {
       const ticketId = ctx.state.ticket?.id ?? ctx.state.currentIssue?.id ?? "unknown";
+      const ticketLabel = ctx.state.ticket?.displayId ?? ctx.state.ticket?.id ?? ctx.state.currentIssue?.displayId ?? ctx.state.currentIssue?.id ?? "unknown";
       const reason = report.notes ?? "Ticket cannot be completed in this session.";
 
       if (ctx.state.ticket) {
@@ -134,7 +135,7 @@ export class CodeReviewStage implements WorkflowStage {
           await withProjectLock(ctx.root, { strict: false }, async ({ state: ps }) => {
             const ticket = ps.ticketByID(ticketId);
             if (ticket && (ticket as Record<string, unknown>).claimedBySession === ctx.state.sessionId) {
-              writeTicketUnlocked(ctx.root, { ...ticket, status: "open", claimedBySession: undefined } as Record<string, unknown>);
+              await writeTicketUnlocked({ ...ticket, status: "open" as const, claimedBySession: null, claim: undefined }, ctx.root);
             }
           });
         } catch { /* best-effort */ }
@@ -153,7 +154,7 @@ export class CodeReviewStage implements WorkflowStage {
         target: "HANDOVER",
         result: {
           instruction: [
-            `# Ticket Skipped: ${ticketId}`,
+            `# Ticket Skipped: ${ticketLabel}`,
             "",
             `**Reason:** ${reason}`,
             "",

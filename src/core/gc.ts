@@ -31,9 +31,6 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
   const candidates: GcCandidate[] = [];
   const warnings: string[] = [];
 
-  const activeTickets = new Set(state.activeTickets.map((t) => t.id));
-  const activeIssues = new Set(state.activeIssues.map((i) => i.id));
-
   function collectDeleted(
     items: readonly { id: string }[],
     type: GcCandidate["type"],
@@ -79,7 +76,6 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
   collectDeleted(state.lessons, "lesson");
 
   const candidateIds = new Set(candidates.map((c) => c.id));
-  const candidateMap = new Map(candidates.map((c) => [c.id, c]));
   const candidateByRef = new Map<string, GcCandidate>();
   for (const c of candidates) {
     candidateByRef.set(c.id, c);
@@ -101,9 +97,9 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
     return candidateByRef.get(ref);
   }
 
-  for (const t of state.tickets as readonly Ticket[]) {
+  for (const t of state.activeTickets as readonly Ticket[]) {
     if (candidateIds.has(t.id)) continue;
-    for (const bid of t.blockedBy) {
+    for (const bid of t.blockedBy ?? []) {
       const c = findCandidate(bid);
       if (c) c.activeReferences.push(t.id);
     }
@@ -113,9 +109,9 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
     }
   }
 
-  for (const i of state.issues as readonly Issue[]) {
+  for (const i of state.activeIssues as readonly Issue[]) {
     if (candidateIds.has(i.id)) continue;
-    for (const tref of i.relatedTickets) {
+    for (const tref of i.relatedTickets ?? []) {
       const c = findCandidate(tref);
       if (c) c.activeReferences.push(i.id);
     }

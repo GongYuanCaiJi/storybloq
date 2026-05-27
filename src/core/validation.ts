@@ -1,6 +1,7 @@
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { CROSS_NODE_REF_CAPTURE_REGEX } from "../models/ticket.js";
+import { hasConflicts } from "./conflicts.js";
 
 // --- Types ---
 
@@ -30,10 +31,6 @@ export interface ValidationResult {
 export function validateProject(state: ProjectState): ValidationResult {
   const findings: ValidationFinding[] = [];
   const phaseIDs = new Set(state.roadmap.phases.map((p) => p.id));
-  const ticketIDs = new Set<string>();
-  const allTicketRefs = new Set<string>();
-  const issueIDs = new Set<string>();
-  const allIssueRefs = new Set<string>();
   const deletedTicketIDs = new Set<string>();
   for (const t of state.tickets) {
     if ((t as Record<string, unknown>).lifecycle === "deleted") {
@@ -45,15 +42,6 @@ export function validateProject(state: ProjectState): ValidationResult {
   const ticketIDCounts = new Map<string, number>();
   for (const t of state.tickets) {
     ticketIDCounts.set(t.id, (ticketIDCounts.get(t.id) ?? 0) + 1);
-    ticketIDs.add(t.id);
-    allTicketRefs.add(t.id);
-    const rec = t as Record<string, unknown>;
-    if (typeof rec.displayId === "string") allTicketRefs.add(rec.displayId);
-    if (Array.isArray(rec.previousDisplayIds)) {
-      for (const prev of rec.previousDisplayIds) {
-        if (typeof prev === "string") allTicketRefs.add(prev);
-      }
-    }
   }
   for (const [id, count] of ticketIDCounts) {
     if (count > 1) {
@@ -70,15 +58,6 @@ export function validateProject(state: ProjectState): ValidationResult {
   const issueIDCounts = new Map<string, number>();
   for (const i of state.issues) {
     issueIDCounts.set(i.id, (issueIDCounts.get(i.id) ?? 0) + 1);
-    issueIDs.add(i.id);
-    allIssueRefs.add(i.id);
-    const irec = i as Record<string, unknown>;
-    if (typeof irec.displayId === "string") allIssueRefs.add(irec.displayId);
-    if (Array.isArray(irec.previousDisplayIds)) {
-      for (const prev of irec.previousDisplayIds) {
-        if (typeof prev === "string") allIssueRefs.add(prev);
-      }
-    }
   }
   for (const [id, count] of issueIDCounts) {
     if (count > 1) {
@@ -124,22 +103,29 @@ export function validateProject(state: ProjectState): ValidationResult {
   }
 
   // Lesson reference checks
-  const lessonIDs = new Set(state.lessons.map((l) => l.id));
   for (const l of state.lessons) {
     // supersedes ref
     if (l.supersedes != null) {
-      if (l.supersedes === l.id) {
+      const resolved = state.resolveLessonRef(l.supersedes);
+      if (resolved.kind === "found" && resolved.item.id === l.id) {
         findings.push({
           level: "error",
           code: "self_ref_supersedes",
           message: `Lesson ${l.id} references itself in supersedes.`,
           entity: l.id,
         });
-      } else if (!lessonIDs.has(l.supersedes)) {
+      } else if (resolved.kind === "missing") {
         findings.push({
           level: "error",
           code: "invalid_supersedes_ref",
           message: `Lesson ${l.id} supersedes nonexistent lesson ${l.supersedes}.`,
+          entity: l.id,
+        });
+      } else if (resolved.kind === "ambiguous") {
+        findings.push({
+          level: "error",
+          code: "ambiguous_supersedes_ref",
+          message: `Lesson ${l.id} supersedes ambiguous lesson reference ${l.supersedes}.`,
           entity: l.id,
         });
       }
@@ -179,28 +165,36 @@ export function validateProject(state: ProjectState): ValidationResult {
 
     // blockedBy refs
     for (const bid of t.blockedBy) {
-      if (bid === t.id) {
+      const resolved = state.resolveTicketRef(bid);
+      if (resolved.kind === "found" && resolved.item.id === t.id) {
         findings.push({
           level: "error",
           code: "self_ref_blocked_by",
           message: `Ticket ${t.id} references itself in blockedBy.`,
           entity: t.id,
         });
-      } else if (!allTicketRefs.has(bid)) {
+      } else if (resolved.kind === "missing") {
         findings.push({
           level: "error",
           code: "invalid_blocked_by_ref",
           message: `Ticket ${t.id} blockedBy references nonexistent ticket ${bid}.`,
           entity: t.id,
         });
-      } else if (deletedTicketIDs.has(bid)) {
+      } else if (resolved.kind === "ambiguous") {
+        findings.push({
+          level: "error",
+          code: "ambiguous_blocked_by_ref",
+          message: `Ticket ${t.id} blockedBy references ambiguous ticket ${bid}.`,
+          entity: t.id,
+        });
+      } else if (deletedTicketIDs.has(resolved.item.id)) {
         findings.push({
           level: "warning",
           code: "blocked_by_deleted",
           message: `Ticket ${t.id} blockedBy references deleted ticket ${bid}.`,
           entity: t.id,
         });
-      } else if (state.umbrellaIDs.has(bid)) {
+      } else if (state.umbrellaIDs.has(resolved.item.id)) {
         findings.push({
           level: "error",
           code: "blocked_by_umbrella",
@@ -212,21 +206,29 @@ export function validateProject(state: ProjectState): ValidationResult {
 
     // parentTicket ref
     if (t.parentTicket != null) {
-      if (t.parentTicket === t.id) {
+      const resolvedParent = state.resolveTicketRef(t.parentTicket);
+      if (resolvedParent.kind === "found" && resolvedParent.item.id === t.id) {
         findings.push({
           level: "error",
           code: "self_ref_parent",
           message: `Ticket ${t.id} references itself as parentTicket.`,
           entity: t.id,
         });
-      } else if (!allTicketRefs.has(t.parentTicket)) {
+      } else if (resolvedParent.kind === "missing") {
         findings.push({
           level: "error",
           code: "invalid_parent_ref",
           message: `Ticket ${t.id} parentTicket references nonexistent ticket ${t.parentTicket}.`,
           entity: t.id,
         });
-      } else if (deletedTicketIDs.has(t.parentTicket)) {
+      } else if (resolvedParent.kind === "ambiguous") {
+        findings.push({
+          level: "error",
+          code: "ambiguous_parent_ref",
+          message: `Ticket ${t.id} parentTicket references ambiguous ticket ${t.parentTicket}.`,
+          entity: t.id,
+        });
+      } else if (deletedTicketIDs.has(resolvedParent.item.id)) {
         findings.push({
           level: "warning",
           code: "parent_deleted",
@@ -246,14 +248,22 @@ export function validateProject(state: ProjectState): ValidationResult {
   // Issue reference checks
   for (const i of state.issues) {
     for (const tref of i.relatedTickets) {
-      if (!allTicketRefs.has(tref)) {
+      const resolved = state.resolveTicketRef(tref);
+      if (resolved.kind === "missing") {
         findings.push({
           level: "error",
           code: "invalid_related_ticket_ref",
           message: `Issue ${i.id} relatedTickets references nonexistent ticket ${tref}.`,
           entity: i.id,
         });
-      } else if (deletedTicketIDs.has(tref)) {
+      } else if (resolved.kind === "ambiguous") {
+        findings.push({
+          level: "error",
+          code: "ambiguous_related_ticket_ref",
+          message: `Issue ${i.id} relatedTickets references ambiguous ticket ${tref}.`,
+          entity: i.id,
+        });
+      } else if (deletedTicketIDs.has(resolved.item.id)) {
         findings.push({
           level: "warning",
           code: "related_ticket_deleted",
@@ -331,6 +341,16 @@ export function validateProject(state: ProjectState): ValidationResult {
         }
       }
     }
+  }
+
+  const conflicts = hasConflicts(state);
+  for (const item of conflicts.items) {
+    findings.push({
+      level: "error",
+      code: "unresolved_conflicts",
+      message: `${item.id} has ${item.conflictCount} unresolved conflict(s). Run \`storybloq resolve\` first.`,
+      entity: item.id,
+    });
   }
 
   const errorCount = findings.filter((f) => f.level === "error").length;
@@ -418,7 +438,10 @@ function dfsParent(
   inStack.add(id);
   const ticket = state.ticketByID(id);
   if (ticket?.parentTicket && ticket.parentTicket !== id) {
-    dfsParent(ticket.parentTicket, state, visited, inStack, findings);
+    const resolved = state.resolveTicketRef(ticket.parentTicket);
+    if (resolved.kind === "found" && resolved.item.id !== id) {
+      dfsParent(resolved.item.id, state, visited, inStack, findings);
+    }
   }
   inStack.delete(id);
   visited.add(id);
@@ -459,8 +482,9 @@ function dfsBlocked(
   const ticket = state.ticketByID(id);
   if (ticket) {
     for (const bid of ticket.blockedBy) {
-      if (bid !== id) {
-        dfsBlocked(bid, state, visited, inStack, findings);
+      const resolved = state.resolveTicketRef(bid);
+      if (resolved.kind === "found" && resolved.item.id !== id) {
+        dfsBlocked(resolved.item.id, state, visited, inStack, findings);
       }
     }
   }
@@ -502,7 +526,10 @@ function dfsSupersedesChain(
   inStack.add(id);
   const lesson = state.lessonByID(id);
   if (lesson?.supersedes && lesson.supersedes !== id) {
-    dfsSupersedesChain(lesson.supersedes, state, visited, inStack, findings);
+    const resolved = state.resolveLessonRef(lesson.supersedes);
+    if (resolved.kind === "found" && resolved.item.id !== id) {
+      dfsSupersedesChain(resolved.item.id, state, visited, inStack, findings);
+    }
   }
   inStack.delete(id);
   visited.add(id);

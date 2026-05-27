@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -24,6 +24,13 @@ function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
     format: "md",
     ...overrides,
   };
+}
+
+async function enableTeamMode(dir: string): Promise<void> {
+  const configPath = join(dir, ".story", "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf-8"));
+  config.team = { ...(config.team ?? {}), enabled: true };
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
 // --- List ---
@@ -142,6 +149,27 @@ describe("handleNoteCreate", () => {
     expect(note.title).toBeNull();
     expect(note.tags).toEqual([]);
     expect(note.status).toBe("active");
+  });
+
+  it("creates canonical IDs with display IDs in explicit team mode", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "note-create-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    await enableTeamMode(dir);
+
+    const result = await handleNoteCreate(
+      { content: "Team note.", title: "Team Note" },
+      "json", dir,
+    );
+
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.id).toMatch(/^n-[a-z0-9]{16}$/);
+    expect(parsed.data.displayId).toBe("N-001");
+    expect(parsed.data.createdAt).toEqual(expect.any(String));
+    const raw = await readFile(join(dir, ".story", "notes", `${parsed.data.id}.json`), "utf-8");
+    const note = JSON.parse(raw);
+    expect(note.title).toBe("Team Note");
+    await expect(readFile(join(dir, ".story", "notes", "N-001.json"), "utf-8")).rejects.toThrow();
   });
 
   it("creates a note with title and tags", async () => {

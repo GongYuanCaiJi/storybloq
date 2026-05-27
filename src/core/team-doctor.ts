@@ -392,20 +392,31 @@ async function checkReservationHealth(state: ProjectState, ctx: DoctorContext): 
     findings.push({
       severity: "warning",
       code: "reservation_fetch_failed",
-      message: `Failed to fetch reservation tags: ${result.fetchError}`,
+      message: `Failed to fetch reservation refs: ${result.fetchError}`,
       entity: null,
       repair: null,
     });
     return findings;
   }
 
-  const health = classifyReservations(result.tags, state);
+  const health = classifyReservations(result, state);
   for (const [entityType, orphanIds] of health.orphan) {
     for (const displayId of orphanIds) {
       findings.push({
         severity: "info",
         code: "orphan_reservation",
-        message: `Orphan reservation tag for ${entityType} ${displayId}: no item has this displayId`,
+        message: `Orphan reservation ref for ${entityType} ${displayId}: no item has this displayId`,
+        entity: displayId,
+        repair: null,
+      });
+    }
+  }
+  for (const [entityType, displayIds] of health.mismatched) {
+    for (const displayId of displayIds) {
+      findings.push({
+        severity: "warning",
+        code: "mismatched_reservation",
+        message: `Mismatched reservation ref for ${entityType} ${displayId}: ownerId does not match the item using this displayId`,
         entity: displayId,
         repair: null,
       });

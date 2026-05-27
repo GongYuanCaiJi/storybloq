@@ -70,13 +70,14 @@ describe("T-382: agent-facing display IDs in status.json", () => {
   });
 
   describe("buildActivePayload currentIssue", () => {
-    it("uses cached displayId for currentIssue", () => {
+    it("keeps canonical id and exposes displayId for currentIssue", () => {
       const session = makeSession({
         currentIssue: { id: "i-curr00000000001", displayId: "ISS-099", title: "Current bug", severity: "high" },
       });
       const payload = buildActivePayload(session);
       expect(payload.currentIssue).toBeTruthy();
-      expect(payload.currentIssue!.id).toBe("ISS-099");
+      expect(payload.currentIssue!.id).toBe("i-curr00000000001");
+      expect(payload.currentIssue!.displayId).toBe("ISS-099");
     });
 
     it("falls back to raw id when currentIssue has no displayId", () => {
@@ -177,7 +178,7 @@ describe("T-382: targeted work display ID rendering", () => {
     expect(result.text).toContain("not found");
   });
 
-  it("buildTargetedPickInstruction uses display IDs in JSON examples", async () => {
+  it("buildTargetedPickInstruction uses display IDs in text and canonical IDs in JSON examples", async () => {
     const { buildTargetedPickInstruction } = await import("../../src/autonomous/target-work.js");
     const { makeState, makeTicket } = await import("../core/test-factories.js");
 
@@ -186,6 +187,7 @@ describe("T-382: targeted work display ID rendering", () => {
 
     const instruction = buildTargetedPickInstruction(["t-abc1234567890123"], projectState, "session-id-here");
     expect(instruction).toContain("T-042");
-    expect(instruction).not.toContain("t-abc1234567890123");
+    expect(instruction).toContain('"ticketId": "t-abc1234567890123"');
+    expect(instruction).not.toContain('"ticketId": "T-042"');
   });
 });

@@ -38,6 +38,58 @@ describe("computeReconcilePlan", () => {
     expect(rename.entityType).toBe("ticket");
   });
 
+  it("valid reservation wins before timestamp", () => {
+    const s = state({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-042", createdAt: "2026-01-01T00:00:00.000Z" }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-042", createdAt: "2026-02-01T00:00:00.000Z" }),
+      ],
+    });
+    const result = computeReconcilePlan(s, {
+      reservations: {
+        ticket: new Map([["T-042", "t-bbb0000000000002"]]),
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.renames).toHaveLength(1);
+    expect(result.plan.renames[0]!.id).toBe("t-aaa0000000000001");
+    expect(result.plan.renames[0]!.reason).toContain("valid reservation");
+  });
+
+  it("protected branch ownership wins before timestamp", () => {
+    const s = state({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-042", createdAt: "2026-01-01T00:00:00.000Z" }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-042", createdAt: "2026-02-01T00:00:00.000Z" }),
+      ],
+    });
+    const result = computeReconcilePlan(s, {
+      protectedOwners: {
+        ticket: new Set(["t-bbb0000000000002"]),
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.renames).toHaveLength(1);
+    expect(result.plan.renames[0]!.id).toBe("t-aaa0000000000001");
+    expect(result.plan.renames[0]!.reason).toContain("protected branch ownership");
+  });
+
+  it("createdAt wins over createdDate when available", () => {
+    const s = state({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-042", createdDate: "2026-01-01", createdAt: "2026-02-01T00:00:00.000Z" }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-042", createdDate: "2026-03-01", createdAt: "2026-01-01T00:00:00.000Z" }),
+      ],
+    });
+    const result = computeReconcilePlan(s);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.renames).toHaveLength(1);
+    expect(result.plan.renames[0]!.id).toBe("t-aaa0000000000001");
+  });
+
   it("lower canonical id wins when timestamps are equal", () => {
     const s = state({
       tickets: [

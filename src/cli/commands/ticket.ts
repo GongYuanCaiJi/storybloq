@@ -1,5 +1,6 @@
 import { nextTicket, nextTickets, blockedTickets } from "../../core/queries.js";
 import { nextTicketID, nextOrder, allocateTeamTicketId } from "../../core/id-allocation.js";
+import { reserveDisplayId } from "../../core/remote-refs.js";
 import { resolveAndNormalizeTicketRef, RefResolutionError } from "../../core/ref-normalization.js";
 import { clearClaimOnComplete, buildClaim, canClaim } from "../../core/claims.js";
 import { validateProject } from "../../core/validation.js";
@@ -313,10 +314,20 @@ export async function handleTicketCreate(
       : undefined;
 
     const isTeam = state.config.team?.enabled === true;
-    const { id, displayId } = isTeam
-      ? allocateTeamTicketId(state.tickets)
-      : { id: nextTicketID(state.tickets), displayId: undefined as string | undefined };
+    let id: string;
+    let displayId: string | undefined;
+    if (isTeam) {
+      const alloc = allocateTeamTicketId(state.tickets);
+      id = alloc.id;
+      displayId = state.config.team?.idAllocator === "git-refs"
+        ? (await reserveDisplayId(root, "ticket", state, id)).displayId
+        : alloc.displayId;
+    } else {
+      id = nextTicketID(state.tickets);
+      displayId = undefined;
+    }
     const order = nextOrder(args.phase, state);
+    const createdAt = new Date().toISOString();
     const ticket: Ticket = {
       id,
       ...(displayId != null && { displayId }),
@@ -326,7 +337,8 @@ export async function handleTicketCreate(
       status: "open",
       phase: args.phase,
       order,
-      createdDate: todayISO(),
+      createdDate: createdAt.slice(0, 10),
+      ...(isTeam && { createdAt }),
       completedDate: null,
       blockedBy: resolvedBlockedBy,
       parentTicket: resolvedParent,
@@ -341,7 +353,7 @@ export async function handleTicketCreate(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(createdTicket), null, 2) };
   }
-  return { output: `Created ticket ${createdTicket.id}: ${createdTicket.title}` };
+  return { output: `Created ticket ${createdTicket.displayId ?? createdTicket.id}: ${createdTicket.title}` };
 }
 
 export async function handleTicketUpdate(
@@ -431,7 +443,7 @@ export async function handleTicketUpdate(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
   }
-  return { output: `Updated ticket ${updatedTicket.id}: ${updatedTicket.title}` };
+  return { output: `Updated ticket ${updatedTicket.displayId ?? updatedTicket.id}: ${updatedTicket.title}` };
 }
 
 export async function handleTicketMetaSet(
@@ -469,7 +481,7 @@ export async function handleTicketMetaSet(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
   }
-  return { output: `Updated metadata ${path} on ticket ${updatedTicket.id}` };
+  return { output: `Updated metadata ${path} on ticket ${updatedTicket.displayId ?? updatedTicket.id}` };
 }
 
 export async function handleTicketMetaUnset(
@@ -505,7 +517,7 @@ export async function handleTicketMetaUnset(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
   }
-  return { output: `Unset metadata ${path} on ticket ${updatedTicket.id}` };
+  return { output: `Unset metadata ${path} on ticket ${updatedTicket.displayId ?? updatedTicket.id}` };
 }
 
 export async function handleTicketDelete(
@@ -514,6 +526,7 @@ export async function handleTicketDelete(
   format: string,
   root: string,
   hard?: boolean,
+  displayLabel?: string,
 ): Promise<CommandResult> {
   if (force) {
     process.stderr.write(
@@ -524,7 +537,7 @@ export async function handleTicketDelete(
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope({ id, deleted: true }), null, 2) };
   }
-  return { output: `Deleted ticket ${id}.` };
+  return { output: `Deleted ticket ${displayLabel ?? id}.` };
 }
 
 export async function handleTicketUnclaim(

@@ -369,6 +369,28 @@ describe("loadProject", () => {
         expect((err as ProjectLoaderError).code).toBe("version_mismatch");
       }
     });
+
+    it("withProjectLock rejects team writes below minCliVersion", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 2, team: { enabled: true, minCliVersion: "99.0.0" } },
+      });
+      await expect(
+        withProjectLock(testRoot, {}, async () => {
+          expect.unreachable("handler should not execute");
+        }),
+      ).rejects.toMatchObject({ code: "version_mismatch" });
+    });
+
+    it("withProjectLock rejects team writes with unsupported required features", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 2, team: { enabled: true, requiredFeatures: ["unknown-feature"] } },
+      });
+      await expect(
+        withProjectLock(testRoot, {}, async () => {
+          expect.unreachable("handler should not execute");
+        }),
+      ).rejects.toMatchObject({ code: "version_mismatch" });
+    });
   });
 
   describe("integration with fixtures", () => {
@@ -560,6 +582,17 @@ describe("delete operations", () => {
     await deleteTicket("T-001", testRoot);
     const result = await loadProject(testRoot);
     expect(result.state.tickets).toHaveLength(0);
+  });
+
+  it("does not enable tombstones for partial team config without team.enabled true", async () => {
+    testRoot = await createTestProject({
+      config: { ...minimalConfig, schemaVersion: 2, team: { claimStalenessHours: 48 } },
+      tickets: { "T-001.json": validTicket },
+    });
+    await deleteTicket("T-001", testRoot);
+    const result = await loadProject(testRoot);
+    expect(result.state.tickets).toHaveLength(0);
+    expect(existsSync(join(testRoot, ".story", "tickets", "T-001.json"))).toBe(false);
   });
 
   it("throws not_found for nonexistent ticket", async () => {
