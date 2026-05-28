@@ -3,7 +3,7 @@ import { threeWayMerge, mergeConfig, mergeRoadmap } from "../src/core/merge-driv
 import { computeGcPlan } from "../src/core/gc.js";
 import { generateKeyBetween, compareByRank, rebalanceRanks } from "../src/core/fractional-index.js";
 import { computeReconcilePlan, computeRebalancePlan } from "../src/core/reconcile.js";
-import { canClaim, isClaimStale, buildClaim, filterClaimedFromRecommendations } from "../src/core/claims.js";
+import { canClaim, isClaimStale, buildClaim, applyClaimAnnotations } from "../src/core/claims.js";
 import { hasConflicts, assertNoConflicts } from "../src/core/conflicts.js";
 import { encodeBase32Crockford, generateCanonicalId, CANONICAL_ID_REGEX } from "../src/core/canonical-id.js";
 import { resolveRef } from "../src/core/resolver.js";
@@ -329,10 +329,14 @@ describe("probe: claims edge cases", () => {
     expect(r.claimedBy).toBe("alice");
   });
 
-  it("filterClaimedFromRecommendations -- null user filters all claimed", () => {
-    const recs = [{ id: "t-1" }, { id: "t-2" }] as any;
+  it("applyClaimAnnotations -- null user downranks claimed but never drops (ISS-681)", () => {
+    const recs = [{ id: "t-1", score: 100 }, { id: "t-2", score: 90 }] as any;
     const claims = new Map([["t-1", { user: "alice", branch: "a", since: "" }]]);
-    expect(filterClaimedFromRecommendations(recs, claims, null)).toHaveLength(1);
+    const result = applyClaimAnnotations(recs, claims, null);
+    expect(result).toHaveLength(2); // never removed
+    const t1 = result.find((r) => r.id === "t-1")!;
+    expect(t1.score).toBeLessThan(100); // downranked
+    expect((t1 as any).claim?.user).toBe("alice");
   });
 });
 

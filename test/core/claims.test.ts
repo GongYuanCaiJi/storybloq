@@ -4,7 +4,7 @@ import {
   canClaim,
   isClaimStale,
   clearClaimOnComplete,
-  filterClaimedFromRecommendations,
+  applyClaimAnnotations,
 } from "../../src/core/claims.js";
 import type { Claim } from "../../src/models/types.js";
 import type { Ticket } from "../../src/models/ticket.js";
@@ -95,47 +95,51 @@ describe("clearClaimOnComplete", () => {
   });
 });
 
-describe("filterClaimedFromRecommendations", () => {
-  it("excludes tickets claimed by others from recommendations", () => {
-    const recs = [
-      { id: "T-001", kind: "ticket" as const, title: "A", category: "open_ticket" as const, reason: "ready", score: 100 },
-      { id: "T-002", kind: "ticket" as const, title: "B", category: "open_ticket" as const, reason: "ready", score: 90 },
-    ];
+describe("applyClaimAnnotations", () => {
+  const baseRec = (id: string, score: number) =>
+    ({ id, kind: "ticket" as const, title: id, category: "open_ticket" as const, reason: "ready", score });
+
+  it("downranks and annotates tickets claimed by others, keeping them visible", () => {
+    const recs = [baseRec("T-001", 100), baseRec("T-002", 90)];
     const claims = new Map<string, Claim>([
       ["T-002", { user: "bob@example.com", branch: "feature/bar", since: now }],
     ]);
-    const filtered = filterClaimedFromRecommendations(recs, claims, "alice@example.com");
-    expect(filtered).toHaveLength(1);
-    expect(filtered[0]!.id).toBe("T-001");
+    const result = applyClaimAnnotations(recs, claims, "alice@example.com");
+    expect(result).toHaveLength(2); // never removed (ISS-681)
+    const t002 = result.find((r) => r.id === "T-002")!;
+    expect(t002.claim?.user).toBe("bob@example.com");
+    expect(t002.reason).toContain("claimed by bob@example.com");
+    expect(t002.score).toBeLessThan(90); // downranked
   });
 
-  it("keeps tickets claimed by current user", () => {
-    const recs = [
-      { id: "T-001", kind: "ticket" as const, title: "A", category: "open_ticket" as const, reason: "ready", score: 100 },
-    ];
+  it("annotates the current user's own claimed ticket without a penalty", () => {
+    const recs = [baseRec("T-001", 100)];
     const claims = new Map<string, Claim>([
       ["T-001", { user: "alice@example.com", branch: "feature/foo", since: now }],
     ]);
-    const filtered = filterClaimedFromRecommendations(recs, claims, "alice@example.com");
-    expect(filtered).toHaveLength(1);
+    const result = applyClaimAnnotations(recs, claims, "alice@example.com");
+    expect(result).toHaveLength(1);
+    expect(result[0]!.claim?.user).toBe("alice@example.com");
+    expect(result[0]!.score).toBe(100); // no penalty for owner
+    expect(result[0]!.reason).not.toContain("claimed by");
   });
 
-  it("keeps all recommendations when no claims exist", () => {
-    const recs = [
-      { id: "T-001", kind: "ticket" as const, title: "A", category: "open_ticket" as const, reason: "ready", score: 100 },
-    ];
-    const filtered = filterClaimedFromRecommendations(recs, new Map(), "alice@example.com");
-    expect(filtered).toHaveLength(1);
+  it("returns recommendations unchanged when no claims exist", () => {
+    const recs = [baseRec("T-001", 100)];
+    const result = applyClaimAnnotations(recs, new Map(), "alice@example.com");
+    expect(result).toHaveLength(1);
+    expect(result[0]!.score).toBe(100);
+    expect(result[0]!.claim).toBeUndefined();
   });
 
-  it("keeps all when currentUser is null (identity unavailable)", () => {
-    const recs = [
-      { id: "T-001", kind: "ticket" as const, title: "A", category: "open_ticket" as const, reason: "ready", score: 100 },
-    ];
+  it("downranks (never drops) claimed tickets when currentUser is null (identity unavailable)", () => {
+    const recs = [baseRec("T-001", 100)];
     const claims = new Map<string, Claim>([
       ["T-001", { user: "bob@example.com", branch: "feature/bar", since: now }],
     ]);
-    const filtered = filterClaimedFromRecommendations(recs, claims, null);
-    expect(filtered).toHaveLength(0);
+    const result = applyClaimAnnotations(recs, claims, null);
+    expect(result).toHaveLength(1); // ISS-681: never hidden, even with unknown identity
+    expect(result[0]!.score).toBeLessThan(100);
+    expect(result[0]!.claim?.user).toBe("bob@example.com");
   });
 });

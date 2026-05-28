@@ -959,9 +959,9 @@ describe("crossNodeRefStatuses filtering", () => {
 
 });
 
-describe("claim filtering integration in recommend (G-7)", () => {
-  it("claimed tickets excluded for other users, included for owner", () => {
-    const state = makeState({
+describe("claim annotation + downrank in recommend (G-7, ISS-681)", () => {
+  function claimedState() {
+    return makeState({
       tickets: [
         makeTicket({
           id: "T-001", phase: "p1", order: 10, status: "inprogress",
@@ -974,16 +974,42 @@ describe("claim filtering integration in recommend (G-7)", () => {
       ],
       roadmap: makeRoadmap([makePhase({ id: "p1" })]),
     });
-    const forAlice = recommend(state, 10, { currentUser: "alice@test.com" });
+  }
+
+  it("claimed-by-others tickets stay visible but are downranked and annotated (never hidden)", () => {
+    const state = claimedState();
     const forBob = recommend(state, 10, { currentUser: "bob@test.com" });
     const noUser = recommend(state, 10);
+    const forAlice = recommend(state, 10, { currentUser: "alice@test.com" });
 
-    const aliceSeesT001 = forAlice.recommendations.some((r) => r.id === "T-001");
-    const bobSeesT001 = forBob.recommendations.some((r) => r.id === "T-001");
-    const noUserSeesT001 = noUser.recommendations.some((r) => r.id === "T-001");
+    // ISS-681: a foreign claim is no longer removed -- it stays visible.
+    const bobT001 = forBob.recommendations.find((r) => r.id === "T-001");
+    const noUserT001 = noUser.recommendations.find((r) => r.id === "T-001");
+    const aliceT001 = forAlice.recommendations.find((r) => r.id === "T-001");
+    expect(bobT001).toBeDefined();
+    expect(noUserT001).toBeDefined();
+    expect(aliceT001).toBeDefined();
 
-    expect(aliceSeesT001).toBe(true);
-    expect(bobSeesT001).toBe(false);
-    expect(noUserSeesT001).toBe(false);
+    // Annotated with the claim and reason for the non-owner.
+    expect(bobT001!.claim?.user).toBe("alice@test.com");
+    expect(bobT001!.reason).toContain("claimed by alice@test.com");
+    // Identity unknown also keeps the item (downranked), not dropped.
+    expect(noUserT001!.claim?.user).toBe("alice@test.com");
+
+    // Downranked: the non-owner / unknown-identity score is below the owner's
+    // unpenalized score for the same ticket.
+    expect(bobT001!.score).toBeLessThan(aliceT001!.score);
+    expect(noUserT001!.score).toBeLessThan(aliceT001!.score);
+  });
+
+  it("owner sees their own claimed ticket annotated without a downrank penalty", () => {
+    const state = claimedState();
+    const forAlice = recommend(state, 10, { currentUser: "alice@test.com" });
+
+    const aliceT001 = forAlice.recommendations.find((r) => r.id === "T-001");
+    expect(aliceT001).toBeDefined();
+    expect(aliceT001!.claim?.user).toBe("alice@test.com");
+    // The owner's reason is not annotated as a foreign claim.
+    expect(aliceT001!.reason).not.toContain("claimed by");
   });
 });

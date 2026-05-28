@@ -18,7 +18,7 @@ import {
   isCrossNodeBlocked,
 } from "./queries.js";
 import { validateProject } from "./validation.js";
-import { filterClaimedFromRecommendations } from "./claims.js";
+import { applyClaimAnnotations } from "./claims.js";
 import type { Claim } from "../models/types.js";
 
 // --- Types ---
@@ -58,6 +58,8 @@ export interface Recommendation {
   readonly category: RecommendCategory;
   readonly reason: string;
   readonly score: number;
+  /** Present when the item is claimed (own or foreign); foreign claims are also downranked. */
+  readonly claim?: Claim;
 }
 
 export interface RecommendResult {
@@ -169,7 +171,17 @@ export function recommend(
     }
   }
 
-  const all = [...dedup.values()].sort((a, b) => {
+  const claims = new Map<string, Claim>();
+  for (const t of state.tickets) {
+    const claim = (t as Record<string, unknown>).claim as Claim | undefined;
+    if (claim) claims.set(t.id, claim);
+  }
+  // Annotate + downrank claimed items BEFORE sorting so the claim penalty
+  // affects ordering. Claimed-by-others stay visible but sink below unclaimed
+  // work (ISS-681).
+  const annotated = applyClaimAnnotations([...dedup.values()], claims, options?.currentUser ?? null);
+
+  const all = annotated.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     const catDiff =
       CATEGORY_PRIORITY[a.category] - CATEGORY_PRIORITY[b.category];
@@ -177,16 +189,9 @@ export function recommend(
     return a.id.localeCompare(b.id);
   });
 
-  const claims = new Map<string, Claim>();
-  for (const t of state.tickets) {
-    const claim = (t as Record<string, unknown>).claim as Claim | undefined;
-    if (claim) claims.set(t.id, claim);
-  }
-  const visible = filterClaimedFromRecommendations(all, claims, options?.currentUser ?? null);
-
   return {
-    recommendations: visible.slice(0, effectiveCount),
-    totalCandidates: visible.length,
+    recommendations: all.slice(0, effectiveCount),
+    totalCandidates: all.length,
   };
 }
 

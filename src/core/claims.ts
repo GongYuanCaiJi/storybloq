@@ -49,7 +49,17 @@ export function clearClaimOnComplete(ticket: Ticket): Ticket {
   return ticket;
 }
 
-export function filterClaimedFromRecommendations(
+// Claimed-by-others items are downranked far below unclaimed work but never
+// hidden (N-059 decision #22: claims are advisory, surfaced and downranked, not
+// removed). The max generator score is ~1000, so this penalty guarantees a
+// claimed-by-others candidate sinks beneath every unclaimed one while keeping
+// the relative order among claimed items.
+const CLAIM_DOWNRANK_PENALTY = 10000;
+
+/// Annotates recommendations with their claim and downranks those claimed by
+/// another user (or by anyone, when the current identity is unknown). It never
+/// removes a recommendation -- claims are advisory. ISS-681.
+export function applyClaimAnnotations(
   recommendations: readonly Recommendation[],
   claims: ReadonlyMap<string, Claim>,
   currentUser: string | null,
@@ -57,10 +67,20 @@ export function filterClaimedFromRecommendations(
   if (claims.size === 0) {
     return [...recommendations];
   }
-  return recommendations.filter((rec) => {
+  return recommendations.map((rec) => {
     const claim = claims.get(rec.id);
-    if (!claim) return true;
-    if (currentUser === null) return false;
-    return claim.user === currentUser;
+    if (!claim) return rec;
+    // Own claim: surface it, no penalty.
+    if (currentUser !== null && claim.user === currentUser) {
+      return { ...rec, claim };
+    }
+    // Claimed by another user, or identity unknown (currentUser === null):
+    // annotate and downrank, never hide.
+    return {
+      ...rec,
+      claim,
+      score: rec.score - CLAIM_DOWNRANK_PENALTY,
+      reason: `${rec.reason} (claimed by ${claim.user})`,
+    };
   });
 }
