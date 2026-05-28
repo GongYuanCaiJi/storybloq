@@ -120,7 +120,8 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
 
   // supersedes is a real canonical cross-ref (LessonIdSchema): a tombstoned lesson
   // still referenced by an active lesson's supersedes must be protected, not purged.
-  for (const l of state.activeLessons as readonly Lesson[]) {
+  // (?? [] guards partial state objects that omit activeLessons.)
+  for (const l of (state.activeLessons ?? []) as readonly Lesson[]) {
     if (candidateIds.has(l.id)) continue;
     if (l.supersedes) {
       const c = findCandidate(l.supersedes);
