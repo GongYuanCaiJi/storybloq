@@ -1,6 +1,7 @@
 import type { ProjectState } from "./project-state.js";
 import type { Ticket } from "../models/ticket.js";
 import type { Issue } from "../models/issue.js";
+import type { Lesson } from "../models/lesson.js";
 
 export interface GcCandidate {
   type: "ticket" | "issue" | "note" | "lesson";
@@ -114,6 +115,16 @@ export function computeGcPlan(state: ProjectState, options?: GcOptions): GcPlan 
     for (const tref of i.relatedTickets ?? []) {
       const c = findCandidate(tref);
       if (c) c.activeReferences.push(i.id);
+    }
+  }
+
+  // supersedes is a real canonical cross-ref (LessonIdSchema): a tombstoned lesson
+  // still referenced by an active lesson's supersedes must be protected, not purged.
+  for (const l of state.activeLessons as readonly Lesson[]) {
+    if (candidateIds.has(l.id)) continue;
+    if (l.supersedes) {
+      const c = findCandidate(l.supersedes);
+      if (c) c.activeReferences.push(l.id);
     }
   }
 

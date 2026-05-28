@@ -145,4 +145,30 @@ describe("computeGcPlan", () => {
     expect(plan.blocked).toHaveLength(0);
     expect(plan.eligible.map((c) => c.id).sort()).toEqual(["ISS-001", "T-001"]);
   });
+
+  it("blocks GC when an active lesson's supersedes references a deleted lesson (ISS-685)", () => {
+    const state = makeState({
+      lessons: [
+        makeLesson({ id: "L-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+        makeLesson({ id: "L-002", supersedes: "L-001" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked).toHaveLength(1);
+    expect(plan.blocked[0]!.id).toBe("L-001");
+    expect(plan.blocked[0]!.activeReferences).toContain("L-002");
+    expect(plan.eligible).toHaveLength(0);
+  });
+
+  it("ignores supersedes references from tombstoned lessons (ISS-685)", () => {
+    const state = makeState({
+      lessons: [
+        makeLesson({ id: "L-001", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "alice" }),
+        makeLesson({ id: "L-002", lifecycle: "deleted", deletedAt: thirtyOneDaysAgo, deletedBy: "bob", supersedes: "L-001" }),
+      ],
+    });
+    const plan = computeGcPlan(state, { retentionDays: 30 });
+    expect(plan.blocked).toHaveLength(0);
+    expect(plan.eligible.map((c) => c.id).sort()).toEqual(["L-001", "L-002"]);
+  });
 });
