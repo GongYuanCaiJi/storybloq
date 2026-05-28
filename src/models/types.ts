@@ -113,6 +113,11 @@ export const DateSchema = z
     { message: "Invalid calendar date" },
   );
 
+// Loose ISO-8601 timestamp (e.g. "2026-05-28T10:00:00Z"). Kept permissive to match the existing
+// `createdAt` treatment and to avoid rejecting legacy passthrough data; the merge layer treats
+// unparseable values as ambiguous rather than failing to load.
+export const TimestampSchema = z.string().nullable().optional();
+
 // --- Reusable ID schemas ---
 
 export const TicketIdSchema = z

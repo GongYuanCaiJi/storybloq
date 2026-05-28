@@ -115,8 +115,8 @@ export const RECOVERY_MAPPING: Readonly<Record<string, { state: string; resetPla
 // Recommend options builder (ISS-018, ISS-019)
 // ---------------------------------------------------------------------------
 
-function buildGuideRecommendOptions(root: string): RecommendOptions {
-  const opts: { latestHandoverContent?: string; previousOpenIssueCount?: number } = {};
+async function buildGuideRecommendOptions(root: string): Promise<RecommendOptions> {
+  const opts: { latestHandoverContent?: string; previousOpenIssueCount?: number; currentUser?: string } = {};
 
   try {
     const handoversDir = join(root, ".story", "handovers");
@@ -137,6 +137,12 @@ function buildGuideRecommendOptions(root: string): RecommendOptions {
       }
     }
   } catch { /* no snapshots */ }
+
+  try {
+    const { gitUserEmail } = await import("./git-inspector.js");
+    const email = await gitUserEmail(root);
+    if (email) opts.currentUser = email;
+  } catch { /* git not available */ }
 
   return opts;
 }
@@ -1315,7 +1321,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
     }
 
     // Also get recommendations (with handover + snapshot context for ISS-018/019)
-    const guideRecOptions = buildGuideRecommendOptions(root);
+    const guideRecOptions = await buildGuideRecommendOptions(root);
     const recResult = recommend(projectState, 5, guideRecOptions);
     let recsText = "";
     if (recResult.recommendations.length > 0) {

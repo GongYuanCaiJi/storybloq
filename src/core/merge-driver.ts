@@ -72,6 +72,44 @@ function commutativeMerge(base: unknown[], ours: unknown[], theirs: unknown[]): 
   return [...result].sort().map((v) => JSON.parse(v));
 }
 
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// Reads the recency value used to pick a coupled-group winner. `spec` is either a top-level
+// field name ("updatedAt") or a nested "member.key" path ("claim.since"). Falls back to the
+// record's top-level updatedAt then updatedDate so a side with only one of those still has a
+// recency signal (e.g. an unclaim whose claim member is now null).
+function recencyValue(obj: Record<string, unknown>, spec: string): string {
+  let primary: unknown;
+  if (spec.includes(".")) {
+    const [member, key] = spec.split(".");
+    primary = (obj[member!] as Record<string, unknown> | null)?.[key!];
+  } else {
+    primary = obj[spec];
+  }
+  return String(primary ?? obj.updatedAt ?? obj.updatedDate ?? "");
+}
+
+// Compares two recency strings. Returns 1 (a newer), -1 (b newer), or 0 (indistinguishable).
+// 0 is returned when the values are equal, both unparseable, or one is date-only and the other
+// is a full timestamp on the same calendar day (the time-of-day is genuinely unknown). A
+// parseable value beats an unparseable one.
+function compareRecency(a: string, b: string): -1 | 0 | 1 {
+  if (a === b) return 0;
+  const aDateOnly = DATE_ONLY_REGEX.test(a);
+  const bDateOnly = DATE_ONLY_REGEX.test(b);
+  if (aDateOnly !== bDateOnly && a.slice(0, 10) === b.slice(0, 10)) return 0;
+  const pa = Date.parse(a);
+  const pb = Date.parse(b);
+  const aNaN = Number.isNaN(pa);
+  const bNaN = Number.isNaN(pb);
+  if (aNaN && bNaN) return 0;
+  if (aNaN) return -1;
+  if (bNaN) return 1;
+  if (pa > pb) return 1;
+  if (pa < pb) return -1;
+  return 0;
+}
+
 export function threeWayMerge(
   base: Record<string, unknown>,
   ours: Record<string, unknown>,
@@ -141,11 +179,39 @@ export function threeWayMerge(
     } else if (deepEqual(oursSnapshot, theirsSnapshot)) {
       for (const m of group.members) { merged[m] = ours[m]; handledByCoupled.add(m); }
     } else if (group.latestWinsField) {
-      const [member, tsKey] = group.latestWinsField.split(".");
-      const oTs = String(((ours[member!] as Record<string, unknown> | null)?.[tsKey!]) ?? "");
-      const tTs = String(((theirs[member!] as Record<string, unknown> | null)?.[tsKey!]) ?? "");
-      const winner = oTs >= tTs ? ours : theirs;
-      for (const m of group.members) { merged[m] = winner[m]; handledByCoupled.add(m); }
+      const cmp = compareRecency(
+        recencyValue(ours, group.latestWinsField),
+        recencyValue(theirs, group.latestWinsField),
+      );
+      if (cmp !== 0) {
+        const winner = cmp > 0 ? ours : theirs;
+        for (const m of group.members) { merged[m] = winner[m]; handledByCoupled.add(m); }
+      } else if (group.onAmbiguous === "release") {
+        // Advisory state (claims): never block a merge. Prefer the side that cleared the group;
+        // if neither cleared it, release the group by setting all members to null.
+        const oursCleared = group.members.every((m) => ours[m] == null);
+        const theirsCleared = group.members.every((m) => theirs[m] == null);
+        const winner = oursCleared ? ours : theirsCleared ? theirs : null;
+        for (const m of group.members) {
+          merged[m] = winner ? winner[m] : null;
+          handledByCoupled.add(m);
+        }
+      } else {
+        // Audit metadata (attribution): surface the ambiguity rather than resolving arbitrarily.
+        for (const m of group.members) {
+          merged[m] = base[m];
+          handledByCoupled.add(m);
+          conflicts.push({
+            fieldPath: toPointer(m),
+            field: m,
+            kind: "coupled",
+            base: base[m],
+            ours: ours[m],
+            theirs: theirs[m],
+            group: group.group,
+          });
+        }
+      }
     } else {
       for (const m of group.members) {
         merged[m] = base[m];

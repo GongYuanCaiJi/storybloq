@@ -33,6 +33,9 @@ export async function handleGc(
       const toRemove = options.force ? plan.candidates : plan.eligible;
       const wrapDir = resolve(root, ".story");
 
+      // GC physically purges tombstones that have aged past retention (N-059 v6.5).
+      // The delete path already wrote the tombstone with the real deletedAt/deletedBy and
+      // propagated it to peers; GC's job is the final removal, identical in team and non-team mode.
       for (const c of toRemove) {
         const subdir = c.type === "ticket" ? "tickets" : c.type === "issue" ? "issues" : c.type === "note" ? "notes" : "lessons";
         const targetPath = join(wrapDir, subdir, `${c.id}.json`);

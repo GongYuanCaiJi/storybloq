@@ -4,6 +4,7 @@ import {
   TICKET_TYPES,
   LIFECYCLE_VALUES,
   DateSchema,
+  TimestampSchema,
   TicketIdSchema,
   ConflictEntrySchema,
   ClaimSchema,
@@ -29,6 +30,8 @@ export const TicketSchema = z
     createdBy: z.string().nullable().optional(),
     assignedTo: z.string().nullable().optional(),
     lastModifiedBy: z.string().nullable().optional(),
+    updatedDate: DateSchema.nullable().optional(),
+    updatedAt: TimestampSchema,
     // ISS-027: Autonomous session ownership — set when ticket claimed as inprogress
     claimedBySession: z.string().nullable().optional(),
     crossNodeBlockedBy: z.array(z.string().regex(CROSS_NODE_REF_REGEX, "Cross-node ref must match node:ID format")).optional(),

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { NOTE_STATUSES, LIFECYCLE_VALUES, DateSchema, NoteIdSchema, ConflictEntrySchema } from "./types.js";
+import { NOTE_STATUSES, LIFECYCLE_VALUES, DateSchema, TimestampSchema, NoteIdSchema, ConflictEntrySchema } from "./types.js";
 
 export const NoteSchema = z
   .object({
@@ -10,6 +10,8 @@ export const NoteSchema = z
     status: z.enum(NOTE_STATUSES),
     createdDate: DateSchema,
     updatedDate: DateSchema,
+    createdBy: z.string().nullable().optional(),
+    updatedAt: TimestampSchema,
     displayId: z.string().optional(),
     previousDisplayIds: z.array(z.string()).optional(),
     lifecycle: z.enum(LIFECYCLE_VALUES).optional(),

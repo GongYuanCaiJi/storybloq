@@ -956,4 +956,34 @@ describe("crossNodeRefStatuses filtering", () => {
     const t002 = result.recommendations.find((r) => r.id === "T-002");
     expect(t002).toBeDefined();
   });
+
+});
+
+describe("claim filtering integration in recommend (G-7)", () => {
+  it("claimed tickets excluded for other users, included for owner", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({
+          id: "T-001", phase: "p1", order: 10, status: "inprogress",
+          claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-26T10:00:00Z" },
+        }),
+        makeTicket({ id: "T-002", phase: "p1", order: 20, status: "open" }),
+      ],
+      issues: [
+        makeIssue({ id: "ISS-001", severity: "critical", relatedTickets: ["T-001"] }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const forAlice = recommend(state, 10, { currentUser: "alice@test.com" });
+    const forBob = recommend(state, 10, { currentUser: "bob@test.com" });
+    const noUser = recommend(state, 10);
+
+    const aliceSeesT001 = forAlice.recommendations.some((r) => r.id === "T-001");
+    const bobSeesT001 = forBob.recommendations.some((r) => r.id === "T-001");
+    const noUserSeesT001 = noUser.recommendations.some((r) => r.id === "T-001");
+
+    expect(aliceSeesT001).toBe(true);
+    expect(bobSeesT001).toBe(false);
+    expect(noUserSeesT001).toBe(false);
+  });
 });

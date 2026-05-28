@@ -165,4 +165,41 @@ describe("TicketSchema", () => {
       expect(result.success).toBe(true);
     });
   });
+
+  describe("attribution fields (updatedAt / updatedDate)", () => {
+    const validTicket = {
+      id: "T-200", title: "Test", description: "", type: "task",
+      status: "open", phase: null, order: 10, createdDate: "2026-01-01",
+      completedDate: null, blockedBy: [],
+    };
+
+    it("parses and round-trips updatedDate + updatedAt", () => {
+      const data = { ...validTicket, updatedDate: "2026-05-20", updatedAt: "2026-05-20T10:00:00Z" };
+      const result = TicketSchema.safeParse(data);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.updatedDate).toBe("2026-05-20");
+        expect(result.data.updatedAt).toBe("2026-05-20T10:00:00Z");
+        const reparsed = TicketSchema.safeParse(JSON.parse(JSON.stringify(result.data)));
+        expect(reparsed.success).toBe(true);
+      }
+    });
+
+    it("accepts a ticket without updatedAt/updatedDate (optional)", () => {
+      const result = TicketSchema.safeParse(validTicket);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.updatedAt).toBeUndefined();
+        expect(result.data.updatedDate).toBeUndefined();
+      }
+    });
+
+    it("accepts a loose (non-ISO) updatedAt string rather than rejecting the file", () => {
+      // updatedAt is intentionally permissive; the merge layer treats unparseable values as
+      // ambiguous instead of failing to load. This guards against rejecting legacy data.
+      const data = { ...validTicket, updatedAt: "not-a-timestamp" };
+      const result = TicketSchema.safeParse(data);
+      expect(result.success).toBe(true);
+    });
+  });
 });

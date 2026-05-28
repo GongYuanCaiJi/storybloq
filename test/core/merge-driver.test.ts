@@ -197,4 +197,159 @@ describe("T-385: threeWayMerge", () => {
       expect(result.conflicts.some((c) => c.fieldPath === "/customField")).toBe(true);
     });
   });
+
+  describe("claim coupled group with null (G-5)", () => {
+    it("unclaim wins when updatedDate is more recent than stale claim", () => {
+      const base = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-20T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-20",
+      });
+      const ours = ticket({
+        claim: null,
+        claimedBySession: null,
+        updatedDate: "2026-05-25",
+        updatedAt: "2026-05-25T14:00:00Z",
+      });
+      const theirs = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-20T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-20",
+      });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.merged.claim).toBeNull();
+      expect(result.merged.claimedBySession).toBeNull();
+    });
+
+    it("newer claim wins over older unclaim", () => {
+      const base = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-20T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-20",
+      });
+      const ours = ticket({
+        claim: null,
+        claimedBySession: null,
+        updatedDate: "2026-05-21",
+        updatedAt: "2026-05-21T08:00:00Z",
+      });
+      const theirs = ticket({
+        claim: { user: "bob@test.com", branch: "feat/y", since: "2026-05-25T12:00:00Z" },
+        claimedBySession: "sess-2",
+        updatedDate: "2026-05-25",
+      });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.merged.claim).toEqual({ user: "bob@test.com", branch: "feat/y", since: "2026-05-25T12:00:00Z" });
+    });
+
+    it("both add claims: latest since wins", () => {
+      const base = ticket({ claim: null, claimedBySession: null, updatedDate: "2026-05-20" });
+      const ours = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-22T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-22",
+      });
+      const theirs = ticket({
+        claim: { user: "bob@test.com", branch: "feat/y", since: "2026-05-25T14:00:00Z" },
+        claimedBySession: "sess-2",
+        updatedDate: "2026-05-25",
+      });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.merged.claim).toEqual({ user: "bob@test.com", branch: "feat/y", since: "2026-05-25T14:00:00Z" });
+    });
+
+    it("same-day mixed precision is non-blocking: cleared side wins, no conflict", () => {
+      // ours clears the claim with only a date-only updatedDate; theirs has a same-day ISO claim.
+      // The time-of-day is unknown, so recency is ambiguous -> advisory claims must NOT block.
+      const base = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-24T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-24",
+      });
+      const ours = ticket({ claim: null, claimedBySession: null, updatedDate: "2026-05-25" });
+      const theirs = ticket({
+        claim: { user: "bob@test.com", branch: "feat/y", since: "2026-05-25T10:00:00Z" },
+        claimedBySession: "sess-2",
+        updatedDate: "2026-05-25",
+      });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      expect(result.merged.claim).toBeNull(); // cleared side preferred
+      expect(result.merged.claimedBySession).toBeNull();
+    });
+
+    it("cross-day date-only unclaim beats an earlier ISO claim via fallback", () => {
+      const base = ticket({
+        claim: { user: "alice@test.com", branch: "feat/x", since: "2026-05-20T10:00:00Z" },
+        claimedBySession: "sess-1",
+        updatedDate: "2026-05-20",
+      });
+      // ours clears the claim; its only recency signal is a date-only updatedDate on a LATER day.
+      const ours = ticket({ claim: null, claimedBySession: null, updatedDate: "2026-05-26" });
+      // theirs re-claims (a real divergence) but on an earlier day with a full ISO since.
+      const theirs = ticket({
+        claim: { user: "bob@test.com", branch: "feat/y", since: "2026-05-22T10:00:00Z" },
+        claimedBySession: "sess-2",
+        updatedDate: "2026-05-22",
+      });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.merged.claim).toBeNull(); // later-day unclaim wins over earlier ISO claim
+      expect(result.merged.claimedBySession).toBeNull();
+    });
+  });
+
+  describe("attribution coupled group (B-4)", () => {
+    it("picks the later updatedAt without conflict", () => {
+      const base = ticket({ updatedAt: "2026-05-20T10:00:00Z" });
+      const ours = ticket({ updatedAt: "2026-05-22T10:00:00Z" });
+      const theirs = ticket({ updatedAt: "2026-05-25T10:00:00Z" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      expect(result.merged.updatedAt).toBe("2026-05-25T10:00:00Z");
+    });
+  });
+
+  describe("attribution coupled group (B-5)", () => {
+    it("lastModifiedBy follows the later-updatedAt side (consistent attribution)", () => {
+      const base = ticket({ lastModifiedBy: "alice@test.com", updatedAt: "2026-05-20T10:00:00Z" });
+      const ours = ticket({ lastModifiedBy: "bob@test.com", updatedAt: "2026-05-22T10:00:00Z" });
+      const theirs = ticket({ lastModifiedBy: "carol@test.com", updatedAt: "2026-05-25T10:00:00Z" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      // The later updatedAt is theirs, so BOTH attribution fields come from theirs.
+      expect(result.merged.updatedAt).toBe("2026-05-25T10:00:00Z");
+      expect(result.merged.lastModifiedBy).toBe("carol@test.com");
+    });
+
+    it("keeps lastModifiedBy and updatedAt from the SAME side", () => {
+      const base = ticket({ lastModifiedBy: "alice@test.com", updatedAt: "2026-05-20T10:00:00Z" });
+      // ours has the later updatedAt; theirs has a lexicographically larger email.
+      const ours = ticket({ lastModifiedBy: "aaa@test.com", updatedAt: "2026-05-28T10:00:00Z" });
+      const theirs = ticket({ lastModifiedBy: "zzz@test.com", updatedAt: "2026-05-25T10:00:00Z" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      expect(result.merged.updatedAt).toBe("2026-05-28T10:00:00Z");
+      expect(result.merged.lastModifiedBy).toBe("aaa@test.com"); // NOT the larger email
+    });
+
+    it("emits a conflict when attribution is genuinely ambiguous (no timestamp signal)", () => {
+      const base = ticket({ lastModifiedBy: "alice@test.com" });
+      const ours = ticket({ lastModifiedBy: "bob@test.com" });
+      const theirs = ticket({ lastModifiedBy: "carol@test.com" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(false);
+      expect(result.merged.lastModifiedBy).toBe("alice@test.com"); // base preserved, not silently picked
+      expect(result.conflicts.some((c) => c.field === "lastModifiedBy" && c.group === "attribution")).toBe(true);
+    });
+
+    it("treats an unparseable updatedAt as ambiguous (no throw)", () => {
+      const base = ticket({ lastModifiedBy: "alice@test.com", updatedAt: "2026-05-20T10:00:00Z" });
+      const ours = ticket({ lastModifiedBy: "bob@test.com", updatedAt: "not-a-timestamp" });
+      const theirs = ticket({ lastModifiedBy: "carol@test.com", updatedAt: "also-garbage" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      // Both recency values unparseable -> ambiguous -> conflict, not a crash.
+      expect(result.clean).toBe(false);
+      expect(result.conflicts.some((c) => c.group === "attribution")).toBe(true);
+    });
+  });
 });
