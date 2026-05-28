@@ -570,8 +570,10 @@ export async function handleTicketStart(
   id: string,
   format: string,
   root: string,
+  force?: boolean,
 ): Promise<CommandResult> {
   let updatedTicket: Ticket | undefined;
+  let claimWarning: string | undefined;
   await withProjectLock(root, { strict: true }, async ({ state }) => {
     const resolvedId = resolveAndNormalizeTicketRef(state, id);
     const existing = state.ticketByID(resolvedId);
@@ -590,9 +592,13 @@ export async function handleTicketStart(
     } catch { /* git not available */ }
 
     if (existing.claim && email) {
-      const check = canClaim(existing, email, branch);
+      const check = canClaim(existing, email, branch, force);
       if (!check.allowed) {
-        throw new CliValidationError("conflict", `Ticket ${id} is claimed by ${check.claimedBy}`);
+        // N-059 decision #22: claims are advisory (latest-wins auto-merge) and
+        // must never hard-block. A foreign claim warns and proceeds, taking over
+        // the claim, rather than throwing. `--force` suppresses the warning.
+        const displayId = (existing as Record<string, unknown>).displayId as string | undefined ?? existing.id;
+        claimWarning = `Warning: ticket ${displayId} is claimed by ${check.claimedBy}; claims are advisory, starting anyway and taking over the claim (pass --force to suppress this warning).`;
       }
     }
 
@@ -607,6 +613,7 @@ export async function handleTicketStart(
     updatedTicket = ticket;
   });
   if (!updatedTicket) throw new Error("Ticket not updated");
+  if (claimWarning) process.stderr.write(claimWarning + "\n");
   if (format === "json") {
     return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
   }

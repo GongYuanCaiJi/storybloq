@@ -1439,11 +1439,13 @@ export function registerTicketCommand(yargs: Argv): Argv {
           "start <id>",
           "Claim a ticket and set status to inprogress",
           (y2) => addFormatOption(
-            y2.positional("id", { type: "string", demandOption: true, describe: "Ticket ID" }),
+            y2.positional("id", { type: "string", demandOption: true, describe: "Ticket ID" })
+              .option("force", { type: "boolean", default: false, describe: "Take over a teammate's claim without a warning (claims are advisory; start never hard-blocks)" }),
           ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             const id = parseTicketId(argv.id as string);
+            const force = argv.force as boolean | undefined;
             const orchRoot = (
               await import("../core/project-root-discovery.js")
             ).discoverProjectRoot();
@@ -1465,7 +1467,7 @@ export function registerTicketCommand(yargs: Argv): Argv {
               return;
             }
             try {
-              const result = await handleTicketStart(id, format, eff.root);
+              const result = await handleTicketStart(id, format, eff.root, force);
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {

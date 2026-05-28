@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,9 @@ import {
   handleTicketMetaSet,
   handleTicketMetaUnset,
   handleTicketDelete,
+  handleTicketStart,
 } from "../../../src/cli/commands/ticket.js";
+import { execFileSync } from "node:child_process";
 import { ExitCode } from "../../../src/core/output-formatter.js";
 import { CliValidationError } from "../../../src/cli/helpers.js";
 import { initProject } from "../../../src/core/init.js";
@@ -641,5 +643,64 @@ describe("handleTicketDelete", () => {
     const result = await handleTicketDelete("T-001", false, "json", dir);
     const parsed = JSON.parse(result.output);
     expect(parsed.data.deleted).toBe(true);
+  });
+});
+
+describe("handleTicketStart claim semantics (ISS-680)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const d of tmpDirs) await rm(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  // Sets up a temp project with a git identity (so handleTicketStart can read
+  // user.email) and a T-001 claimed by `claimUser`.
+  async function setup(myEmail: string, claimUser: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "ticket-start-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", myEmail], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+    await handleTicketCreate(
+      { title: "Claimed", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null },
+      "md", dir,
+    );
+    const path = join(dir, ".story", "tickets", "T-001.json");
+    const ticket = JSON.parse(await readFile(path, "utf-8"));
+    ticket.claim = { user: claimUser, branch: "feature/theirs", since: "2026-05-26T00:00:00Z" };
+    await writeFile(path, JSON.stringify(ticket, null, 2) + "\n", "utf-8");
+    return dir;
+  }
+
+  it("warns and proceeds (takes over) on a foreign claim instead of throwing", async () => {
+    const dir = await setup("alice@example.com", "bob@example.com");
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      // Must NOT throw -- claims are advisory (N-059 #22).
+      const result = await handleTicketStart("T-001", "json", dir);
+      const parsed = JSON.parse(result.output);
+      expect(parsed.data.status).toBe("inprogress");
+      expect(parsed.data.claim.user).toBe("alice@example.com"); // claim taken over (latest-wins)
+      const warned = stderr.mock.calls.map((c) => String(c[0])).join("");
+      expect(warned).toContain("claimed by bob@example.com");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("--force takes over a foreign claim without emitting a warning", async () => {
+    const dir = await setup("alice@example.com", "bob@example.com");
+    const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    try {
+      const result = await handleTicketStart("T-001", "json", dir, true);
+      const parsed = JSON.parse(result.output);
+      expect(parsed.data.status).toBe("inprogress");
+      expect(parsed.data.claim.user).toBe("alice@example.com");
+      const warned = stderr.mock.calls.map((c) => String(c[0])).join("");
+      expect(warned).not.toContain("claimed by");
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
