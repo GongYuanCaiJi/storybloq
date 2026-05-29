@@ -704,3 +704,48 @@ describe("handleTicketStart claim semantics (ISS-680)", () => {
     }
   });
 });
+
+describe("global _conflicts write-block through CLI handlers (ISS-695)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const d of tmpDirs) await rm(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+
+  async function seedConflict(dir: string, ticketId: string) {
+    const path = join(dir, ".story", "tickets", `${ticketId}.json`);
+    const raw = JSON.parse(await readFile(path, "utf-8"));
+    raw._conflicts = [
+      { fieldPath: "/title", field: "title", kind: "field", base: "Original", ours: "Ours", theirs: "Theirs" },
+    ];
+    await writeFile(path, JSON.stringify(raw, null, 2) + "\n", "utf-8");
+  }
+
+  // The spec requires rejecting ALL mutating writes while ANY .story/ item has
+  // _conflicts. The gate (assertNoConflictsFromDisk) is wired into the write path;
+  // these exercise it end-to-end through real CLI handlers on a different, clean item.
+  it("blocks updating a clean ticket while another ticket has _conflicts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "conflict-block-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    await handleTicketCreate({ title: "Conflicted", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null }, "md", dir);
+    await handleTicketCreate({ title: "Clean", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null }, "md", dir);
+    await seedConflict(dir, "T-001");
+
+    await expect(
+      handleTicketUpdate("T-002", { title: "Should be refused" }, "md", dir),
+    ).rejects.toThrow(/unresolved conflicts/i);
+  });
+
+  it("blocks creating a new ticket while another item has _conflicts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "conflict-block-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    await handleTicketCreate({ title: "Conflicted", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null }, "md", dir);
+    await seedConflict(dir, "T-001");
+
+    await expect(
+      handleTicketCreate({ title: "New", type: "task", phase: "p0", description: "", blockedBy: [], parentTicket: null }, "md", dir),
+    ).rejects.toThrow(/unresolved conflicts/i);
+  });
+});
