@@ -1602,15 +1602,27 @@ async function handleReport(root: string, args: GuideInput): Promise<McpToolResu
   if (currentState === "COMPACT" && !state.compactPending) {
     return guideError(new Error(
       `Session ${args.sessionId} is in COMPACT state but compactPending is false (stale compact). ` +
+      `Your report was NOT applied. ` +
       `Run "storybloq session clear-compact ${args.sessionId}" to recover.`,
     ));
   }
   if (currentState === "COMPACT") {
-    return guideError(new Error(
-      `Session ${args.sessionId} is in COMPACT state. ` +
-      `Call action: "resume" before reporting completion, or run ` +
-      `"storybloq session stop ${args.sessionId}" if the session is stuck.`,
-    ));
+    // ISS-719: report is a no-op in COMPACT (no registered stage). Make the
+    // error self-correcting by embedding the exact resume call, and state
+    // plainly that the report was dropped so no stale completedAction is
+    // assumed applied. Do not auto-resume here: resume() is not a passive
+    // restore (it does HEAD-drift recovery routing, lease re-arbitration, and
+    // can refuse), so a blind auto-resume could apply the stale completedAction
+    // to the wrong stage.
+    return guideError(new Error([
+      `Session ${args.sessionId} is in COMPACT state. Your report was NOT applied.`,
+      `Resume first by calling \`storybloq_autonomous_guide\` with action: "resume":`,
+      "```json",
+      `{ "sessionId": "${args.sessionId}", "action": "resume" }`,
+      "```",
+      `After resume returns the current stage, re-report your completed step. ` +
+      `If the session is stuck, run "storybloq session stop ${args.sessionId}".`,
+    ].join("\n")));
   }
 
   try {

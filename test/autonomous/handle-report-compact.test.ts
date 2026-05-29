@@ -122,6 +122,33 @@ describe("handleReport COMPACT guard (ISS-377)", () => {
     expect(text).not.toContain("is not registered");
   });
 
+  it("self-corrects the COMPACT report error: copy-paste resume JSON, dropped-report notice, true no-op (ISS-719)", async () => {
+    const session = createCompactSession(root, { preCompactState: "PLAN" });
+    const sessDir = join(sessionsDir, session.sessionId);
+    const before = readFileSync(join(sessDir, "state.json"), "utf-8");
+
+    const result = await handleAutonomousGuide(root, {
+      action: "report",
+      sessionId: session.sessionId,
+      report: { completedAction: "plan_written" },
+    });
+
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    // Embeds a copy-pasteable resume call so the agent can recover in one step.
+    expect(text).toContain("```json");
+    expect(text).toContain(`"sessionId": "${session.sessionId}"`);
+    expect(text).toContain('"action": "resume"');
+    // The JSON block must interpolate the real id, never emit the literal
+    // placeholder (guards the template-literal regressing to a plain string).
+    expect(text).not.toContain("${args.sessionId}");
+    // States plainly that the report was not applied.
+    expect(text).toContain("NOT applied");
+    // The report must be a true no-op: session state on disk is unchanged.
+    const after = readFileSync(join(sessDir, "state.json"), "utf-8");
+    expect(after).toBe(before);
+  });
+
   it("rejects report on stale COMPACT (compactPending=false) and points to clear-compact", async () => {
     const session = createCompactSession(root, { preCompactState: "PLAN" });
     // Mimic the stale-compact state that handleResume itself rejects:
