@@ -41,7 +41,16 @@ import {
   LENS_MAX_SEVERITY,
 } from "./types.js";
 
-const MAX_PROMPT_SIZE = 10_000;
+// ISS-716: the assembled lens prompt is already bounded upstream (the artifact
+// by config.tokenBudgetPerLens, the project rules by the 2000-char slice in
+// context-packager), so this cap is a backstop against a pathological prompt,
+// not the primary size control. The previous value of 10_000 was below the
+// security lens's fixed prompt size (~10.6k chars with a real RULES.md, even
+// with an empty diff), so the security lens (a core, critical, always-active
+// lens) was silently blanked to "" on every realistic CODE_REVIEW. Sized to
+// clear the worst-case assembled prompt (artifact tokenBudget ~128k chars plus
+// preamble/body) with headroom.
+const MAX_PROMPT_SIZE = 200_000;
 
 // ── Prepare ───────────────────────────────────────────────────
 
