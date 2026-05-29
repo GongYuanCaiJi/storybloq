@@ -318,8 +318,16 @@ describe("review stages record reviewerPath/reviewId for lens reviews (ISS-720)"
     expect(artifact.reviewId).toBeUndefined();
   });
 
-  it("plan-review records the path on the verdict artifact too", async () => {
-    writeTelemetry(sDir, [entry("plan-review-r1")]);
+  it("plan-review records lenses-unverified (plan reviews never snapshot, so the gate always skips)", async () => {
+    // Production reality: writeFreshReviewSnapshot is gated to CODE_REVIEW
+    // (mcp-handlers.ts), so a plan review never writes an addressable snapshot.
+    // Its reviewId stays the non-addressable lens-<ts> form, synthesize's
+    // loadSnapshot returns snapshot_absent, and telemetry is written with
+    // verificationSkipped:true. A lens-backed plan review is therefore ALWAYS
+    // classified lenses-unverified -- this pins that reachable state rather than
+    // the lenses-verified state plan reviews cannot produce. The lenses-verified
+    // recording path is covered by the code-review cases above.
+    writeTelemetry(sDir, [entry("lens-pr1", { verificationSkipped: true, verified: 0 })]);
     const { PlanReviewStage } = await import("../../src/autonomous/stages/plan-review.js");
     const stage = new PlanReviewStage();
     const ctx = new StageContext(testRoot, sDir, makeState({ state: "PLAN_REVIEW" }), makeRecipe());
@@ -328,13 +336,13 @@ describe("review stages record reviewerPath/reviewId for lens reviews (ISS-720)"
       completedAction: "plan_review_round",
       verdict: "approve",
       reviewer: "lenses",
-      reviewId: "plan-review-r1",
+      reviewId: "lens-pr1",
       findings: [],
     });
 
     const artifact = readVerdictArtifact(sDir);
     expect(artifact.stage).toBe("plan");
-    expect(artifact.reviewId).toBe("plan-review-r1");
-    expect(artifact.reviewerPath).toBe("lenses-verified");
+    expect(artifact.reviewId).toBe("lens-pr1");
+    expect(artifact.reviewerPath).toBe("lenses-unverified");
   });
 });
