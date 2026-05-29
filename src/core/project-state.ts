@@ -475,8 +475,13 @@ function isDeleted(item: { lifecycle?: unknown }): boolean {
 function buildDisplayIndex<T extends { id: string }>(items: readonly T[]): Map<string, T[]> {
   const index = new Map<string, T[]>();
   for (const item of items) {
-    const displayId = (item as Record<string, unknown>).displayId as string | undefined;
-    const key = displayId ?? item.id;
+    // ISS-696: mirror Swift buildDisplayIndex -- trim the displayId and treat an
+    // empty/whitespace-only value as absent, falling back to the canonical id.
+    // Previously an empty-string displayId was used verbatim as the key, so TS and
+    // Swift disagreed on resolution for malformed/hand-edited items.
+    const displayId = (item as Record<string, unknown>).displayId;
+    const trimmed = typeof displayId === "string" ? displayId.trim() : "";
+    const key = trimmed === "" ? item.id : trimmed;
     const arr = index.get(key);
     if (arr) {
       arr.push(item);

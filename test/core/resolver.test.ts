@@ -133,6 +133,21 @@ describe("resolveTicketRef", () => {
     const result = state.resolveTicketRef("ISS-001");
     expect(result.kind).toBe("missing");
   });
+
+  it("treats an empty/whitespace displayId as absent, mirroring Swift (ISS-696)", () => {
+    // Malformed/hand-edited item with a blank displayId. The display index must
+    // fall back to the canonical id (not key on ""), so an empty ref does not
+    // resolve and the canonical id still does -- matching Swift buildDisplayIndex.
+    const t = makeTicket({ id: "t-k7m2p9x3w4a5b6e8", displayId: "   " } as any);
+    const state = makeState({ tickets: [t] });
+
+    expect(state.resolveTicketRef("").kind).toBe("missing");
+    expect(state.resolveTicketRef("   ").kind).toBe("missing");
+
+    const byId = state.resolveTicketRef("t-k7m2p9x3w4a5b6e8");
+    expect(byId.kind).toBe("found");
+    if (byId.kind === "found") expect(byId.matchedBy).toBe("id");
+  });
 });
 
 describe("resolveIssueRef", () => {
