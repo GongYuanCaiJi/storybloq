@@ -1,6 +1,7 @@
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { isClaimStale } from "./claims.js";
+import { compareVersionStrings } from "./team-capabilities.js";
 
 export type DoctorSeverity = "error" | "warning" | "info";
 
@@ -208,17 +209,6 @@ function checkCliVersion(state: ProjectState, ctx: DoctorContext): DoctorFinding
     }];
   }
   return [];
-}
-
-function compareVersionStrings(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const na = pa[i] ?? 0;
-    const nb = pb[i] ?? 0;
-    if (na !== nb) return na - nb;
-  }
-  return 0;
 }
 
 function checkDuplicateCanonicalIds(state: ProjectState): DoctorFinding[] {

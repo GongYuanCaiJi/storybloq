@@ -94,6 +94,27 @@ describe("runDoctor", () => {
     expect(finding!.severity).toBe("warning");
   });
 
+  it("warns for a prerelease CLI below minCliVersion (ISS-692)", async () => {
+    // The old private compareVersionStrings split only on "." and mapped through
+    // Number(), so "2.0.0-rc.1".split(".")[2] = Number("0-rc") = NaN and `NaN < 0`
+    // is false: the warning never fired for a prerelease, silently disabling the
+    // check. The canonical comparator (splits on [.-], coerces non-finite to 0)
+    // correctly orders "2.0.0-rc.1" below "2.0.1".
+    const configWithMin: Config = { ...teamConfig, team: { minCliVersion: "2.0.1" } };
+    const s = makeState({ config: configWithMin, roadmap: makeRoadmap([makePhase({ id: "p1" })]) });
+    const result = await runDoctor(s, teamCtx({ cliVersion: "2.0.0-rc.1" }));
+    const finding = result.findings.find((f) => f.code === "cli_version_mismatch");
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe("warning");
+  });
+
+  it("does not warn for a release CLI at or above minCliVersion (ISS-692)", async () => {
+    const configWithMin: Config = { ...teamConfig, team: { minCliVersion: "2.0.0" } };
+    const s = makeState({ config: configWithMin, roadmap: makeRoadmap([makePhase({ id: "p1" })]) });
+    const result = await runDoctor(s, teamCtx({ cliVersion: "2.1.0" }));
+    expect(result.findings.find((f) => f.code === "cli_version_mismatch")).toBeUndefined();
+  });
+
   it("accepts injected custom checks via registerDoctorCheck", async () => {
     const customCheck: DoctorCheck = () => [
       { severity: "info", code: "custom_check", message: "Custom check ran", entity: null, repair: null },
