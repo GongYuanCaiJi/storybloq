@@ -56,6 +56,25 @@ function writeAgedTombstone(root: string, id: string): string {
   return path;
 }
 
+function writeActiveTicket(root: string, id: string, fields: Record<string, unknown>): string {
+  const path = join(root, ".story", "tickets", `${id}.json`);
+  writeJson(path, {
+    id,
+    title: `Active ${id}`,
+    type: "task",
+    status: "open",
+    phase: "p1",
+    order: 20,
+    description: "",
+    createdDate: "2026-01-01",
+    completedDate: null,
+    blockedBy: [],
+    parentTicket: null,
+    ...fields,
+  });
+  return path;
+}
+
 describe("handleGc apply loop", () => {
   it("physically unlinks an aged tombstone in non-team mode", async () => {
     const root = createProject({ team: false });
@@ -80,5 +99,48 @@ describe("handleGc apply loop", () => {
     // The fix for ISS-672: GC purges the aged tombstone rather than re-stamping it.
     // A re-stamp would leave the file in place with a reset deletedAt; assert it is gone.
     expect(existsSync(ticketPath)).toBe(false);
+  });
+
+  describe("--force referential-integrity guard (ISS-704)", () => {
+    it("refuses to purge a referenced tombstone and leaves it on disk", async () => {
+      const root = createProject({ team: true });
+      const tombstonePath = writeAgedTombstone(root, "t-0000000000000001");
+      // An active ticket still references the tombstone by its canonical id.
+      writeActiveTicket(root, "t-0000000000000002", { blockedBy: ["t-0000000000000001"] });
+      expect(existsSync(tombstonePath)).toBe(true);
+
+      const result = await handleGc(root, { apply: true, force: true });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.output).toContain("cannot");
+      expect(result.output).toContain("t-0000000000000001");
+      expect(result.output).toContain("t-0000000000000002"); // the referrer
+      expect(result.output).toContain("storybloq repair");
+      // Refusal is atomic: the referenced tombstone is NOT unlinked.
+      expect(existsSync(tombstonePath)).toBe(true);
+    });
+
+    it("--force still purges an unreferenced aged tombstone (no blocked candidates)", async () => {
+      const root = createProject({ team: true });
+      const tombstonePath = writeAgedTombstone(root, "t-0000000000000001");
+      expect(existsSync(tombstonePath)).toBe(true);
+
+      const result = await handleGc(root, { apply: true, force: true });
+
+      expect(result.exitCode ?? 0).toBe(0);
+      expect(existsSync(tombstonePath)).toBe(false);
+    });
+
+    it("without --force, a referenced tombstone is skipped (not an error) and stays on disk", async () => {
+      const root = createProject({ team: true });
+      const tombstonePath = writeAgedTombstone(root, "t-0000000000000001");
+      writeActiveTicket(root, "t-0000000000000002", { blockedBy: ["t-0000000000000001"] });
+
+      const result = await handleGc(root, { apply: true });
+
+      expect(result.exitCode ?? 0).toBe(0);
+      // Blocked candidates are never in plan.eligible, so the file remains.
+      expect(existsSync(tombstonePath)).toBe(true);
+    });
   });
 });

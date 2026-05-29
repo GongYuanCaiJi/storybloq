@@ -24,12 +24,30 @@ export async function handleGc(
     const { withProjectLock } = await import("../../core/project-loader.js");
     let applied: string[] = [];
     let plan: GcPlan | undefined;
+    let refusal: string | undefined;
 
     const errors: Array<{ id: string; error: string }> = [];
 
     await withProjectLock(root, { strict: false }, async ({ state }) => {
       const { guardPath } = await import("../../core/project-loader.js");
       plan = computeGcPlan(state, { retentionDays });
+
+      // ISS-704: --force must NOT physically purge tombstones that active items
+      // still reference. Cross-refs store canonical IDs and are never rewritten,
+      // so unlinking a referenced tombstone leaves a dangling
+      // blockedBy/parentTicket/relatedTickets/supersedes ref, escalating the
+      // tolerated *_deleted WARNINGS into ERROR-level invalid_*_ref. Refuse
+      // atomically (purge nothing) and direct the user to repair, which removes
+      // the stale references first. Eligible (unreferenced) tombstones are still
+      // purged by --force when nothing is blocked.
+      if (options.force && plan.blocked.length > 0) {
+        const lines = plan.blocked
+          .map((c) => `  - ${c.id} (referenced by ${c.activeReferences.join(", ")})`)
+          .join("\n");
+        refusal = `Error: gc --force cannot purge ${plan.blocked.length} tombstone(s) still referenced by active items; physically removing them would dangle canonical references and fail validation:\n${lines}\n\nRun \`storybloq repair\` to remove the stale references first, then re-run gc.`;
+        return;
+      }
+
       const toRemove = options.force ? plan.candidates : plan.eligible;
       const wrapDir = resolve(root, ".story");
 
@@ -48,6 +66,10 @@ export async function handleGc(
         }
       }
     });
+
+    if (refusal) {
+      return { output: refusal, exitCode: 1 };
+    }
 
     if (errors.length > 0) {
       const errLines = errors.map((e) => `  - ${e.id}: ${e.error}`).join("\n");
