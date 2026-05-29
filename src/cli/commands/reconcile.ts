@@ -8,7 +8,8 @@ import { listReservations } from "../../core/remote-refs.js";
 import type { ProjectState } from "../../core/project-state.js";
 import type { Note } from "../../models/note.js";
 import type { CommandResult } from "../types.js";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { isTeamModeConfig } from "../../core/team-capabilities.js";
 
@@ -119,10 +120,12 @@ async function applyChanges(
   for (const rename of renames) {
     const dir = ENTITY_DIRS[rename.entityType];
     if (!dir) continue;
-    const files = await readdir(join(storyDir, dir));
-    const match = files.find((f) => f.endsWith(".json") && f.replace(/\.json$/, "") === rename.id);
-    if (!match) continue;
-    const filePath = join(storyDir, dir, match);
+    // ISS-710: canonical IDs ARE filenames (documented invariant), so build the
+    // path directly -- matching the rank loop below -- instead of reading and
+    // scanning the whole directory per rename. A single existence check keeps the
+    // prior skip-on-missing behavior (rather than throwing) for a stale rename.
+    const filePath = join(storyDir, dir, `${rename.id}.json`);
+    if (!existsSync(filePath)) continue;
     const raw = await readFile(filePath, "utf-8");
     const entity = JSON.parse(raw) as Record<string, unknown>;
     entity.displayId = rename.newDisplayId;
