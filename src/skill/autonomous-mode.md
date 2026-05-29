@@ -112,6 +112,24 @@ Use `/story auto T-XXX` instead. A single-ticket targeted auto session is equiva
 - Use the same review process as auto mode (same backends, same adaptive depth)
 - Can be cancelled with `action: "cancel"` at any point
 
+## Review findings and dispositions
+
+When you report a review round (`action: "report"` with `findings`), each finding
+carries a `disposition`. The four values are not interchangeable, and one has a
+side effect worth knowing before you choose it:
+
+- `open` -- unresolved this round (the round will not converge to approve)
+- `addressed` -- fixed in this round
+- `contested` -- you judge the finding a false positive. This feeds the false-positive
+  learning loop and files no issue. Do NOT use it to park a valid finding you simply
+  will not fix now; that pollutes the learning signal.
+- `deferred` -- the finding is valid but out of scope for this ticket. This AUTO-FILES
+  a storybloq issue so the work is tracked. Severity `suggestion` is exempt and is not
+  filed. Use `deferred` only when you genuinely want a new issue created.
+
+So the rule of thumb: park valid-but-out-of-scope work as `deferred` (it becomes an
+issue), and reserve `contested` for genuine false positives.
+
 ## Branch Affinity
 
 When running `/story auto` (standard mode, no targetWork), the guide checks if the

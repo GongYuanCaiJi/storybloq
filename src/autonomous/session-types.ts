@@ -14,6 +14,21 @@ export const TARGET_WORK_ID_REGEX = new RegExp(`^(T-\\d+[a-z]?|ISS-\\d+|t-${CROC
 export const LENS_FINDING_DISPOSITIONS = ["open", "addressed", "contested", "deferred"] as const;
 export type LensFindingDisposition = typeof LENS_FINDING_DISPOSITIONS[number];
 
+/**
+ * ISS-718: Canonical review verdicts accepted by the plan-review and
+ * code-review stage guards. Centralized so the two stages share one
+ * vocabulary instead of duplicating bare string literals.
+ *
+ * NOTE: this is intentionally NOT applied to the persisted verdict fields in
+ * SessionStateSchema. readSessionResilient only recovers invalid-enum values at
+ * lensReviewHistory[*].disposition, so narrowing the stored verdict to an enum
+ * would wedge resume on any legacy state.json carrying an out-of-vocabulary
+ * verdict. The judge (review-lenses/judge.ts) also intentionally emits a
+ * narrower set (no request_changes), so it is not unified here.
+ */
+export const REVIEW_VERDICTS = ["approve", "revise", "request_changes", "reject"] as const;
+export type ReviewVerdict = typeof REVIEW_VERDICTS[number];
+
 // ---------------------------------------------------------------------------
 // Workflow states from N-005 v5.1 state machine
 // ---------------------------------------------------------------------------

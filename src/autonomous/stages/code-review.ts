@@ -2,6 +2,7 @@ import { displayIdOf } from "../../core/resolver.js";
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import { buildLensHistoryUpdate } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
+import { REVIEW_VERDICTS } from "../session-types.js";
 import { requiredRounds, nextReviewer } from "../review-depth.js";
 import { clearCache } from "../review-lenses/cache.js";
 import { accumulateVerificationCounters } from "../review-lenses/verification-log.js";
@@ -170,7 +171,7 @@ export class CodeReviewStage implements WorkflowStage {
     }
 
     const verdict = report.verdict;
-    if (!verdict || !["approve", "revise", "request_changes", "reject"].includes(verdict)) {
+    if (!verdict || !(REVIEW_VERDICTS as readonly string[]).includes(verdict)) {
       return { action: "retry", instruction: 'Invalid verdict. Re-submit with verdict: "approve", "revise", "request_changes", or "reject".' };
     }
 

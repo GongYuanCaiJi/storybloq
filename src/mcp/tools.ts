@@ -1121,7 +1121,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
   // --- Autonomous guide ---
 
   server.registerTool("storybloq_autonomous_guide", {
-    description: "Autonomous session orchestrator. Call at every decision point during autonomous mode. Supports tiered access: auto (full autonomous), review (code review only), plan (plan + review), guided (single ticket end-to-end).",
+    description: "Autonomous session orchestrator. Call at every decision point during autonomous mode. Supports tiered access: auto (full autonomous), review (code review only), plan (plan + review), guided (single ticket end-to-end). Note: a review finding reported with disposition 'deferred' (and severity above 'suggestion') auto-files a storybloq issue, so use 'deferred' only for work you genuinely want tracked as a new issue. See the report.findings[].disposition field for the full per-value semantics.",
     inputSchema: {
       sessionId: z.string().uuid().nullable().describe("Session ID (null for start action)"),
       action: z.enum(["start", "report", "resume", "pre_compact", "cancel"]).describe("Action to perform"),
@@ -1143,7 +1143,12 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
           // ISS-556: must match the enum persisted by SessionStateSchema.
           // Without this, a single invalid value wedges readSession for the
           // entire session.
-          disposition: z.enum(LENS_FINDING_DISPOSITIONS),
+          disposition: z.enum(LENS_FINDING_DISPOSITIONS).describe(
+            "Finding disposition. 'open' = unresolved this round; 'addressed' = fixed in this round; " +
+            "'contested' = false positive (feeds the false-positive learning loop, files no issue; do NOT use it " +
+            "to park a valid finding, that pollutes the signal); 'deferred' = valid but out of scope, which " +
+            "AUTO-FILES a storybloq issue (severity 'suggestion' is exempt and is not filed).",
+          ),
         })).optional().describe("Review findings"),
         reviewerSessionId: z.string().optional().describe("Codex session ID"),
         reviewer: z.string().optional().describe("Actual reviewer backend used (e.g. 'agent' when codex was unavailable)"),

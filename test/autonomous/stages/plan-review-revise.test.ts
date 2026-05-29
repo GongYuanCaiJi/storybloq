@@ -107,4 +107,19 @@ describe("PlanReviewStage — ISS-048 revise routing", () => {
     });
     expect(ctx.state.reviews.plan.length).toBe(0);
   });
+
+  it("rejects a typo'd verdict with a corrective retry (ISS-718 REVIEW_VERDICTS guard)", async () => {
+    const ctx = new StageContext(testRoot, sessionDir, makeState(), makeRecipe());
+    const advance = await stage.report(ctx, {
+      completedAction: "plan_review_round",
+      verdict: "approveee",
+      findings: [],
+    });
+    expect(advance.action).toBe("retry");
+    if (advance.action === "retry") {
+      expect(advance.instruction).toContain("Invalid verdict");
+    }
+    // The typo must not have been recorded as a review round.
+    expect(ctx.state.reviews.plan.length).toBe(0);
+  });
 });
