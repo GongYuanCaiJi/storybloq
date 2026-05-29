@@ -494,11 +494,11 @@ describe("ProjectState", () => {
       expect(state.ticketByID("T-001")?.title).toBe("First");
     });
 
-    it("duplicate issue IDs: last wins", () => {
+    it("duplicate issue IDs: first wins (ISS-697, matches Swift + tickets)", () => {
       const first = makeIssue({ id: "ISS-001", title: "First" });
       const second = makeIssue({ id: "ISS-001", title: "Second" });
       const state = makeState({ issues: [first, second] });
-      expect(state.issueByID("ISS-001")?.title).toBe("Second");
+      expect(state.issueByID("ISS-001")?.title).toBe("First");
     });
   });
 
@@ -610,6 +610,24 @@ describe("ProjectState", () => {
         roadmap: makeRoadmap([makePhase({ id: "p0" })]),
       });
       expect(state.isEmptyScaffold).toBe(true);
+    });
+  });
+
+  describe("primary index dedup policy (ISS-697)", () => {
+    // Swift uses uniquingKeysWith: { first, _ in first } for tickets/issues/notes/
+    // lessons. The TS issues/notes/lessons indexes were last-wins with a comment
+    // falsely claiming parity; they are now first-wins to match Swift. (Canonical
+    // ids are unique in practice, so this only pins the cross-platform contract.)
+    it("issue/note/lesson byID is first-wins on a duplicate id, matching Swift", () => {
+      const state = makeState({
+        issues: [makeIssue({ id: "ISS-001", title: "First" }), makeIssue({ id: "ISS-001", title: "Second" })],
+        notes: [makeNote({ id: "N-001", title: "First" }), makeNote({ id: "N-001", title: "Second" })],
+        lessons: [makeLesson({ id: "L-001", title: "First" }), makeLesson({ id: "L-001", title: "Second" })],
+        roadmap: makeRoadmap([makePhase({ id: "p0" })]),
+      });
+      expect(state.issueByID("ISS-001")?.title).toBe("First");
+      expect(state.noteByID("N-001")?.title).toBe("First");
+      expect(state.lessonByID("L-001")?.title).toBe("First");
     });
   });
 });

@@ -208,24 +208,34 @@ export class ProjectState {
     }
     this.ticketsByID = tByID;
 
-    // Issues: last-wins (matching Swift uniquingKeysWith: { _, new in new })
+    // ISS-697: first-wins for issues/notes/lessons, matching Swift's
+    // `uniquingKeysWith: { first, _ in first }` (ProjectState.swift). The prior
+    // last-wins here, plus a comment that falsely claimed parity, diverged from
+    // Swift on a duplicate canonical id. (Canonical ids are unique per
+    // one-file-per-id, so first==last in practice; this keeps the contract honest.)
     const iByID = new Map<string, Issue>();
     for (const i of input.issues) {
-      iByID.set(i.id, i);
+      if (!iByID.has(i.id)) {
+        iByID.set(i.id, i);
+      }
     }
     this.issuesByID = iByID;
 
-    // Notes: last-wins (same as issues)
+    // Notes: first-wins (same as issues)
     const nByID = new Map<string, Note>();
     for (const n of input.notes) {
-      nByID.set(n.id, n);
+      if (!nByID.has(n.id)) {
+        nByID.set(n.id, n);
+      }
     }
     this.notesByID = nByID;
 
-    // Lessons: last-wins (same as issues)
+    // Lessons: first-wins (same as issues)
     const lByID = new Map<string, Lesson>();
     for (const l of this.lessons) {
-      lByID.set(l.id, l);
+      if (!lByID.has(l.id)) {
+        lByID.set(l.id, l);
+      }
     }
     this.lessonsByID = lByID;
 
