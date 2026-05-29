@@ -4,7 +4,7 @@ import type { GuideReportInput } from "../session-types.js";
 import { REVIEW_VERDICTS } from "../session-types.js";
 import { requiredRounds, nextReviewer } from "../review-depth.js";
 import { accumulateVerificationCounters } from "../review-lenses/verification-log.js";
-import { writeReviewVerdict, readReviewVerdict, buildTier1Verdict, type ReviewVerdictArtifact } from "../review-verdict.js";
+import { writeReviewVerdict, readReviewVerdict, buildTier1Verdict, classifyLensReviewPath, type ReviewVerdictArtifact } from "../review-verdict.js";
 import {
   currentStorybloqClient,
   nativeCodexReportInstruction,
@@ -48,11 +48,11 @@ export class PlanReviewStage implements WorkflowStage {
           "3. Spawn all lens subagents in parallel (each prompt is returned by the prepare tool)",
           "4. Collect results and call `storybloq_review_lenses_synthesize` with the lens results",
           "5. Run the merger agent with the returned mergerPrompt, then call `storybloq_review_lenses_judge`",
-          "6. Run the judge agent and report the final SynthesisResult verdict and findings",
+          "6. Run the judge agent and report the final SynthesisResult verdict and findings, including the reviewId from prepare (so the recorded verdict reflects whether the verification gate ran)",
           "",
           "When done, call `storybloq_autonomous_guide` with:",
           '```json',
-          `{ "sessionId": "${ctx.state.sessionId}", "action": "report", "report": { "completedAction": "plan_review_round", "verdict": "<approve|revise|reject>", "findings": [...] } }`,
+          `{ "sessionId": "${ctx.state.sessionId}", "action": "report", "report": { "completedAction": "plan_review_round", "verdict": "<approve|revise|reject>", "reviewId": "<reviewId from prepare>", "findings": [...] } }`,
           '```',
         ].join("\n"),
         reminders: [
@@ -204,6 +204,12 @@ export class PlanReviewStage implements WorkflowStage {
     const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
     const durationMs = Number.isFinite(startedMs) ? Math.max(0, Date.now() - startedMs) : 0;
     const summary = report.notes || `Plan review ${verdict}: ${findings.length} finding(s) (${criticalCount} critical, ${majorCount} major)`;
+    // ISS-720: for lens-backed reviews, record the path actually taken (whether
+    // the verification gate ran) instead of trusting the configured backend tag.
+    // reviewId/reviewerPath are lens-review observability, so both are recorded
+    // only when the backend is lenses.
+    const lensReviewId = reviewerBackend === "lenses" ? report.reviewId : undefined;
+    const reviewerPath = lensReviewId ? classifyLensReviewPath(ctx.dir, lensReviewId) : undefined;
     const artifact: ReviewVerdictArtifact = {
       target,
       stage: "plan",
@@ -217,6 +223,8 @@ export class PlanReviewStage implements WorkflowStage {
       summary,
       findings,
       timestamp: new Date().toISOString(),
+      ...(lensReviewId ? { reviewId: lensReviewId } : {}),
+      ...(reviewerPath ? { reviewerPath } : {}),
     };
     const writeResult = writeReviewVerdict(ctx.dir, artifact);
 

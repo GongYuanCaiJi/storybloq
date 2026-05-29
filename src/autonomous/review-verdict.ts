@@ -36,6 +36,12 @@ export interface ReviewVerdictArtifact {
   readonly summary: string;
   readonly findings: readonly unknown[];
   readonly timestamp: string;
+  // ISS-720: the lens review id this round used (the join key into
+  // verification-telemetry.jsonl) and the path actually taken, so analytics can
+  // tell a real lens-verified round from one where the lens pipeline was
+  // skipped/bypassed. Optional and additive: only set for lenses reviews.
+  readonly reviewId?: string;
+  readonly reviewerPath?: "lenses-verified" | "lenses-unverified";
 }
 
 export interface Tier1ReviewVerdict {
@@ -73,7 +79,19 @@ function canonicalize(obj: unknown): unknown {
 }
 
 export function computeContentHash(artifact: ReviewVerdictArtifact): string {
-  const { timestamp: _ts, _contentHash: _ch, durationMs: _dur, ...rest } = artifact as Record<string, unknown>;
+  // ISS-720: reviewId/reviewerPath are observability metadata (the second is
+  // derived from telemetry, not authored review content), so they are excluded
+  // from the dedupe hash alongside timestamp/_contentHash/durationMs. Round is
+  // already part of the hash, so excluding reviewId keeps hashes stable across
+  // this additive schema change without risking cross-round collisions.
+  const {
+    timestamp: _ts,
+    _contentHash: _ch,
+    durationMs: _dur,
+    reviewId: _rid,
+    reviewerPath: _rpath,
+    ...rest
+  } = artifact as Record<string, unknown>;
   const canonical = canonicalize(rest);
   return createHash("sha256").update(JSON.stringify(canonical), "utf-8").digest("hex");
 }
@@ -180,4 +198,60 @@ export function buildTier1Verdict(artifact: ReviewVerdictArtifact): Tier1ReviewV
     durationMs: artifact.durationMs,
     summary: artifact.summary,
   };
+}
+
+// ---------------------------------------------------------------------------
+// ISS-720: classify the lens review path actually taken
+// ---------------------------------------------------------------------------
+
+/**
+ * Read per-review verification telemetry and report whether the lens
+ * verification pipeline actually verified findings for `reviewId`, so a
+ * recorded `reviewer: "lenses"` tag can be distinguished from a round where the
+ * lens path was skipped or degraded. The configured backend alone over-counts
+ * "lens-reviewed"; this reflects the path taken. A round is "lenses-unverified"
+ * when verification was skipped (no snapshot), the snapshot failed integrity
+ * (legacy entries only -- a live integrity failure now throws before telemetry
+ * is written), OR any finding bypassed verification with a runtime error
+ * (verificationRuntimeErrors > 0): in that last case the gate ran but let some
+ * findings through unverified, so the round was not fully verified.
+ *
+ * Returns undefined when no telemetry can be attributed to the review: no
+ * reviewId supplied, the telemetry file is absent/unreadable, or no entry
+ * matches (e.g. the lens synthesize step never ran for this id). The last
+ * matching entry wins, mirroring accumulateVerificationCounters' line semantics
+ * (drop the trailing partial/empty segment).
+ */
+export function classifyLensReviewPath(
+  sessionDir: string,
+  reviewId: string | undefined,
+): "lenses-verified" | "lenses-unverified" | undefined {
+  if (!reviewId) return undefined;
+  let raw: string;
+  try {
+    raw = readFileSync(join(sessionDir, "verification-telemetry.jsonl"), "utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = raw === "" ? [] : raw.split("\n").slice(0, -1);
+  let match: Record<string, unknown> | undefined;
+  for (const line of lines) {
+    try {
+      const e = JSON.parse(line) as Record<string, unknown>;
+      if (e && e.reviewId === reviewId) match = e;
+    } catch {
+      // malformed line: skip
+    }
+  }
+  if (!match) return undefined;
+  // Number(undefined) is NaN and NaN > 0 is false, so legacy entries without
+  // verificationRuntimeErrors are not falsely downgraded.
+  if (
+    match.snapshotIntegrityFailure === true ||
+    match.verificationSkipped === true ||
+    Number(match.verificationRuntimeErrors) > 0
+  ) {
+    return "lenses-unverified";
+  }
+  return "lenses-verified";
 }

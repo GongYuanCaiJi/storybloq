@@ -702,6 +702,7 @@ export interface GuideReportInput {
   readonly overrideOverlap?: boolean;
   readonly notes?: string;
   readonly reviewer?: string;  // ISS-102: actual reviewer backend used (overrides computed nextReviewer)
+  readonly reviewId?: string;  // ISS-720: lens reviewId from prepare/synthesize; joins to verification telemetry to record the path actually taken
 }
 
 export interface GuideInput {

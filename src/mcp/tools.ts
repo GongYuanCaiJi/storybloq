@@ -1163,6 +1163,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
         })).optional().describe("Review findings"),
         reviewerSessionId: z.string().optional().describe("Codex session ID"),
         reviewer: z.string().optional().describe("Actual reviewer backend used (e.g. 'agent' when codex was unavailable)"),
+        reviewId: z.string().optional().describe("ISS-720: lens reviewId returned by review_lenses_prepare/synthesize. Pass it on a lens-backed review_round report so the recorded verdict reflects whether the lens verification gate actually ran (lenses-verified) or was skipped/degraded (lenses-unverified)."),
         notes: z.string().optional().describe("Free-text notes"),
       }).optional().describe("Report data (required for report action)"),
     },
