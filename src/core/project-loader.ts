@@ -360,11 +360,25 @@ async function assertNoConflictsFromDisk(root: string): Promise<void> {
   }
 }
 
+/**
+ * The single disk-reading team-mode detector (ISS-701): reads .story/config.json
+ * and returns whether team mode is enabled, reusing the in-memory predicate
+ * isTeamModeConfig. Error policy is "throw on any failure" -- a missing,
+ * unreadable, or malformed config all reject. Callers that need to degrade apply
+ * their own documented policy on top (e.g. the soft-delete path treats any
+ * failure as "cannot determine -> fail closed", while handover treats a missing
+ * config as solo mode). Keeps config loading in one place instead of two
+ * divergent re-implementations.
+ */
+export async function detectTeamModeFromDisk(root: string): Promise<boolean> {
+  const raw = await readFile(join(resolve(root), ".story", "config.json"), "utf-8");
+  const config = ConfigSchema.passthrough().parse(JSON.parse(raw));
+  return isTeamModeConfig(config);
+}
+
 async function isTeamMode(root: string): Promise<boolean | "error"> {
   try {
-    const raw = await readFile(join(resolve(root, ".story"), "config.json"), "utf-8");
-    const config = ConfigSchema.passthrough().parse(JSON.parse(raw));
-    return isTeamModeConfig(config);
+    return await detectTeamModeFromDisk(root);
   } catch {
     return "error";
   }

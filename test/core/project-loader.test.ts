@@ -25,6 +25,7 @@ import {
   atomicWrite,
   atomicCreate,
   withProjectLock,
+  detectTeamModeFromDisk,
 } from "../../src/core/project-loader.js";
 import { ProjectLoaderError } from "../../src/core/errors.js";
 import { fixturesDir } from "../helpers.js";
@@ -1038,5 +1039,34 @@ describe("deterministic load order", () => {
     expect(result.state.tickets[0]!.id).toBe("T-001");
     expect(result.state.tickets[1]!.id).toBe("T-002");
     expect(result.state.tickets[2]!.id).toBe("T-003");
+  });
+});
+
+describe("detectTeamModeFromDisk (ISS-701)", () => {
+  it("returns true when team mode is enabled in config", async () => {
+    testRoot = await createTestProject({ config: { ...minimalConfig, team: { enabled: true } } });
+    expect(await detectTeamModeFromDisk(testRoot)).toBe(true);
+  });
+
+  it("returns false for a solo-mode config", async () => {
+    testRoot = await createTestProject();
+    expect(await detectTeamModeFromDisk(testRoot)).toBe(false);
+  });
+
+  it("returns false when team is present but not enabled", async () => {
+    testRoot = await createTestProject({ config: { ...minimalConfig, team: { enabled: false } } });
+    expect(await detectTeamModeFromDisk(testRoot)).toBe(false);
+  });
+
+  it("throws with code ENOENT when config.json is missing (caller decides degradation)", async () => {
+    testRoot = await createTestProject({ skipConfig: true });
+    await expect(detectTeamModeFromDisk(testRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("throws (non-ENOENT) on malformed config json", async () => {
+    testRoot = await createTestProject();
+    await writeFile(join(testRoot, ".story", "config.json"), "{ not valid json");
+    await expect(detectTeamModeFromDisk(testRoot)).rejects.toThrow();
+    await expect(detectTeamModeFromDisk(testRoot)).rejects.not.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -1,5 +1,5 @@
 import { readHandover } from "../../core/handover-parser.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
@@ -13,12 +13,11 @@ import {
   withProjectLock,
   atomicWrite,
   guardPath,
+  detectTeamModeFromDisk,
 } from "../../core/project-loader.js";
 import { parseHandoverFilename, todayISO, CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import type { OutputFormat } from "../../models/types.js";
-import { ConfigSchema } from "../../models/config.js";
-import { isTeamModeConfig } from "../../core/team-capabilities.js";
 
 export function handleHandoverList(ctx: CommandContext): CommandResult {
   return { output: formatHandoverList(ctx.state.handoverFilenames, ctx.format) };
@@ -123,12 +122,13 @@ export function normalizeSlug(raw: string): string {
   return slug;
 }
 
-function detectTeamMode(absRoot: string): boolean {
+// ISS-701: delegate config reading to the single shared detector
+// (detectTeamModeFromDisk) and apply handover's own degradation policy on top:
+// a missing config means a non-team project (use sequential filenames), but a
+// malformed/unreadable config is a real error and propagates.
+async function detectTeamMode(absRoot: string): Promise<boolean> {
   try {
-    const configPath = join(absRoot, ".story", "config.json");
-    const raw = readFileSync(configPath, "utf-8");
-    const config = ConfigSchema.parse(JSON.parse(raw));
-    return isTeamModeConfig(config);
+    return await detectTeamModeFromDisk(absRoot);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
@@ -159,7 +159,7 @@ export async function handleHandoverCreate(
     await mkdir(handoversDir, { recursive: true });
     const wrapDir = join(absRoot, ".story");
 
-    const isTeamMode = detectTeamMode(absRoot);
+    const isTeamMode = await detectTeamMode(absRoot);
 
     if (isTeamMode) {
       const { generateTeamHandoverFilename } = await import("../../core/handover-filename.js");
