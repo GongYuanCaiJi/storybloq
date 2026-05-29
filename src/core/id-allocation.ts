@@ -6,10 +6,13 @@ import type { ProjectState } from "./project-state.js";
 import { TICKET_ID_REGEX, ISSUE_ID_REGEX, NOTE_ID_REGEX, LESSON_ID_REGEX } from "../models/types.js";
 import { generateCanonicalId, type CanonicalPrefix } from "./canonical-id.js";
 
-const TICKET_NUMERIC_REGEX = /^T-(\d+)[a-z]?$/;
-const ISSUE_NUMERIC_REGEX = /^ISS-(\d+)$/;
-const NOTE_NUMERIC_REGEX = /^N-(\d+)$/;
-const LESSON_NUMERIC_REGEX = /^L-(\d+)$/;
+// ISS-709: single source for the anchored numeric display-ID regexes, shared by
+// the reconcile core + CLI. (remote-refs.ts intentionally uses looser,
+// prefix-only variants and is not consolidated here.)
+export const TICKET_NUMERIC_REGEX = /^T-(\d+)[a-z]?$/;
+export const ISSUE_NUMERIC_REGEX = /^ISS-(\d+)$/;
+export const NOTE_NUMERIC_REGEX = /^N-(\d+)$/;
+export const LESSON_NUMERIC_REGEX = /^L-(\d+)$/;
 
 /**
  * Next ticket ID: scan existing IDs, find max numeric part, return T-(max+1).

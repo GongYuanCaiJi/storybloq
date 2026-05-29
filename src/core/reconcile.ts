@@ -5,13 +5,14 @@ import type { Note } from "../models/note.js";
 import type { Lesson } from "../models/lesson.js";
 import type { ProjectState } from "./project-state.js";
 import { TICKET_ID_REGEX, ISSUE_ID_REGEX, NOTE_ID_REGEX, LESSON_ID_REGEX } from "../models/types.js";
-import { maxSequentialNumber } from "./id-allocation.js";
+import {
+  maxSequentialNumber,
+  TICKET_NUMERIC_REGEX,
+  ISSUE_NUMERIC_REGEX,
+  NOTE_NUMERIC_REGEX,
+  LESSON_NUMERIC_REGEX,
+} from "./id-allocation.js";
 import { compareByRank, rebalanceRanks, REBALANCE_THRESHOLD } from "./fractional-index.js";
-
-const TICKET_NUMERIC_REGEX = /^T-(\d+)[a-z]?$/;
-const ISSUE_NUMERIC_REGEX = /^ISS-(\d+)$/;
-const NOTE_NUMERIC_REGEX = /^N-(\d+)$/;
-const LESSON_NUMERIC_REGEX = /^L-(\d+)$/;
 
 export type EntityType = "ticket" | "issue" | "note" | "lesson";
 

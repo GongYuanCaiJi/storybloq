@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import { computeReconcilePlan, computeRebalancePlan, type EntityType, type ReconcileContext, type ReconcileRename } from "../../core/reconcile.js";
 import { formatReconcileResult, ExitCode, successEnvelope, type ExitCodeValue } from "../../core/output-formatter.js";
 import { withProjectLock, runTransactionUnlocked } from "../../core/project-loader.js";
-import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
+import { nextNoteID, allocateTeamNoteId, NOTE_NUMERIC_REGEX } from "../../core/id-allocation.js";
 import { listReservations } from "../../core/remote-refs.js";
 import type { ProjectState } from "../../core/project-state.js";
 import type { Note } from "../../models/note.js";
@@ -11,8 +11,6 @@ import type { CommandResult } from "../types.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { isTeamModeConfig } from "../../core/team-capabilities.js";
-
-const NOTE_NUMERIC_REGEX = /^N-(\d+)$/;
 
 export interface ReconcileOptions {
   readonly dryRun: boolean;
