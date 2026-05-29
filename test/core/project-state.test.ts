@@ -475,6 +475,38 @@ describe("ProjectState", () => {
       const state = makeState({ tickets: [makeTicket({ id: "T-001" })] });
       expect(state.issuesReferencing("T-001")).toEqual([]);
     });
+
+    describe("tombstoned referrers do not block a delete (ISS-705)", () => {
+      it("ticketsBlocking excludes a tombstoned blockedBy referrer", () => {
+        const tickets = [
+          makeTicket({ id: "T-001" }),
+          makeTicket({ id: "T-002", blockedBy: ["T-001"], lifecycle: "deleted" } as any),
+          makeTicket({ id: "T-003", blockedBy: ["T-001"] }),
+        ];
+        const state = makeState({ tickets });
+        // T-002 is tombstoned -> its stale ref is a warning, not a blocker; only T-003 counts.
+        expect(state.ticketsBlocking("T-001")).toEqual(["T-003"]);
+      });
+
+      it("childrenOf excludes a tombstoned child referrer", () => {
+        const tickets = [
+          makeTicket({ id: "T-001" }),
+          makeTicket({ id: "T-002", parentTicket: "T-001", lifecycle: "deleted" } as any),
+        ];
+        const state = makeState({ tickets });
+        expect(state.childrenOf("T-001")).toEqual([]);
+      });
+
+      it("issuesReferencing excludes a tombstoned issue referrer", () => {
+        const tickets = [makeTicket({ id: "T-001" })];
+        const issues = [
+          makeIssue({ id: "ISS-001", relatedTickets: ["T-001"], lifecycle: "deleted" } as any),
+          makeIssue({ id: "ISS-002", relatedTickets: ["T-001"] }),
+        ];
+        const state = makeState({ tickets, issues });
+        expect(state.issuesReferencing("T-001")).toEqual(["ISS-002"]);
+      });
+    });
   });
 
   describe("edge cases", () => {

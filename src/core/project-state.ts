@@ -160,9 +160,15 @@ export class ProjectState {
         const resolved = localResolve(t.parentTicket);
         const arr = children.get(resolved);
         if (arr) { arr.push(t); } else { children.set(resolved, [t]); }
-        for (const rid of localResolveAll(t.parentTicket)) {
-          const darr = delChildren.get(rid);
-          if (darr) { darr.push(t); } else { delChildren.set(rid, [t]); }
+        // ISS-705: deletion-safety counts only ACTIVE referrers. A tombstoned
+        // ticket's stale parentTicket ref is a warning-level dangling ref, not a
+        // blocker (N-059), so it must not refuse a delete. (The display-derived
+        // `children` map above keeps all referrers.)
+        if (!isDeleted(t)) {
+          for (const rid of localResolveAll(t.parentTicket)) {
+            const darr = delChildren.get(rid);
+            if (darr) { darr.push(t); } else { delChildren.set(rid, [t]); }
+          }
         }
       }
     }
@@ -177,9 +183,12 @@ export class ProjectState {
         const resolved = localResolve(blockerID);
         const arr = reverseBlocks.get(resolved);
         if (arr) { arr.push(t); } else { reverseBlocks.set(resolved, [t]); }
-        for (const rid of localResolveAll(blockerID)) {
-          const darr = delReverseBlocks.get(rid);
-          if (darr) { darr.push(t); } else { delReverseBlocks.set(rid, [t]); }
+        // ISS-705: deletion-safety counts only ACTIVE referrers (see Step 4).
+        if (!isDeleted(t)) {
+          for (const rid of localResolveAll(blockerID)) {
+            const darr = delReverseBlocks.get(rid);
+            if (darr) { darr.push(t); } else { delReverseBlocks.set(rid, [t]); }
+          }
         }
       }
     }
@@ -187,8 +196,11 @@ export class ProjectState {
     this.deletionReverseBlocks = delReverseBlocks;
 
     // Step 5b: Issues by related ticket (deletion-safety)
+    // ISS-705: only ACTIVE issues block a ticket delete; a tombstoned issue's
+    // stale relatedTickets ref is a warning-level dangling ref, not a blocker.
     const issuesByRelTicket = new Map<string, Issue[]>();
     for (const i of input.issues) {
+      if (isDeleted(i)) continue;
       for (const tref of i.relatedTickets) {
         for (const rid of localResolveAll(tref)) {
           const arr = issuesByRelTicket.get(rid);
