@@ -1,16 +1,33 @@
 import { z } from "zod";
 
+// --- Canonical ID alphabet (single source of truth, ISS-703) ---
+
+/**
+ * The 32-character Crockford base32 alphabet used to encode canonical IDs
+ * (excludes i, l, o, u). The encoder (canonical-id.ts) and every consuming
+ * regex derive from these two constants so the alphabet and its matching regex
+ * character class can never silently drift.
+ */
+export const CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+/**
+ * Regex character class matching exactly the Crockford alphabet, built by listing
+ * the alphabet verbatim inside brackets (equivalent to the hand-written range
+ * [0-9a-hjkmnp-tvwxyz]). Safe because the alphabet contains no char-class
+ * metacharacters. Interpolate into `new RegExp` to build canonical-ID patterns.
+ */
+export const CROCKFORD_CLASS = `[${CROCKFORD_ALPHABET}]`;
+
 // --- ID format regexes ---
 
 /** Matches legacy T-001, T-077a, T-079b */
 export const TICKET_ID_REGEX = /^T-\d+[a-z]?$/;
 /** Matches canonical t-[crockford16] */
-export const TICKET_CANONICAL_ID_REGEX = /^t-[0-9a-hjkmnp-tvwxyz]{16}$/;
+export const TICKET_CANONICAL_ID_REGEX = new RegExp(`^t-${CROCKFORD_CLASS}{16}$`);
 
 /** Matches legacy ISS-001, ISS-009 */
 export const ISSUE_ID_REGEX = /^ISS-\d+$/;
 /** Matches canonical i-[crockford16] */
-export const ISSUE_CANONICAL_ID_REGEX = /^i-[0-9a-hjkmnp-tvwxyz]{16}$/;
+export const ISSUE_CANONICAL_ID_REGEX = new RegExp(`^i-${CROCKFORD_CLASS}{16}$`);
 
 // --- Ticket enums ---
 
@@ -33,7 +50,7 @@ export type IssueSeverity = (typeof ISSUE_SEVERITIES)[number];
 export const NOTE_STATUSES = ["active", "archived"] as const;
 export type NoteStatus = (typeof NOTE_STATUSES)[number];
 export const NOTE_ID_REGEX = /^N-\d+$/;
-export const NOTE_CANONICAL_ID_REGEX = /^n-[0-9a-hjkmnp-tvwxyz]{16}$/;
+export const NOTE_CANONICAL_ID_REGEX = new RegExp(`^n-${CROCKFORD_CLASS}{16}$`);
 export const NoteIdSchema = z
   .string()
   .refine(
@@ -48,7 +65,7 @@ export type LessonStatus = (typeof LESSON_STATUSES)[number];
 export const LESSON_SOURCES = ["review", "correction", "postmortem", "manual"] as const;
 export type LessonSource = (typeof LESSON_SOURCES)[number];
 export const LESSON_ID_REGEX = /^L-\d+$/;
-export const LESSON_CANONICAL_ID_REGEX = /^l-[0-9a-hjkmnp-tvwxyz]{16}$/;
+export const LESSON_CANONICAL_ID_REGEX = new RegExp(`^l-${CROCKFORD_CLASS}{16}$`);
 export const LessonIdSchema = z
   .string()
   .refine(

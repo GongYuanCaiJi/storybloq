@@ -1,8 +1,9 @@
 import { realpathSync } from "node:fs";
 import { z } from "zod";
+import { CROCKFORD_CLASS } from "../models/types.js";
 
-/** Combined ticket + issue ID regex for targetWork validation (sequential + canonical). */
-export const TARGET_WORK_ID_REGEX = /^(T-\d+[a-z]?|ISS-\d+|t-[0-9a-hjkmnp-tvwxyz]{16}|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
+/** Combined ticket + issue ID regex for targetWork validation (sequential + canonical). ISS-703: canonical char class derived from CROCKFORD_CLASS. */
+export const TARGET_WORK_ID_REGEX = new RegExp(`^(T-\\d+[a-z]?|ISS-\\d+|t-${CROCKFORD_CLASS}{16}|i-${CROCKFORD_CLASS}{16})$`);
 
 /**
  * ISS-556: Canonical dispositions for lens-review findings.

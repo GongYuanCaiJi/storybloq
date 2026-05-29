@@ -27,6 +27,7 @@ import {
   ISSUE_ID_REGEX, ISSUE_CANONICAL_ID_REGEX,
   NOTE_ID_REGEX, NOTE_CANONICAL_ID_REGEX,
   LESSON_ID_REGEX, LESSON_CANONICAL_ID_REGEX,
+  CROCKFORD_CLASS,
 } from "../models/types.js";
 import { ProjectState } from "./project-state.js";
 import {
@@ -1039,11 +1040,12 @@ const LEGACY_FILENAME_REGEXES: Record<EntityType, RegExp> = {
   lesson: /^L-\d+\.json$/,
 };
 
+// ISS-703: canonical-ID char class derived from the single CROCKFORD_CLASS source.
 const TEAM_FILENAME_REGEXES: Record<EntityType, RegExp> = {
-  ticket: /^t-[0-9a-hjkmnp-tvwxyz]{16}\.json$/,
-  issue: /^i-[0-9a-hjkmnp-tvwxyz]{16}\.json$/,
-  note: /^n-[0-9a-hjkmnp-tvwxyz]{16}\.json$/,
-  lesson: /^l-[0-9a-hjkmnp-tvwxyz]{16}\.json$/,
+  ticket: new RegExp(`^t-${CROCKFORD_CLASS}{16}\\.json$`),
+  issue: new RegExp(`^i-${CROCKFORD_CLASS}{16}\\.json$`),
+  note: new RegExp(`^n-${CROCKFORD_CLASS}{16}\\.json$`),
+  lesson: new RegExp(`^l-${CROCKFORD_CLASS}{16}\\.json$`),
 };
 
 const CANONICAL_ID_REGEXES: Record<EntityType, RegExp> = {

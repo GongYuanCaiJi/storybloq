@@ -4,6 +4,16 @@ import {
   generateCanonicalId,
   CANONICAL_ID_REGEX,
 } from "../../src/core/canonical-id.js";
+import {
+  CROCKFORD_ALPHABET,
+  CROCKFORD_CLASS,
+  TICKET_CANONICAL_ID_REGEX,
+  ISSUE_CANONICAL_ID_REGEX,
+  NOTE_CANONICAL_ID_REGEX,
+  LESSON_CANONICAL_ID_REGEX,
+} from "../../src/models/types.js";
+import { CROSS_NODE_REF_REGEX, CROSS_NODE_REF_CAPTURE_REGEX } from "../../src/models/ticket.js";
+import { TARGET_WORK_ID_REGEX } from "../../src/autonomous/session-types.js";
 
 const TEST_VECTORS: [string, string][] = [
   ["00000000000000000000", "0000000000000000"],
@@ -104,5 +114,51 @@ describe("CANONICAL_ID_REGEX", () => {
   it("rejects wrong prefix", () => {
     expect(CANONICAL_ID_REGEX.test("x-0000000000000000")).toBe(false);
     expect(CANONICAL_ID_REGEX.test("0000000000000000")).toBe(false);
+  });
+});
+
+describe("ISS-703 single-source Crockford char class", () => {
+  // The hand-written range that every regex used to copy independently. The
+  // derived CROCKFORD_CLASS must match exactly the same characters.
+  const LEGACY_RANGE = /^[0-9a-hjkmnp-tvwxyz]$/;
+  const derivedChar = new RegExp(`^${CROCKFORD_CLASS}$`);
+
+  it("CROCKFORD_CLASS is equivalent to the legacy hand-written range for every ASCII alphanumeric", () => {
+    for (let code = 0x30; code <= 0x7a; code++) {
+      const ch = String.fromCharCode(code);
+      expect(derivedChar.test(ch)).toBe(LEGACY_RANGE.test(ch));
+    }
+  });
+
+  it("matches exactly the 32 alphabet chars and rejects the excluded i/l/o/u", () => {
+    expect(CROCKFORD_ALPHABET).toHaveLength(32);
+    for (const ch of CROCKFORD_ALPHABET) {
+      expect(derivedChar.test(ch)).toBe(true);
+    }
+    for (const ch of ["i", "l", "o", "u"]) {
+      expect(derivedChar.test(ch)).toBe(false);
+    }
+  });
+
+  it("every generated id matches every consuming regex (no drift)", () => {
+    const perType = {
+      t: TICKET_CANONICAL_ID_REGEX,
+      i: ISSUE_CANONICAL_ID_REGEX,
+      n: NOTE_CANONICAL_ID_REGEX,
+      l: LESSON_CANONICAL_ID_REGEX,
+    } as const;
+    for (const prefix of ["t", "i", "n", "l"] as const) {
+      for (let k = 0; k < 50; k++) {
+        const id = generateCanonicalId(prefix);
+        expect(CANONICAL_ID_REGEX.test(id)).toBe(true);
+        expect(perType[prefix].test(id)).toBe(true);
+        if (prefix === "t" || prefix === "i") {
+          // Cross-node refs and targetWork accept canonical ticket/issue ids.
+          expect(TARGET_WORK_ID_REGEX.test(id)).toBe(true);
+          expect(CROSS_NODE_REF_REGEX.test(`node-1:${id}`)).toBe(true);
+          expect(CROSS_NODE_REF_CAPTURE_REGEX.test(`node-1:${id}`)).toBe(true);
+        }
+      }
+    }
   });
 });

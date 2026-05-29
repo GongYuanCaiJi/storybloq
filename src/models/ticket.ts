@@ -8,10 +8,12 @@ import {
   TicketIdSchema,
   ConflictEntrySchema,
   ClaimSchema,
+  CROCKFORD_CLASS,
 } from "./types.js";
 
-export const CROSS_NODE_REF_REGEX = /^[a-z][a-z0-9_-]{0,63}:(T-\d+[a-z]?|t-[0-9a-hjkmnp-tvwxyz]{16}|ISS-\d+|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
-export const CROSS_NODE_REF_CAPTURE_REGEX = /^([a-z][a-z0-9_-]{0,63}):(T-\d+[a-z]?|t-[0-9a-hjkmnp-tvwxyz]{16}|ISS-\d+|i-[0-9a-hjkmnp-tvwxyz]{16})$/;
+// ISS-703: canonical-ID char class derived from the single CROCKFORD_CLASS source.
+export const CROSS_NODE_REF_REGEX = new RegExp(`^[a-z][a-z0-9_-]{0,63}:(T-\\d+[a-z]?|t-${CROCKFORD_CLASS}{16}|ISS-\\d+|i-${CROCKFORD_CLASS}{16})$`);
+export const CROSS_NODE_REF_CAPTURE_REGEX = new RegExp(`^([a-z][a-z0-9_-]{0,63}):(T-\\d+[a-z]?|t-${CROCKFORD_CLASS}{16}|ISS-\\d+|i-${CROCKFORD_CLASS}{16})$`);
 
 export const TicketSchema = z
   .object({

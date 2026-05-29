@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
-
-const ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+import { CROCKFORD_ALPHABET, CROCKFORD_CLASS } from "../models/types.js";
 
 export function encodeBase32Crockford(bytes: Uint8Array): string {
   let result = "";
@@ -14,7 +13,7 @@ export function encodeBase32Crockford(bytes: Uint8Array): string {
           ? bytes[byteIndex + 1]! >>> (8 - shift)
           : 0)) &
       0xff;
-    result += ALPHABET[(value >>> 3) & 0x1f];
+    result += CROCKFORD_ALPHABET[(value >>> 3) & 0x1f];
   }
   return result;
 }
@@ -26,4 +25,4 @@ export function generateCanonicalId(prefix: CanonicalPrefix): string {
   return `${prefix}-${encodeBase32Crockford(bytes)}`;
 }
 
-export const CANONICAL_ID_REGEX = /^[tinl]-[0-9a-hjkmnp-tvwxyz]{16}$/;
+export const CANONICAL_ID_REGEX = new RegExp(`^[tinl]-${CROCKFORD_CLASS}{16}$`);
