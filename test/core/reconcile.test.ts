@@ -57,6 +57,27 @@ describe("computeReconcilePlan", () => {
     expect(result.plan.renames[0]!.reason).toContain("valid reservation");
   });
 
+  it("does not reassign a number a tombstone still holds (ISS-689)", () => {
+    // T-100 is a tombstone (lifecycle deleted). Two active tickets collide on
+    // T-099; the renamed loser must skip T-100 (the tombstone's number) and take
+    // T-101, or restoring/surfacing the tombstone would resurrect a duplicate.
+    const s = state({
+      tickets: [
+        makeTicket({ id: "t-aaa0000000000001", displayId: "T-099", createdDate: "2026-01-01" }),
+        makeTicket({ id: "t-bbb0000000000002", displayId: "T-099", createdDate: "2026-01-15" }),
+        makeTicket({ id: "t-ccc0000000000100", displayId: "T-100", createdDate: "2026-01-02", lifecycle: "deleted" }),
+      ],
+    });
+    const result = computeReconcilePlan(s);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.renames).toHaveLength(1);
+    const rename = result.plan.renames[0]!;
+    expect(rename.id).toBe("t-bbb0000000000002");
+    expect(rename.newDisplayId).not.toBe("T-100");
+    expect(rename.newDisplayId).toBe("T-101");
+  });
+
   it("protected branch ownership wins before timestamp", () => {
     const s = state({
       tickets: [

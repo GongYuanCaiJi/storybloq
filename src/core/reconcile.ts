@@ -167,7 +167,12 @@ function reconcileEntityType<T extends EntityWithTimestamp & Record<string, unkn
     group.push(item);
   }
 
-  let nextSeq = maxSequentialNumber(activeItems as readonly Resolvable[], numericRegex) + 1;
+  // ISS-689: allocate next sequential numbers from the FULL item set (including
+  // tombstones), not just active items. Collision grouping above is intentionally
+  // over active items only, but a renamed loser must never be handed a displayId a
+  // tombstone still holds (its displayId/previousDisplayIds), or restoring/surfacing
+  // that tombstone would resurrect a duplicate reconcile itself created.
+  let nextSeq = maxSequentialNumber(items as readonly Resolvable[], numericRegex) + 1;
   const renames: ReconcileRename[] = [];
 
   for (const [displayId, group] of groups) {
