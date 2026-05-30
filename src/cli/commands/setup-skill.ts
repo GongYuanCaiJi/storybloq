@@ -1095,16 +1095,15 @@ async function handleSetupCodex(options: SetupSkillOptions = {}): Promise<void> 
     return;
   }
 
+  // Primary Codex skill artifact: leave unwrapped so a total failure propagates
+  // to the top-level handler and sets a non-zero exit (parity with
+  // handleSetupClaude's primary writes). The no-setup self-heal path has its own
+  // non-fatal guard in autoRefreshSkillIfStale, so this does not affect it.
   const skillDir = join(homedir(), ".agents", "skills", "story");
   const existed = existsSync(join(skillDir, "SKILL.md"));
-  try {
-    const writtenFiles = await copyDirRecursive(srcSkillDir, skillDir);
-    log(`${existed ? "Updated" : "Installed"} $story skill at ${skillDir}/`);
-    log(`  ${writtenFiles.join(" + ")} written`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`Warning: $story skill copy failed: ${msg}\n`);
-  }
+  const writtenFiles = await copyDirRecursive(srcSkillDir, skillDir);
+  log(`${existed ? "Updated" : "Installed"} $story skill at ${skillDir}/`);
+  log(`  ${writtenFiles.join(" + ")} written`);
 
   const compatSkillDir = join(codexHome(), "skills", "story");
   if (existsSync(join(compatSkillDir, "SKILL.md"))) {

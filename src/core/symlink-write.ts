@@ -17,6 +17,19 @@
  * inside `.story/` can never escape the repo through a planted symlink. User
  * dotfiles are symlinked on purpose and must be followed; in-repo project data
  * must not. Do NOT route `.story/` writers through this module.
+ *
+ * Accepted behaviors (intentional, do not "harden"):
+ *  - Following a DANGLING link writes through to (and `mkdir -p` creates) the
+ *    link's intended final target, even if that is an arbitrary ancestor chain.
+ *    This is the fresh-stow self-heal case: the user deliberately symlinked the
+ *    dotfile, the content is the tool's own generated config, no pre-existing
+ *    file is overwritten, and planting the link already requires write access to
+ *    the parent. Restricting to "only follow when the parent exists" would break
+ *    that case, so it is left as-is.
+ *  - Atomicity relies on `tmpPath` sitting beside the RESOLVED real target so the
+ *    final `rename` stays on the target's filesystem. This is verified by
+ *    construction (the tmp path is derived from `realTarget`), not by a cross-FS
+ *    test, which is not portable.
  */
 
 import { lstat, mkdir, readlink, realpath, rename, unlink, writeFile } from "node:fs/promises";
@@ -61,6 +74,8 @@ export async function resolveSymlinkTarget(path: string): Promise<string> {
       }
       return next;
     }
+    // Defensive bound only: a real cyclic chain throws ELOOP from realpath above
+    // and never reaches here; this caps a pathological all-dangling chain.
     throw new Error(`symlink chain too deep at ${path}`);
   }
 }

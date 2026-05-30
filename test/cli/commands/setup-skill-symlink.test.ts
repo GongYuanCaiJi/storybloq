@@ -243,6 +243,26 @@ describe("copyDirRecursive symlinked destination (issue #12)", () => {
     expect(existsSync(realDest + ".bak")).toBe(false);
   });
 
+  it("self-heals a DANGLING directory symlink: creates the real dir, preserves the link", async () => {
+    if (process.platform === "win32") return;
+    // The exact fresh-stow case: ~/.claude/skills/story symlinked to a dir that
+    // does not exist yet. copyDirRecursive must create the backing dir and keep
+    // the symlink, not replace it with a real directory.
+    const realMissing = join(dir, "realdest"); // does NOT exist
+    const linkDest = join(dir, "linkdest");
+    await symlink(realMissing, linkDest);
+    expect((await lstat(linkDest)).isSymbolicLink()).toBe(true);
+
+    const { copyDirRecursive } = await import(SKILL);
+    await copyDirRecursive(src, linkDest);
+
+    expect((await lstat(linkDest)).isSymbolicLink()).toBe(true);
+    expect(existsSync(realMissing)).toBe(true);
+    expect(await readFile(join(realMissing, "a.txt"), "utf-8")).toBe("A");
+    // Readable through the preserved link too.
+    expect(await readFile(join(linkDest, "sub", "b.txt"), "utf-8")).toBe("B");
+  });
+
   it("refuses to convert a symlink that points at an existing non-directory", async () => {
     if (process.platform === "win32") return;
     const realFile = join(dir, "realfile");

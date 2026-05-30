@@ -102,15 +102,59 @@ describe("atomicWriteFollowingSymlink", () => {
     expect(await readFile(real, "utf-8")).toBe("chain");
   });
 
-  it("throws on a cyclic symlink rather than clobbering", async () => {
+  it("follows a multi-hop DANGLING chain to its final intended target (readlink walk)", async () => {
     if (process.platform === "win32") return;
+    // link -> mid -> dir/sub/final.json, where the final target (and its parent)
+    // does not exist. realpath throws ENOENT, so resolveSymlinkTarget must walk
+    // readlink across both hops and create the final target, preserving both links.
+    const finalMissing = join(dir, "sub", "final.json");
+    const mid = join(dir, "mid");
+    const link = join(dir, "link");
+    await symlink(finalMissing, mid);
+    await symlink(mid, link);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect((await lstat(mid)).isSymbolicLink()).toBe(true);
+
+    await atomicWriteFollowingSymlink(link, "walked");
+
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect((await lstat(mid)).isSymbolicLink()).toBe(true);
+    expect(await readFile(finalMissing, "utf-8")).toBe("walked");
+  });
+
+  it("rethrows (does not clobber) when the target's symlink-ness is unknowable (EACCES via locked parent)", async () => {
+    if (process.platform === "win32") return;
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root bypasses 0o000
+    const { chmod } = await import("node:fs/promises");
+    const locked = join(dir, "locked");
+    const real = join(dir, "real.json");
+    const link = join(locked, "settings.json");
+    await mkdir(locked, { recursive: true });
+    await writeFile(real, "old", "utf-8");
+    await symlink(real, link);
+    await chmod(locked, 0o000); // lstat(link) now fails EACCES (parent not searchable)
+
+    try {
+      await expect(atomicWriteFollowingSymlink(link, "new")).rejects.toThrow();
+    } finally {
+      await chmod(locked, 0o755); // restore so afterEach cleanup + assertions work
+    }
+
+    // The link was never touched: still a symlink, real target unchanged.
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(real, "utf-8")).toBe("old");
+  });
+
+  it("throws (ELOOP) on a cyclic symlink rather than clobbering", async () => {
+    if (process.platform === "win32") return;
+    // realpath surfaces ELOOP for a cycle, which resolveSymlinkTarget rethrows
+    // (non-ENOENT) before the readlink walk -- the link is never replaced.
     const a = join(dir, "a");
     const b = join(dir, "b");
     await symlink(b, a);
     await symlink(a, b); // a -> b -> a
 
     await expect(atomicWriteFollowingSymlink(a, "x")).rejects.toThrow();
-    // The link is still a link; it was never replaced.
     expect((await lstat(a)).isSymbolicLink()).toBe(true);
   });
 });
