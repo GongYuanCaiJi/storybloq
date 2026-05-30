@@ -2,6 +2,8 @@ import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { CROSS_NODE_REF_CAPTURE_REGEX } from "../models/ticket.js";
 import { hasConflicts } from "./conflicts.js";
+import { displayIdOf } from "./resolver.js";
+import { isTeamModeConfig } from "./team-capabilities.js";
 
 // --- Types ---
 
@@ -99,6 +101,52 @@ export function validateProject(state: ProjectState): ValidationResult {
         message: `Duplicate lesson ID: ${id} appears ${count} times.`,
         entity: id,
       });
+    }
+  }
+
+  // Duplicate displayIds (team mode only) -- ISS-729.
+  // In team mode the default "local" allocator assigns a PROVISIONAL sequential
+  // displayId (max+1) per branch while the canonical id stays a unique entropy
+  // id, so two branches can independently mint the same "T-042"; git sees no
+  // conflict (canonical ids and filenames differ), cross-references never break,
+  // and reconcile renames the losers on merge. `validate` is the natural
+  // pre-merge sanity command, so surface the same duplicate-displayId signal
+  // that `storybloq team doctor` and reconcile already provide, rather than
+  // leaving it to be discovered only at merge/reconcile time. Two deliberate
+  // choices: (1) group over ACTIVE items only -- a displayId still held by a
+  // tombstone is not a reconcile-actionable duplicate (ISS-689), and flagging it
+  // would be a false positive reconcile will not resolve; (2) level "warning",
+  // not "error" -- a provisional displayId collision is a by-design-transient
+  // state that leaves the project fully functional (canonical ids are unique)
+  // until reconcile runs, so it should surface without failing validate. In
+  // non-team mode displayId === canonical id, so any collision is already
+  // reported as duplicate_<entity>_id; gating on team mode avoids double-counting.
+  if (isTeamModeConfig(state.config)) {
+    const displayIdGroups: ReadonlyArray<{ type: string; items: readonly { id: string; displayId?: string | null }[] }> = [
+      { type: "ticket", items: state.tickets },
+      { type: "issue", items: state.issues },
+      { type: "note", items: state.notes },
+      { type: "lesson", items: state.lessons },
+    ];
+    for (const { type, items } of displayIdGroups) {
+      const idsByDisplay = new Map<string, string[]>();
+      for (const item of items) {
+        if ((item as Record<string, unknown>).lifecycle === "deleted") continue;
+        const did = displayIdOf(item);
+        const ids = idsByDisplay.get(did) ?? [];
+        ids.push(item.id);
+        idsByDisplay.set(did, ids);
+      }
+      for (const [displayId, ids] of idsByDisplay) {
+        if (ids.length > 1) {
+          findings.push({
+            level: "warning",
+            code: "duplicate_display_id",
+            message: `Duplicate ${type} displayId ${displayId}: ${ids.join(", ")}. Run \`storybloq reconcile\` to assign unique displayIds.`,
+            entity: displayId,
+          });
+        }
+      }
     }
   }
 

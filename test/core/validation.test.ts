@@ -343,6 +343,67 @@ describe("validateProject", () => {
   });
 });
 
+describe("ISS-729: team-mode duplicate displayId detection", () => {
+  const teamConfig = { ...minimalConfig, team: { enabled: true } } as Config;
+
+  it("flags duplicate ticket displayIds as a warning in team mode (not error)", () => {
+    const state = makeState({
+      config: teamConfig,
+      tickets: [
+        makeTicket({ id: "T-aaaa11112222", displayId: "T-042", phase: "p1" }),
+        makeTicket({ id: "T-bbbb33334444", displayId: "T-042", phase: "p1" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    } as never);
+    const result = validateProject(state);
+    const finding = result.findings.find((f) => f.code === "duplicate_display_id");
+    expect(finding).toBeDefined();
+    expect(finding!.level).toBe("warning");
+    expect(finding!.entity).toBe("T-042");
+    expect(finding!.message).toContain("T-aaaa11112222");
+    expect(finding!.message).toContain("T-bbbb33334444");
+    // Warning, not error: the canonical ids are unique so the project is valid.
+    expect(result.errorCount).toBe(0);
+    expect(result.valid).toBe(true);
+  });
+
+  it("also flags duplicate issue displayIds in team mode", () => {
+    const state = makeState({
+      config: teamConfig,
+      issues: [
+        makeIssue({ id: "ISS-aaaa1111", displayId: "ISS-007" }),
+        makeIssue({ id: "ISS-bbbb2222", displayId: "ISS-007" }),
+      ],
+    } as never);
+    const finding = validateProject(state).findings.find((f) => f.code === "duplicate_display_id");
+    expect(finding).toBeDefined();
+    expect(finding!.entity).toBe("ISS-007");
+  });
+
+  it("does NOT flag duplicate displayIds in non-team mode (gated off)", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "T-aaaa11112222", displayId: "T-042", phase: "p1" }),
+        makeTicket({ id: "T-bbbb33334444", displayId: "T-042", phase: "p1" }),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    } as never);
+    expect(validateProject(state).findings.some((f) => f.code === "duplicate_display_id")).toBe(false);
+  });
+
+  it("does NOT flag a displayId still held by a tombstone (active-only, ISS-689)", () => {
+    const state = makeState({
+      config: teamConfig,
+      tickets: [
+        makeTicket({ id: "T-aaaa11112222", displayId: "T-042", phase: "p1" }),
+        makeTicket({ id: "T-bbbb33334444", displayId: "T-042", phase: "p1", lifecycle: "deleted" } as never),
+      ],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    } as never);
+    expect(validateProject(state).findings.some((f) => f.code === "duplicate_display_id")).toBe(false);
+  });
+});
+
 describe("mergeValidation", () => {
   it("merges loader warnings into validation result", () => {
     const base = validateProject(makeState());
