@@ -422,9 +422,15 @@ export function mergeValidation(
   result: ValidationResult,
   loaderWarnings: readonly LoadWarning[],
 ): ValidationResult {
-  if (loaderWarnings.length === 0) return result;
+  // ISS-730: drop "cross_reference" loader warnings here. They are produced by
+  // the opt-in validateOnLoad pass, which runs the SAME validateProject the
+  // validate command already runs against ctx.state -- merging them would
+  // double-report every cross-reference finding. They remain in the raw load
+  // warning stream for consumers (read commands) that do not run validateProject.
+  const merged = loaderWarnings.filter((w) => w.type !== "cross_reference");
+  if (merged.length === 0) return result;
 
-  const extra: ValidationFinding[] = loaderWarnings.map((w) => ({
+  const extra: ValidationFinding[] = merged.map((w) => ({
     level:
       w.type === "naming_convention"
         ? ("info" as const)

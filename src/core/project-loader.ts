@@ -39,6 +39,7 @@ import {
 } from "./errors.js";
 import { listHandovers } from "./handover-parser.js";
 import { assertTeamWriteCapabilities, isTeamModeConfig } from "./team-capabilities.js";
+import { validateProject } from "./validation.js";
 import type { ZodType } from "zod";
 
 // --- Public Types ---
@@ -215,6 +216,29 @@ export async function loadProject(
     config,
     handoverFilenames,
   });
+
+  // 11. ISS-730: opt-in continuous cross-reference integrity check. When
+  // config.validateOnLoad is true, run the full validateProject pass and feed
+  // its ERROR-level findings (dangling parentTicket/blockedBy/relatedTickets/
+  // supersedes, cycles, duplicate ids, unresolved conflicts) into the load
+  // warning stream as advisory "cross_reference" warnings. This is defense in
+  // depth, NOT a hard gate: cross_reference is not an integrity type, so it
+  // never trips strict mode (step 9) and never blocks a read -- it only catches
+  // externally-introduced corruption earlier than an explicit `storybloq
+  // validate`. Off by default to keep loads cheap and to avoid bricking reads on
+  // a pre-existing dangling ref. The check is only as strong as validateProject
+  // (see ISS-042: lesson-supersedes cycle coverage).
+  if (config.validateOnLoad === true) {
+    const validation = validateProject(state);
+    for (const f of validation.findings) {
+      if (f.level !== "error") continue;
+      warnings.push({
+        type: "cross_reference",
+        file: f.entity ?? ".story",
+        message: `[${f.code}] ${f.message}`,
+      });
+    }
+  }
 
   return { state, warnings, fileClassifications };
 }

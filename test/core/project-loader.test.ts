@@ -1070,3 +1070,48 @@ describe("detectTeamModeFromDisk (ISS-701)", () => {
     await expect(detectTeamModeFromDisk(testRoot)).rejects.not.toMatchObject({ code: "ENOENT" });
   });
 });
+
+describe("validateOnLoad cross-reference check (ISS-730)", () => {
+  const danglingTicket = { ...validTicket, id: "T-001", parentTicket: "T-999" };
+
+  it("off by default: a dangling parentTicket produces NO cross_reference warning", async () => {
+    testRoot = await createTestProject({
+      tickets: { "T-001.json": danglingTicket },
+    });
+    const result = await loadProject(testRoot);
+    expect(result.warnings.some((w) => w.type === "cross_reference")).toBe(false);
+  });
+
+  it("when enabled: surfaces the dangling ref as an advisory cross_reference warning (load still succeeds)", async () => {
+    testRoot = await createTestProject({
+      config: { ...minimalConfig, validateOnLoad: true },
+      tickets: { "T-001.json": danglingTicket },
+    });
+    const result = await loadProject(testRoot);
+    expect(result.state.tickets).toHaveLength(1); // load did not fail
+    const xref = result.warnings.find((w) => w.type === "cross_reference");
+    expect(xref).toBeDefined();
+    expect(xref!.message).toContain("invalid_parent_ref");
+    expect(xref!.message).toContain("T-999");
+  });
+
+  it("a clean project with validateOnLoad enabled produces no cross_reference warning", async () => {
+    testRoot = await createTestProject({
+      config: { ...minimalConfig, validateOnLoad: true },
+      tickets: { "T-001.json": validTicket },
+    });
+    const result = await loadProject(testRoot);
+    expect(result.warnings.some((w) => w.type === "cross_reference")).toBe(false);
+  });
+
+  it("cross_reference is non-fatal even in strict mode (does not throw)", async () => {
+    testRoot = await createTestProject({
+      config: { ...minimalConfig, validateOnLoad: true },
+      tickets: { "T-001.json": danglingTicket },
+    });
+    // strict mode only fails on INTEGRITY_WARNING_TYPES, evaluated before the
+    // validateOnLoad pass; cross_reference must never brick a strict load.
+    const result = await loadProject(testRoot, { strict: true });
+    expect(result.warnings.some((w) => w.type === "cross_reference")).toBe(true);
+  });
+});

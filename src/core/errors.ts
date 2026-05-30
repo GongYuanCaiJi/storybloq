@@ -21,7 +21,11 @@ export type LoadWarningType =
   | "duplicate_id"
   | "naming_convention"
   | "filename_id_mismatch"
-  | "filename_classification_mismatch";
+  | "filename_classification_mismatch"
+  // ISS-730: advisory cross-reference integrity finding from the opt-in
+  // validateOnLoad pass. Deliberately NOT an integrity type -- it must never
+  // fail strict mode or hard-block a load, only surface in the warning stream.
+  | "cross_reference";
 
 /** Integrity warnings fail strict mode. Cosmetic warnings are collected but never block. */
 export const INTEGRITY_WARNING_TYPES: readonly LoadWarningType[] = [

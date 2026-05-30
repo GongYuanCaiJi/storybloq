@@ -21,6 +21,12 @@ export const ConfigSchema = z
     language: z.string(),
     features: FeaturesSchema,
     recipe: z.string().optional(),  // default "coding" applied in guide.ts handleStart
+    // ISS-730: opt-in continuous cross-reference integrity check. When true,
+    // loadProject runs a full validateProject pass and surfaces ERROR-level
+    // findings as advisory "cross_reference" load warnings (never fatal, never
+    // trips strict mode). Off by default to keep loads O(per-file) and to avoid
+    // bricking reads on a pre-existing dangling reference.
+    validateOnLoad: z.boolean().optional(),
     recipeOverrides: z.object({
       maxTicketsPerSession: z.number().min(0).optional(),
       compactThreshold: z.string().optional(),

@@ -422,6 +422,28 @@ describe("mergeValidation", () => {
     const merged = mergeValidation(base, []);
     expect(merged).toBe(base); // same reference
   });
+
+  it("ISS-730: drops cross_reference loader warnings (validate runs its own pass)", () => {
+    const base = validateProject(makeState());
+    const warnings: LoadWarning[] = [
+      { file: "T-001", message: "[invalid_parent_ref] dangling", type: "cross_reference" },
+    ];
+    const merged = mergeValidation(base, warnings);
+    // The only loader warning was cross_reference, so nothing is merged in.
+    expect(merged).toBe(base);
+    expect(merged.findings.some((f) => f.code === "loader_cross_reference")).toBe(false);
+  });
+
+  it("ISS-730: cross_reference is dropped but other loader warnings still merge", () => {
+    const base = validateProject(makeState());
+    const warnings: LoadWarning[] = [
+      { file: "T-001", message: "[invalid_parent_ref] dangling", type: "cross_reference" },
+      { file: "tickets/T-bad.json", message: "Invalid JSON", type: "parse_error" },
+    ];
+    const merged = mergeValidation(base, warnings);
+    expect(merged.findings.some((f) => f.code === "loader_parse_error")).toBe(true);
+    expect(merged.findings.some((f) => f.code === "loader_cross_reference")).toBe(false);
+  });
 });
 
 describe("crossNodeBlockedBy validation (T-337)", () => {
