@@ -336,4 +336,39 @@ describe("handleSynthesize verification gate", () => {
 
     expect(() => handleSynthesize(input)).toThrow(SnapshotIntegrityError);
   });
+
+  it("throws (escalates, does not skip) when a present manifest has an invalid-format identity field (ISS-723)", () => {
+    // A present-on-disk manifest whose stored sessionId is tampered to an
+    // invalid FORMAT is a tampered snapshot, not an absent one. Before ISS-723
+    // it was misclassified snapshot_absent (gate skipped, findings passed as if
+    // unverified); it must now escalate (throw -> MCP isError).
+    const projectRoot = join(tmpDir, "tampered-id-project");
+    const sessionId = "a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e4";
+    const reviewId = "code-review-r1";
+    mkdirSync(join(projectRoot, ".story"), { recursive: true });
+    writeFileSync(join(projectRoot, ".story", "config.json"), JSON.stringify({ version: 2, recipeOverrides: {} }));
+    const sessionDir = join(projectRoot, ".story", "sessions", sessionId);
+    mkdirSync(sessionDir, { recursive: true });
+    mkdirSync(join(projectRoot, "src"), { recursive: true });
+    writeFileSync(join(projectRoot, "src", "a.ts"), "line1\nline2\nline3\n");
+
+    writeReviewSnapshot({ projectRoot, sessionId, reviewId, stage: "code-review", round: 1, files: ["src/a.ts"] });
+
+    // Tamper the stored sessionId to an invalid-format string, keeping valid JSON
+    // (the manifest is written read-only, so chmod first).
+    const manifestPath = join(sessionDir, "review-snapshot", reviewId, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.sessionId = "tampered-not-a-uuid";
+    chmodSync(manifestPath, 0o644);
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const input = makeSynthesizeInput({
+      projectRoot,
+      sessionDir,
+      sessionId,
+      metadata: { activeLenses: ["security", "clean-code"], skippedLenses: [], reviewRound: 1, reviewId },
+    });
+
+    expect(() => handleSynthesize(input)).toThrow(SnapshotIntegrityError);
+  });
 });

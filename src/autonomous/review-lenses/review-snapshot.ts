@@ -569,8 +569,25 @@ export function readReviewSnapshotManifestWithBytes(
   // Manifest identity cross-checks — verify the manifest matches the
   // requested (sessionId, reviewId) and the canonical paths we derived.
   // Run before lexical path validation so identity mismatches fail first.
-  assertValidSessionId(manifest.sessionId);
-  assertValidReviewId(manifest.reviewId);
+  //
+  // ISS-723: the manifest is present on disk, so an invalid-FORMAT stored
+  // sessionId/reviewId is a TAMPERED manifest, not an absent snapshot. The
+  // requested-id rejection at the top of this function (assertValidSessionId/
+  // assertValidReviewId, lines 519-520) throws "invalid sessionId/reviewId",
+  // which loadSnapshot classifies as snapshot_absent (benign skip). These
+  // manifest-field checks must NOT reuse that wording, or a tampered manifest
+  // would be misclassified as absent and skip verification. Use a distinct
+  // "malformed" message so loadSnapshot escalates it as manifest_load_failed.
+  if (!SESSION_ID_RE.test(manifest.sessionId)) {
+    throw new Error(
+      `review-snapshot: manifest.sessionId is malformed (tampered manifest; expected canonical UUID): ${JSON.stringify(manifest.sessionId)}`,
+    );
+  }
+  if (!REVIEW_ID_RE.test(manifest.reviewId)) {
+    throw new Error(
+      `review-snapshot: manifest.reviewId is malformed (tampered manifest; expected <stage>-r<n>): ${JSON.stringify(manifest.reviewId)}`,
+    );
+  }
   assertReviewIdMatchesStageRound(
     manifest.reviewId,
     manifest.stage,
