@@ -10,6 +10,7 @@
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import { registerAllTools } from "../../src/mcp/tools.js";
+import { buildLensHistoryUpdate } from "../../src/autonomous/stages/types.js";
 
 function captureGuideSchema(): z.ZodTypeAny {
   const tools = new Map<string, { inputSchema: z.ZodRawShape }>();
@@ -46,7 +47,7 @@ describe("autonomous_guide report.findings schema (ISS-717)", () => {
     expect(f.severity).toBe("major");
   });
 
-  it("strips lens-only fields rather than rejecting the payload", () => {
+  it("preserves the lens field (ISS-724) but strips the other lens-only fields", () => {
     const parsed = parseReport([
       {
         lens: "security",
@@ -63,8 +64,14 @@ describe("autonomous_guide report.findings schema (ISS-717)", () => {
     const f = parsed.report.findings[0];
     expect(f.severity).toBe("critical");
     expect(f.disposition).toBe("open");
-    expect(f.lens).toBeUndefined();
+    // ISS-724: lens now survives the boundary so lensReviewHistory records a
+    // real per-lens entry instead of collapsing to lens:'unknown'.
+    expect(f.lens).toBe("security");
+    // The remaining lens-only fields are unused downstream and stay stripped.
+    expect(f.lensVersion).toBeUndefined();
+    expect(f.recommendedImpact).toBeUndefined();
     expect(f.evidence).toBeUndefined();
+    expect(f.confidence).toBeUndefined();
     expect(f.issueKey).toBeUndefined();
   });
 
@@ -88,5 +95,29 @@ describe("autonomous_guide report.findings schema (ISS-717)", () => {
     expect(() =>
       parseReport([{ severity: "major", category: "x", description: "y", disposition: "bogus" }]),
     ).toThrow();
+  });
+});
+
+describe("lens fidelity through the report boundary (ISS-724)", () => {
+  it("a lens-shaped finding parsed through the real schema records its true lens in history", () => {
+    const parsed = parseReport([
+      { lens: "security", severity: "critical", category: "injection", description: "sql injection" },
+      { lens: "error-handling", severity: "major", category: "swallowed-error", description: "empty catch" },
+    ], "request_changes");
+
+    const history = buildLensHistoryUpdate(parsed.report.findings, [], "T-001", "CODE_REVIEW");
+    expect(history).not.toBeNull();
+    expect(history!.map((e) => e.lens).sort()).toEqual(["error-handling", "security"]);
+    // Distinct lenses no longer collapse onto lens:'unknown'.
+    expect(history!.some((e) => e.lens === "unknown")).toBe(false);
+  });
+
+  it("a finding with no lens still falls back to 'unknown' (e.g. a non-lens reviewer)", () => {
+    const parsed = parseReport([
+      { severity: "major", category: "logic", description: "missing null check" },
+    ]);
+    const history = buildLensHistoryUpdate(parsed.report.findings, [], "T-001", "CODE_REVIEW");
+    expect(history).not.toBeNull();
+    expect(history![0].lens).toBe("unknown");
   });
 });

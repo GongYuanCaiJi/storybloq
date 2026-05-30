@@ -1146,6 +1146,16 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
           severity: z.string(),
           category: z.string(),
           description: z.string(),
+          // ISS-724: declare the synthesized finding's lens identifier so it
+          // survives the report boundary. Without it zod strips the field (the
+          // object has no .passthrough()), so buildLensHistoryUpdate sees no
+          // lens and records every per-lens finding under lens:'unknown',
+          // collapsing what should be distinct security/clean-code/error-handling
+          // history entries (dedup key is ticketId:stage:lens:category). The
+          // other lens-only fields (evidence, issueKey, recommendedImpact) are
+          // unused downstream of the report boundary, so they stay stripped.
+          // Observability fidelity only -- no behavioral effect on the review.
+          lens: z.string().optional(),
           // ISS-556: stays constrained to the enum persisted by
           // SessionStateSchema (a default of "open" can never violate it).
           disposition: z.enum(LENS_FINDING_DISPOSITIONS).default("open").describe(
