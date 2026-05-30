@@ -63,7 +63,7 @@ export class CodeReviewStage implements WorkflowStage {
           "",
           "1. Capture the full diff and changed file list (`git diff --name-only`)",
           `2. Call \`storybloq_review_lenses_prepare\` with the diff, changedFiles, stage: CODE_REVIEW, ticketDescription, reviewRound: ${roundNum}, and sessionId: "${ctx.state.sessionId}" (the sessionId lets prepare snapshot the reviewed files so findings can be verified)`,
-          "3. Spawn all lens subagents in parallel (each prompt is returned by the prepare tool)",
+          "3. Spawn all lens subagents in parallel, dispatching each returned prompt as-is (it already embeds the diff; do not append the diff again). If a prompt comes back empty (promptTruncated), reduce the diff and re-run that lens rather than dispatching a blank prompt.",
           `4. Collect results and call \`storybloq_review_lenses_synthesize\` with the lens results, plus the diff and changedFiles from step 1, the same reviewRound: ${roundNum}, the reviewId returned by prepare, and the sessionId "${ctx.state.sessionId}" (enables finding verification, origin classification, and issue filing for pre-existing findings)`,
           "5. Run the merger agent with the returned mergerPrompt, then call `storybloq_review_lenses_judge`",
           "6. Run the judge agent and report the final SynthesisResult verdict and findings, including the reviewId from prepare (so the recorded verdict reflects whether the verification gate ran)",

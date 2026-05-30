@@ -45,7 +45,7 @@ export class PlanReviewStage implements WorkflowStage {
           "",
           "1. Read the plan file",
           "2. Call `storybloq_review_lenses_prepare` with the plan text as diff, stage: PLAN_REVIEW, and ticketDescription",
-          "3. Spawn all lens subagents in parallel (each prompt is returned by the prepare tool)",
+          "3. Spawn all lens subagents in parallel, dispatching each returned prompt as-is (it already embeds the plan text; do not append it again). If a prompt comes back empty (promptTruncated), reduce the scope and re-run that lens rather than dispatching a blank prompt.",
           "4. Collect results and call `storybloq_review_lenses_synthesize` with the lens results",
           "5. Run the merger agent with the returned mergerPrompt, then call `storybloq_review_lenses_judge`",
           "6. Run the judge agent and report the final SynthesisResult verdict and findings, including the reviewId from prepare (so the recorded verdict reflects whether the verification gate ran)",

@@ -68,8 +68,8 @@ The tool returns `lensPrompts` (one per active lens) and `metadata`.
 ### Step 4: Spawn lens agents in parallel
 
 For each lens prompt where `cached: false`, launch a subagent in a **single message with multiple Agent tool calls**:
-- **Prompt:** The `prompt` string returned by the prepare tool + append `\n\n## Diff to review\n\n` + the `artifact` string from Step 3
-- **If `promptTruncated: true`:** The prompt was too large to include. Read `promptRef` from the skill directory (`~/.claude/skills/story/review-lenses/<promptRef>`), fill the preamble variables (see Path B Step 5), select the stage-appropriate section, and append the artifact yourself.
+- **Prompt:** Use the `prompt` string returned by the prepare tool **as-is**. It already contains the full lens instructions with the review artifact (diff or plan) embedded at the end, with secrets redacted. Do NOT append the artifact again -- that duplicates the diff inside the dispatched prompt and re-introduces unredacted content (the separate top-level `artifact` field is the raw, un-redacted input, returned only for reference, not for re-appending).
+- **If `promptTruncated: true`:** The assembled prompt exceeded the size cap, so `prompt` is empty (rare -- the cap is large). Do NOT reconstruct it from `promptRef`: prepare does not return the resolved preamble variables, so a reconstruction would not match what prepare built. Instead reduce the review scope (review fewer files, or split the diff across smaller `prepare` calls) and re-run, or surface it as an error -- do not dispatch a blank prompt.
 - **Model:** The `model` string returned (sonnet or opus)
 - **Tools:** Read, Grep, Glob (read-only)
 
