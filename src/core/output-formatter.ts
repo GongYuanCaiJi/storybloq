@@ -97,11 +97,34 @@ export function partialEnvelope<T>(
 // --- Markdown Safety ---
 
 /**
- * Escapes characters that would create Markdown structure in inline text.
- * Handles heading, list, blockquote, ordered list at line start.
- * Handles inline structural characters.
+ * Escapes only heading and list markers at the start of a line (unordered and
+ * ordered) so an embedded field cannot start a new Markdown block inside the
+ * formatter's own `md` output.
+ *
+ * This is NOT a Markdown or HTML sanitizer. Inline-structural, HTML-entity, and
+ * backslash escaping were intentionally removed: the only consumers of formatter
+ * output are plain-text sinks (CLI stdout and MCP `text` results to the model),
+ * neither of which decodes entities or renders Markdown, so that escaping never
+ * got decoded and instead leaked as visible noise like `&amp;`, `\(`, `\[`.
+ * Blockquotes (`>`) and inline characters are passed through for plain-text
+ * readability. Do not reintroduce inline/HTML escaping unless a real
+ * Markdown/HTML renderer is added downstream.
  */
 export function escapeMarkdownInline(text: string): string {
+  return text
+    .replace(/(^|\n)([#\-+*])/g, "$1\\$2")
+    .replace(/(^|\n)(\d+)\./g, "$1$2\\.");
+}
+
+/**
+ * Full Markdown + HTML escaping for content embedded in a rendered, shareable
+ * document (the `storybloq export` output). Unlike escapeMarkdownInline (which
+ * only guards line-start markers for plain-text sinks), this also neutralizes
+ * inline structure, HTML, and link injection, because the export document is
+ * meant to be opened in a Markdown viewer where an unescaped title could inject
+ * a link or raw HTML.
+ */
+export function escapeMarkdownDocument(text: string): string {
   return text
     .replace(/\\/g, "\\\\")
     .replace(/&/g, "&amp;")
@@ -1132,11 +1155,11 @@ function formatPhaseExport(
   }
 
   const lines: string[] = [];
-  lines.push(`# ${escapeMarkdownInline(phase.name)} (${phase.id})`);
+  lines.push(`# ${escapeMarkdownDocument(phase.name)} (${phase.id})`);
   lines.push("");
   lines.push(`Status: ${phaseStatus}`);
   if (phase.description) {
-    lines.push(`Description: ${escapeMarkdownInline(phase.description)}`);
+    lines.push(`Description: ${escapeMarkdownDocument(phase.description)}`);
   }
 
   if (leaves.length > 0) {
@@ -1145,7 +1168,7 @@ function formatPhaseExport(
     for (const t of leaves) {
       const indicator = t.status === "complete" ? "[x]" : t.status === "inprogress" ? "[~]" : "[ ]";
       const parentLabel = t.parentTicket && umbrellaAncestors.has(t.parentTicket) ? ` (under ${resolveTicketRefDisplay(t.parentTicket, state)})` : "";
-      lines.push(`${indicator} ${displayIdOf(t)}: ${escapeMarkdownInline(t.title)}${parentLabel}`);
+      lines.push(`${indicator} ${displayIdOf(t)}: ${escapeMarkdownDocument(t.title)}${parentLabel}`);
     }
   }
 
@@ -1153,7 +1176,7 @@ function formatPhaseExport(
     lines.push("");
     lines.push("## Cross-Phase Dependencies");
     for (const [, dep] of crossPhaseDeps) {
-      lines.push(`- ${displayIdOf(dep)}: ${escapeMarkdownInline(dep.title)} [${dep.status}] (${dep.phase ?? "unphased"})`);
+      lines.push(`- ${displayIdOf(dep)}: ${escapeMarkdownDocument(dep.title)} [${dep.status}] (${dep.phase ?? "unphased"})`);
     }
   }
 
@@ -1161,7 +1184,7 @@ function formatPhaseExport(
     lines.push("");
     lines.push("## Open Issues");
     for (const i of relatedIssues) {
-      lines.push(`- ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownInline(i.title)}`);
+      lines.push(`- ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownDocument(i.title)}`);
     }
   }
 
@@ -1169,7 +1192,7 @@ function formatPhaseExport(
     lines.push("");
     lines.push("## Active Blockers");
     for (const b of activeBlockers) {
-      lines.push(`- ${escapeMarkdownInline(b.name)}${b.note ? ` — ${escapeMarkdownInline(b.note)}` : ""}`);
+      lines.push(`- ${escapeMarkdownDocument(b.name)}${b.note ? ` — ${escapeMarkdownDocument(b.note)}` : ""}`);
     }
   }
 
@@ -1229,7 +1252,7 @@ function formatFullExport(
   }
 
   const lines: string[] = [];
-  lines.push(`# ${escapeMarkdownInline(state.config.project)} — Full Export`);
+  lines.push(`# ${escapeMarkdownDocument(state.config.project)} — Full Export`);
   lines.push("");
   lines.push(`Tickets: ${state.completeLeafTicketCount}/${state.leafTicketCount} complete`);
   lines.push(`Issues: ${state.activeIssueCount} open`);
@@ -1241,16 +1264,16 @@ function formatFullExport(
   for (const p of phases) {
     const indicator = p.status === "complete" ? "[x]" : p.status === "inprogress" ? "[~]" : "[ ]";
     lines.push("");
-    lines.push(`### ${indicator} ${escapeMarkdownInline(p.phase.name)} (${p.phase.id})`);
+    lines.push(`### ${indicator} ${escapeMarkdownDocument(p.phase.name)} (${p.phase.id})`);
     if (p.phase.description) {
-      lines.push(escapeMarkdownInline(p.phase.description));
+      lines.push(escapeMarkdownDocument(p.phase.description));
     }
     const tickets = state.phaseTickets(p.phase.id);
     if (tickets.length > 0) {
       lines.push("");
       for (const t of tickets) {
         const ti = t.status === "complete" ? "[x]" : t.status === "inprogress" ? "[~]" : "[ ]";
-        lines.push(`${ti} ${displayIdOf(t)}: ${escapeMarkdownInline(t.title)}`);
+        lines.push(`${ti} ${displayIdOf(t)}: ${escapeMarkdownDocument(t.title)}`);
       }
     }
   }
@@ -1260,7 +1283,7 @@ function formatFullExport(
     lines.push("## Issues");
     for (const i of state.issues) {
       const resolved = i.status === "resolved" ? " ✓" : "";
-      lines.push(`- ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownInline(i.title)}${resolved}`);
+      lines.push(`- ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownDocument(i.title)}${resolved}`);
     }
   }
 
@@ -1270,8 +1293,8 @@ function formatFullExport(
     lines.push("## Notes");
     for (const n of activeNotes) {
       const title = n.title ?? displayIdOf(n);
-      const tagInfo = n.tags.length > 0 ? ` (${n.tags.join(", ")})` : "";
-      lines.push(`- ${displayIdOf(n)}: ${escapeMarkdownInline(title)}${tagInfo}`);
+      const tagInfo = n.tags.length > 0 ? ` (${n.tags.map(escapeMarkdownDocument).join(", ")})` : "";
+      lines.push(`- ${displayIdOf(n)}: ${escapeMarkdownDocument(title)}${tagInfo}`);
     }
   }
 
@@ -1281,8 +1304,8 @@ function formatFullExport(
     lines.push("## Lessons");
     for (const l of activeLessons) {
       const reinforced = l.reinforcements > 0 ? ` (×${l.reinforcements})` : "";
-      const tagInfo = l.tags.length > 0 ? ` [${l.tags.join(", ")}]` : "";
-      lines.push(`- ${displayIdOf(l)}: ${escapeMarkdownInline(l.title)}${reinforced}${tagInfo}`);
+      const tagInfo = l.tags.length > 0 ? ` [${l.tags.map(escapeMarkdownDocument).join(", ")}]` : "";
+      lines.push(`- ${displayIdOf(l)}: ${escapeMarkdownDocument(l.title)}${reinforced}${tagInfo}`);
     }
   }
 
@@ -1292,7 +1315,7 @@ function formatFullExport(
     lines.push("## Blockers");
     for (const b of blockers) {
       const cleared = isBlockerCleared(b) ? "[x]" : "[ ]";
-      lines.push(`${cleared} ${escapeMarkdownInline(b.name)}${b.note ? ` — ${escapeMarkdownInline(b.note)}` : ""}`);
+      lines.push(`${cleared} ${escapeMarkdownDocument(b.name)}${b.note ? ` — ${escapeMarkdownDocument(b.note)}` : ""}`);
     }
   }
 

@@ -26,6 +26,7 @@ import {
   atomicCreate,
   withProjectLock,
   detectTeamModeFromDisk,
+  guardPath,
 } from "../../src/core/project-loader.js";
 import { ProjectLoaderError } from "../../src/core/errors.js";
 import { fixturesDir } from "../helpers.js";
@@ -767,6 +768,41 @@ describe("guardPath", () => {
     } finally {
       await rm(outsideDir, { recursive: true, force: true });
     }
+  });
+
+  // Regression for Storybloq/storybloq#11 (ISS-639): the inside-root check used
+  // `startsWith(resolvedRoot + "/")`, which never matched on Windows where
+  // realpath() returns backslash paths -- rejecting every legitimate .story
+  // write. The check now uses path.relative(), which is separator-agnostic.
+  // Note: the Windows-specific backslash failure cannot be reproduced on a
+  // POSIX runner (path.sep === "/"). These tests lock the equivalent semantics
+  // the fix must preserve on every platform.
+  it("accepts a nested path inside root", async () => {
+    testRoot = await createTestProject();
+    const wrapDir = join(testRoot, ".story");
+    await expect(
+      guardPath(join(wrapDir, "tickets", "T-001.json"), wrapDir),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts a directory literally named '..keep' inside root (not an escape)", async () => {
+    testRoot = await createTestProject();
+    const wrapDir = join(testRoot, ".story");
+    const trickyDir = join(wrapDir, "..keep");
+    await mkdir(trickyDir, { recursive: true });
+    // A path segment that merely starts with ".." must not be mistaken for an
+    // escape -- this is why the check tests for ".." + sep, not a bare "..".
+    await expect(
+      guardPath(join(trickyDir, "file.json"), wrapDir),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a path that escapes root via ..", async () => {
+    testRoot = await createTestProject();
+    const wrapDir = join(testRoot, ".story");
+    await expect(
+      guardPath(join(testRoot, "..", "outside.json"), wrapDir),
+    ).rejects.toThrow(ProjectLoaderError);
   });
 });
 

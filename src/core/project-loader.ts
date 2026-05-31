@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join, resolve, relative, extname, dirname, basename } from "node:path";
+import { join, resolve, relative, extname, dirname, basename, sep, isAbsolute } from "node:path";
 import lockfile from "proper-lockfile";
 import { TicketSchema, type Ticket } from "../models/ticket.js";
 import { IssueSchema, type Issue } from "../models/issue.js";
@@ -1355,7 +1355,8 @@ export async function guardPath(
     resolvedDir = targetDir;
   }
 
-  if (resolvedDir !== resolvedRoot && !resolvedDir.startsWith(resolvedRoot + "/")) {
+  const rel = relative(resolvedRoot, resolvedDir);
+  if (rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
     throw new ProjectLoaderError(
       "invalid_input",
       `Path ${target} resolves outside project root`,
