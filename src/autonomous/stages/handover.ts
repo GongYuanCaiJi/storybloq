@@ -76,7 +76,10 @@ export class HandoverStage implements WorkflowStage {
           if (ticket) {
             const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
             if (ticketClaim === ctx.state.sessionId) {
-              await writeTicketUnlocked({ ...ticket, claimedBySession: null, claim: undefined } as typeof ticket, ctx.root);
+              // ISS-652: delete the keys rather than writing an explicit null,
+              // so a released ticket carries no residual claim state.
+              const { claimedBySession: _cb, claim: _cl, ...rest } = ticket as Record<string, unknown>;
+              await writeTicketUnlocked(rest as typeof ticket, ctx.root);
             }
           }
         });

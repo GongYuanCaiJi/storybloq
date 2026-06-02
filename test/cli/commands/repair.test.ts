@@ -101,4 +101,68 @@ describe("computeRepairs", () => {
     expect(result.tickets).toHaveLength(2);
     expect(result.issues).toHaveLength(1);
   });
+
+  describe("ISS-652: strips stale claim state from completed tickets", () => {
+    const has = (t: unknown, key: string) => Object.prototype.hasOwnProperty.call(t as object, key);
+
+    it("strips claimedBySession from a completed ticket (UUID)", () => {
+      const state = makeState({
+        tickets: [makeTicket({ id: "T-001", status: "complete", phase: "p1", claimedBySession: "sess-abc" })],
+        roadmap,
+      });
+      const result = computeRepairs(state, []);
+      expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
+      const fixed = result.tickets.find((t) => t.id === "T-001")!;
+      expect(fixed).toBeDefined();
+      expect(has(fixed, "claimedBySession")).toBe(false);
+      expect(has(fixed, "claim")).toBe(false);
+    });
+
+    it("strips an explicit-null claimedBySession from a completed ticket", () => {
+      const state = makeState({
+        tickets: [makeTicket({ id: "T-001", status: "complete", phase: "p1", claimedBySession: null })],
+        roadmap,
+      });
+      const result = computeRepairs(state, []);
+      expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
+      const fixed = result.tickets.find((t) => t.id === "T-001")!;
+      expect(has(fixed, "claimedBySession")).toBe(false);
+    });
+
+    it("strips a residual claim object from a completed ticket", () => {
+      const state = makeState({
+        tickets: [makeTicket({
+          id: "T-001",
+          status: "complete",
+          phase: "p1",
+          claim: { user: "alice", branch: "feature/x", since: "2026-05-01" },
+        })],
+        roadmap,
+      });
+      const result = computeRepairs(state, []);
+      expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
+      const fixed = result.tickets.find((t) => t.id === "T-001")!;
+      expect(has(fixed, "claim")).toBe(false);
+    });
+
+    it("leaves an OPEN ticket's claim state untouched", () => {
+      const state = makeState({
+        tickets: [makeTicket({ id: "T-001", status: "open", phase: "p1", claimedBySession: "sess-live" })],
+        roadmap,
+      });
+      const result = computeRepairs(state, []);
+      expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(false);
+      expect(result.tickets).toHaveLength(0);
+    });
+
+    it("does not flag a clean completed ticket with no claim fields", () => {
+      const state = makeState({
+        tickets: [makeTicket({ id: "T-001", status: "complete", phase: "p1" })],
+        roadmap,
+      });
+      const result = computeRepairs(state, []);
+      expect(result.fixes.some((f) => f.field === "claim")).toBe(false);
+      expect(result.tickets).toHaveLength(0);
+    });
+  });
 });

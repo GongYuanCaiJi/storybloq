@@ -129,8 +129,26 @@ export function computeRepairs(
       modified = true;
     }
 
+    // ISS-652: completed tickets must not retain autonomous session claim state.
+    // The CLI/MCP update path strips it on completion, but tickets completed by
+    // direct edit (or before that cleanup existed) keep a stale claimedBySession
+    // (or a residual claim). Strip both keys here -- covers explicit-null too,
+    // since claimedBySession is nullable+optional and parse retains the key.
+    const tRec = ticket as Record<string, unknown>;
+    const staleClaimOnComplete = ticket.status === "complete"
+      && (Object.prototype.hasOwnProperty.call(tRec, "claimedBySession") || ticket.claim != null);
+    if (staleClaimOnComplete) {
+      fixes.push({ entity: ticket.id, field: "claim", description: "Cleared stale claim state on completed ticket" });
+      modified = true;
+    }
+
     if (modified) {
-      modifiedTickets.push({ ...ticket, blockedBy, parentTicket, phase } as Ticket);
+      let rebuilt: Record<string, unknown> = { ...ticket, blockedBy, parentTicket, phase };
+      if (staleClaimOnComplete) {
+        const { claim: _claim, claimedBySession: _claimedBySession, ...rest } = rebuilt;
+        rebuilt = rest;
+      }
+      modifiedTickets.push(rebuilt as Ticket);
     }
   }
 
