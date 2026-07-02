@@ -47,6 +47,8 @@ export function assertNoConflicts(state: ProjectState): void {
   const summary = report.items.map((i) => `${i.id} (${i.conflictCount})`).join(", ");
   throw new ProjectLoaderError(
     "conflicts_present",
-    `Cannot write: ${report.items.length} item(s) have unresolved conflicts: ${summary}. Run \`storybloq resolve\` first.`,
+    `Cannot write: ${report.items.length} item(s) have unresolved conflicts: ${summary}. ` +
+    `Run \`storybloq conflicts list\` to inspect, then \`storybloq resolve <id> --use ours|theirs\`. ` +
+    `For config.json/roadmap.json use \`storybloq resolve config\` or \`storybloq resolve roadmap\`.`,
   );
 }

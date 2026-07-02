@@ -350,13 +350,38 @@ describe("T-387: mergeRoadmap", () => {
   });
 
   describe("_conflicts handling", () => {
-    it("strips existing _conflicts from inputs", () => {
+    it("drops base-only (resolved) _conflicts", () => {
       const base = roadmap({ _conflicts: [{ fieldPath: "/stale" }] });
       const ours = roadmap();
       const theirs = roadmap();
       const result = mergeRoadmap(base, ours, theirs);
       expect(result.clean).toBe(true);
       expect(result.merged._conflicts).toBeUndefined();
+    });
+
+    it("carries forward an unresolved entry present in base+ours+theirs across an unrelated clean merge (ISS-750)", () => {
+      const entry = { fieldPath: "/title", field: "title", kind: "field", base: "a", ours: "b", theirs: "c" };
+      const base = roadmap({ _conflicts: [entry] });
+      const ours = roadmap({ _conflicts: [entry] });
+      const theirs = roadmap({ date: "2026-02-20", _conflicts: [entry] });
+      const result = mergeRoadmap(base, ours, theirs);
+      expect(result.clean).toBe(true);
+      expect(result.merged.date).toBe("2026-02-20");
+      const carried = result.merged._conflicts as Array<Record<string, unknown>>;
+      expect(Array.isArray(carried)).toBe(true);
+      expect(carried.some((c) => c.fieldPath === "/title")).toBe(true);
+    });
+
+    it("carries forward an entry present in ours+theirs (concluded conflicted merge on both lines)", () => {
+      const entry = { fieldPath: "/title", field: "title", kind: "field", base: "a", ours: "b", theirs: "c" };
+      const base = roadmap();
+      const ours = roadmap({ _conflicts: [entry] });
+      const theirs = roadmap({ _conflicts: [entry] });
+      const result = mergeRoadmap(base, ours, theirs);
+      expect(result.clean).toBe(true);
+      const carried = result.merged._conflicts as Array<Record<string, unknown>>;
+      expect(Array.isArray(carried)).toBe(true);
+      expect(carried).toHaveLength(1);
     });
   });
 

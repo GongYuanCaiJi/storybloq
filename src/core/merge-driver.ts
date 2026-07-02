@@ -1,4 +1,5 @@
 import { getMergeRules, getCoupledGroups, type EntityType, type MergeRule } from "./field-classification.js";
+import { carryForward, mergeConflictSets, attachConflicts } from "./conflict-lifecycle.js";
 
 export interface ConflictEntry {
   fieldPath: string;
@@ -20,7 +21,7 @@ export interface MergeResult {
   clean: boolean;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== typeof b) return false;
   if (typeof a !== "object") return false;
@@ -139,42 +140,43 @@ export function threeWayMerge(
   const conflicts: ConflictEntry[] = [];
   const merged: Record<string, unknown> = {};
 
-  const existingConflicts: unknown[] = [];
-  const seenConflictKeys = new Set<string>();
-  for (const src of [base, ours, theirs]) {
-    if (Array.isArray(src._conflicts)) {
-      for (const c of src._conflicts) {
-        const cr = c as Record<string, unknown>;
-        const key = `${cr.fieldPath}\0${cr.kind}\0${cr.group ?? ""}`;
-        if (!seenConflictKeys.has(key)) {
-          seenConflictKeys.add(key);
-          existingConflicts.push(c);
-        }
-      }
-    }
-  }
+  const carried = carryForward(base, ours, theirs);
 
   const oursDeleted = !isDeleted(base) && isDeleted(ours);
   const theirsDeleted = !isDeleted(base) && isDeleted(theirs);
 
   if (oursDeleted && theirsDeleted) {
     Object.assign(merged, ours);
-    delete merged._conflicts;
-    if (existingConflicts.length > 0) merged._conflicts = existingConflicts;
+    attachConflicts(merged, mergeConflictSets(carried, []));
     return { merged, conflicts, clean: conflicts.length === 0 };
   }
 
+  // ISS-746: delete-vs-edit records FULL entity snapshots (base may be null for
+  // the add/add tombstone variant, where base was {}) and keeps the EDITED side
+  // as the body: the file stays schema-valid, id-bearing and active, so the
+  // loader keeps it, the write gate sees it, and conflicts list/show/resolve
+  // find it. The tombstone (with its original audit stamps) lives in the entry.
   if (oursDeleted && !theirsDeleted && hasNonTombstoneChanges(base, theirs)) {
-    conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "deleted", theirs: "edited" });
-    Object.assign(merged, base);
-    merged._conflicts = [...existingConflicts, ...conflicts];
+    conflicts.push({
+      fieldPath: "", field: "_entity", kind: "delete-edit",
+      base: entitySnapshot(base),
+      ours: entitySnapshot(ours),
+      theirs: entitySnapshot(theirs),
+    });
+    Object.assign(merged, stripConflicts(theirs));
+    attachConflicts(merged, mergeConflictSets(carried, conflicts));
     return { merged, conflicts, clean: false };
   }
 
   if (theirsDeleted && !oursDeleted && hasNonTombstoneChanges(base, ours)) {
-    conflicts.push({ fieldPath: "", field: "_entity", kind: "delete-edit", base: "active", ours: "edited", theirs: "deleted" });
-    Object.assign(merged, base);
-    merged._conflicts = [...existingConflicts, ...conflicts];
+    conflicts.push({
+      fieldPath: "", field: "_entity", kind: "delete-edit",
+      base: entitySnapshot(base),
+      ours: entitySnapshot(ours),
+      theirs: entitySnapshot(theirs),
+    });
+    Object.assign(merged, stripConflicts(ours));
+    attachConflicts(merged, mergeConflictSets(carried, conflicts));
     return { merged, conflicts, clean: false };
   }
 
@@ -218,7 +220,9 @@ export function threeWayMerge(
       } else {
         // Audit metadata (attribution): surface the ambiguity rather than resolving arbitrarily.
         for (const m of group.members) {
-          merged[m] = base[m];
+          // ISS-747/R6: never write undefined into the body when base lacks the
+          // member (add/add) -- fall back to ours, then theirs.
+          merged[m] = base[m] !== undefined ? base[m] : ours[m] !== undefined ? ours[m] : theirs[m];
           handledByCoupled.add(m);
           conflicts.push({
             fieldPath: toPointer(m),
@@ -233,7 +237,8 @@ export function threeWayMerge(
       }
     } else {
       for (const m of group.members) {
-        merged[m] = base[m];
+        // ISS-747/R6: same undefined-base fallback as the ambiguous branch.
+        merged[m] = base[m] !== undefined ? base[m] : ours[m] !== undefined ? ours[m] : theirs[m];
         handledByCoupled.add(m);
         conflicts.push({
           fieldPath: toPointer(m),
@@ -278,7 +283,11 @@ export function threeWayMerge(
     const rule: MergeRule | undefined = rules[key];
 
     if (!rule || rule.kind === "hard-conflict") {
-      merged[key] = bVal;
+      // ISS-747: with base {} (add/add) bVal is undefined and JSON.stringify
+      // would silently drop the key, making required fields (title, displayId)
+      // vanish from the body. Fall back to ours; the entry still records
+      // base: undefined, so nothing is lost.
+      merged[key] = bVal !== undefined ? bVal : oVal;
       conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
       continue;
     }
@@ -320,21 +329,33 @@ export function threeWayMerge(
       continue;
     }
 
-    merged[key] = bVal;
+    merged[key] = bVal !== undefined ? bVal : oVal;
     conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
   }
 
-  if (conflicts.length > 0 || existingConflicts.length > 0) {
-    merged._conflicts = [...existingConflicts, ...conflicts];
-  }
+  // NOTE: `clean` (and therefore the git exit code) reflects only NEW conflicts.
+  // A merge that merely carries forward committed-but-unresolved entries exits 0:
+  // the merge itself succeeded; failing every later merge of the file would make
+  // the state unrecoverable-by-merge. The write-gate re-engages from file content.
+  attachConflicts(merged, mergeConflictSets(carried, conflicts));
 
   return { merged, conflicts, clean: conflicts.length === 0 };
 }
 
-function stripConflicts(obj: Record<string, unknown>): Record<string, unknown> {
+export function stripConflicts(obj: Record<string, unknown>): Record<string, unknown> {
   const copy = { ...obj };
   delete copy._conflicts;
   return copy;
+}
+
+/**
+ * Full-entity snapshot for entity-level conflict entries: the object with its
+ * `_conflicts` stripped (snapshots never nest), or null when nothing remains
+ * (e.g. an add/add whose base was {}).
+ */
+export function entitySnapshot(obj: Record<string, unknown>): Record<string, unknown> | null {
+  const copy = stripConflicts(obj);
+  return Object.keys(copy).length > 0 ? copy : null;
 }
 
 function jsonType(v: unknown): string {
@@ -827,9 +848,11 @@ export function mergeConfig(
     conflicts.push({ fieldPath: pointer, field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
   }
 
-  if (conflicts.length > 0) {
-    merged._conflicts = [...conflicts];
-  }
+  // ISS-750: carry committed-but-unresolved entries forward (computed from the
+  // ORIGINAL unstripped inputs) instead of silently dropping them. See the
+  // `clean` note in threeWayMerge: carried-only merges still exit 0.
+  const carried = carryForward(base, ours, theirs);
+  attachConflicts(merged, mergeConflictSets(carried, conflicts));
 
   return { merged, conflicts, clean: conflicts.length === 0 };
 }
@@ -887,9 +910,11 @@ export function mergeRoadmap(
     conflicts.push({ fieldPath: toPointer(key), field: key, kind: "field", base: bVal, ours: oVal, theirs: tVal });
   }
 
-  if (conflicts.length > 0) {
-    merged._conflicts = [...conflicts];
-  }
+  // ISS-750: carry committed-but-unresolved entries forward (computed from the
+  // ORIGINAL unstripped inputs) instead of silently dropping them. See the
+  // `clean` note in threeWayMerge: carried-only merges still exit 0.
+  const carried = carryForward(base, ours, theirs);
+  attachConflicts(merged, mergeConflictSets(carried, conflicts));
 
   return { merged, conflicts, clean: conflicts.length === 0 };
 }

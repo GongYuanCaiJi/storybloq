@@ -396,7 +396,7 @@ export function validateProject(state: ProjectState): ValidationResult {
     findings.push({
       level: "error",
       code: "unresolved_conflicts",
-      message: `${item.id} has ${item.conflictCount} unresolved conflict(s). Run \`storybloq resolve\` first.`,
+      message: `${item.id} has ${item.conflictCount} unresolved conflict(s). Run \`storybloq conflicts show ${item.id}\`, then \`storybloq resolve <id> --use ours|theirs\` (for config.json/roadmap.json use \`storybloq resolve config\` or \`storybloq resolve roadmap\`).`,
       entity: item.id,
     });
   }

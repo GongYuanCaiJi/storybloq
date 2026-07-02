@@ -162,6 +162,45 @@ describe("T-385: threeWayMerge", () => {
       expect(result.clean).toBe(false);
       const deleteEdit = result.conflicts.find((c) => c.kind === "delete-edit");
       expect(deleteEdit).toBeDefined();
+      // ISS-746: the entry carries full entity snapshots, not placeholder strings,
+      // and the merged body is the EDITED side (loadable, visible, resolvable).
+      const entry = deleteEdit as Record<string, unknown>;
+      expect((entry.ours as Record<string, unknown>).lifecycle).toBe("deleted");
+      expect((entry.ours as Record<string, unknown>).deletedAt).toBe("2026-05-26T00:00:00Z");
+      expect((entry.theirs as Record<string, unknown>).title).toBe("Changed");
+      expect(entry.ours).not.toBe("deleted");
+      expect(entry.theirs).not.toBe("edited");
+      expect(entry.base).not.toBe("active");
+      expect(result.merged.title).toBe("Changed");
+      expect(result.merged.lifecycle).not.toBe("deleted");
+    });
+
+    it("mirrored branch: theirs deletes, ours edits -> body is ours' edit, snapshots per side (ISS-746)", () => {
+      const base = ticket({ title: "Original", lifecycle: "active" });
+      const ours = ticket({ title: "Changed by us", lifecycle: "active" });
+      const theirs = ticket({ title: "Original", lifecycle: "deleted", deletedAt: "2026-05-27T00:00:00Z", deletedBy: "bob@test.com" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(false);
+      const entry = result.conflicts.find((c) => c.kind === "delete-edit") as Record<string, unknown>;
+      expect(entry).toBeDefined();
+      expect((entry.theirs as Record<string, unknown>).lifecycle).toBe("deleted");
+      expect((entry.theirs as Record<string, unknown>).deletedAt).toBe("2026-05-27T00:00:00Z");
+      expect((entry.theirs as Record<string, unknown>).deletedBy).toBe("bob@test.com");
+      expect((entry.ours as Record<string, unknown>).title).toBe("Changed by us");
+      expect(result.merged.title).toBe("Changed by us");
+      expect(result.merged.lifecycle).not.toBe("deleted");
+    });
+
+    it("add/add tombstone variant: base {} produces a full active-entity body (ISS-747 repro 2)", () => {
+      const tombstone = ticket({ lifecycle: "deleted", deletedAt: "2026-05-26T00:00:00Z", deletedBy: "alice@test.com" });
+      const active = ticket({ title: "Fresh add" });
+      const result = threeWayMerge({}, tombstone, active, "ticket");
+      expect(result.clean).toBe(false);
+      expect(result.merged.id).toBeDefined();
+      expect(result.merged.title).toBe("Fresh add");
+      const entry = result.conflicts.find((c) => c.kind === "delete-edit") as Record<string, unknown>;
+      expect(entry).toBeDefined();
+      expect(entry.base).toBeNull();
     });
 
     it("clean merge when both sides delete", () => {
@@ -184,6 +223,68 @@ describe("T-385: threeWayMerge", () => {
       const conflicts = result.merged._conflicts as unknown[];
       expect(conflicts).toBeDefined();
       expect(conflicts.some((c: any) => c.fieldPath === "phase")).toBe(true);
+    });
+
+    it("drops an entry present in base+theirs but resolved by ours (ISS-750 resurrection repro 1)", () => {
+      const entry = { fieldPath: "/title", field: "title", kind: "field", base: "Old", ours: "A", theirs: "B" };
+      const base = ticket({ _conflicts: [entry] });
+      const ours = ticket(); // ours resolved it: entry removed
+      const theirs = ticket({ _conflicts: [entry] });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      expect(result.merged._conflicts).toBeUndefined();
+    });
+
+    it("drops a base-only entry (both sides resolved it, ISS-750 resurrection repro 2)", () => {
+      const entry = { fieldPath: "/title", field: "title", kind: "field", base: "Old", ours: "A", theirs: "B" };
+      const base = ticket({ _conflicts: [entry] });
+      const ours = ticket();
+      const theirs = ticket();
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(true);
+      expect(result.merged._conflicts).toBeUndefined();
+    });
+
+    it("fresh entry supersedes a stale carried entry on the same slot", () => {
+      const stale = { fieldPath: "/title", field: "title", kind: "field", base: "Ancient", ours: "X", theirs: "Y" };
+      const base = ticket({ title: "Original" });
+      const ours = ticket({ title: "Ours new", _conflicts: [stale] });
+      const theirs = ticket({ title: "Theirs new" });
+      const result = threeWayMerge(base, ours, theirs, "ticket");
+      expect(result.clean).toBe(false);
+      const entries = (result.merged._conflicts as Array<Record<string, unknown>>).filter((c) => c.fieldPath === "/title");
+      expect(entries).toHaveLength(1);
+      expect(entries[0]!.ours).toBe("Ours new");
+      expect(entries[0]!.theirs).toBe("Theirs new");
+    });
+  });
+
+  describe("add/add divergence with base {} (ISS-747)", () => {
+    it("hard-conflict field keeps ours' value in the body instead of dropping it", () => {
+      const ours = ticket({ title: "From A" });
+      const theirs = ticket({ title: "From B" });
+      const result = threeWayMerge({}, ours, theirs, "ticket");
+      expect(result.clean).toBe(false);
+      expect(result.merged.title).toBe("From A");
+      const entry = result.conflicts.find((c) => c.fieldPath === "/title");
+      expect(entry).toBeDefined();
+      expect(entry!.base).toBeUndefined();
+    });
+
+    it("divergent displayId keeps ours' value in the body", () => {
+      const ours = ticket({ displayId: "T-042" });
+      const theirs = ticket({ displayId: "T-043" });
+      const result = threeWayMerge({}, ours, theirs, "ticket");
+      expect(result.merged.displayId).toBe("T-042");
+      expect(result.conflicts.some((c) => c.fieldPath === "/displayId")).toBe(true);
+    });
+
+    it("divergent coupled group keeps ours' members in the body", () => {
+      const ours = ticket({ status: "open", completedDate: null, lifecycle: "active" });
+      const theirs = ticket({ status: "inprogress", completedDate: null, lifecycle: "active" });
+      const result = threeWayMerge({}, ours, theirs, "ticket");
+      expect(result.merged.status).toBe("open");
+      expect(result.merged.lifecycle).toBe("active");
     });
   });
 

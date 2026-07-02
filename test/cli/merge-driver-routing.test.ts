@@ -13,7 +13,9 @@ function writeTemp(dir: string, name: string, content: Record<string, unknown>):
 describe("T-387: merge driver routing", () => {
   it("config.json: clean merge returns 0", () => {
     const dir = mkdtempSync(join(tmpdir(), "merge-"));
-    const cfg = { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } };
+    // features must satisfy FeaturesSchema (five required booleans) now that the
+    // driver validates its output against the loader schemas.
+    const cfg = { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true } };
     const base = writeTemp(dir, "base.json", cfg);
     const ours = writeTemp(dir, "ours.json", cfg);
     const theirs = writeTemp(dir, "theirs.json", { ...cfg, language: "javascript" });
@@ -25,7 +27,7 @@ describe("T-387: merge driver routing", () => {
 
   it("config.json: conflict returns 1 with _conflicts", () => {
     const dir = mkdtempSync(join(tmpdir(), "merge-"));
-    const cfg = { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } };
+    const cfg = { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true, issues: true, handovers: true, roadmap: true, reviews: true } };
     const base = writeTemp(dir, "base.json", cfg);
     const ours = writeTemp(dir, "ours.json", { ...cfg, project: "alpha" });
     const theirs = writeTemp(dir, "theirs.json", { ...cfg, project: "beta" });

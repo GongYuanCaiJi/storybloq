@@ -409,7 +409,7 @@ async function isTeamMode(root: string): Promise<boolean | "error"> {
   }
 }
 
-async function resolveActor(root: string, explicit?: string): Promise<string> {
+export async function resolveActor(root: string, explicit?: string): Promise<string> {
   if (explicit) return explicit;
   try {
     const { gitUserEmail } = await import("../autonomous/git-inspector.js");

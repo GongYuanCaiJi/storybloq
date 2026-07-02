@@ -153,13 +153,38 @@ describe("T-387: mergeConfig", () => {
   });
 
   describe("_conflicts handling", () => {
-    it("strips existing _conflicts from inputs", () => {
+    it("drops base-only (resolved) _conflicts", () => {
       const base = config({ _conflicts: [{ fieldPath: "/stale", kind: "field" }] });
       const ours = config();
       const theirs = config();
       const result = mergeConfig(base, ours, theirs);
       expect(result.clean).toBe(true);
       expect(result.merged._conflicts).toBeUndefined();
+    });
+
+    it("carries forward an unresolved entry present in base+ours+theirs across an unrelated clean merge (ISS-750)", () => {
+      const entry = { fieldPath: "/project", field: "project", kind: "field", base: "alpha", ours: "beta", theirs: "gamma" };
+      const base = config({ _conflicts: [entry] });
+      const ours = config({ _conflicts: [entry] });
+      const theirs = config({ language: "python", _conflicts: [entry] });
+      const result = mergeConfig(base, ours, theirs);
+      expect(result.clean).toBe(true);
+      expect(result.merged.language).toBe("python");
+      const carried = result.merged._conflicts as Array<Record<string, unknown>>;
+      expect(Array.isArray(carried)).toBe(true);
+      expect(carried.some((c) => c.fieldPath === "/project")).toBe(true);
+    });
+
+    it("carries forward an entry present in ours+theirs (concluded conflicted merge on both lines)", () => {
+      const entry = { fieldPath: "/project", field: "project", kind: "field", base: "alpha", ours: "beta", theirs: "gamma" };
+      const base = config();
+      const ours = config({ _conflicts: [entry] });
+      const theirs = config({ _conflicts: [entry] });
+      const result = mergeConfig(base, ours, theirs);
+      expect(result.clean).toBe(true);
+      const carried = result.merged._conflicts as Array<Record<string, unknown>>;
+      expect(Array.isArray(carried)).toBe(true);
+      expect(carried).toHaveLength(1);
     });
   });
 });

@@ -105,3 +105,121 @@ describe("resolveConflicts", () => {
     expect(result.resolved).toEqual(["status"]);
   });
 });
+
+describe("ISS-758: --field without --use or --value", () => {
+  it("throws and leaves the entity untouched", () => {
+    const entity = withConflicts(makeTicket({ id: "T-001", title: "body-title" }), [
+      fieldConflict("/title", "old", "ours-title", "theirs-title"),
+    ]);
+    expect(() => resolveConflicts(entity, { field: "title" })).toThrow(/--value/);
+    expect(entity.title).toBe("body-title");
+    expect((entity._conflicts as ConflictEntry[]).length).toBe(1);
+  });
+});
+
+describe("entity-level (_entity) resolution (ISS-746)", () => {
+  const baseSnap = { id: "T-001", title: "Original", description: "d", type: "task", status: "open", phase: "p1", order: 10, createdDate: "2026-01-01", completedDate: null, blockedBy: [], parentTicket: null };
+  const tombstoneSnap = { ...baseSnap, lifecycle: "deleted", deletedAt: "2026-05-26T00:00:00Z", deletedBy: "alice@test.com" };
+  const editedSnap = { ...baseSnap, description: "edited by teammate" };
+
+  const entityLevelEntry = (): ConflictEntry => ({
+    fieldPath: "",
+    field: "_entity",
+    kind: "delete-edit",
+    base: baseSnap,
+    ours: tombstoneSnap,
+    theirs: editedSnap,
+  });
+
+  it("--use theirs restores the full edit with no junk _entity key", () => {
+    // Body is the edited side (new driver behavior); resolving theirs keeps it byte-for-byte.
+    const entity = { ...editedSnap, _conflicts: [entityLevelEntry()] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { use: "theirs" });
+    expect(result.fullyResolved).toBe(true);
+    expect(entity.description).toBe("edited by teammate");
+    expect(entity.lifecycle).toBeUndefined();
+    expect("_entity" in entity).toBe(false);
+    expect(entity._conflicts).toBeUndefined();
+  });
+
+  it("--use ours applies the real tombstone with original stamps", () => {
+    const entity = { ...editedSnap, _conflicts: [entityLevelEntry()] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { use: "ours" });
+    expect(result.fullyResolved).toBe(true);
+    expect(entity.lifecycle).toBe("deleted");
+    expect(entity.deletedAt).toBe("2026-05-26T00:00:00Z");
+    expect(entity.deletedBy).toBe("alice@test.com");
+    expect("_entity" in entity).toBe(false);
+  });
+
+  it("--field _entity removes only that entry", () => {
+    const other = fieldConflict("/phase", "p1", "p2", "p3");
+    const entity = { ...editedSnap, _conflicts: [entityLevelEntry(), other] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { field: "_entity", use: "theirs" });
+    expect(result.remaining).toBe(1);
+    expect((entity._conflicts as ConflictEntry[])[0]!.fieldPath).toBe("/phase");
+  });
+
+  it("blanket --use applies entity-level first, then field-level onto the replaced body", () => {
+    const other = fieldConflict("/phase", "p1", "p2-ours", "p3-theirs");
+    const entity = { ...editedSnap, _conflicts: [other, entityLevelEntry()] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { use: "theirs" });
+    expect(result.fullyResolved).toBe(true);
+    expect(entity.description).toBe("edited by teammate");
+    expect(entity.phase).toBe("p3-theirs");
+  });
+
+  it("--value with a full entity object performs wholesale replacement", () => {
+    const custom = { ...baseSnap, title: "Hand merged" };
+    const entity = { ...editedSnap, _conflicts: [entityLevelEntry()] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { field: "_entity", value: custom });
+    expect(result.fullyResolved).toBe(true);
+    expect(entity.title).toBe("Hand merged");
+    expect("_entity" in entity).toBe(false);
+  });
+
+  it("--value with a mismatched id errors", () => {
+    const custom = { ...baseSnap, id: "T-999" };
+    const entity = { ...editedSnap, _conflicts: [entityLevelEntry()] } as Record<string, unknown>;
+    expect(() => resolveConflicts(entity, { field: "_entity", value: custom })).toThrow(/id/);
+  });
+
+  it("R3: a null chosen side fails loudly naming --value, without clobbering the body", () => {
+    const entry: ConflictEntry = { fieldPath: "", field: "_entity", kind: "delete-edit", base: null, ours: null, theirs: editedSnap };
+    const entity = { ...editedSnap, _conflicts: [entry] } as Record<string, unknown>;
+    expect(() => resolveConflicts(entity, { use: "ours" })).toThrow(/--value/);
+    expect(entity.title).toBe("Original");
+    expect(Array.isArray(entity._conflicts)).toBe(true);
+  });
+});
+
+describe("legacy placeholder _entity entries (pre-1.5.0)", () => {
+  const legacyEntry = (): ConflictEntry => ({
+    fieldPath: "",
+    field: "_entity",
+    kind: "delete-edit",
+    base: "active",
+    ours: "deleted",
+    theirs: "edited",
+  });
+
+  it("choosing the delete side synthesizes a tombstone with actor attribution and a warning", () => {
+    const entity = { ...makeTicket({ id: "T-001" }), _conflicts: [legacyEntry()] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { use: "ours", actor: "carol@test.com" });
+    expect(result.fullyResolved).toBe(true);
+    expect(entity.lifecycle).toBe("deleted");
+    expect(typeof entity.deletedAt).toBe("string");
+    expect(entity.deletedBy).toBe("carol@test.com");
+    expect("_entity" in entity).toBe(false);
+    expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("choosing the edit side throws with git-recovery and --value guidance, keeping the entry", () => {
+    const entity = { ...makeTicket({ id: "T-001" }), _conflicts: [legacyEntry()] } as Record<string, unknown>;
+    expect(() => resolveConflicts(entity, { use: "theirs" })).toThrow(/git log --all/);
+    expect(() => resolveConflicts(entity, { use: "theirs" })).toThrow(/--value/);
+    expect(Array.isArray(entity._conflicts)).toBe(true);
+    expect((entity._conflicts as ConflictEntry[]).length).toBe(1);
+    expect("_entity" in entity).toBe(false);
+  });
+});
