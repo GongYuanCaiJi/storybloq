@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -196,5 +196,32 @@ describe("entity-level conflict rendering", () => {
     });
     const result = await handleConflictsShow("T-001", dir, "md");
     expect(result.output).toContain("pre-1.5.0");
+  });
+});
+
+describe("ISS-768: attacker-crafted conflict fieldPath through the resolve command", () => {
+  afterEach(() => {
+    delete (Object.prototype as Record<string, unknown>)["polluted"];
+  });
+
+  it("resolve config --use theirs on a /__proto__/ entry errors cleanly, file unchanged, no pollution", async () => {
+    const dir = makeProject();
+    writeConfig(dir, {
+      _conflicts: [{ fieldPath: "/__proto__/polluted", field: "polluted", kind: "field", base: null, ours: null, theirs: "owned" }],
+    });
+    const before = readFileSync(join(dir, ".story", "config.json"), "utf-8");
+
+    let threw = false;
+    let exitCode = 0;
+    try {
+      const result = await handleResolve("config", dir, { use: "theirs" });
+      exitCode = result.exitCode ?? 0;
+    } catch (err) {
+      threw = true;
+      expect(String(err)).toMatch(/reserved prototype key/);
+    }
+    expect(threw || exitCode !== 0).toBe(true);
+    expect(readFileSync(join(dir, ".story", "config.json"), "utf-8")).toBe(before);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
