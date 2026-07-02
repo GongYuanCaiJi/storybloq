@@ -32,7 +32,7 @@ import {
 import { ProjectState } from "./project-state.js";
 import {
   ProjectLoaderError,
-  CURRENT_SCHEMA_VERSION,
+  MAX_SUPPORTED_SCHEMA_VERSION,
   INTEGRITY_WARNING_TYPES,
   type LoadWarning,
   type LoadWarningType,
@@ -47,7 +47,7 @@ import type { ZodType } from "zod";
 export interface LoadOptions {
   /** In strict mode, integrity warnings become thrown errors. Default: false */
   strict?: boolean;
-  /** Maximum schemaVersion this loader supports. Default: CURRENT_SCHEMA_VERSION */
+  /** Maximum schemaVersion this loader supports. Default: MAX_SUPPORTED_SCHEMA_VERSION */
   maxSchemaVersion?: number;
 }
 
@@ -108,7 +108,7 @@ export async function loadProject(
   );
 
   // 4. Check schemaVersion
-  const maxVersion = options?.maxSchemaVersion ?? CURRENT_SCHEMA_VERSION;
+  const maxVersion = options?.maxSchemaVersion ?? MAX_SUPPORTED_SCHEMA_VERSION;
   if (
     config.schemaVersion !== undefined &&
     config.schemaVersion > maxVersion
@@ -768,11 +768,11 @@ async function withProjectLockInternal(
     const config = result.state.config;
     if (
       config.schemaVersion !== undefined &&
-      config.schemaVersion > CURRENT_SCHEMA_VERSION
+      config.schemaVersion > MAX_SUPPORTED_SCHEMA_VERSION
     ) {
       throw new ProjectLoaderError(
         "version_mismatch",
-        `Config schemaVersion ${config.schemaVersion} exceeds max supported ${CURRENT_SCHEMA_VERSION}. Run: npm update -g @storybloq/storybloq`,
+        `Config schemaVersion ${config.schemaVersion} exceeds max supported ${MAX_SUPPORTED_SCHEMA_VERSION}. Run: npm update -g @storybloq/storybloq`,
       );
     }
     assertTeamWriteCapabilities(config);

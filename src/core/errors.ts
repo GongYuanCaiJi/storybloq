@@ -1,7 +1,34 @@
 import type { ErrorCode } from "../models/types.js";
 
-/** Schema version this loader understands. Config.schemaVersion > this → version_mismatch. */
+/**
+ * Schema version written by fresh (non-team) `storybloq init`.
+ * ISS-751: deliberately kept at 2 so a fresh non-team project remains readable
+ * by every older client. Emission and acceptance are decoupled: do NOT bump
+ * this when raising MAX_SUPPORTED_SCHEMA_VERSION.
+ */
 export const CURRENT_SCHEMA_VERSION = 2;
+
+/**
+ * Maximum Config.schemaVersion this loader accepts, for both reads and writes.
+ * schemaVersion > this → version_mismatch (hard fail, exit 1).
+ */
+export const MAX_SUPPORTED_SCHEMA_VERSION = 3;
+
+/**
+ * Schema version stamped by team-init ONLY (the old-client fence, ISS-751).
+ * Published clients <= 1.4.4 accept schemaVersion 2, so a v2 team repo gave
+ * mixed-version teams silent partial reads. Those same clients hard-fail on
+ * schemaVersion 3 for both reads and writes ("Config schemaVersion 3 exceeds
+ * max supported 2", exit 1; verified empirically against published 1.4.4),
+ * which turns the fence into the intended hard failure.
+ *
+ * Migration note (ISS-734 docs pending; keep this block until a team docs file
+ * exists): existing team repos created before this fence carry schemaVersion 2.
+ * Once ALL teammates run >= 1.5.0 CLIs, set schemaVersion to 3 manually (or
+ * re-run `storybloq team init`). Older Mac app builds show a schemaVersion-3
+ * project as read-only ("Please update Storybloq") until updated; no data loss.
+ */
+export const TEAM_SCHEMA_VERSION = 3;
 
 export class ProjectLoaderError extends Error {
   readonly name = "ProjectLoaderError";

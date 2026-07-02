@@ -1,4 +1,5 @@
 import { teamInit, type TeamInitOptions } from "../../core/team-init.js";
+import { TEAM_SCHEMA_VERSION } from "../../core/errors.js";
 
 export interface TeamInitOutput {
   output: string;
@@ -25,7 +26,7 @@ export async function handleTeamInit(
 
     const lines: string[] = [
       "Team init complete:",
-      `  Schema version: ${result.schemaVersionSet ? "set to 2" : "already 2+"}`,
+      `  Schema version: ${result.schemaVersionSet ? `set to ${TEAM_SCHEMA_VERSION}` : `already ${TEAM_SCHEMA_VERSION}+`}`,
       `  Team config: ${result.teamConfigured ? "configured" : "skipped"}`,
       `  Merge driver: ${result.mergeDriverInstalled ? "installed" : "skipped"}`,
       `  .gitattributes: ${result.gitattributesWritten ? "written" : "skipped"}`,

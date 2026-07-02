@@ -32,7 +32,7 @@ function runCli(cliJs: string, cwd: string, ...args: string[]): { code: number; 
   }
 }
 
-function createTeamProject(minCliVersion: string): string {
+function createTeamProject(minCliVersion: string, schemaVersion = 2): string {
   const dir = mkdtempSync(join(tmpdir(), "teamcap-e2e-"));
   const story = join(dir, ".story");
   for (const d of ["tickets", "issues", "handovers", "notes", "lessons"]) {
@@ -43,7 +43,7 @@ function createTeamProject(minCliVersion: string): string {
     JSON.stringify(
       {
         version: 2,
-        schemaVersion: 2,
+        schemaVersion,
         project: "teamcap-e2e",
         type: "npm",
         language: "ts",
@@ -116,6 +116,39 @@ describe("ISS-748: dist bundle resolves its own version for the team write gate"
     expect(r.code).not.toBe(0);
     expect(r.out).toContain("999.0.0");
     expect(r.out).toContain(`current CLI is ${bakedVersion}`);
+  });
+});
+
+// ISS-751: team-init stamps schemaVersion 3 as the old-client fence. The dist
+// bundle under test must READ and WRITE schemaVersion-3 team projects, and must
+// hard-fail on 4. The other half of the fence is empirical and cannot run in this
+// suite (no npm install here): published 1.4.4 was manually verified to hard-fail
+// on schemaVersion 3 for both reads and writes with "Config schemaVersion 3
+// exceeds max supported 2" and exit code 1. That manual verification is the
+// foundation this bump relies on.
+describe("ISS-751: schemaVersion-3 old-client fence on the dist bundle", () => {
+  it("reads AND writes a schemaVersion-3 team project when minCliVersion matches", () => {
+    const dir = createTeamProject(bakedVersion, 3);
+
+    const read = runCli(cliPath, dir, "status");
+    expect(read.out).not.toContain("exceeds max supported");
+    expect(read.code).toBe(0);
+
+    const write = runCli(cliPath, dir, "ticket", "create", "--title", "probe", "--type", "task");
+    expect(write.out).not.toContain("exceeds max supported");
+    expect(write.code).toBe(0);
+  });
+
+  it("hard-fails on a schemaVersion-4 project with version_mismatch", () => {
+    const dir = createTeamProject(bakedVersion, 4);
+
+    const read = runCli(cliPath, dir, "status");
+    expect(read.code).not.toBe(0);
+    expect(read.out).toContain("exceeds max supported");
+
+    const write = runCli(cliPath, dir, "ticket", "create", "--title", "probe", "--type", "task");
+    expect(write.code).not.toBe(0);
+    expect(write.out).toContain("exceeds max supported");
   });
 });
 

@@ -54,12 +54,35 @@ function readConfig(root: string): Record<string, unknown> {
 }
 
 describe("T-366: team-init", () => {
-  it("sets schemaVersion to 2", async () => {
+  // ISS-751: team-init must stamp schemaVersion 3, not 2. Published 1.4.4 clients
+  // accept 2 silently (partial reads); they hard-fail on 3 for both reads and
+  // writes, which is the whole point of the old-client fence.
+  it("sets schemaVersion to 3 (ISS-751 old-client fence)", async () => {
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig());
+    const result = await teamInit(root, {});
+    const config = readConfig(root);
+    expect(config.schemaVersion).toBe(3);
+    expect(result.schemaVersionSet).toBe(true);
+  });
+
+  it("upgrades an existing schemaVersion-2 team repo to 3 and reports schemaVersionSet (ISS-751)", async () => {
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig({ schemaVersion: 2, team: { enabled: true } }));
+    // Deliberate: re-running team init on a pre-fence (schemaVersion 2) team repo
+    // is the 2 -> 3 migration path, so schemaVersionSet MUST report true here.
+    const result = await teamInit(root, {});
+    expect(result.schemaVersionSet).toBe(true);
+    expect(readConfig(root).schemaVersion).toBe(3);
+  });
+
+  it("idempotent at 3: second run reports schemaVersionSet false and keeps 3 (ISS-751)", async () => {
     const root = createTempGitRepo();
     writeConfig(root, baseConfig());
     await teamInit(root, {});
-    const config = readConfig(root);
-    expect(config.schemaVersion).toBe(2);
+    const second = await teamInit(root, {});
+    expect(second.schemaVersionSet).toBe(false);
+    expect(readConfig(root).schemaVersion).toBe(3);
   });
 
   it("sets team defaults", async () => {

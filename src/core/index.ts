@@ -34,6 +34,8 @@ export {
 export {
   ProjectLoaderError,
   CURRENT_SCHEMA_VERSION,
+  MAX_SUPPORTED_SCHEMA_VERSION,
+  TEAM_SCHEMA_VERSION,
   INTEGRITY_WARNING_TYPES,
   type LoadWarning,
   type LoadWarningType,

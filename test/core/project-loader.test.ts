@@ -357,6 +357,40 @@ describe("loadProject", () => {
       expect(result.state.config.schemaVersion).toBe(1);
     });
 
+    // ISS-751: team-init stamps schemaVersion 3 as the old-client fence, so the
+    // current loader MUST accept 3 while still rejecting the next unknown version.
+    it("accepts schemaVersion 3 (team schema, ISS-751)", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 3 },
+      });
+      const result = await loadProject(testRoot);
+      expect(result.state.config.schemaVersion).toBe(3);
+    });
+
+    it("rejects schemaVersion 4 with version_mismatch (ISS-751 boundary)", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 4 },
+      });
+      try {
+        await loadProject(testRoot);
+        expect.fail("Should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProjectLoaderError);
+        expect((err as ProjectLoaderError).code).toBe("version_mismatch");
+      }
+    });
+
+    it("withProjectLock allows writes at schemaVersion 3 (ISS-751)", async () => {
+      testRoot = await createTestProject({
+        config: { ...minimalConfig, schemaVersion: 3 },
+      });
+      let ran = false;
+      await withProjectLock(testRoot, {}, async () => {
+        ran = true;
+      });
+      expect(ran).toBe(true);
+    });
+
     it("withProjectLock rejects writes when schemaVersion too high", async () => {
       testRoot = await createTestProject({
         config: { ...minimalConfig, schemaVersion: 99 },

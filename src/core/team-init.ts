@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { teamSetup } from "./team-setup.js";
 import { currentCliVersion } from "./team-capabilities.js";
 import { withProjectLock, writeConfigUnlocked } from "./project-loader.js";
+import { TEAM_SCHEMA_VERSION } from "./errors.js";
 
 export interface TeamInitOptions {
   claimStalenessHours?: number;
@@ -33,10 +34,15 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
   await withProjectLock(root, { strict: false }, async ({ state }) => {
     const config = { ...state.config, team: { ...(state.config.team ?? {}) } };
 
+    // ISS-751: stamp the team schema version (3), not 2. Published <= 1.4.4
+    // clients accept 2 (silent partial reads in mixed-version teams) but
+    // hard-fail on 3 for both reads and writes, making the old-client fence
+    // real. Idempotent at 3; re-running on a pre-fence schemaVersion-2 team
+    // repo is the deliberate 2 -> 3 upgrade path (schemaVersionSet = true).
     const prevSchema = typeof config.schemaVersion === "number" ? config.schemaVersion : 1;
-    schemaUpgraded = prevSchema < 2;
+    schemaUpgraded = prevSchema < TEAM_SCHEMA_VERSION;
     if (schemaUpgraded) {
-      config.schemaVersion = 2;
+      config.schemaVersion = TEAM_SCHEMA_VERSION;
     }
 
     config.team.enabled = true;

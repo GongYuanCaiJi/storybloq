@@ -81,7 +81,7 @@ export async function handleMigrate(
     const schemaVersion = typeof raw.schemaVersion === "number" ? raw.schemaVersion : 0;
     if (schemaVersion >= 2) {
       resultOutput = format === "json"
-        ? JSON.stringify({ version: 1, data: { migrated: false, reason: "already at schemaVersion 2" } })
+        ? JSON.stringify({ version: 1, data: { migrated: false, reason: `already at schemaVersion ${schemaVersion}` } })
         : "Already migrated (schemaVersion >= 2). No changes needed.";
       return { output: resultOutput };
     }

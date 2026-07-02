@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { initProject, STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
 import { loadProject } from "../../src/core/project-loader.js";
-import { ProjectLoaderError, CURRENT_SCHEMA_VERSION } from "../../src/core/errors.js";
+import { ProjectLoaderError } from "../../src/core/errors.js";
 
 let testRoot: string;
 
@@ -39,7 +39,11 @@ describe("initProject", () => {
 
     const { state } = await loadProject(testRoot);
     expect(state.config.version).toBe(2);
-    expect(state.config.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
+    // ISS-751 regression lock: fresh NON-team init must keep writing the literal 2
+    // so new non-team projects stay readable by every older client. Only team-init
+    // stamps TEAM_SCHEMA_VERSION (3). Do not assert via a shared constant here;
+    // the literal is the contract.
+    expect(state.config.schemaVersion).toBe(2);
     expect(state.config.project).toBe("my-project");
     expect(state.config.type).toBe("npm");
     expect(state.config.language).toBe("typescript");
