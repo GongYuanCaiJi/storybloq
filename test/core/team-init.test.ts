@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { teamInit } from "../../src/core/team-init.js";
+import { STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
 
 function createTempGitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "team-init-"));
@@ -135,6 +136,38 @@ describe("T-366: team-init", () => {
     await teamInit(root, {});
     const attrs = readFileSync(join(root, ".story", ".gitattributes"), "utf-8");
     expect(attrs).toContain("tickets/*.json merge=storybloq-json");
+  });
+
+  // ISS-754: a legacy project upgraded to team mode must get the ephemeral
+  // gitignore, or sessions/, snapshots/, status.json (absolute paths incl.
+  // the username) become committed to the shared team repo.
+  it("ensures .story/.gitignore with every ephemeral entry on a legacy project (ISS-754)", async () => {
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig());
+    expect(existsSync(join(root, ".story", ".gitignore"))).toBe(false);
+    await teamInit(root, {});
+    const content = readFileSync(join(root, ".story", ".gitignore"), "utf-8");
+    for (const entry of STORY_GITIGNORE_ENTRIES) {
+      expect(content).toContain(entry);
+    }
+  });
+
+  it("preserves custom .gitignore lines and appends only missing entries (ISS-754)", async () => {
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig());
+    // Exact-entry fixtures: matching is trimmed-line equality, so use the
+    // canonical forms for the already-present subset.
+    writeFileSync(
+      join(root, ".story", ".gitignore"),
+      "my-custom-dir/\nsnapshots/\nstatus.json\nsessions/\n",
+      "utf-8",
+    );
+    await teamInit(root, {});
+    const content = readFileSync(join(root, ".story", ".gitignore"), "utf-8");
+    expect(content).toContain("my-custom-dir/");
+    expect(content.match(/^snapshots\/$/gm)).toHaveLength(1);
+    expect(content).toContain("federation-cache.json");
+    expect(content).toContain("channel-inbox/");
   });
 
   it("writes the running CLI version as minCliVersion (ISS-748)", async () => {

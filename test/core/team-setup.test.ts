@@ -12,6 +12,7 @@ import {
   teamSetup,
   checkMergeDriverSetup,
 } from "../../src/core/team-setup.js";
+import { STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
 
 function createTempGitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "team-setup-"));
@@ -181,5 +182,20 @@ describe("T-388: team-setup", () => {
       expect(check.ok).toBe(false);
       expect(check.issues.some((i) => i.includes("version"))).toBe(true);
     });
+  });
+});
+
+// ISS-754: standalone `team setup` must also ensure the ephemeral gitignore
+// (teamSetup is the shared implementation for both `team init` and `team setup`).
+describe("ISS-754: teamSetup ensures .story/.gitignore", () => {
+  it("creates the gitignore with every ephemeral entry", async () => {
+    const root = createTempGitRepo();
+    writeConfig(root, { version: 2, project: "t", type: "npm", language: "ts" });
+    const result = await teamSetup(root);
+    expect(result.gitignoreEnsured).toBe(true);
+    const content = readFileSync(join(root, ".story", ".gitignore"), "utf-8");
+    for (const entry of STORY_GITIGNORE_ENTRIES) {
+      expect(content).toContain(entry);
+    }
   });
 });

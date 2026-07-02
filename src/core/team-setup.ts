@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { ensureGitignoreEntries, STORY_GITIGNORE_ENTRIES } from "./init.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -101,6 +102,7 @@ export interface SetupResult {
   driverInstalled: boolean;
   gitattributesWritten: boolean;
   versionUpdated: boolean;
+  gitignoreEnsured: boolean;
   gitRoot: string;
 }
 
@@ -120,11 +122,16 @@ export async function teamSetup(root: string): Promise<SetupResult> {
   await installMergeDriver(gitRoot);
   await writeGitattributes(storyDir);
   await updateConfigVersion(storyDir);
+  // ISS-754: legacy projects upgraded to team mode predate init's gitignore
+  // writing; without this, sessions/, snapshots/, status.json (absolute paths
+  // including the username) become committed to the shared team repo.
+  await ensureGitignoreEntries(join(storyDir, ".gitignore"), STORY_GITIGNORE_ENTRIES);
 
   return {
     driverInstalled: true,
     gitattributesWritten: true,
     versionUpdated: true,
+    gitignoreEnsured: true,
     gitRoot,
   };
 }

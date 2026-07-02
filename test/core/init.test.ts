@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -136,5 +136,20 @@ describe("initProject", () => {
 
   it("STORY_GITIGNORE_ENTRIES includes federation-cache.json", () => {
     expect(STORY_GITIGNORE_ENTRIES).toContain("federation-cache.json");
+  });
+
+  // ISS-754: channel-inbox holds Mac-app event payloads (incl. the .failed/
+  // quarantine); machine-local IPC, never team-visible.
+  it("STORY_GITIGNORE_ENTRIES includes channel-inbox/ (ISS-754)", () => {
+    expect(STORY_GITIGNORE_ENTRIES).toContain("channel-inbox/");
+  });
+
+  it("init writes .story/.gitignore containing every ephemeral entry (ISS-754 coverage lock)", async () => {
+    testRoot = await mkdtemp(join(tmpdir(), "storybloq-init-"));
+    await initProject(testRoot, { name: "test" });
+    const content = await readFile(join(testRoot, ".story", ".gitignore"), "utf-8");
+    for (const entry of STORY_GITIGNORE_ENTRIES) {
+      expect(content).toContain(entry);
+    }
   });
 });
