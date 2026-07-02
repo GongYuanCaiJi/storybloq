@@ -4,12 +4,20 @@
  * On every CLI invocation and in storybloq_status, we want to know whether
  * a newer @storybloq/storybloq exists on the npm registry. We cache the
  * registry answer for 24 hours in a small JSON file so the check costs at
- * most one HTTP request per day per user.
+ * most one HTTP request per day per machine across ALL entry points, and
+ * zero requests when NO_UPDATE_NOTIFIER or CI is set (ISS-777).
  *
  * Cache location: ~/.claude/storybloq/update-check.json
  *   (hidden from git-scoped .story/ by being outside the project)
  *
  * Design:
+ * - The 24h freshness gate lives in one helper (isCacheFresh) and is applied
+ *   at the FETCH layer (refreshUpdateCacheInBackground), not just when reading
+ *   the cache, so no caller can accidentally phone the registry per-invocation.
+ * - The NO_UPDATE_NOTIFIER/CI opt-out lives in one helper
+ *   (shouldSuppressUpdateFetch) enforced INSIDE fetchLatestFromNpm, the single
+ *   fetch site, so every caller (checkForUpdate,
+ *   refreshUpdateCacheInBackground, and any future one) inherits it.
  * - Network call is best-effort. Any failure (offline, registry down,
  *   timeout) silently returns null. Updates are opt-in helpful, not
  *   required for correctness.
@@ -42,7 +50,21 @@ function cachePath(): string {
   return join(homedir(), ".claude", "storybloq", "update-check.json");
 }
 
-function readCache(): UpdateCache | null {
+/**
+ * Whether a cache entry is still within the 24-hour freshness window.
+ * Single source of the age math (ISS-777): shared by readCache (which backs
+ * checkForUpdate + readUpdateCacheSync) and refreshUpdateCacheInBackground so
+ * no entry point can drift from the once-per-day contract.
+ */
+function isCacheFresh(cache: UpdateCache): boolean {
+  return Date.now() - cache.fetchedAt <= CACHE_TTL_MS;
+}
+
+/**
+ * Read + shape-validate the cache file. Does NOT apply the freshness window,
+ * so callers that need to distinguish "stale" from "absent" can.
+ */
+function readCacheRaw(): UpdateCache | null {
   try {
     const p = cachePath();
     if (!existsSync(p)) return null;
@@ -50,11 +72,16 @@ function readCache(): UpdateCache | null {
     if (typeof data.latestVersion !== "string" || typeof data.fetchedAt !== "number") {
       return null;
     }
-    if (Date.now() - data.fetchedAt > CACHE_TTL_MS) return null;
     return data;
   } catch {
     return null;
   }
+}
+
+function readCache(): UpdateCache | null {
+  const data = readCacheRaw();
+  if (!data) return null;
+  return isCacheFresh(data) ? data : null;
 }
 
 function writeCache(latestVersion: string): void {
@@ -68,7 +95,21 @@ function writeCache(latestVersion: string): void {
   }
 }
 
+/**
+ * Privacy opt-out for the registry fetch (ISS-777): NO_UPDATE_NOTIFIER or CI
+ * set-and-non-empty suppresses ALL update-check network traffic. Same
+ * semantics as shouldEmitUpdateBanner's env guards (CI="false" deliberately
+ * counts as set; empty string does not). Enforced inside fetchLatestFromNpm,
+ * the single fetch site, so every present and future caller inherits it.
+ */
+function shouldSuppressUpdateFetch(env: Record<string, string | undefined> = process.env): boolean {
+  if (env.NO_UPDATE_NOTIFIER !== undefined && env.NO_UPDATE_NOTIFIER !== "") return true;
+  if (env.CI !== undefined && env.CI !== "") return true;
+  return false;
+}
+
 async function fetchLatestFromNpm(): Promise<string | null> {
+  if (shouldSuppressUpdateFetch()) return null;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -148,8 +189,19 @@ export function readUpdateCacheSync(currentVersion: string): UpdateInfo | null {
  * Fire-and-forget background refresh of the update cache. Safe to call from
  * any context; errors are swallowed. Useful from storybloq_status so the
  * next call has fresh data.
+ *
+ * ISS-777: this runs on EVERY CLI dispatch (via preCommandHousekeeping) and
+ * on every storybloq_status call, so it must not hit the network unless a
+ * refresh is actually due. It (a) honors the NO_UPDATE_NOTIFIER/CI opt-outs
+ * (also enforced at the fetch site itself; the early return here just avoids
+ * pointless work), and (b) skips the fetch entirely while the cache is still
+ * fresh -- enforcing the once-per-day, opt-out-respecting contract at the
+ * FETCH layer across all entry points.
  */
 export function refreshUpdateCacheInBackground(): void {
+  if (shouldSuppressUpdateFetch()) return;
+  const cached = readCacheRaw();
+  if (cached && isCacheFresh(cached)) return;
   void fetchLatestFromNpm().then((v) => {
     if (v) writeCache(v);
   });

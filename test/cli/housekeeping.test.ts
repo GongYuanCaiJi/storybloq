@@ -101,3 +101,46 @@ describe("preCommandHousekeeping end-to-end", () => {
     expect(settings.permissions).toEqual({ allow: ["Bash(git status)"] });
   });
 });
+
+// ISS-777: pure predicate deciding when the CLI skips preCommandHousekeeping
+// (which does an awaited skill refresh + a background npm-registry fetch).
+// Programmatic entry points (git merge driver, Claude hooks) must skip so they
+// never phone the npm registry per invocation; interactive commands keep it.
+describe("shouldSkipHousekeeping (ISS-777)", () => {
+  it("skips the git merge driver", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["merge-driver", "%O", "%A", "%B"])).toBe(true);
+  });
+
+  it("skips the hook-status Stop hook", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["hook-status"])).toBe(true);
+  });
+
+  it("skips session compact-prepare (PreCompact hook)", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["session", "compact-prepare"])).toBe(true);
+  });
+
+  it("skips session resume-prompt (SessionStart hook)", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["session", "resume-prompt"])).toBe(true);
+  });
+
+  it("does NOT skip interactive session subcommands", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["session", "list"])).toBe(false);
+    expect(shouldSkipHousekeeping(["session"])).toBe(false);
+  });
+
+  it("does NOT skip ordinary commands", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["status"])).toBe(false);
+    expect(shouldSkipHousekeeping(["repair"])).toBe(false);
+  });
+
+  it("does NOT skip an empty argv", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping([])).toBe(false);
+  });
+});

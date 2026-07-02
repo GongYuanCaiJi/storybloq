@@ -75,15 +75,19 @@ async function runCli(): Promise<void> {
   // Version injected at build time by tsup define
   const version = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
 
-  // ISS-736: git spawns `storybloq merge-driver ...` once per merged .story
-  // file; both housekeeping (awaited skill refresh + background npm fetch)
-  // and the update banner are per-spawn noise/latency inside git plumbing.
-  const dispatchedCommand = hideBin(process.argv)[0];
-  const isMergeDriver = dispatchedCommand === "merge-driver";
+  // ISS-736 / ISS-777: some entry points run programmatically many times and
+  // must not do per-invocation housekeeping (awaited skill refresh + a
+  // background npm-registry fetch): the git merge driver (spawned once per
+  // merged .story file) and the Claude Code hooks (hook-status Stop hook,
+  // session compact-prepare/resume-prompt). shouldSkipHousekeeping is the pure
+  // predicate covering them; interactive commands keep housekeeping.
+  const dispatchedArgv = hideBin(process.argv);
+  const dispatchedCommand = dispatchedArgv[0];
+  const { shouldSkipHousekeeping } = await import("./housekeeping.js");
 
   // ISS-570: silent skill-dir refresh if the CLI version changed + schedule
   // a background update check so the next invocation's banner is fresh.
-  if (!isMergeDriver) {
+  if (!shouldSkipHousekeeping(dispatchedArgv)) {
     const { preCommandHousekeeping } = await import("./housekeeping.js");
     await preCommandHousekeeping(version);
   }
