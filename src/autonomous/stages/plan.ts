@@ -155,8 +155,9 @@ export class PlanStage implements WorkflowStage {
       // between PICK_TICKET and PLAN. Retrying PLAN can never succeed (the
       // plan file exists, the claim stays foreign), so it used to spin
       // forever. Clear the draft lock FIRST so the session no longer holds
-      // the ticket, then send the walker back to PICK_TICKET (goto is
-      // target-agnostic; same pattern as complete.ts).
+      // the ticket, then send the walker back to PICK_TICKET. The goto target
+      // is NOT free-form: assertTransition validates it against the state
+      // machine, so PLAN's row in TRANSITIONS must list PICK_TICKET (ISS-767).
       ctx.updateDraft({ ticket: undefined, pendingTicketClaim: undefined } as Partial<typeof ctx.state>);
       return {
         action: "goto",
