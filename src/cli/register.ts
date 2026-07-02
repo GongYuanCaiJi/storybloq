@@ -1528,6 +1528,10 @@ export function registerIssueCommand(yargs: Argv): Argv {
                 .option("component", {
                   type: "string",
                   describe: "Filter by component",
+                })
+                .option("phase", {
+                  type: "string",
+                  describe: "Filter by phase",
                 }),
             ),
           async (argv) => {
@@ -1538,6 +1542,7 @@ export function registerIssueCommand(yargs: Argv): Argv {
                   status: argv.status as string | undefined,
                   severity: argv.severity as string | undefined,
                   component: argv.component as string | undefined,
+                  phase: argv.phase as string | undefined,
                 },
                 ctx,
               ),

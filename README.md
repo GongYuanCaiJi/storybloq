@@ -193,7 +193,7 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 
 | Command | Description |
 |---------|-------------|
-| `storybloq issue list [--status] [--severity]` | List issues |
+| `storybloq issue list [--status] [--severity] [--component] [--phase]` | List issues |
 | `storybloq issue get <id>` | Issue detail |
 | `storybloq issue create --title --severity --impact [--components] [--related-tickets] [--location]` | Create |
 | `storybloq issue update <id> [--status] [--title] [--severity] ...` | Update |

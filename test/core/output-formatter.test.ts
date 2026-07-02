@@ -645,3 +645,40 @@ describe("formatRecommendations", () => {
     expect(md).toContain("Showing 1 of 8 candidates.");
   });
 });
+
+// ISS-739 (GitHub #13): issue phase/location/order were settable via CLI/MCP
+// but never rendered in markdown, and MCP read tools are hard-coded to md, so
+// MCP clients could not see them at all.
+describe("formatIssue phase/location/order (ISS-739)", () => {
+  it("renders Phase and Order on the Status line, matching formatTicket placement", () => {
+    const md = formatIssue(
+      makeIssue({ id: "ISS-001", status: "open", severity: "high", phase: "p2", order: 3 }),
+      "md",
+    );
+    expect(md).toContain("Status: open | Severity: high | Phase: p2 | Order: 3");
+  });
+
+  it("renders none defaults when phase and order are unset", () => {
+    const md = formatIssue(makeIssue({ id: "ISS-001" }), "md");
+    expect(md).toContain("Phase: none | Order: none");
+  });
+
+  it("renders Location when non-empty and omits the line when empty", () => {
+    const withLoc = formatIssue(
+      makeIssue({ id: "ISS-001", location: ["src/a.ts:10", "src/b.ts"] }),
+      "md",
+    );
+    expect(withLoc).toContain("Location: src/a.ts:10, src/b.ts");
+    const withoutLoc = formatIssue(makeIssue({ id: "ISS-002" }), "md");
+    expect(withoutLoc).not.toContain("Location:");
+  });
+
+  it("formatIssueList rows carry the phase suffix like ticket rows", () => {
+    const md = formatIssueList(
+      [makeIssue({ id: "ISS-001", phase: "p1" }), makeIssue({ id: "ISS-002" })],
+      "md",
+    );
+    expect(md).toContain("ISS-001 [medium]: Test ISS-001 (p1)");
+    expect(md).toContain("ISS-002 [medium]: Test ISS-002 (none)");
+  });
+});

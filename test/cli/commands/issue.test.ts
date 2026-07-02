@@ -127,6 +127,51 @@ describe("handleIssueList", () => {
     const result = handleIssueList({}, ctx);
     expect(() => JSON.parse(result.output)).not.toThrow();
   });
+
+  // ISS-739 (GitHub #13): phase filter, mirroring handleTicketList semantics:
+  // no roadmap validation at the CLI layer, unknown phase yields an empty
+  // list with exit 0 (validation lives in the MCP tool closure, like
+  // storybloq_ticket_list).
+  it("filters by phase (ISS-739)", () => {
+    const ctx = makeCtx({
+      state: makeState({
+        issues: [
+          makeIssue({ id: "ISS-001", phase: "p1" }),
+          makeIssue({ id: "ISS-002", phase: "p2" }),
+          makeIssue({ id: "ISS-003" }),
+        ],
+      }),
+    });
+    const result = handleIssueList({ phase: "p1" }, ctx);
+    expect(result.output).toContain("ISS-001");
+    expect(result.output).not.toContain("ISS-002");
+    expect(result.output).not.toContain("ISS-003");
+  });
+
+  it("unknown phase returns an empty list with exit 0, like ticket list (ISS-739)", () => {
+    const ctx = makeCtx({
+      state: makeState({ issues: [makeIssue({ id: "ISS-001", phase: "p1" })] }),
+    });
+    const result = handleIssueList({ phase: "bogus" }, ctx);
+    expect(result.output).toBe("No issues found.");
+    expect(result.exitCode).toBeUndefined();
+  });
+
+  it("phase filter composes with severity as AND (ISS-739)", () => {
+    const ctx = makeCtx({
+      state: makeState({
+        issues: [
+          makeIssue({ id: "ISS-001", phase: "p1", severity: "high" }),
+          makeIssue({ id: "ISS-002", phase: "p1", severity: "low" }),
+          makeIssue({ id: "ISS-003", phase: "p2", severity: "high" }),
+        ],
+      }),
+    });
+    const result = handleIssueList({ phase: "p1", severity: "high" }, ctx);
+    expect(result.output).toContain("ISS-001");
+    expect(result.output).not.toContain("ISS-002");
+    expect(result.output).not.toContain("ISS-003");
+  });
 });
 
 describe("handleIssueGet", () => {

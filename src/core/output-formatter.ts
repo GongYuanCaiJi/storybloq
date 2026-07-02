@@ -524,10 +524,13 @@ export function formatIssue(
   const lines: string[] = [
     `# ${escapeMarkdownInline(displayIdOf(issue))}: ${escapeMarkdownInline(issue.title)}`,
     "",
-    `Status: ${issue.status} | Severity: ${issue.severity}`,
+    `Status: ${issue.status} | Severity: ${issue.severity} | Phase: ${issue.phase ?? "none"} | Order: ${issue.order ?? "none"}`,
     `Components: ${issue.components.join(", ") || "none"}`,
     `Discovered: ${issue.discoveredDate}${issue.resolvedDate ? ` | Resolved: ${issue.resolvedDate}` : ""}`,
   ];
+  if (issue.location.length > 0) {
+    lines.push(`Location: ${issue.location.join(", ")}`);
+  }
   if (issue.relatedTickets.length > 0) {
     const display = state
       ? issue.relatedTickets.map((ref) => resolveTicketRefDisplay(ref, state)).join(", ")
@@ -552,7 +555,7 @@ export function formatIssueList(
   const lines: string[] = [];
   for (const i of issues) {
     const status = i.status === "resolved" ? "[x]" : "[ ]";
-    lines.push(`${status} ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownInline(i.title)}`);
+    lines.push(`${status} ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownInline(i.title)} (${i.phase ?? "none"})`);
   }
   return lines.join("\n");
 }

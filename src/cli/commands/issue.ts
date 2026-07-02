@@ -77,7 +77,7 @@ function rethrowIssueResolutionError(err: unknown, fallbackMsg: string): never {
 // --- Read Handlers ---
 
 export function handleIssueList(
-  filters: { status?: string; severity?: string; component?: string },
+  filters: { status?: string; severity?: string; component?: string; phase?: string },
   ctx: CommandContext,
 ): CommandResult {
   let issues = [...ctx.state.activeIssues];
@@ -102,6 +102,11 @@ export function handleIssueList(
   }
   if (filters.component) {
     issues = issues.filter((i) => i.components.includes(filters.component!));
+  }
+  // ISS-739: no roadmap validation here, matching handleTicketList; unknown
+  // phase yields an empty list; the MCP tool closure validates like ticket_list.
+  if (filters.phase) {
+    issues = issues.filter((i) => i.phase === filters.phase);
   }
 
   return { output: formatIssueList(issues, ctx.format) };

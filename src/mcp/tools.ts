@@ -426,14 +426,30 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       status: z.enum(ISSUE_STATUSES).optional().describe("Filter by status: open, inprogress, resolved"),
       severity: z.enum(ISSUE_SEVERITIES).optional().describe("Filter by severity: critical, high, medium, low"),
       component: z.string().optional().describe("Filter by component name"),
+      phase: z.string().optional().describe("Filter by phase ID"),
       node: nodeParam,
     },
   }, (args) => {
     const eff = resolveEffectiveRoot(pinnedRoot, args.node);
     if ("content" in eff) return eff;
-    return runMcpReadTool(pinnedRoot, (ctx) =>
-      handleIssueList({ status: args.status, severity: args.severity, component: args.component }, ctx),
-    eff.root);
+    return runMcpReadTool(pinnedRoot, (ctx) => {
+      // ISS-739: validate phase at the tool layer like storybloq_ticket_list;
+      // the CLI handler itself stays unvalidated for parity with ticket list.
+      if (args.phase) {
+        const phaseExists = ctx.state.roadmap.phases.some((p) => p.id === args.phase);
+        if (!phaseExists) {
+          return {
+            output: `Phase "${args.phase}" not found in roadmap.`,
+            exitCode: 1 as const,
+            errorCode: "not_found" as const,
+          };
+        }
+      }
+      return handleIssueList(
+        { status: args.status, severity: args.severity, component: args.component, phase: args.phase },
+        ctx,
+      );
+    }, eff.root);
   });
 
   server.registerTool("storybloq_issue_get", {

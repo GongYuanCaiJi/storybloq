@@ -76,7 +76,7 @@ storybloq ticket delete <id> [--force] [--format json|md]
 List issues with optional filters
 
 ```
-storybloq issue list [--status <s>] [--severity <sev>] [--format json|md]
+storybloq issue list [--status <s>] [--severity <sev>] [--component <c>] [--phase <p>] [--format json|md]
 ```
 
 ### issue get
@@ -328,7 +328,7 @@ storybloq setup-skill [--skip-hooks]
 - **storybloq_ticket_meta_get** (id, path?) — Get custom passthrough metadata from a ticket
 - **storybloq_ticket_next** (count?) — Highest-priority unblocked ticket(s)
 - **storybloq_ticket_blocked** — All blocked tickets with dependencies
-- **storybloq_issue_list** (status?, severity?, component?) — List issues with optional filters
+- **storybloq_issue_list** (status?, severity?, component?, phase?) — List issues with optional filters
 - **storybloq_issue_get** (id) — Get an issue by ID
 - **storybloq_issue_meta_get** (id, path?) — Get custom passthrough metadata from an issue
 - **storybloq_handover_list** — List handover filenames (newest first)
