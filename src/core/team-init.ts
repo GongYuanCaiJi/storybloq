@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { teamSetup } from "./team-setup.js";
+import { currentCliVersion } from "./team-capabilities.js";
 import { withProjectLock, writeConfigUnlocked } from "./project-loader.js";
 
 export interface TeamInitOptions {
@@ -50,13 +51,11 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
       config.team.requiredFeatures = ["merge-driver"];
     }
     if (config.team.minCliVersion === undefined) {
-      try {
-        const { createRequire } = await import("node:module");
-        const require = createRequire(import.meta.url);
-        const pkg = require("../../package.json") as { version: string };
-        config.team.minCliVersion = pkg.version;
-      } catch {
-        // Non-critical: version gate is best-effort
+      // Non-critical: version gate is best-effort (ISS-748: shared resolver, not a
+      // relative require that reads the wrong manifest from dist builds)
+      const version = currentCliVersion();
+      if (version !== null) {
+        config.team.minCliVersion = version;
       }
     }
 

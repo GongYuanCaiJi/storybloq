@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -112,6 +112,21 @@ describe("T-366: team-init", () => {
     await teamInit(root, {});
     const attrs = readFileSync(join(root, ".story", ".gitattributes"), "utf-8");
     expect(attrs).toContain("tickets/*.json merge=storybloq-json");
+  });
+
+  it("writes the running CLI version as minCliVersion (ISS-748)", async () => {
+    vi.stubEnv("STORYBLOQ_VERSION", "7.7.7");
+    try {
+      const root = createTempGitRepo();
+      writeConfig(root, baseConfig());
+      await teamInit(root, {});
+      const team = readConfig(root).team as Record<string, unknown>;
+      // ISS-748: the broken relative require read the workspace-root manifest and
+      // wrote its version; the value must come from the CLI's own version instead.
+      expect(team.minCliVersion).toBe("7.7.7");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("fails if no .story/ dir", async () => {

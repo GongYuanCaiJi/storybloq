@@ -19,7 +19,15 @@ export const SUPPORTED_TEAM_FEATURES = new Set([
   "tombstones",
 ]);
 
-function currentCliVersion(): string | null {
+// ISS-748: the version MUST come from the build-time constant in bundled builds.
+// tsup's `define` replaces the exact dotted expression `process.env.STORYBLOQ_VERSION`
+// with the package version literal in every dist bundle (do not rewrite to bracket
+// access or destructuring -- esbuild only substitutes the dotted form). The relative
+// require below is only correct from the src tree; from dist/ it resolves outside
+// the package root (missing on npm installs, the workspace root in this monorepo).
+export function currentCliVersion(): string | null {
+  const baked = process.env.STORYBLOQ_VERSION;
+  if (typeof baked === "string" && baked.trim() !== "") return baked;
   try {
     const require = createRequire(import.meta.url);
     const pkg = require("../../package.json") as { version?: unknown };
