@@ -1221,19 +1221,19 @@ function formatFullExport(
             type: t.type,
           })),
         })),
-        issues: state.issues.map((i) => ({
+        issues: state.activeIssues.map((i) => ({
           id: i.id,
           title: i.title,
           severity: i.severity,
           status: i.status,
         })),
-        notes: state.notes.map((n) => ({
+        notes: state.activeNotes.map((n) => ({
           id: n.id,
           title: n.title,
           status: n.status,
           tags: n.tags,
         })),
-        lessons: state.lessons.filter((l) => l.status === "active").map((l) => ({
+        lessons: state.activeLessons.filter((l) => l.status === "active").map((l) => ({
           id: l.id,
           title: l.title,
           content: l.content,
@@ -1278,16 +1278,16 @@ function formatFullExport(
     }
   }
 
-  if (state.issues.length > 0) {
+  if (state.activeIssues.length > 0) {
     lines.push("");
     lines.push("## Issues");
-    for (const i of state.issues) {
+    for (const i of state.activeIssues) {
       const resolved = i.status === "resolved" ? " ✓" : "";
       lines.push(`- ${displayIdOf(i)} [${i.severity}]: ${escapeMarkdownDocument(i.title)}${resolved}`);
     }
   }
 
-  const activeNotes = state.notes.filter((n) => n.status === "active");
+  const activeNotes = state.activeNotes.filter((n) => n.status === "active");
   if (activeNotes.length > 0) {
     lines.push("");
     lines.push("## Notes");
@@ -1298,7 +1298,7 @@ function formatFullExport(
     }
   }
 
-  const activeLessons = state.lessons.filter((l) => l.status === "active");
+  const activeLessons = state.activeLessons.filter((l) => l.status === "active");
   if (activeLessons.length > 0) {
     lines.push("");
     lines.push("## Lessons");

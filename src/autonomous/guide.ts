@@ -1289,7 +1289,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
     }
 
     // T-153: Surface high/critical issues alongside ticket candidates
-    const highIssues = projectState.issues.filter(
+    const highIssues = projectState.activeIssues.filter(
       i => i.status === "open" && (i.severity === "critical" || i.severity === "high"),
     );
     let issuesText = "";
@@ -2265,7 +2265,7 @@ async function handleCancel(root: string, args: GuideInput): Promise<McpToolResu
   try {
     const { state: projectState } = await loadProject(root);
     const nextResult = nextTickets(projectState, 5);
-    const openIssues = projectState.issues.filter(i => i.status === "open" || i.status === "inprogress").slice(0, 5);
+    const openIssues = projectState.activeIssues.filter(i => i.status === "open" || i.status === "inprogress").slice(0, 5);
     const remainingWork = {
       tickets: nextResult.kind === "found"
         ? nextResult.candidates.map(c => ({ id: (c.ticket as Record<string, unknown>).displayId as string | undefined ?? c.ticket.id, title: c.ticket.title }))

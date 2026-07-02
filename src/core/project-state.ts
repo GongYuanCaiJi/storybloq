@@ -486,11 +486,11 @@ export class ProjectState {
   }
 }
 
-function isActiveLifecycle(item: { lifecycle?: unknown }): boolean {
+export function isActiveLifecycle(item: { lifecycle?: unknown }): boolean {
   return item.lifecycle == null || item.lifecycle === "active";
 }
 
-function isDeleted(item: { lifecycle?: unknown }): boolean {
+export function isDeleted(item: { lifecycle?: unknown }): boolean {
   return item.lifecycle === "deleted";
 }
 

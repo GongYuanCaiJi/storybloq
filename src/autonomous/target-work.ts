@@ -1,3 +1,4 @@
+import { isDeleted } from "../core/project-state.js";
 import { displayIdOf } from "../core/resolver.js";
 /**
  * T-188: Targeted auto mode helpers.
@@ -74,6 +75,13 @@ export function buildTargetedCandidatesText(
     if (issueResult.kind === "found") {
       const issue = issueResult.item;
       const displayId = displayIdOf(issue);
+      // ISS-756: tombstoned targets are terminally unworkable; label them
+      // truthfully (targeted mode was explicitly given this id) and never
+      // let them become firstReady, so exhaustion routes to stuck-handover.
+      if (isDeleted(issue)) {
+        lines.push(`${i + 1}. **${displayId}: ${issue.title}** (issue, ${issue.severity}) -- deleted (tombstoned)`);
+        continue;
+      }
       lines.push(`${i + 1}. **${displayId}: ${issue.title}** (issue, ${issue.severity}) -- ${issueStatusLabel(issue.status)}`);
       if (!firstReady && (issue.status === "open" || issue.status === "inprogress")) {
         firstReady = { id: issue.id, displayId, kind: "issue" };
@@ -85,6 +93,10 @@ export function buildTargetedCandidatesText(
     if (ticketResult.kind === "found") {
       const ticket = ticketResult.item;
       const displayId = displayIdOf(ticket);
+      if (isDeleted(ticket)) {
+        lines.push(`${i + 1}. **${displayId}: ${ticket.title}** (${ticket.type}) -- deleted (tombstoned)`);
+        continue;
+      }
       const blocked = projectState.isBlocked(ticket);
       const complete = ticket.status === "complete";
       const blockerIds = ticket.blockedBy.map((bId) => {

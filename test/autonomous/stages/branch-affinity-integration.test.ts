@@ -50,8 +50,8 @@ function makeRecipe(overrides?: Partial<ResolvedRecipe>): ResolvedRecipe {
 }
 
 function setupProject(root: string, options?: {
-  tickets?: Array<{ id: string; title: string; status: string; phase: string; blockedBy?: string[]; displayId?: string; previousDisplayIds?: string[] }>;
-  issues?: Array<{ id: string; title: string; status: string; severity: string; displayId?: string; previousDisplayIds?: string[] }>;
+  tickets?: Array<{ id: string; title: string; status: string; phase: string; blockedBy?: string[]; displayId?: string; previousDisplayIds?: string[]; lifecycle?: string }>;
+  issues?: Array<{ id: string; title: string; status: string; severity: string; displayId?: string; previousDisplayIds?: string[]; lifecycle?: string }>;
 }): void {
   const storyDir = join(root, ".story");
   mkdirSync(join(storyDir, "tickets"), { recursive: true });
@@ -76,6 +76,7 @@ function setupProject(root: string, options?: {
       blockedBy: t.blockedBy ?? [], parentTicket: null,
       ...(t.displayId ? { displayId: t.displayId } : {}),
       ...(t.previousDisplayIds ? { previousDisplayIds: t.previousDisplayIds } : {}),
+      ...(t.lifecycle ? { lifecycle: t.lifecycle, deletedAt: "2026-06-01T00:00:00Z", deletedBy: "test" } : {}),
     }));
   }
   for (const i of options?.issues ?? []) {
@@ -85,6 +86,7 @@ function setupProject(root: string, options?: {
       discoveredDate: "2026-04-03", resolvedDate: null, relatedTickets: [], order: 10,
       ...(i.displayId ? { displayId: i.displayId } : {}),
       ...(i.previousDisplayIds ? { previousDisplayIds: i.previousDisplayIds } : {}),
+      ...(i.lifecycle ? { lifecycle: i.lifecycle, deletedAt: "2026-06-01T00:00:00Z", deletedBy: "test" } : {}),
     }));
   }
 }
@@ -440,5 +442,37 @@ describe("gitCheckRefFormat", () => {
     const result = await gitCheckRefFormat("/tmp", "story/has space");
     expect(result.ok).toBe(true);
     expect(result.ok && result.data).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISS-756: tombstoned (soft-deleted) items must be unpickable
+// ---------------------------------------------------------------------------
+
+describe("ISS-756: PickTicketStage rejects tombstoned items", () => {
+  it("rejects a tombstoned open ticket with a retry naming the state", async () => {
+    setupProject(testRoot, {
+      tickets: [{ id: "T-001", title: "Ghost", status: "open", phase: "p1", lifecycle: "deleted" }],
+    });
+    const ctx = new StageContext(testRoot, sessionDir, makeSessionState({}), makeRecipe());
+    const stage = new PickTicketStage();
+
+    const result = await stage.report(ctx, { completedAction: "ticket_picked", ticketId: "T-001" } as any);
+
+    expect(result).toHaveProperty("action", "retry");
+    expect((result as { instruction: string }).instruction).toMatch(/deleted \(tombstoned\)/);
+  });
+
+  it("rejects a tombstoned open issue with a retry naming the state", async () => {
+    setupProject(testRoot, {
+      issues: [{ id: "ISS-001", title: "Ghost issue", status: "open", severity: "high", lifecycle: "deleted" }],
+    });
+    const ctx = new StageContext(testRoot, sessionDir, makeSessionState({}), makeRecipe());
+    const stage = new PickTicketStage();
+
+    const result = await stage.report(ctx, { completedAction: "issue_picked", issueId: "ISS-001" } as any);
+
+    expect(result).toHaveProperty("action", "retry");
+    expect((result as { instruction: string }).instruction).toMatch(/deleted \(tombstoned\)/);
   });
 });

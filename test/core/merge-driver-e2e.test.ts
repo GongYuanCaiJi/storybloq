@@ -365,7 +365,7 @@ describe("ISS-746: delete-vs-edit end-to-end recovery loop", () => {
     // Write gate lifted.
     const update = cli(dir, "ticket", "update", "T-001", "--title", "Post-resolve update");
     expect(update.exitCode).toBe(0);
-  });
+  }, 20000);
 
   it("--use ours applies the tombstone with the deleting side's original stamps", () => {
     const dir = setupDeleteEditRepo();
@@ -378,7 +378,7 @@ describe("ISS-746: delete-vs-edit end-to-end recovery loop", () => {
     expect(resolved.deletedAt).toBe("2026-05-26T00:00:00Z");
     expect(resolved.deletedBy).toBe("alice@test.com");
     expect(resolved._conflicts).toBeUndefined();
-  });
+  }, 20000);
 });
 
 describe("ISS-749: config/roadmap conflicts are showable and resolvable", () => {

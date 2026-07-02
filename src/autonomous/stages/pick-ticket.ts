@@ -2,6 +2,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
+import { isDeleted } from "../../core/project-state.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
 import { detectBranchAffinity, checkAffinityMismatch, buildAffinityAnnotation, buildMismatchHandoverInstruction, createTicketBranch, refreshGitWorkingState } from "../branch-affinity.js";
 import { canClaim, buildClaim } from "../../core/claims.js";
@@ -89,7 +90,7 @@ export class PickTicketStage implements WorkflowStage {
     }
 
     // ISS-084: Surface ALL open issues (severity affects display order, not work-remaining check)
-    const allOpenIssues = projectState.issues.filter(i => i.status === "open");
+    const allOpenIssues = projectState.activeIssues.filter(i => i.status === "open");
     const highIssues = allOpenIssues.filter(i => i.severity === "critical" || i.severity === "high");
     const otherIssues = allOpenIssues.filter(i => i.severity !== "critical" && i.severity !== "high");
     let issuesText = "";
@@ -180,6 +181,12 @@ export class PickTicketStage implements WorkflowStage {
     }
     const ticket = resolvedRef.item;
     const ticketLabel = displayIdOf(ticket);
+
+    // ISS-756: tombstoned items resolve (gc/conflicts tooling needs that) but
+    // must never be workable.
+    if (isDeleted(ticket)) {
+      return { action: "retry", instruction: `Ticket ${ticketLabel} is deleted (tombstoned). Pick a different ticket.` };
+    }
 
     // T-188: Enforce target membership with the resolved canonical id (targetWork is canonical per ISS-654)
     const targetReject = this.enforceTargetMembership(ctx, ticket.id, ticketLabel);
@@ -323,6 +330,11 @@ export class PickTicketStage implements WorkflowStage {
     }
     const issue = resolvedRef.item;
     const issueLabel = displayIdOf(issue);
+
+    // ISS-756: see the ticket path -- tombstoned items are unworkable.
+    if (isDeleted(issue)) {
+      return { action: "retry", instruction: `Issue ${issueLabel} is deleted (tombstoned). Pick a different issue.` };
+    }
 
     // T-188: Enforce target membership with the resolved canonical id (targetWork is canonical per ISS-654)
     const targetReject = this.enforceTargetMembership(ctx, issue.id, issueLabel);

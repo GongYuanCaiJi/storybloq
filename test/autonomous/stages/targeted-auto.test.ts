@@ -565,3 +565,38 @@ describe("COMPLETE enter() targeted termination", () => {
     expect(reminders.some((r: string) => r.includes("targeted auto mode"))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ISS-756: tombstoned targets are terminally unworkable, never firstReady
+// ---------------------------------------------------------------------------
+
+describe("ISS-756: tombstoned targets in candidates", () => {
+  it("labels a tombstoned open ticket deleted and skips it for firstReady", () => {
+    const ps = makeProjectState({
+      tickets: [
+        makeTicket({ id: "T-001", lifecycle: "deleted" } as Parameters<typeof makeTicket>[0]),
+        makeTicket({ id: "T-002" }),
+      ],
+    });
+    const { text, firstReady } = buildTargetedCandidatesText(["T-001", "T-002"], ps);
+    expect(text).toContain("deleted (tombstoned)");
+    expect(firstReady).toEqual({ id: "T-002", displayId: "T-002", kind: "ticket" });
+  });
+
+  it("labels a tombstoned open issue deleted and never firstReady", () => {
+    const ps = makeProjectState({
+      issues: [makeIssue({ id: "ISS-001", lifecycle: "deleted" } as Parameters<typeof makeIssue>[0])],
+    });
+    const { text, firstReady } = buildTargetedCandidatesText(["ISS-001"], ps);
+    expect(text).toContain("deleted (tombstoned)");
+    expect(firstReady).toBeNull();
+  });
+
+  it("stuck (firstReady null) when only tombstoned targets remain", () => {
+    const ps = makeProjectState({
+      tickets: [makeTicket({ id: "T-001", lifecycle: "deleted" } as Parameters<typeof makeTicket>[0])],
+    });
+    const { firstReady } = buildTargetedCandidatesText(["T-001"], ps);
+    expect(firstReady).toBeNull();
+  });
+});

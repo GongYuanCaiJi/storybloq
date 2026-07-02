@@ -237,3 +237,46 @@ describe("formatExport", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// ISS-756: export must exclude tombstoned (soft-deleted) items
+// ---------------------------------------------------------------------------
+
+describe("ISS-756: export excludes tombstoned items", () => {
+  function tombstonedFixtures() {
+    return {
+      issues: [
+        makeIssue({ id: "ISS-001" }),
+        makeIssue({ id: "ISS-002", lifecycle: "deleted" } as Parameters<typeof makeIssue>[0]),
+      ],
+      notes: [
+        makeNote({ id: "N-001" }),
+        makeNote({ id: "N-002", lifecycle: "deleted" } as Parameters<typeof makeNote>[0]),
+      ],
+      lessons: [
+        makeLesson({ id: "L-001" }),
+        makeLesson({ id: "L-002", lifecycle: "deleted" } as Parameters<typeof makeLesson>[0]),
+      ],
+    };
+  }
+
+  it("md export omits tombstoned issues, notes, and lessons", () => {
+    const result = handleExport(makeCtx(tombstonedFixtures(), "md"), "all", null);
+    expect(result.output).toContain("ISS-001");
+    expect(result.output).not.toContain("ISS-002");
+    expect(result.output).toContain("N-001");
+    expect(result.output).not.toContain("N-002");
+    expect(result.output).toContain("L-001");
+    expect(result.output).not.toContain("L-002");
+  });
+
+  it("json export omits tombstoned issues, notes, and lessons", () => {
+    const result = handleExport(makeCtx(tombstonedFixtures(), "json"), "all", null);
+    const parsed = JSON.parse(result.output) as {
+      data: { issues: Array<{ id: string }>; notes: Array<{ id: string }>; lessons: Array<{ id: string }> };
+    };
+    expect(parsed.data.issues.map((i) => i.id)).toEqual(["ISS-001"]);
+    expect(parsed.data.notes.map((n) => n.id)).toEqual(["N-001"]);
+    expect(parsed.data.lessons.map((l) => l.id)).toEqual(["L-001"]);
+  });
+});
