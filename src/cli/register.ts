@@ -179,8 +179,10 @@ export function registerRepairCommand(yargs: Argv): Argv {
       if (dryRun) {
         await runReadCommand("md", (ctx) => handleRepair(ctx, true));
       } else {
-        // Write mode: load, compute, write atomically
-        const { withProjectLock, writeTicketUnlocked, writeIssueUnlocked, runTransactionUnlocked } = await import("../core/project-loader.js");
+        // Write mode: load, compute, apply minimal patches atomically (ISS-738:
+        // patches target the raw on-disk JSON, never loader-hydrated entities).
+        const { withProjectLock } = await import("../core/project-loader.js");
+        const { applyRepairPatches } = await import("./commands/repair.js");
         const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
         await withProjectLock(root, { strict: false }, async ({ state, warnings }) => {
           const result = computeRepairs(state, warnings, { canonicalizeRefs });
@@ -193,17 +195,7 @@ export function registerRepairCommand(yargs: Argv): Argv {
             writeOutput("No stale references found. Project is clean.");
             return;
           }
-          const { resolve } = await import("node:path");
-          const { serializeJSON } = await import("../core/project-loader.js");
-          const storyDir = resolve(root, ".story");
-          const ops: Array<{ op: "write"; target: string; content: string }> = [];
-          for (const ticket of result.tickets) {
-            ops.push({ op: "write", target: resolve(storyDir, "tickets", `${ticket.id}.json`), content: serializeJSON(ticket) });
-          }
-          for (const issue of result.issues) {
-            ops.push({ op: "write", target: resolve(storyDir, "issues", `${issue.id}.json`), content: serializeJSON(issue) });
-          }
-          await runTransactionUnlocked(root, ops);
+          await applyRepairPatches(root, result.patches);
           const lines = [`Fixed ${result.fixes.length} stale reference(s):`, ""];
           for (const fix of result.fixes) {
             lines.push(`- ${fix.entity}.${fix.field}: ${fix.description}`);

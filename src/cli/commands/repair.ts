@@ -1,9 +1,12 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { CommandContext, CommandResult } from "../run.js";
 import { validateProject } from "../../core/validation.js";
 import { INTEGRITY_WARNING_TYPES, type LoadWarning } from "../../core/errors.js";
 import type { ProjectState } from "../../core/project-state.js";
-import type { Ticket } from "../../models/ticket.js";
-import type { Issue } from "../../models/issue.js";
+import { serializeJSON, runTransactionUnlocked } from "../../core/project-loader.js";
+import { CANONICAL_ID_REGEX } from "../../core/canonical-id.js";
+import { TICKET_ID_REGEX, ISSUE_ID_REGEX } from "../../models/types.js";
 
 interface RepairFix {
   entity: string;
@@ -11,11 +14,24 @@ interface RepairFix {
   description: string;
 }
 
+/**
+ * ISS-738: repair writes are MINIMAL PATCHES against the raw on-disk JSON,
+ * never re-serializations of loader-hydrated entities (which absorb derived
+ * fields like displayId and defaulted completedDate into every touched file).
+ * `set` holds only the fields repair actually changed, as plain JSON values;
+ * `unset` holds keys to delete (the ISS-652 stale-claim strip).
+ */
+export interface RepairPatch {
+  id: string;
+  type: "ticket" | "issue";
+  set: Record<string, unknown>;
+  unset: string[];
+}
+
 export interface RepairResult {
   fixes: RepairFix[];
   error?: string;
-  tickets: Ticket[];
-  issues: Issue[];
+  patches: RepairPatch[];
 }
 
 /**
@@ -39,14 +55,12 @@ export function computeRepairs(
     return {
       fixes: [],
       error: `Cannot repair: data integrity issue in ${integrityWarning.file}: ${integrityWarning.message}. Fix the corrupt file first, then retry.`,
-      tickets: [],
-      issues: [],
+      patches: [],
     };
   }
 
   const fixes: RepairFix[] = [];
-  const modifiedTickets: Ticket[] = [];
-  const modifiedIssues: Issue[] = [];
+  const patches: RepairPatch[] = [];
 
   const ticketIDs = new Set(state.tickets.map((t) => t.id));
   const allTicketRefs = new Set<string>();
@@ -71,10 +85,12 @@ export function computeRepairs(
   }
 
   for (const ticket of state.tickets) {
-    let modified = false;
+    let blockedByChanged = false;
+    let parentChanged = false;
+    let phaseCleared = false;
     let blockedBy = [...ticket.blockedBy];
     let parentTicket = ticket.parentTicket;
-    let phase = ticket.phase;
+    const phase = ticket.phase;
 
     const newBlockedBy: string[] = [];
     for (const ref of blockedBy) {
@@ -83,18 +99,18 @@ export function computeRepairs(
         if (kind === "found") {
           if (resolved !== ref) {
             fixes.push({ entity: ticket.id, field: "blockedBy", description: `Canonicalized: ${ref} -> ${resolved}` });
-            modified = true;
+            blockedByChanged = true;
           }
           newBlockedBy.push(resolved);
         } else if (kind === "missing") {
           fixes.push({ entity: ticket.id, field: "blockedBy", description: `Removed stale ref: ${ref}` });
-          modified = true;
+          blockedByChanged = true;
         } else {
           newBlockedBy.push(ref);
         }
       } else if (!allTicketRefs.has(ref)) {
         fixes.push({ entity: ticket.id, field: "blockedBy", description: `Removed stale ref: ${ref}` });
-        modified = true;
+        blockedByChanged = true;
       } else {
         newBlockedBy.push(ref);
       }
@@ -107,16 +123,16 @@ export function computeRepairs(
         if (kind === "found" && resolved !== parentTicket) {
           fixes.push({ entity: ticket.id, field: "parentTicket", description: `Canonicalized: ${parentTicket} -> ${resolved}` });
           parentTicket = resolved;
-          modified = true;
+          parentChanged = true;
         } else if (kind === "missing") {
           fixes.push({ entity: ticket.id, field: "parentTicket", description: `Cleared stale ref: ${parentTicket}` });
           parentTicket = null;
-          modified = true;
+          parentChanged = true;
         }
       } else if (!allTicketRefs.has(parentTicket)) {
         fixes.push({ entity: ticket.id, field: "parentTicket", description: `Cleared stale ref: ${parentTicket}` });
         parentTicket = null;
-        modified = true;
+        parentChanged = true;
       }
     }
 
@@ -125,8 +141,7 @@ export function computeRepairs(
       : phase != null ? String(phase) : null;
     if (phaseRaw && !phaseIDs.has(phaseRaw)) {
       fixes.push({ entity: ticket.id, field: "phase", description: `Cleared stale phase: ${phaseRaw}` });
-      phase = null;
-      modified = true;
+      phaseCleared = true;
     }
 
     // ISS-652: completed tickets must not retain autonomous session claim state.
@@ -139,23 +154,23 @@ export function computeRepairs(
       && (Object.prototype.hasOwnProperty.call(tRec, "claimedBySession") || ticket.claim != null);
     if (staleClaimOnComplete) {
       fixes.push({ entity: ticket.id, field: "claim", description: "Cleared stale claim state on completed ticket" });
-      modified = true;
     }
 
-    if (modified) {
-      let rebuilt: Record<string, unknown> = { ...ticket, blockedBy, parentTicket, phase };
-      if (staleClaimOnComplete) {
-        const { claim: _claim, claimedBySession: _claimedBySession, ...rest } = rebuilt;
-        rebuilt = rest;
-      }
-      modifiedTickets.push(rebuilt as Ticket);
+    if (blockedByChanged || parentChanged || phaseCleared || staleClaimOnComplete) {
+      const set: Record<string, unknown> = {};
+      if (blockedByChanged) set.blockedBy = blockedBy;
+      if (parentChanged) set.parentTicket = parentTicket;
+      if (phaseCleared) set.phase = null;
+      const unset = staleClaimOnComplete ? ["claim", "claimedBySession"] : [];
+      patches.push({ id: ticket.id, type: "ticket", set, unset });
     }
   }
 
   for (const issue of state.issues) {
-    let modified = false;
+    let relatedChanged = false;
+    let phaseCleared = false;
     let relatedTickets = [...issue.relatedTickets];
-    let phase = issue.phase;
+    const phase = issue.phase;
 
     const newRelated: string[] = [];
     for (const ref of relatedTickets) {
@@ -164,18 +179,18 @@ export function computeRepairs(
         if (kind === "found") {
           if (resolved !== ref) {
             fixes.push({ entity: issue.id, field: "relatedTickets", description: `Canonicalized: ${ref} -> ${resolved}` });
-            modified = true;
+            relatedChanged = true;
           }
           newRelated.push(resolved);
         } else if (kind === "missing") {
           fixes.push({ entity: issue.id, field: "relatedTickets", description: `Removed stale ref: ${ref}` });
-          modified = true;
+          relatedChanged = true;
         } else {
           newRelated.push(ref);
         }
       } else if (!allTicketRefs.has(ref)) {
         fixes.push({ entity: issue.id, field: "relatedTickets", description: `Removed stale ref: ${ref}` });
-        modified = true;
+        relatedChanged = true;
       } else {
         newRelated.push(ref);
       }
@@ -187,16 +202,70 @@ export function computeRepairs(
       : phase != null ? String(phase) : null;
     if (issuePhaseRaw && !phaseIDs.has(issuePhaseRaw)) {
       fixes.push({ entity: issue.id, field: "phase", description: `Cleared stale phase: ${issuePhaseRaw}` });
-      phase = null;
-      modified = true;
+      phaseCleared = true;
     }
 
-    if (modified) {
-      modifiedIssues.push({ ...issue, relatedTickets, phase } as Issue);
+    if (relatedChanged || phaseCleared) {
+      const set: Record<string, unknown> = {};
+      if (relatedChanged) set.relatedTickets = relatedTickets;
+      if (phaseCleared) set.phase = null;
+      patches.push({ id: issue.id, type: "issue", set, unset: [] });
     }
   }
 
-  return { fixes, tickets: modifiedTickets, issues: modifiedIssues };
+  return { fixes, patches };
+}
+
+function isValidPatchId(patch: RepairPatch): boolean {
+  if (patch.type === "ticket") {
+    return TICKET_ID_REGEX.test(patch.id) || (CANONICAL_ID_REGEX.test(patch.id) && patch.id.startsWith("t-"));
+  }
+  return ISSUE_ID_REGEX.test(patch.id) || (CANONICAL_ID_REGEX.test(patch.id) && patch.id.startsWith("i-"));
+}
+
+/**
+ * Applies repair patches to the raw on-disk JSON (ISS-738). Two-phase: every
+ * target file is read, parsed, and patched in memory FIRST (any failure aborts
+ * before a single write), then one transaction writes them all. The base
+ * object is the on-disk one, so loader-derived fields are never injected. The
+ * caller must hold the project lock.
+ */
+export async function applyRepairPatches(root: string, patches: RepairPatch[]): Promise<void> {
+  interface Group { target: string; set: Record<string, unknown>; unset: Set<string> }
+  const groups = new Map<string, Group>();
+  for (const patch of patches) {
+    if (!isValidPatchId(patch)) {
+      throw new Error(`repair: refusing to write "${patch.id}": not a valid ${patch.type} id`);
+    }
+    const dir = patch.type === "ticket" ? "tickets" : "issues";
+    const target = resolve(root, ".story", dir, `${patch.id}.json`);
+    const group = groups.get(target) ?? { target, set: {}, unset: new Set<string>() };
+    for (const [key, value] of Object.entries(patch.set)) {
+      if (group.unset.has(key)) {
+        throw new Error(`repair: conflicting patch operations for "${patch.id}.${key}" (set after unset)`);
+      }
+      if (Object.hasOwn(group.set, key) && JSON.stringify(group.set[key]) !== JSON.stringify(value)) {
+        throw new Error(`repair: conflicting duplicate sets for "${patch.id}.${key}"`);
+      }
+      group.set[key] = value;
+    }
+    for (const key of patch.unset) {
+      if (Object.hasOwn(group.set, key)) {
+        throw new Error(`repair: conflicting patch operations for "${patch.id}.${key}" (unset after set)`);
+      }
+      group.unset.add(key);
+    }
+    groups.set(target, group);
+  }
+
+  const ops: Array<{ op: "write"; target: string; content: string }> = [];
+  for (const group of groups.values()) {
+    const raw = JSON.parse(await readFile(group.target, "utf-8")) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(group.set)) raw[key] = value;
+    for (const key of group.unset) delete raw[key];
+    ops.push({ op: "write", target: group.target, content: serializeJSON(raw) });
+  }
+  await runTransactionUnlocked(root, ops);
 }
 
 export function handleRepair(ctx: CommandContext, dryRun: boolean): CommandResult {

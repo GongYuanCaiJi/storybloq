@@ -14,8 +14,7 @@ describe("computeRepairs", () => {
     });
     const result = computeRepairs(state, []);
     expect(result.fixes).toHaveLength(0);
-    expect(result.tickets).toHaveLength(0);
-    expect(result.issues).toHaveLength(0);
+    expect(result.patches).toHaveLength(0);
   });
 
   it("fixes issue with stale relatedTickets", () => {
@@ -28,7 +27,8 @@ describe("computeRepairs", () => {
     expect(result.fixes).toHaveLength(1);
     expect(result.fixes[0]!.entity).toBe("ISS-001");
     expect(result.fixes[0]!.field).toBe("relatedTickets");
-    expect(result.issues).toHaveLength(1);
+    expect(result.patches).toHaveLength(1);
+    expect(result.patches[0]!).toEqual({ id: "ISS-001", type: "issue", set: { relatedTickets: ["T-001"] }, unset: [] });
   });
 
   it("fixes issue with stale phase", () => {
@@ -47,7 +47,8 @@ describe("computeRepairs", () => {
     });
     const result = computeRepairs(state, []);
     expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "blockedBy")).toBe(true);
-    expect(result.tickets).toHaveLength(1);
+    expect(result.patches).toHaveLength(1);
+    expect(result.patches[0]!).toEqual({ id: "T-001", type: "ticket", set: { blockedBy: [] }, unset: [] });
   });
 
   it("fixes ticket with stale parentTicket", () => {
@@ -98,12 +99,11 @@ describe("computeRepairs", () => {
     });
     const result = computeRepairs(state, []);
     expect(result.fixes.length).toBeGreaterThanOrEqual(4);
-    expect(result.tickets).toHaveLength(2);
-    expect(result.issues).toHaveLength(1);
+    expect(result.patches.filter((p) => p.type === "ticket")).toHaveLength(2);
+    expect(result.patches.filter((p) => p.type === "issue")).toHaveLength(1);
   });
 
   describe("ISS-652: strips stale claim state from completed tickets", () => {
-    const has = (t: unknown, key: string) => Object.prototype.hasOwnProperty.call(t as object, key);
 
     it("strips claimedBySession from a completed ticket (UUID)", () => {
       const state = makeState({
@@ -112,10 +112,10 @@ describe("computeRepairs", () => {
       });
       const result = computeRepairs(state, []);
       expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
-      const fixed = result.tickets.find((t) => t.id === "T-001")!;
-      expect(fixed).toBeDefined();
-      expect(has(fixed, "claimedBySession")).toBe(false);
-      expect(has(fixed, "claim")).toBe(false);
+      const patch = result.patches.find((p) => p.id === "T-001")!;
+      expect(patch).toBeDefined();
+      expect(patch.unset).toEqual(["claim", "claimedBySession"]);
+      expect(patch.set).toEqual({});
     });
 
     it("strips an explicit-null claimedBySession from a completed ticket", () => {
@@ -125,8 +125,9 @@ describe("computeRepairs", () => {
       });
       const result = computeRepairs(state, []);
       expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
-      const fixed = result.tickets.find((t) => t.id === "T-001")!;
-      expect(has(fixed, "claimedBySession")).toBe(false);
+      const patch = result.patches.find((p) => p.id === "T-001")!;
+      expect(patch.unset).toContain("claimedBySession");
+      expect(patch.set).toEqual({});
     });
 
     it("strips a residual claim object from a completed ticket", () => {
@@ -141,8 +142,9 @@ describe("computeRepairs", () => {
       });
       const result = computeRepairs(state, []);
       expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(true);
-      const fixed = result.tickets.find((t) => t.id === "T-001")!;
-      expect(has(fixed, "claim")).toBe(false);
+      const patch = result.patches.find((p) => p.id === "T-001")!;
+      expect(patch.unset).toContain("claim");
+      expect(patch.set).toEqual({});
     });
 
     it("leaves an OPEN ticket's claim state untouched", () => {
@@ -152,7 +154,7 @@ describe("computeRepairs", () => {
       });
       const result = computeRepairs(state, []);
       expect(result.fixes.some((f) => f.entity === "T-001" && f.field === "claim")).toBe(false);
-      expect(result.tickets).toHaveLength(0);
+      expect(result.patches).toHaveLength(0);
     });
 
     it("does not flag a clean completed ticket with no claim fields", () => {
@@ -162,7 +164,27 @@ describe("computeRepairs", () => {
       });
       const result = computeRepairs(state, []);
       expect(result.fixes.some((f) => f.field === "claim")).toBe(false);
-      expect(result.tickets).toHaveLength(0);
+      expect(result.patches).toHaveLength(0);
     });
+  });
+});
+
+describe("ISS-738: canonicalize-refs patch emission", () => {
+  const phase = makePhase({ id: "p1" });
+  const roadmap = makeRoadmap([phase]);
+
+  it("emits canonical ids as plain strings in set, nothing else", () => {
+    const state = makeState({
+      tickets: [
+        makeTicket({ id: "t-0123456789abcdeg", displayId: "T-100", phase: "p1" }),
+        makeTicket({ id: "T-001", blockedBy: ["T-100"], parentTicket: "T-100", phase: "p1" }),
+      ],
+      roadmap,
+    });
+    const result = computeRepairs(state, [], { canonicalizeRefs: true });
+    const patch = result.patches.find((p) => p.id === "T-001")!;
+    expect(patch).toBeDefined();
+    expect(patch.set).toEqual({ blockedBy: ["t-0123456789abcdeg"], parentTicket: "t-0123456789abcdeg" });
+    expect(patch.unset).toEqual([]);
   });
 });
