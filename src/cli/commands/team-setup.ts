@@ -1,4 +1,4 @@
-import { teamSetup, type SetupResult } from "../../core/team-setup.js";
+import { teamSetup, LOCAL_ALLOCATOR_NOTE, type SetupResult } from "../../core/team-setup.js";
 
 export interface TeamSetupOutput {
   output: string;
@@ -20,6 +20,11 @@ export async function handleTeamSetup(root: string, opts: { format?: "md" | "jso
       `  Config version: ${result.versionUpdated ? "updated" : "skipped"}`,
       `  Git root: ${result.gitRoot}`,
     ];
+    // ISS-734: local-allocator collision guidance. Every teammate runs team
+    // setup on their own clone, so this is the output the whole team sees.
+    if (result.idAllocator === "local") {
+      lines.push("", LOCAL_ALLOCATOR_NOTE);
+    }
     return { output: lines.join("\n"), exitCode: 0 };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

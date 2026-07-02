@@ -11,6 +11,16 @@ export const MERGE_DRIVER_NAME = "storybloq-json";
 export const MERGE_DRIVER_CMD = "storybloq merge-driver %O %A %B %P";
 export const MERGE_DRIVER_DISPLAY_NAME = "Storybloq JSON three-way merge";
 
+/**
+ * ISS-734: inline collision guidance printed by `team init` and `team setup`
+ * whenever the effective id allocator is local. Surfaced at the point the
+ * choice is made because the failure mode (duplicate display ids after a
+ * merge of divergent branches) only shows up much later.
+ */
+export const LOCAL_ALLOCATOR_NOTE =
+  "Note: the local id allocator can mint duplicate display ids across divergent branches; " +
+  "run `storybloq reconcile` after merges, or use --id-allocator git-refs to prevent collisions at the source.";
+
 const BLOCK_BEGIN = "# storybloq-merge-begin";
 const BLOCK_END = "# storybloq-merge-end";
 
@@ -104,6 +114,8 @@ export interface SetupResult {
   versionUpdated: boolean;
   gitignoreEnsured: boolean;
   gitRoot: string;
+  /** Effective id allocator after setup: anything but an explicit "git-refs" runs as "local". */
+  idAllocator: "local" | "git-refs";
 }
 
 export async function teamSetup(root: string): Promise<SetupResult> {
@@ -127,12 +139,27 @@ export async function teamSetup(root: string): Promise<SetupResult> {
   // including the username) become committed to the shared team repo.
   await ensureGitignoreEntries(join(storyDir, ".gitignore"), STORY_GITIGNORE_ENTRIES);
 
+  // ISS-734: report the effective allocator so callers can surface the
+  // local-allocator collision note. Re-read config.json: updateConfigVersion
+  // just rewrote it, so this reflects the on-disk truth including any
+  // pre-existing team.idAllocator.
+  let idAllocator: "local" | "git-refs" = "local";
+  try {
+    const config = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+    const team = config.team as Record<string, unknown> | undefined;
+    if (team?.idAllocator === "git-refs") idAllocator = "git-refs";
+  } catch {
+    // Unreadable config would have thrown in updateConfigVersion already;
+    // default to "local", the runtime allocation default.
+  }
+
   return {
     driverInstalled: true,
     gitattributesWritten: true,
     versionUpdated: true,
     gitignoreEnsured: true,
     gitRoot,
+    idAllocator,
   };
 }
 

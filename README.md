@@ -229,6 +229,21 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq node list` | Table of all configured nodes |
 | `storybloq config set-federation --allow-node-writes` | Allow orchestrator to write into node repos |
 
+### Team (team-mode projects)
+
+See [Team mode](#team-mode) for the merge model these commands operate on.
+
+| Command | Description |
+|---------|-------------|
+| `storybloq team init [--id-allocator local\|git-refs] [--claim-staleness-hours N]` | Enable team mode on this project |
+| `storybloq team setup` | Install the git merge driver in this clone (each teammate, once per checkout) |
+| `storybloq team doctor [--ci]` | Team health checks; `--ci` exits non-zero on error findings |
+| `storybloq team config show` · `team config set <key> <value>` | Inspect or change team configuration |
+| `storybloq team reserve <type> --count N` | Reserve display ids via remote refs (git-refs allocator only) |
+| `storybloq reconcile [--dry-run] [--ci]` | Detect and renumber duplicate display ids |
+| `storybloq conflicts list` · `conflicts show <id>` | Inspect unresolved merge conflicts |
+| `storybloq resolve <id> [--field <f>] [--use ours\|theirs] [--value <json>]` | Resolve conflicts (also `resolve config`, `resolve roadmap`) |
+
 ## MCP server reference
 
 Register with Claude Code or Codex (done automatically by setup):
@@ -381,6 +396,82 @@ git commit -m "T-001: scaffold Next.js"
 
 # Session ends. Next session starts with /story and picks up with full context.
 ```
+
+## Team mode
+
+`.story/` is plain JSON tracked by git, so a team sharing it hits the same two problems any shared state hits: concurrent edits to the same record, and concurrent creation of new records. Team mode addresses both.
+
+```bash
+storybloq team init     # once per project; commit the result
+storybloq team setup    # once per clone, by every teammate
+```
+
+`team init` configures the project for team work (schema version, claim staleness, id allocator, required client features) and runs setup for your own clone. `team setup` installs the `storybloq-json` git merge driver into the clone's local git config and writes `.story/.gitattributes` so `.story/` JSON files route through it. Git config is per-clone, so each teammate runs setup once in each checkout. `storybloq team doctor` checks the whole arrangement (duplicate display ids, unresolved conflicts, stale claims, merge driver installed) and exits non-zero on errors with `--ci`; see [Team CI](#team-ci) below for the merge-gate workflow.
+
+### Concurrent edits: the merge model
+
+When git merges two branches that both touched the same `.story/` record, the merge driver runs a structured three-way merge per record instead of a line-based text merge. Fields merge independently: if one teammate changes a ticket's `status` while another edits its `description`, both changes land. When the same field diverges on both sides, the driver picks neither. It records the divergence as a structured `_conflicts` block inside the record, so the file stays valid JSON with no conflict markers; git still reports the path as conflicted, so `git add` the file and commit to conclude the merge, then resolve the recorded conflicts at your own pace (they carry forward across later merges until resolved). A project with unresolved `_conflicts` is write-blocked until every conflict is resolved:
+
+```bash
+storybloq conflicts list                     # every item with unresolved conflicts
+storybloq conflicts show T-042               # field-level detail: base, ours, theirs
+storybloq resolve T-042 --field status --use theirs
+storybloq resolve T-042 --field title --value '"Merged title"'
+storybloq resolve config                     # config.json merges the same way
+storybloq resolve roadmap                    # so does roadmap.json
+```
+
+### Concurrent creates: display id collisions
+
+Two teammates creating items on parallel branches is a different failure mode. New records are stored under a random canonical-id filename (for example `t-8f2kq0v3n1xw9d4e.json`), so independently created items never collide at the file level; only legacy sequential filenames (`ISS-041.json`, from projects that predate canonical ids) can still path-collide. What can collide is the human-facing display id: both branches compute "next free number" locally and both mint `T-042`. That is not a merge conflict, it is a duplicate, and it has its own tool:
+
+```bash
+storybloq reconcile          # renumber duplicates; the copy already on the protected ref, else the earlier one, keeps the number
+storybloq reconcile --ci     # detect only: exit non-zero if duplicates exist, mutate nothing
+```
+
+Renumbered items keep their old display id in `previousDisplayIds`, so existing references to the old number still resolve.
+
+### Choosing an id allocator
+
+`team init --id-allocator local|git-refs` picks how display ids are allocated. The tradeoff:
+
+| | `local` (default) | `git-refs` |
+|---|---|---|
+| Allocation | next free number, computed from the local checkout | ids reserved as refs on the shared git remote before use |
+| Collisions | divergent branches can mint duplicate display ids | prevented at the source |
+| Recovery | `storybloq reconcile` after merges; gate merges with `reconcile --ci` | not needed for ids |
+| Requirements | none; works offline | a reachable shared remote with ref-push permission |
+| Older clients | any client can create items | clients that do not declare the reservation capability fail closed (see caveat below) |
+
+With `git-refs`, `team init` also adds `remote-ref-reservations` to `team.requiredFeatures`, so clients that do not declare that capability refuse to create items instead of allocating locally against a git-refs team and colliding. One caveat: current Mac app releases predate reservations while still declaring the capability, so until the Mac-side update ships, avoid creating items from the Mac app on git-refs teams. `storybloq team reserve tickets --count 5` reserves a batch of ids up front.
+
+### Schema version and older clients
+
+`team init` stamps `schemaVersion: 3` in `.story/config.json`. CLI releases before 1.5.0 refuse a schemaVersion-3 project cleanly, for both reads and writes, with an upgrade message (`Config schemaVersion 3 exceeds max supported 2. Run: npm update -g @storybloq/storybloq`). The hard failure is deliberate: those clients do not understand team-mode data, and in mixed-version teams they previously produced silent partial reads instead of an error.
+
+Team repos created before the fence carry `schemaVersion: 2`. To upgrade an existing team repo: wait until every teammate runs a 1.5.0+ CLI, then set `schemaVersion` to 3 manually (or re-run `storybloq team init`, which performs the same upgrade). Older Mac app builds show a schemaVersion-3 project as read-only until updated; no data is lost.
+
+### Upgrading a repo that predates `.story/.gitignore`
+
+`team init` and `team setup` write `.story/.gitignore` covering the machine-local files (`sessions/`, `snapshots/`, `status.json`, `federation-cache.json`, `channel-inbox/`). A gitignore does not untrack files that are already tracked, so a project that adopted storybloq before the gitignore existed may already have ephemeral files in git history. Check once and untrack them:
+
+```bash
+git ls-files .story/ | grep -E 'sessions/|snapshots/|status\.json|channel-inbox/'
+git rm -r --cached --ignore-unmatch .story/sessions .story/snapshots .story/status.json .story/channel-inbox
+```
+
+Commit the removal. Session state records absolute paths (including your username), so this is worth doing before the first shared push.
+
+### What your team sees
+
+Team mode shares state through the repo, so everything committed under `.story/` is visible to everyone with repo access:
+
+- Tickets, issues, notes, and lessons, including all free-text fields.
+- Handovers: narrative session documents, often the most detailed record of what happened and why.
+- Claim blocks on in-progress items: the claiming teammate's git identity (`user.email`), branch name, and claim timestamp, plus a `claimedBySession` UUID while an autonomous session works the item.
+
+The machine-local files stay out of the repo once the gitignore is in place: `sessions/` (autonomous session state, including each session's `events.log`), `snapshots/`, `status.json`, and `channel-inbox/`. Treat committed `.story/` content with the same care as commit messages and code comments; it travels with the repo.
 
 ## Team CI
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { runDoctor, registerDoctorCheck, defaultChecks, checkStaleClaims, isClaimBranchGone, listRemoteBranchNames, parseRemoteBranches, type DoctorContext, type DoctorCheck } from "../../src/core/team-doctor.js";
+import { runDoctor, registerDoctorCheck, defaultChecks, checkStaleClaims, checkLocalIdAllocator, isClaimBranchGone, listRemoteBranchNames, parseRemoteBranches, type DoctorContext, type DoctorCheck } from "../../src/core/team-doctor.js";
 import { makeTicket, makeIssue, makeState, makeRoadmap, makePhase, minimalConfig } from "./test-factories.js";
 import type { Config } from "../../src/models/config.js";
 
@@ -274,5 +274,41 @@ describe("parseRemoteBranches (ISS-698)", () => {
 describe("listRemoteBranchNames (ISS-698)", () => {
   it("returns an empty set for a non-git directory (graceful skip)", () => {
     expect(listRemoteBranchNames("/nonexistent-path-storybloq-xyz")).toEqual(new Set());
+  });
+});
+
+describe("checkLocalIdAllocator (ISS-734)", () => {
+  it("emits an info finding when a team-mode project uses the local allocator", async () => {
+    const s = state({
+      config: { ...teamConfig, team: { enabled: true, idAllocator: "local" } },
+      tickets: [makeTicket({ id: "t-aaa0000000000001", displayId: "T-001", createdDate: "2026-01-01" })],
+    });
+    const result = await runDoctor(s, teamCtx());
+    const finding = result.findings.find((f) => f.code === "local_id_allocator");
+    expect(finding).toBeDefined();
+    expect(finding!.severity).toBe("info");
+    expect(finding!.message).toContain("reconcile");
+    expect(finding!.message).toContain("git-refs");
+    // Nothing is broken: info must not affect error/warning counts.
+    expect(result.errorCount).toBe(0);
+    expect(result.warningCount).toBe(0);
+  });
+
+  it("treats an absent idAllocator as local (the runtime default)", () => {
+    const s = state({ config: { ...teamConfig, team: { enabled: true } } });
+    const findings = checkLocalIdAllocator(s, teamCtx());
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.code).toBe("local_id_allocator");
+  });
+
+  it("emits nothing for a git-refs team", () => {
+    const s = state({ config: { ...teamConfig, team: { enabled: true, idAllocator: "git-refs" } } });
+    expect(checkLocalIdAllocator(s, teamCtx())).toHaveLength(0);
+  });
+
+  it("does not fire on non-team projects (runDoctor early-returns)", async () => {
+    const s = makeState({});
+    const result = await runDoctor(s, nonTeamCtx());
+    expect(result.findings.find((f) => f.code === "local_id_allocator")).toBeUndefined();
   });
 });

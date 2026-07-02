@@ -305,6 +305,10 @@ MCP examples:
 
 Read operations (list, get, next, blocked) are available via both CLI and MCP.
 
+## Team Mode
+
+Some projects have team mode enabled (`.story/config.json` contains `"team": { "enabled": true }`). No special workflow is needed: the CLI and MCP tools enforce the guard rails on their own (claims on in-progress tickets, structured three-way merges of `.story/` JSON, write-blocking while records carry unresolved `_conflicts`). When a command refuses to proceed, two recoveries cover almost every case: if writes are blocked by unresolved conflicts, run `storybloq conflicts list` and `storybloq resolve <id>` (also `resolve config` / `resolve roadmap`); if a merge produced duplicate display ids because both branches created items, run `storybloq reconcile`. The full merge model, the local-vs-git-refs id allocator tradeoff, and migration notes are documented in the storybloq package README under "Team mode".
+
 ## Notes
 
 **Notes** are unstructured brainstorming artifacts -- ideas, design thinking, "what if" explorations. Use notes when the content doesn't fit tickets (planned work) or issues (discovered problems).

@@ -512,6 +512,25 @@ async function checkReservationHealth(state: ProjectState, ctx: DoctorContext): 
   return findings;
 }
 
+/**
+ * ISS-734: surface the local-allocator collision tradeoff where teams actually
+ * look for health signals. Info-level because nothing is broken; the local
+ * allocator is the default and duplicate display ids minted on divergent
+ * branches are recoverable via reconcile. Only runs in team mode (runDoctor
+ * gates all checks on ctx.isTeamMode); an absent idAllocator means the runtime
+ * default, which is local.
+ */
+export function checkLocalIdAllocator(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
+  if (state.config.team?.idAllocator === "git-refs") return [];
+  return [{
+    severity: "info",
+    code: "local_id_allocator",
+    message: "Local id allocator in use: divergent branches can mint duplicate display ids. Run storybloq reconcile after merges (or gate merges with storybloq reconcile --ci); the git-refs allocator prevents collisions at the source.",
+    entity: null,
+    repair: null,
+  }];
+}
+
 const TEAM_HANDOVER_REGEX = /^\d{4}-\d{2}-\d{2}-\d{6}-[0-9a-f]{8}-/;
 
 function checkHandoverFilenamePolicy(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
@@ -544,4 +563,5 @@ registerDoctorCheck(checkStaleTombstones);
 registerDoctorCheck(checkConflictsPresent);
 registerDoctorCheck(checkMergeDriverConfig);
 registerDoctorCheck(checkReservationHealth);
+registerDoctorCheck(checkLocalIdAllocator);
 registerDoctorCheck(checkHandoverFilenamePolicy);

@@ -15,6 +15,13 @@ export interface TeamInitResult {
   teamConfigured: boolean;
   mergeDriverInstalled: boolean;
   gitattributesWritten: boolean;
+  /**
+   * ISS-734: the EFFECTIVE allocator after init, not the requested option.
+   * A pre-existing team.idAllocator wins over opts (initialize-only-when-
+   * undefined above), so callers keying guidance off this value stay accurate
+   * on re-runs.
+   */
+  idAllocator: "local" | "git-refs";
 }
 
 export async function teamInit(root: string, opts: TeamInitOptions): Promise<TeamInitResult> {
@@ -31,6 +38,7 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
   const setupResult = await teamSetup(root);
 
   let schemaUpgraded = false;
+  let effectiveAllocator: "local" | "git-refs" = "local";
   await withProjectLock(root, { strict: false }, async ({ state }) => {
     const config = { ...state.config, team: { ...(state.config.team ?? {}) } };
 
@@ -53,6 +61,7 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
     if (config.team.idAllocator === undefined) {
       config.team.idAllocator = opts.idAllocator ?? "local";
     }
+    effectiveAllocator = config.team.idAllocator === "git-refs" ? "git-refs" : "local";
     if (config.team.requiredFeatures === undefined) {
       config.team.requiredFeatures = ["merge-driver"];
     }
@@ -88,5 +97,6 @@ export async function teamInit(root: string, opts: TeamInitOptions): Promise<Tea
     teamConfigured: true,
     mergeDriverInstalled: setupResult.driverInstalled,
     gitattributesWritten: setupResult.gitattributesWritten,
+    idAllocator: effectiveAllocator,
   };
 }

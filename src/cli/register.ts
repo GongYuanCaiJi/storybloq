@@ -471,7 +471,7 @@ export function registerTeamCommand(yargs: Argv): Argv {
         (y2) =>
           y2
             .option("claim-staleness-hours", { type: "number", describe: "Hours before a claim is considered stale (default 48)" })
-            .option("id-allocator", { type: "string", choices: ["local", "git-refs"], describe: "ID allocation strategy (default local)" })
+            .option("id-allocator", { type: "string", choices: ["local", "git-refs"], describe: "ID allocation strategy: local (default) needs no remote but divergent branches can mint duplicate display ids (run `storybloq reconcile` after merges); git-refs reserves ids via remote refs, preventing collisions at the source" })
             .option("format", { type: "string", choices: ["md", "json"], default: "md", describe: "Output format" }),
         async (argv) => {
           const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
