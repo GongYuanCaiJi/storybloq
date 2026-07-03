@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { resolveConflicts } from "../../src/core/resolve.js";
 import { makeTicket } from "./test-factories.js";
 import type { ConflictEntry } from "../../src/models/types.js";
@@ -190,6 +190,98 @@ describe("entity-level (_entity) resolution (ISS-746)", () => {
     expect(() => resolveConflicts(entity, { use: "ours" })).toThrow(/--value/);
     expect(entity.title).toBe("Original");
     expect(Array.isArray(entity._conflicts)).toBe(true);
+  });
+});
+
+describe("ISS-801: top-level reserved snapshot keys never survive entity resolution", () => {
+  const tombstoneSnap = { id: "T-001", title: "Original", lifecycle: "deleted", deletedAt: "2026-05-26T00:00:00Z", deletedBy: "alice@test.com" };
+
+  const craftedEntity = (): Record<string, unknown> => JSON.parse(
+    '{"id":"T-001","title":"x","constructor":{"polluted":true},"prototype":1,"__proto__":{"polluted":true}}',
+  ) as Record<string, unknown>;
+
+  const entityLevelEntry = (theirs: unknown): ConflictEntry => ({
+    fieldPath: "",
+    field: "_entity",
+    kind: "delete-edit",
+    base: null,
+    ours: tombstoneSnap,
+    theirs,
+  } as ConflictEntry);
+
+  afterEach(() => {
+    // Pollution hygiene: RED recordings on unfixed code could write onto the
+    // prototypes; scrub the probe key so parallel vitest workers stay clean.
+    delete (Object.prototype as Record<string, unknown>)["polluted"];
+  });
+
+  it("entity-level --use theirs strips top-level reserved keys from the applied snapshot", () => {
+    const crafted = craftedEntity();
+    const entity = { id: "T-001", title: "Original", _conflicts: [entityLevelEntry(crafted)] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { use: "theirs" });
+    expect(result.fullyResolved).toBe(true);
+    expect(Object.hasOwn(entity, "constructor")).toBe(false);
+    expect(Object.hasOwn(entity, "prototype")).toBe(false);
+    expect(Object.hasOwn(entity, "__proto__")).toBe(false);
+    expect(Object.getPrototypeOf(entity)).toBe(Object.prototype);
+    expect(entity.id).toBe("T-001");
+    expect(entity.title).toBe("x");
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("entity-level --field _entity --value strips top-level reserved keys from the custom value", () => {
+    const crafted = craftedEntity();
+    const entity = { id: "T-001", title: "Original", _conflicts: [entityLevelEntry(craftedEntity())] } as Record<string, unknown>;
+    const result = resolveConflicts(entity, { field: "_entity", value: crafted });
+    expect(result.fullyResolved).toBe(true);
+    expect(result.resolved).toContain("_entity");
+    expect(Object.hasOwn(entity, "constructor")).toBe(false);
+    expect(Object.hasOwn(entity, "prototype")).toBe(false);
+    expect(Object.hasOwn(entity, "__proto__")).toBe(false);
+    expect(Object.getPrototypeOf(entity)).toBe(Object.prototype);
+    expect(entity.title).toBe("x");
+    expect(entity._conflicts).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("field-level blanket --use never writes reserved-name conflicts but still consumes them", () => {
+    const entity = withConflicts(makeTicket({ id: "T-001" }), [
+      fieldConflict("/constructor", null, null, JSON.parse('{"polluted":true}')),
+      fieldConflict("/prototype", null, null, 1),
+    ]);
+    const result = resolveConflicts(entity, { use: "theirs" });
+    expect(result.fullyResolved).toBe(true);
+    expect(result.resolved).toContain("constructor");
+    expect(result.resolved).toContain("prototype");
+    expect(Object.hasOwn(entity, "constructor")).toBe(false);
+    expect(Object.hasOwn(entity, "prototype")).toBe(false);
+    expect(entity._conflicts).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("single --field targeting a reserved name consumes the conflict without writing the key", () => {
+    const entity = withConflicts(makeTicket({ id: "T-001" }), [
+      fieldConflict("/constructor", null, null, JSON.parse('{"polluted":true}')),
+    ]);
+    const result = resolveConflicts(entity, { field: "constructor", use: "theirs" });
+    expect(result.resolved).toEqual(["constructor"]);
+    expect(Object.hasOwn(entity, "constructor")).toBe(false);
+    expect(entity._conflicts).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("coupled group applies legit members and skips reserved-name members", () => {
+    const entity = withConflicts(makeTicket({ id: "T-001", status: "open" }), [
+      fieldConflict("/constructor", null, null, JSON.parse('{"polluted":true}'), { kind: "coupled", group: "g1" }),
+      fieldConflict("/status", "open", "inprogress", "complete", { kind: "coupled", group: "g1" }),
+    ]);
+    const result = resolveConflicts(entity, { field: "status", use: "theirs" });
+    expect(entity.status).toBe("complete");
+    expect(Object.hasOwn(entity, "constructor")).toBe(false);
+    expect(result.resolved).toContain("constructor");
+    expect(result.resolved).toContain("status");
+    expect(result.fullyResolved).toBe(true);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 

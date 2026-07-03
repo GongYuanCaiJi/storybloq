@@ -254,6 +254,54 @@ describe("ISS-768: reserved pointer segments are refused", () => {
   });
 });
 
+describe("ISS-801: top-level reserved keys in entity-level doc snapshots are stripped", () => {
+  const craftedDoc = (): Record<string, unknown> => JSON.parse(
+    '{"version":2,"project":"theirs-project","type":"npm","constructor":{"polluted":true},"prototype":1,"__proto__":{"polluted":true}}',
+  ) as Record<string, unknown>;
+
+  const entityEntry = (theirs: unknown): Entry => ({
+    fieldPath: "",
+    field: "_entity",
+    kind: "field",
+    base: null,
+    ours: { version: 2, project: "ours-project" },
+    theirs,
+  });
+
+  afterEach(() => {
+    // Pollution hygiene: RED recordings on unfixed code could write onto the
+    // prototypes; scrub the probe key so parallel vitest workers stay clean.
+    delete (Object.prototype as Record<string, unknown>)["polluted"];
+  });
+
+  it("entity-level --use theirs strips top-level reserved keys from the applied document", () => {
+    const doc = withConflicts({ version: 2, project: "damaged" }, [entityEntry(craftedDoc())]);
+    resolveDocConflicts(doc, { use: "theirs" });
+    expect(doc.project).toBe("theirs-project");
+    expect(Object.hasOwn(doc, "constructor")).toBe(false);
+    expect(Object.hasOwn(doc, "prototype")).toBe(false);
+    expect(Object.hasOwn(doc, "__proto__")).toBe(false);
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(doc._conflicts).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  it("entity-level --field _entity --value strips top-level reserved keys from the custom document", () => {
+    const crafted = craftedDoc();
+    const doc = withConflicts({ version: 2, project: "damaged" }, [entityEntry(craftedDoc())]);
+    const result = resolveDocConflicts(doc, { field: "_entity", value: crafted });
+    expect(result.fullyResolved).toBe(true);
+    expect(result.resolved).toContain("_entity");
+    expect(doc.project).toBe("theirs-project");
+    expect(Object.hasOwn(doc, "constructor")).toBe(false);
+    expect(Object.hasOwn(doc, "prototype")).toBe(false);
+    expect(Object.hasOwn(doc, "__proto__")).toBe(false);
+    expect(Object.getPrototypeOf(doc)).toBe(Object.prototype);
+    expect(doc._conflicts).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
 describe("ISS-769: pointer ops are identity-anchored across reorder/keyed mutation", () => {
   const phaseWith = (id: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
     ...phase(id), ...extra,

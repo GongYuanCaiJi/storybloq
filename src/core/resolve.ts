@@ -18,6 +18,20 @@ export interface ResolveResult {
   messages: string[];
 }
 
+/**
+ * ISS-768/ISS-801: names that would walk or write the prototype chain when
+ * bracket-assigned onto a plain object. Module-private on purpose: only the
+ * isReservedKey predicate is exported, so no importer can mutate the
+ * canonical set. resolve-doc.ts imports isReservedKey for its pointer guard.
+ * _conflicts snapshots arrive from merges of untrusted teammate branches,
+ * so these names are never legitimate top-level storybloq fields.
+ */
+const RESERVED_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+export function isReservedKey(k: string): boolean {
+  return RESERVED_SEGMENTS.has(k);
+}
+
 export function fieldName(c: ConflictEntry): string {
   return (c as Record<string, unknown>).field as string | undefined
     ?? c.fieldPath.replace(/^\//, "");
@@ -55,7 +69,7 @@ function replaceEntityBody(entity: Record<string, unknown>, chosen: Record<strin
     if (k !== "_conflicts") delete entity[k];
   }
   for (const [k, v] of Object.entries(chosen)) {
-    if (k !== "_conflicts") entity[k] = v;
+    if (k !== "_conflicts" && !isReservedKey(k)) entity[k] = v;
   }
 }
 
@@ -169,7 +183,9 @@ export function resolveConflicts(
       for (const c of conflicts) {
         if (c.kind === "coupled" && c.group === target.group) {
           const name = fieldName(c);
-          entity[name] = side === "ours" ? c.ours : c.theirs;
+          // ISS-801: reserved names are never legitimate top-level fields;
+          // skip the write, still consume the conflict.
+          if (!isReservedKey(name)) entity[name] = side === "ours" ? c.ours : c.theirs;
           resolved.push(name);
         } else {
           remaining.push(c);
@@ -192,7 +208,7 @@ export function resolveConflicts(
         const value = options.value !== undefined
           ? options.value
           : options.use === "ours" ? target.ours : target.theirs;
-        entity[name] = value;
+        if (!isReservedKey(name)) entity[name] = value;
         resolved.push(name);
       }
       for (const c of conflicts) {
@@ -213,7 +229,7 @@ export function resolveConflicts(
     }
     for (const c of fieldLevel) {
       const name = fieldName(c);
-      entity[name] = side === "ours" ? c.ours : c.theirs;
+      if (!isReservedKey(name)) entity[name] = side === "ours" ? c.ours : c.theirs;
       resolved.push(name);
     }
   } else {

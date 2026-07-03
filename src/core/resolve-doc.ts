@@ -1,5 +1,5 @@
 import type { ConflictEntry } from "../models/types.js";
-import { fieldName, matchesField, isEntityLevel, type ResolveOptions, type ResolveResult } from "./resolve.js";
+import { fieldName, matchesField, isEntityLevel, isReservedKey, type ResolveOptions, type ResolveResult } from "./resolve.js";
 
 /**
  * Conflict resolution for config.json / roadmap.json (ISS-749).
@@ -20,9 +20,6 @@ import { fieldName, matchesField, isEntityLevel, type ResolveOptions, type Resol
 
 const KEYED_ALIAS_REGEX = /^(.+)\[([^=\]]+)=(.+)\]$/;
 
-/** ISS-768: segments that would walk or write the prototype chain. */
-const RESERVED_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
-
 /** RFC 6901 pointer segments; a legacy bare fieldPath is one top-level segment. */
 function parsePointer(fieldPath: string): string[] {
   const segments = !fieldPath.startsWith("/")
@@ -34,7 +31,7 @@ function parsePointer(fieldPath: string): string[] {
   // ISS-768: exact segment equality only, applied AFTER ~-unescaping, so
   // benign fields like "prototypeSettings" are untouched.
   for (const seg of segments) {
-    if (RESERVED_SEGMENTS.has(seg)) {
+    if (isReservedKey(seg)) {
       throw new Error(
         `Cannot apply conflict resolution at "${fieldPath}": pointer segment "${seg}" is a reserved prototype key ` +
         `(_conflicts entries are untrusted input and never traverse prototypes). Resolve by hand and re-run, or use --value.`,
@@ -250,7 +247,7 @@ function applyEntityLevelDoc(doc: Record<string, unknown>, c: ConflictEntry, cho
     if (k !== "_conflicts") delete doc[k];
   }
   for (const [k, v] of Object.entries(chosen as Record<string, unknown>)) {
-    if (k !== "_conflicts") doc[k] = v;
+    if (k !== "_conflicts" && !isReservedKey(k)) doc[k] = v;
   }
 }
 
