@@ -68,6 +68,47 @@ describe("setup-skill", () => {
     expect(content).toContain("filed this wave");
   });
 
+  it("orchestrator-mode.md carries the ISS-813 cold-run friction additions", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    // (a) single-repo blast-radius phrasing
+    expect(content).toContain("Single-repo run:");
+    // (b) visible wave board + stage-boundary narration
+    expect(content).toContain("keep a visible wave board");
+    // (c) storybloq status ranked first, stale session dirs normal
+    expect(content).toContain("stale terminal session dirs are normal");
+    // (d) workflow-script practicalities incl. prefix-cache recovery
+    expect(content).toContain("Resume is PREFIX-CACHED on the sequence of agent calls");
+    // (e) durable artifacts land in ledger or repo
+    expect(content).toContain("never only a scratchpad or session directory");
+    // (f) item-scoped acceptance + wave-level branch health
+    expect(content).toContain("no NEW failures vs the recorded tip baseline");
+    expect(content).toContain("wave-level concern");
+    // (g) known-caveats block as standard wave-prompt furniture
+    expect(content).toContain("KNOWN CAVEATS");
+    // (h) byte-review adjudicates pre-existing-failure claims
+    expect(content).toContain("re-derive the claim in the parent-commit worktree");
+    // (i) orchestrator-owned ledger fence + followUps report field
+    expect(content).toContain("the ledger is orchestrator-owned");
+    expect(content).toContain("followUps");
+    // (j) never-amend policy in the non-negotiable rules
+    expect(content).toContain("DO NOT amend, rebase, or force-push");
+
+    // adjacency (finding 3): the ledger fence + followUps furniture live in the
+    // pipeline doctrine, BEFORE the dynamic-workflow skeleton section.
+    const skeletonIdx = content.indexOf("## Dynamic-workflow skeleton");
+    expect(skeletonIdx).toBeGreaterThan(-1);
+    const ledgerIdx = content.indexOf("the ledger is orchestrator-owned");
+    expect(ledgerIdx).toBeGreaterThan(-1);
+    expect(ledgerIdx).toBeLessThan(skeletonIdx);
+    expect(content.indexOf("followUps")).toBeLessThan(skeletonIdx);
+
+    // adjacency (finding 3): never-amend is a non-negotiable, so it must sit
+    // AFTER the Critical rules heading, not merely somewhere in the file.
+    const criticalIdx = content.indexOf("## Critical rules");
+    expect(criticalIdx).toBeGreaterThan(-1);
+    expect(content.indexOf("DO NOT amend, rebase, or force-push")).toBeGreaterThan(criticalIdx);
+  });
+
   it("SKILL.md ticket-and-issue discipline points orchestrator filings at the enrichment template", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     expect(content).toContain("ticket or issue");
