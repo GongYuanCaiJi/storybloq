@@ -126,7 +126,11 @@ beforeEach(() => {
 afterEach(() => {
   killSidecarsInRoot(root);
   rmSync(root, { recursive: true, force: true });
-  vi.restoreAllMocks();
+  // clearAllMocks resets call history only; the git-inspector mock
+  // implementations from the vi.mock factory (which runs once at module load)
+  // are preserved. restoreAllMocks would strip those implementations, leaving
+  // later tests running against gutted mocks.
+  vi.clearAllMocks();
 });
 
 describe("HANDOVER claim release flips a mid-work handoff back to open (ISS-792)", () => {
