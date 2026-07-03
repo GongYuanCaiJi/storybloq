@@ -57,6 +57,23 @@ describe("setup-skill", () => {
     expect(existsSync(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"))).toBe(true);
   });
 
+  it("orchestrator-mode.md requires orchestrator-filed tickets and issues to use the enrichment template", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    // R1: narrowed subject -- tickets and issues, never "every item"
+    expect(content).toContain("ticket or issue");
+    // R2: tier-neutral rationale phrasing
+    expect(content).toContain("lowest permitted execution tier");
+    expect(content).toContain("enrichment template");
+    // SCOPE 2: wave-boundary upgrade sweep
+    expect(content).toContain("filed this wave");
+  });
+
+  it("SKILL.md ticket-and-issue discipline points orchestrator filings at the enrichment template", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    expect(content).toContain("ticket or issue");
+    expect(content).toContain("lowest permitted execution tier");
+  });
+
   // -------------------------------------------------------------------------
   // Cross-file reference integrity
   // -------------------------------------------------------------------------
