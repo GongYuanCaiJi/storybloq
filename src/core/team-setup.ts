@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { ensureGitignoreEntries, STORY_GITIGNORE_ENTRIES } from "./init.js";
+import { withProjectLock, writeConfigUnlocked } from "./project-loader.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -85,27 +86,12 @@ export async function writeGitattributes(storyDir: string): Promise<void> {
   writeFileSync(filePath, result, "utf-8");
 }
 
-export async function updateConfigVersion(storyDir: string): Promise<void> {
-  const configPath = join(storyDir, "config.json");
-  let raw: string;
-  try {
-    raw = readFileSync(configPath, "utf-8");
-  } catch (err) {
-    throw new Error(`Failed to read ${configPath}: ${(err as Error).message}`);
-  }
-  let config: Record<string, unknown>;
-  try {
-    config = JSON.parse(raw) as Record<string, unknown>;
-  } catch {
-    throw new Error(`Failed to parse ${configPath}: invalid JSON`);
-  }
-
-  if (!config.team || typeof config.team !== "object") {
-    config.team = {};
-  }
-  (config.team as Record<string, unknown>).mergeDriverVersion = MERGE_DRIVER_VERSION;
-
-  writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+export async function updateConfigVersion(root: string): Promise<void> {
+  await withProjectLock(root, { strict: false }, async ({ state }) => {
+    const config = { ...state.config, team: { ...(state.config.team ?? {}) } };
+    config.team.mergeDriverVersion = MERGE_DRIVER_VERSION;
+    await writeConfigUnlocked(config, root);
+  });
 }
 
 export interface SetupResult {
@@ -133,7 +119,7 @@ export async function teamSetup(root: string): Promise<SetupResult> {
 
   await installMergeDriver(gitRoot);
   await writeGitattributes(storyDir);
-  await updateConfigVersion(storyDir);
+  await updateConfigVersion(root);
   // ISS-754: legacy projects upgraded to team mode predate init's gitignore
   // writing; without this, sessions/, snapshots/, status.json (absolute paths
   // including the username) become committed to the shared team repo.

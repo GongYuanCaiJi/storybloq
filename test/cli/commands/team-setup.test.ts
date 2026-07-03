@@ -29,6 +29,16 @@ function writeConfig(root: string, config: Record<string, unknown> = {}): void {
     }, null, 2) + "\n",
     "utf-8",
   );
+  writeFileSync(
+    join(storyDir, "roadmap.json"),
+    JSON.stringify({
+      title: "test",
+      date: "2026-01-01",
+      phases: [{ id: "p0", label: "PHASE 0", name: "Setup", description: "Setup." }],
+      blockers: [],
+    }, null, 2) + "\n",
+    "utf-8",
+  );
 }
 
 // ISS-734: inline collision guidance mirrors handleTeamInit. Each teammate runs

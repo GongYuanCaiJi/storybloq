@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -31,7 +31,37 @@ function createStoryDir(root: string): string {
 function writeConfig(root: string, config: Record<string, unknown>): void {
   const storyDir = join(root, ".story");
   mkdirSync(storyDir, { recursive: true });
+  for (const dir of ["tickets", "issues", "handovers", "notes", "lessons"]) {
+    mkdirSync(join(storyDir, dir), { recursive: true });
+  }
   writeFileSync(join(storyDir, "config.json"), JSON.stringify(config, null, 2) + "\n", "utf-8");
+  writeFileSync(
+    join(storyDir, "roadmap.json"),
+    JSON.stringify({
+      title: "test",
+      date: "2026-01-01",
+      phases: [{ id: "p0", label: "PHASE 0", name: "Setup", description: "Setup." }],
+      blockers: [],
+    }, null, 2) + "\n",
+    "utf-8",
+  );
+}
+
+function baseConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    version: 2,
+    project: "test",
+    type: "npm",
+    language: "ts",
+    features: {
+      tickets: true,
+      issues: true,
+      handovers: true,
+      roadmap: true,
+      reviews: true,
+    },
+    ...overrides,
+  };
 }
 
 describe("T-388: team-setup", () => {
@@ -96,8 +126,8 @@ describe("T-388: team-setup", () => {
   describe("updateConfigVersion", () => {
     it("sets team.mergeDriverVersion", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
-      await updateConfigVersion(join(root, ".story"));
+      writeConfig(root, baseConfig());
+      await updateConfigVersion(root);
       const config = JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8"));
       expect(config.team).toBeDefined();
       expect(config.team.mergeDriverVersion).toBe(MERGE_DRIVER_VERSION);
@@ -105,28 +135,41 @@ describe("T-388: team-setup", () => {
 
     it("preserves existing config fields", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, {
-        version: 2,
-        project: "test",
-        type: "npm",
-        language: "ts",
-        features: { tickets: true },
+      writeConfig(root, baseConfig({
         team: { idAllocator: "git-refs", minCliVersion: "1.0.0" },
         customField: "preserved",
-      });
-      await updateConfigVersion(join(root, ".story"));
+      }));
+      await updateConfigVersion(root);
       const config = JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8"));
       expect(config.team.idAllocator).toBe("git-refs");
       expect(config.team.minCliVersion).toBe("1.0.0");
       expect(config.team.mergeDriverVersion).toBe(MERGE_DRIVER_VERSION);
       expect(config.customField).toBe("preserved");
     });
+
+    it("ISS-793: rejects a schema-invalid config instead of rewriting it", async () => {
+      const root = createTempGitRepo();
+      // Bypass baseConfig on purpose: omit features entirely so ConfigSchema fails.
+      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts" });
+      await expect(updateConfigVersion(root)).rejects.toThrow(/validation/i);
+    });
+
+    it("ISS-793: writes atomically with no temp residue and stamps mergeDriverVersion", async () => {
+      const root = createTempGitRepo();
+      writeConfig(root, baseConfig());
+      await updateConfigVersion(root);
+      const storyDir = join(root, ".story");
+      const leftovers = readdirSync(storyDir).filter((f) => f.endsWith(".tmp"));
+      expect(leftovers).toEqual([]);
+      const config = JSON.parse(readFileSync(join(storyDir, "config.json"), "utf-8"));
+      expect(config.team.mergeDriverVersion).toBe(MERGE_DRIVER_VERSION);
+    });
   });
 
   describe("teamSetup", () => {
     it("orchestrates all steps", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+      writeConfig(root, baseConfig());
       const result = await teamSetup(root);
       expect(result.driverInstalled).toBe(true);
       expect(result.gitattributesWritten).toBe(true);
@@ -135,7 +178,7 @@ describe("T-388: team-setup", () => {
 
     it("fails if not in a git repo", async () => {
       const dir = mkdtempSync(join(tmpdir(), "no-git-"));
-      writeConfig(dir, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+      writeConfig(dir, baseConfig());
       await expect(teamSetup(dir)).rejects.toThrow();
     });
 
@@ -148,7 +191,7 @@ describe("T-388: team-setup", () => {
   describe("checkMergeDriverSetup", () => {
     it("returns ok when fully set up", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true } });
+      writeConfig(root, baseConfig());
       await teamSetup(root);
       const check = await checkMergeDriverSetup(root);
       expect(check.ok).toBe(true);
@@ -157,7 +200,7 @@ describe("T-388: team-setup", () => {
 
     it("detects missing git config", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true }, team: { mergeDriverVersion: 1 } });
+      writeConfig(root, baseConfig({ team: { mergeDriverVersion: 1 } }));
       createStoryDir(root);
       const check = await checkMergeDriverSetup(root);
       expect(check.ok).toBe(false);
@@ -166,7 +209,7 @@ describe("T-388: team-setup", () => {
 
     it("detects missing .gitattributes", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true }, team: { mergeDriverVersion: 1 } });
+      writeConfig(root, baseConfig({ team: { mergeDriverVersion: 1 } }));
       execFileSync("git", ["config", "--local", "merge.storybloq-json.driver", "storybloq merge-driver %O %A %B %P"], { cwd: root });
       const check = await checkMergeDriverSetup(root);
       expect(check.ok).toBe(false);
@@ -175,7 +218,7 @@ describe("T-388: team-setup", () => {
 
     it("detects version mismatch", async () => {
       const root = createTempGitRepo();
-      writeConfig(root, { version: 2, project: "test", type: "npm", language: "ts", features: { tickets: true }, team: { mergeDriverVersion: 999 } });
+      writeConfig(root, baseConfig({ team: { mergeDriverVersion: 999 } }));
       await writeGitattributes(join(root, ".story"));
       execFileSync("git", ["config", "--local", "merge.storybloq-json.driver", "storybloq merge-driver %O %A %B %P"], { cwd: root });
       const check = await checkMergeDriverSetup(root);
@@ -190,7 +233,7 @@ describe("T-388: team-setup", () => {
 describe("ISS-754: teamSetup ensures .story/.gitignore", () => {
   it("creates the gitignore with every ephemeral entry", async () => {
     const root = createTempGitRepo();
-    writeConfig(root, { version: 2, project: "t", type: "npm", language: "ts" });
+    writeConfig(root, baseConfig({ project: "t" }));
     const result = await teamSetup(root);
     expect(result.gitignoreEnsured).toBe(true);
     const content = readFileSync(join(root, ".story", ".gitignore"), "utf-8");
