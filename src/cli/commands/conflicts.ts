@@ -94,14 +94,20 @@ function isDeletedSnapshot(obj: Record<string, unknown>): boolean {
 
 function sideSummary(label: string, value: unknown): string {
   if (typeof value === "string") {
-    return `- ${label}: "${value}" (snapshots unavailable, pre-1.5.0)`;
+    // JSON.stringify neutralizes ESC/OSC/BEL and other control bytes in this
+    // UNTRUSTED teammate-authored string; a raw interpolation would emit
+    // terminal escape sequences to the victim.
+    return `- ${label}: ${JSON.stringify(value)} (snapshots unavailable, pre-1.5.0)`;
   }
   if (value === null || value === undefined) {
     return `- ${label}: (absent)`;
   }
   const snap = value as Record<string, unknown>;
   if (isDeletedSnapshot(snap)) {
-    return `- ${label}: deleted (tombstone by ${String(snap.deletedBy ?? "unknown")} at ${String(snap.deletedAt ?? "unknown")})`;
+    // deletedBy/deletedAt come from an untrusted snapshot too; JSON.stringify
+    // them (same neutralization as the string and edited branches) so crafted
+    // control bytes cannot reach the terminal.
+    return `- ${label}: deleted (tombstone by ${JSON.stringify(String(snap.deletedBy ?? "unknown"))} at ${JSON.stringify(String(snap.deletedAt ?? "unknown"))})`;
   }
   return `- ${label}: edited (title: ${JSON.stringify(snap.title ?? snap.name ?? snap.id ?? "?")})`;
 }

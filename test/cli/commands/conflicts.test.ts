@@ -197,6 +197,42 @@ describe("entity-level conflict rendering", () => {
     const result = await handleConflictsShow("T-001", dir, "md");
     expect(result.output).toContain("pre-1.5.0");
   });
+
+  it("neutralizes ANSI/OSC escape bytes in untrusted legacy string sides (FIX B)", async () => {
+    const dir = makeProject();
+    // Teammate-authored entity-level entry whose sides are bare strings carrying
+    // a screen-clear (ESC [2J) and an OSC title-set (ESC ] 0 ; ... BEL).
+    const evil = "\x1b[2J\x1b]0;pwned\x07 OWNED";
+    writeTicketFile(dir, "T-001", {
+      _conflicts: [{ fieldPath: "", field: "_entity", kind: "delete-edit", base: evil, ours: evil, theirs: evil }],
+    });
+    const result = await handleConflictsShow("T-001", dir, "md");
+    // No raw ESC byte reaches the victim terminal.
+    expect(result.output).not.toContain(String.fromCharCode(27));
+    // The control bytes survive as their JSON-escaped, inert representation.
+    expect(result.output).toContain("\\u001b");
+    // Sanity: the readable payload text is still present.
+    expect(result.output).toContain("OWNED");
+  });
+
+  it("neutralizes escape bytes in untrusted tombstone snapshot fields (FIX B)", async () => {
+    const dir = makeProject();
+    // Teammate-authored tombstone snapshot whose deletedBy/deletedAt carry
+    // control bytes; these reach the tombstone branch via isDeletedSnapshot.
+    const evilTombstone = {
+      id: "T-001", title: "Original", lifecycle: "deleted",
+      deletedBy: "\x1b[2Jpwned\x07", deletedAt: "\x1b]0;pwned\x07 OWNED",
+    };
+    writeTicketFile(dir, "T-001", {
+      _conflicts: [{ fieldPath: "", field: "_entity", kind: "delete-edit", base: { id: "T-001" }, ours: evilTombstone, theirs: { id: "T-001", title: "Edited" } }],
+    });
+    const result = await handleConflictsShow("T-001", dir, "md");
+    expect(result.output).not.toContain(String.fromCharCode(27));
+    expect(result.output).toContain("\\u001b");
+    // Sanity: the tombstone branch still renders and the readable payload survives.
+    expect(result.output).toContain("deleted (tombstone by");
+    expect(result.output).toContain("OWNED");
+  });
 });
 
 describe("ISS-768: attacker-crafted conflict fieldPath through the resolve command", () => {

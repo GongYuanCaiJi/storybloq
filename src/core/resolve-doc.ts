@@ -160,12 +160,33 @@ function isReorderEntry(doc: Record<string, unknown>, c: ConflictEntry, chosen: 
 
 function applyReorder(doc: Record<string, unknown>, c: ConflictEntry, chosenOrder: string[]): void {
   const segments = parsePointer(c.fieldPath);
-  let parent: Record<string, unknown> = doc;
+  let parent: unknown = doc;
   for (const seg of segments.slice(0, -1)) {
-    parent = parent[seg] as Record<string, unknown>;
+    // isReorderEntry validated this walk at PLAN time, but applyPlanned applies
+    // entity-level ops first, so a same-batch entity replacement can turn a
+    // mid-walk node into a non-object between classification and application.
+    // Refuse loudly (pointerError) rather than dereferencing a primitive.
+    if (typeof parent !== "object" || parent === null || Array.isArray(parent)) {
+      throw pointerError(c.fieldPath);
+    }
+    parent = (parent as Record<string, unknown>)[seg];
+  }
+  if (typeof parent !== "object" || parent === null || Array.isArray(parent)) {
+    throw pointerError(c.fieldPath);
   }
   const key = segments[segments.length - 1]!;
-  const arr = parent[key] as Array<Record<string, unknown>>;
+  const arr = (parent as Record<string, unknown>)[key] as Array<Record<string, unknown>>;
+  // Same desync guard for the final target: a same-batch entity op may have
+  // replaced the array itself with a non-array (arr.every would TypeError).
+  if (!Array.isArray(arr)) {
+    throw pointerError(c.fieldPath);
+  }
+  // Element-shape guard: the same desync can leave the array holding null,
+  // primitives, or nested arrays, all of which would bare-TypeError on the
+  // el.id / el.name shape access below. Refuse loudly instead.
+  if (!arr.every((el) => typeof el === "object" && el !== null && !Array.isArray(el))) {
+    throw pointerError(c.fieldPath);
+  }
 
   const keyField = arr.every((el) => typeof el.id === "string") ? "id"
     : arr.every((el) => typeof el.name === "string") ? "name"

@@ -463,3 +463,77 @@ describe("ISS-769: pointer ops are identity-anchored across reorder/keyed mutati
     expect(() => resolveDocConflicts(doc, { use: "theirs" })).toThrow(/\/items\/0/);
   });
 });
+
+describe("FIX C: applyReorder is type-guarded against same-batch entity desync", () => {
+  const phaseWith = (id: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...phase(id), ...extra,
+  });
+
+  it("refuses gracefully when a same-batch entity op turns the reorder target into a non-array", () => {
+    // Entity op (applied first) replaces the doc with a body where phases is a
+    // string; the /phases reorder entry was classified as a reorder at PLAN time
+    // (phases was still an array), so apply-time the target has desynced.
+    const oursBody = { version: 2, title: "t", phases: "NOT-AN-ARRAY" };
+    const theirsBody = { version: 2, title: "t", phases: [phase("p1"), phase("p2")] };
+    const doc = withConflicts(
+      { version: 2, title: "t", phases: [phase("p1"), phase("p2")] },
+      [
+        { fieldPath: "", field: "_entity", kind: "field", base: null, ours: oursBody, theirs: theirsBody },
+        { fieldPath: "/phases", field: "phases", kind: "field", base: ["p1", "p2"], ours: ["p2", "p1"], theirs: ["p1", "p2"] },
+      ],
+    );
+    // Graceful refusal (pointerError), NOT a bare "arr.every is not a function" TypeError.
+    expect(() => resolveDocConflicts(doc, { use: "ours" })).toThrow(/resolve by hand|--value/i);
+  });
+
+  it("refuses gracefully when a mid-walk container becomes a non-object before reorder applies", () => {
+    // Deeper reorder path /nested/phases; the entity op collapses `nested` into
+    // a string, so the mid-walk `parent[seg]` is no longer a traversable object.
+    const oursBody = { version: 2, nested: "NOT-AN-OBJECT" };
+    const theirsBody = { version: 2, nested: { phases: [phase("p1"), phase("p2")] } };
+    const doc = withConflicts(
+      { version: 2, nested: { phases: [phase("p1"), phase("p2")] } },
+      [
+        { fieldPath: "", field: "_entity", kind: "field", base: null, ours: oursBody, theirs: theirsBody },
+        { fieldPath: "/nested/phases", field: "phases", kind: "field", base: ["p1", "p2"], ours: ["p2", "p1"], theirs: ["p1", "p2"] },
+      ],
+    );
+    expect(() => resolveDocConflicts(doc, { use: "ours" })).toThrow(/resolve by hand|--value/i);
+  });
+
+  it("refuses gracefully when a same-batch entity op leaves the reorder target holding a null element", () => {
+    // The target is still an Array (passes Array.isArray), but a same-batch
+    // entity op replaced its contents with an array containing null, so the
+    // downstream el.id / el.name shape access would bare-TypeError.
+    const oursBody = { version: 2, title: "t", phases: [null, phase("p2")] };
+    const theirsBody = { version: 2, title: "t", phases: [phase("p1"), phase("p2")] };
+    const doc = withConflicts(
+      { version: 2, title: "t", phases: [phase("p1"), phase("p2")] },
+      [
+        { fieldPath: "", field: "_entity", kind: "field", base: null, ours: oursBody, theirs: theirsBody },
+        { fieldPath: "/phases", field: "phases", kind: "field", base: ["p1", "p2"], ours: ["p2", "p1"], theirs: ["p1", "p2"] },
+      ],
+    );
+    expect(() => resolveDocConflicts(doc, { use: "ours" })).toThrow(/resolve by hand|--value/i);
+  });
+
+  it("does not false-refuse a legitimate same-batch reorder over real object elements", () => {
+    // Guard must not over-fire: an entity op that keeps phases as an array of
+    // real objects plus a reorder entry must still resolve cleanly.
+    const oursBody = { version: 2, title: "t", phases: [phaseWith("p1", { name: "P1-edited" }), phase("p2")] };
+    const theirsBody = { version: 2, title: "t", phases: [phase("p1"), phase("p2")] };
+    const doc = withConflicts(
+      { version: 2, title: "t", phases: [phase("p1"), phase("p2")] },
+      [
+        { fieldPath: "", field: "_entity", kind: "field", base: null, ours: oursBody, theirs: theirsBody },
+        { fieldPath: "/phases", field: "phases", kind: "field", base: ["p1", "p2"], ours: ["p2", "p1"], theirs: ["p1", "p2"] },
+      ],
+    );
+    const result = resolveDocConflicts(doc, { use: "ours" });
+    expect(result.fullyResolved).toBe(true);
+    const phases = doc.phases as Array<Record<string, unknown>>;
+    expect(phases.map((p) => p.id)).toEqual(["p2", "p1"]);
+    // Content of the entity-supplied edit is preserved through the reorder.
+    expect(phases.find((p) => p.id === "p1")!.name).toBe("P1-edited");
+  });
+});
