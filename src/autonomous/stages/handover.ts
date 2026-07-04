@@ -66,13 +66,15 @@ export class HandoverStage implements WorkflowStage {
       }
     }
 
-    // Release ticket claim on session end: for a still-inprogress handoff owned
-    // by this session, delete the claim keys AND flip status back to open so the
-    // ticket stays pickable (true parity with the cancel and session-compact
-    // paths, ISS-792). The status guard means a non-inprogress ticket is never
-    // rewritten here, even with a stale claim stamp: normal completion clears
-    // ctx.state.ticket in FINALIZE and clearClaimOnComplete owns that path,
-    // while stale claims on complete tickets belong to the ISS-652 repair.
+    // Release ticket claim on session end: for a still-inprogress ticket, delete
+    // the claim keys AND flip status back to open so the ticket stays pickable
+    // (ISS-792). Ownership matches the cancel and session-compact paths exactly
+    // (ISS-778/ISS-816): release when this session owns the claimedBySession
+    // stamp, or when the ticket carries no claim material at all; a foreign
+    // claim is never touched. The status guard means a non-inprogress ticket is
+    // never rewritten here, even with a stale claim stamp: normal completion
+    // clears ctx.state.ticket in FINALIZE and clearClaimOnComplete owns that
+    // path, while stale claims on complete tickets belong to the ISS-652 repair.
     const ticketId = ctx.state.ticket?.id;
     if (ticketId) {
       try {
@@ -81,7 +83,14 @@ export class HandoverStage implements WorkflowStage {
           const ticket = projectState.ticketByID(ticketId);
           if (ticket && ticket.status === "inprogress") {
             const ticketClaim = (ticket as Record<string, unknown>).claimedBySession;
-            if (ticketClaim === ctx.state.sessionId) {
+            const ticketClaimBlock = (ticket as Record<string, unknown>).claim;
+            // ISS-778/ISS-816: strict ownership, matching the cancel and
+            // session-compact paths. Release when this session owns the
+            // claimedBySession stamp, or when the ticket carries no claim material
+            // at all (a bare inprogress ticket, nothing foreign to destroy). A
+            // foreign claim (another session's claimedBySession, or a CLI claim
+            // block that never sets claimedBySession) is never released here.
+            if (ticketClaim === ctx.state.sessionId || (!ticketClaim && ticketClaimBlock == null)) {
               // ISS-652: delete the keys rather than writing an explicit null,
               // so a released ticket carries no residual claim state.
               const { claimedBySession: _cb, claim: _cl, ...rest } = ticket as Record<string, unknown>;

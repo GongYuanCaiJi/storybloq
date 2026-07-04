@@ -15,6 +15,11 @@
  * whose ticket went complete out-of-band can never reopen it. Stale claims on
  * complete tickets belong to the ISS-652 repair.
  *
+ * Ownership carries the ISS-778 disjunction the cancel and session-compact
+ * siblings use (ISS-816): release when this session owns the
+ * claimedBySession stamp, or when the ticket carries no claim material at
+ * all (a bare inprogress ticket); a foreign claim is never released.
+ *
  * This drives handleAutonomousGuide's HANDOVER report path end to end (real
  * session files, temp project, mocked git-inspector), the same way
  * cancel-claim-ownership.test.ts drives the cancel path.
@@ -205,5 +210,47 @@ describe("HANDOVER claim release flips a mid-work handoff back to open (ISS-792)
     // No write at all: the file is byte-identical, stale stamp included.
     expect(rawTicketBytes(root)).toBe(before);
     expect(after.claimedBySession).toBe(sessionId);
+  });
+
+  it("(4) bare inprogress ticket with no claim material: released to open on handover (ISS-816)", async () => {
+    const { sessionId } = plantHandoverSession(root, {
+      previousState: "CODE_REVIEW",
+      ticket: { id: "T-001", title: "Test ticket", risk: "low", claimed: true },
+    });
+    // No claimedBySession and no claim block: the session flipped the ticket
+    // inprogress before any claim material was written (ISS-778 shape).
+    writeTicket(root, {});
+
+    const result = await reportHandoverWritten(root, sessionId);
+    expect(result.isError).toBeFalsy();
+
+    const after = readTicket(root);
+    // Load-bearing assertion: the bare handed-off ticket must be re-pickable.
+    expect(after.status).toBe("open");
+    expect("claimedBySession" in after).toBe(false);
+    expect("claim" in after).toBe(false);
+  });
+
+  it("(5) foreign CLI claim block with no claimedBySession: never released, file untouched (ISS-816)", async () => {
+    const { sessionId } = plantHandoverSession(root, {
+      previousState: "CODE_REVIEW",
+      ticket: { id: "T-001", title: "Test ticket", risk: "low", claimed: true },
+    });
+    // A CLI claim (storybloq ticket claim) writes a claim block but never
+    // claimedBySession. The ticketClaimBlock == null guard must keep the
+    // bare-ticket disjunct from swallowing this foreign claim.
+    writeTicket(root, {
+      claim: { user: "other@example.com", branch: "main", since: NOW },
+    });
+
+    const before = rawTicketBytes(root);
+    const result = await reportHandoverWritten(root, sessionId);
+    expect(result.isError).toBeFalsy();
+
+    // No write at all: byte-identical, still inprogress, claim block intact.
+    expect(rawTicketBytes(root)).toBe(before);
+    const after = readTicket(root);
+    expect(after.status).toBe("inprogress");
+    expect(after.claim).toEqual({ user: "other@example.com", branch: "main", since: NOW });
   });
 });
