@@ -496,10 +496,15 @@ export function handleNodeList(ctx: CommandContext): CommandResult {
   const config = ctx.state.config as Record<string, unknown>;
 
   if (config.type !== "orchestrator") {
-    return {
-      output: formatError("invalid_input", "Node commands are only available on orchestrator projects.", ctx.format),
-      exitCode: ExitCode.USER_ERROR,
-    };
+    // ISS-811: the LIST read path is benign on non-orchestrator projects.
+    // Single-repo mode returns an empty node list plus a note, so cold
+    // orchestrate Step 1 opens without an error. Write/mutating node paths
+    // (add/remove/update, node_init) still error as before.
+    const note = "not an orchestrator project; single-repo mode";
+    if (ctx.format === "json") {
+      return { output: JSON.stringify(successEnvelope({ nodes: [], note }), null, 2) };
+    }
+    return { output: "No federation nodes: not an orchestrator project (single-repo mode)." };
   }
 
   const nodes = (config.nodes as Record<string, Record<string, unknown>>) ?? {};

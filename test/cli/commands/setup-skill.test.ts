@@ -109,6 +109,13 @@ describe("setup-skill", () => {
     expect(content.indexOf("DO NOT amend, rebase, or force-push")).toBeGreaterThan(criticalIdx);
   });
 
+  it("orchestrator-mode.md distinguishes single-repo from a zero-node orchestrator on an empty node list (ISS-811)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    expect(content).toContain("An empty list means there are no federation nodes to guard");
+    expect(content).toContain("single-repo mode");
+    expect(content).toContain("REMAINS an orchestrator");
+  });
+
   it("SKILL.md ticket-and-issue discipline points orchestrator filings at the enrichment template", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     expect(content).toContain("ticket or issue");

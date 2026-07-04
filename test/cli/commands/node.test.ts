@@ -484,7 +484,7 @@ describe("handleNodeList", () => {
     expect(parsed.data.nodes[0].name).toBe("engine");
   });
 
-  it("rejects on non-orchestrator", async () => {
+  it("returns benign empty list on non-orchestrator (single-repo mode, md)", async () => {
     const dir = await createNonOrchestrator();
     const { state, warnings } = await loadProject(dir);
     const result = handleNodeList({
@@ -494,7 +494,25 @@ describe("handleNodeList", () => {
       handoversDir: join(dir, ".story", "handovers"),
       format: "md",
     });
-    expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+    expect(result.exitCode).toBeUndefined();
+    expect(result.output).toContain("single-repo mode");
+    expect(result.output).not.toContain("only available on orchestrator");
+  });
+
+  it("returns empty success envelope with note on non-orchestrator (json)", async () => {
+    const dir = await createNonOrchestrator();
+    const { state, warnings } = await loadProject(dir);
+    const result = handleNodeList({
+      state,
+      warnings,
+      root: dir,
+      handoversDir: join(dir, ".story", "handovers"),
+      format: "json",
+    });
+    expect(result.exitCode).toBeUndefined();
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.nodes).toEqual([]);
+    expect(parsed.data.note).toContain("single-repo");
   });
 });
 

@@ -12,6 +12,7 @@ import { handleIssueList } from "../../src/cli/commands/issue.js";
 import { handleHandoverList, handleHandoverLatest } from "../../src/cli/commands/handover.js";
 import { handleValidate } from "../../src/cli/commands/validate.js";
 import { handleBlockerList } from "../../src/cli/commands/blocker.js";
+import { handleNodeList } from "../../src/cli/commands/node.js";
 import { initProject } from "../../src/core/init.js";
 
 const FIXTURES_DIR = join(import.meta.dirname, "..", "fixtures", "valid", "basic");
@@ -84,6 +85,15 @@ describe("MCP integration — real filesystem", () => {
     const root = await setupProject();
     const result = await runMcpReadTool(root, handleHandoverList);
     expect(result.isError).toBeUndefined();
+  });
+
+  it("runMcpReadTool(handleNodeList) - benign empty list on a non-orchestrator project (ISS-811)", async () => {
+    const root = await setupProject(); // fixture type is "npm" (non-orchestrator)
+    const result = await runMcpReadTool(root, handleNodeList);
+    // Non-orchestrator LIST is informational, NOT isError, and carries no old error text.
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("single-repo mode");
+    expect(result.content[0].text).not.toContain("only available on orchestrator");
   });
 
   it("no project root → ProjectLoaderError (isError: true)", async () => {
