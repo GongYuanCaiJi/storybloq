@@ -184,7 +184,12 @@ export async function handleReconcile(
         output = formatReconcileOutput(result, options.format, rebalance);
         exitCode = ExitCode.USER_ERROR;
       } else {
-        output = "No duplicate displayIds found. Project is clean.";
+        // ISS-805: honor --format json in the clean branch too, using the same
+        // successEnvelope shape the other reconcile JSON paths emit. Interactive
+        // callers keep the plain-text confirmation.
+        output = options.format === "json"
+          ? JSON.stringify(successEnvelope({ clean: true, renames: [] }), null, 2)
+          : "No duplicate displayIds found. Project is clean.";
         exitCode = ExitCode.OK;
       }
       return;

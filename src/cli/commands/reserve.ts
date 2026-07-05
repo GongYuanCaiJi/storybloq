@@ -1,6 +1,28 @@
 import { resolve } from "node:path";
 import type { CommandResult } from "../types.js";
 
+/**
+ * ISS-805 R1: shared --count validation so the JSON error envelope wins in BOTH
+ * the team-reserve command wrapper (before project discovery) and here. Returns
+ * an error message when the count is out of range, or null when it is valid.
+ */
+export function validateReserveCount(count: number): string | null {
+  if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
+    return "--count must be an integer between 1 and 100.";
+  }
+  return null;
+}
+
+/** Format a --count validation failure as the sibling { ok:false, error } shape. */
+export function formatReserveCountError(message: string, format: "md" | "json"): CommandResult {
+  return {
+    output: format === "json"
+      ? JSON.stringify({ ok: false, error: message }, null, 2)
+      : `Error: ${message}`,
+    exitCode: 1,
+  };
+}
+
 export async function handleReserve(
   root: string,
   type: "tickets" | "issues" | "notes" | "lessons",
@@ -10,8 +32,9 @@ export async function handleReserve(
   const { loadProject } = await import("../../core/project-loader.js");
   const { reserveDisplayId } = await import("../../core/remote-refs.js");
 
-  if (!Number.isSafeInteger(count) || count < 1 || count > 100) {
-    return { output: "Error: --count must be an integer between 1 and 100.", exitCode: 1 };
+  const countError = validateReserveCount(count);
+  if (countError) {
+    return formatReserveCountError(countError, format);
   }
 
   const entityType = type.replace(/s$/, "") as "ticket" | "issue" | "note" | "lesson";

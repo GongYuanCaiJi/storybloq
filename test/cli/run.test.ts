@@ -3,10 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
-import { runReadCommand, writeOutput } from "../../src/cli/run.js";
+import { runReadCommand, runReadCommandWithRoot, runDeleteCommand, writeOutput } from "../../src/cli/run.js";
 import { ExitCode } from "../../src/core/output-formatter.js";
 import { ProjectLoaderError } from "../../src/core/errors.js";
 import { CliValidationError } from "../../src/cli/helpers.js";
+import { RefResolutionError } from "../../src/core/ref-normalization.js";
 
 describe("writeOutput", () => {
   it("writes to stdout", () => {
@@ -124,6 +125,74 @@ describe("runReadCommand", () => {
       output: "ok",
     }));
     expect(process.exitCode).toBe(ExitCode.OK);
+    spy.mockRestore();
+  });
+
+  // ISS-805: an ambiguous ref is caller input, not a project conflict, so all
+  // three pipelines must map RefResolutionError("ambiguous") to invalid_input,
+  // not conflict. Missing refs stay not_found.
+  it("maps ambiguous RefResolutionError to invalid_input (runReadCommand)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-test-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    process.chdir(dir);
+
+    const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    await runReadCommand("json", () => {
+      throw new RefResolutionError("ambiguous", 'Ref "T-9" is ambiguous (matches: a, b)');
+    });
+    const output = spy.mock.calls[0]![0] as string;
+    expect(output).toContain("invalid_input");
+    expect(output).not.toContain("conflict");
+    expect(process.exitCode).toBe(ExitCode.USER_ERROR);
+    spy.mockRestore();
+  });
+
+  it("maps ambiguous RefResolutionError to invalid_input (runReadCommandWithRoot)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-test-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+
+    const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    await runReadCommandWithRoot("json", dir, () => {
+      throw new RefResolutionError("ambiguous", 'Ref "N-9" is ambiguous (matches: a, b)');
+    });
+    const output = spy.mock.calls[0]![0] as string;
+    expect(output).toContain("invalid_input");
+    expect(output).not.toContain("conflict");
+    expect(process.exitCode).toBe(ExitCode.USER_ERROR);
+    spy.mockRestore();
+  });
+
+  it("maps ambiguous RefResolutionError to invalid_input (runDeleteCommand)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-test-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    process.chdir(dir);
+
+    const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    await runDeleteCommand("json", true, () => {
+      throw new RefResolutionError("ambiguous", 'Ref "L-9" is ambiguous (matches: a, b)');
+    });
+    const output = spy.mock.calls[0]![0] as string;
+    expect(output).toContain("invalid_input");
+    expect(output).not.toContain("conflict");
+    expect(process.exitCode).toBe(ExitCode.USER_ERROR);
+    spy.mockRestore();
+  });
+
+  it("keeps missing RefResolutionError as not_found (runReadCommand)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "run-test-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    process.chdir(dir);
+
+    const spy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    await runReadCommand("json", () => {
+      throw new RefResolutionError("missing", 'Ref "T-9" not found');
+    });
+    const output = spy.mock.calls[0]![0] as string;
+    expect(output).toContain("not_found");
     spy.mockRestore();
   });
 });

@@ -123,6 +123,21 @@ describe("handleNoteGet", () => {
     expect(result.output).toContain("not_found");
     expect(result.exitCode).toBe(ExitCode.USER_ERROR);
   });
+
+  it("ISS-805: reports invalid_input (not not_found) for an ambiguous ref", () => {
+    // Two notes sharing a displayId make N-900 an ambiguous ref.
+    const ctx = makeCtx({
+      state: makeState({
+        notes: [
+          makeNote({ id: "n-000000000000aa01", displayId: "N-900" }),
+          makeNote({ id: "n-000000000000aa02", displayId: "N-900" }),
+        ],
+      }),
+    });
+    const result = handleNoteGet("N-900", ctx);
+    expect(result.errorCode).toBe("invalid_input");
+    expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+  });
 });
 
 // --- Create ---

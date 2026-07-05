@@ -17,7 +17,7 @@ export async function handleGc(
   const format = options.format ?? "md";
   const retentionDays = options.retentionDays ?? 30;
   if (!Number.isInteger(retentionDays) || retentionDays < 0) {
-    return { output: "Error: --retention-days must be a non-negative integer.", exitCode: 1 };
+    return formatGcError("--retention-days must be a non-negative integer.", format);
   }
 
   if (options.apply) {
@@ -44,7 +44,7 @@ export async function handleGc(
         const lines = plan.blocked
           .map((c) => `  - ${c.id} (referenced by ${c.activeReferences.join(", ")})`)
           .join("\n");
-        refusal = `Error: gc --force cannot purge ${plan.blocked.length} tombstone(s) still referenced by active items; physically removing them would dangle canonical references and fail validation:\n${lines}\n\nRun \`storybloq repair\` to remove the stale references first, then re-run gc.`;
+        refusal = `gc --force cannot purge ${plan.blocked.length} tombstone(s) still referenced by active items; physically removing them would dangle canonical references and fail validation:\n${lines}\n\nRun \`storybloq repair\` to remove the stale references first, then re-run gc.`;
         return;
       }
 
@@ -68,10 +68,15 @@ export async function handleGc(
     });
 
     if (refusal) {
-      return { output: refusal, exitCode: 1 };
+      return formatGcError(refusal, format);
     }
 
     if (errors.length > 0) {
+      // Structured consumers get one JSON object with the errors folded in;
+      // interactive (md) callers keep the plan render plus the "### Errors" block.
+      if (format === "json") {
+        return { output: formatGcResult(plan!, applied, format, errors), exitCode: 1 };
+      }
       const errLines = errors.map((e) => `  - ${e.id}: ${e.error}`).join("\n");
       const base = formatGcResult(plan!, applied, format);
       return { output: `${base}\n\n### Errors\n${errLines}`, exitCode: 1 };
@@ -86,16 +91,36 @@ export async function handleGc(
   return { output: formatGcResult(plan, null, format) };
 }
 
-function formatGcResult(plan: GcPlan, applied: string[] | null, format: "md" | "json"): string {
+/**
+ * Format an error/refusal path as the same { ok } envelope shape the sibling
+ * success path (formatGcResult) already emits in JSON. Interactive callers keep
+ * the leading "Error:" plain-text form. Output shape only, no behavior change.
+ */
+function formatGcError(message: string, format: "md" | "json"): CommandResult {
+  return {
+    output: format === "json"
+      ? JSON.stringify({ ok: false, error: message }, null, 2)
+      : `Error: ${message}`,
+    exitCode: 1,
+  };
+}
+
+function formatGcResult(
+  plan: GcPlan,
+  applied: string[] | null,
+  format: "md" | "json",
+  errors: Array<{ id: string; error: string }> = [],
+): string {
   if (format === "json") {
     return JSON.stringify({
-      ok: true,
+      ok: errors.length === 0,
       data: {
         retentionDays: plan.retentionDays,
         eligible: plan.eligible.map((c) => ({ type: c.type, id: c.id, age: c.age })),
         blocked: plan.blocked.map((c) => ({ type: c.type, id: c.id, age: c.age, activeReferences: c.activeReferences })),
         warnings: plan.warnings,
         applied: applied ?? [],
+        errors: errors.map((e) => ({ id: e.id, error: e.error })),
       },
     }, null, 2);
   }
@@ -132,7 +157,7 @@ function formatGcResult(plan: GcPlan, applied: string[] | null, format: "md" | "
       lines.push(`| ${c.type} | ${c.id} | ${c.age} | ${c.activeReferences.join(", ")} |`);
     }
     lines.push("");
-    lines.push("Run `storybloq repair` to clean up references, or use `--force` to remove anyway.");
+    lines.push("Run `storybloq repair` to clear the stale references first; `--force` still refuses to purge referenced tombstones.");
   }
 
   if (plan.warnings.length > 0) {

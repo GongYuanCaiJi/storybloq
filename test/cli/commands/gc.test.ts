@@ -1,8 +1,26 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleGc } from "../../../src/cli/commands/gc.js";
+
+// ISS-805: deterministic failure seam for the partial-failure path. The unlink
+// used by handleGc is stubbed to throw only for one sentinel tombstone id
+// (t-0000000000000911); every other path delegates to the real unlink, so the
+// other tests in this file remove real files exactly as before. No permission
+// tricks or timing, per the Wave-1 plan-review ruling.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    unlink: async (p: Parameters<typeof actual.unlink>[0], ...rest: unknown[]) => {
+      if (String(p).includes("t-0000000000000911")) {
+        throw new Error("EACCES: simulated unlink failure");
+      }
+      return (actual.unlink as (...a: unknown[]) => Promise<void>)(p, ...rest);
+    },
+  };
+});
 
 function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
@@ -158,5 +176,47 @@ describe("handleGc apply loop", () => {
       expect(result.exitCode).toBe(1);
       expect(result.output).toContain("retention-days");
     });
+  });
+});
+
+describe("ISS-805: handleGc --format json error envelopes", () => {
+  it("invalid --retention-days with format json emits one parseable object with ok:false", async () => {
+    const root = createProject({ team: false });
+    const result = await handleGc(root, { retentionDays: -1, format: "json" });
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+    expect(String(parsed.error)).toContain("retention-days");
+  });
+
+  it("--force refusal on a referenced tombstone with format json is parseable with ok:false", async () => {
+    const root = createProject({ team: true });
+    writeAgedTombstone(root, "t-0000000000000001");
+    writeActiveTicket(root, "t-0000000000000002", { blockedBy: ["t-0000000000000001"] });
+
+    const result = await handleGc(root, { apply: true, force: true, format: "json" });
+
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+    // No trailing markdown: the whole output is a single JSON document.
+    expect(String(parsed.error)).toContain("t-0000000000000001");
+  });
+
+  it("partial-failure with format json folds the errors into one parseable object (exitCode 1)", async () => {
+    const root = createProject({ team: true });
+    // Sentinel id: the mocked unlink throws deterministically for this tombstone.
+    writeAgedTombstone(root, "t-0000000000000911");
+
+    const result = await handleGc(root, { apply: true, format: "json" });
+
+    expect(result.exitCode).toBe(1);
+    // RED before the fix: output is JSON followed by a "### Errors" markdown block,
+    // so JSON.parse throws. After the fix it is one object with errors folded in.
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+    expect(Array.isArray(parsed.data.errors)).toBe(true);
+    expect(parsed.data.errors.length).toBeGreaterThan(0);
+    expect(parsed.data.errors[0].id).toBe("t-0000000000000911");
   });
 });

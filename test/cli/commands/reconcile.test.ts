@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleReconcile } from "../../../src/cli/commands/reconcile.js";
+import { ExitCode } from "../../../src/core/output-formatter.js";
 
 function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2) + "\n");
@@ -132,5 +133,18 @@ describe("handleReconcile", () => {
     const second = JSON.parse(readFileSync(join(tickets, "t-0000000000000002.json"), "utf-8"));
     expect(second.rank.length).toBeLessThan(longRank.length);
     expect(readdirSync(join(root, ".story", "notes"))).toHaveLength(0);
+  });
+
+  describe("ISS-805: --ci clean project with format json", () => {
+    it("emits a parseable success envelope and exits OK", async () => {
+      const root = createProject(); // no tickets: clean, no renames, no rank changes
+      const result = await handleReconcile(root, { dryRun: false, ci: true, format: "json" });
+      expect(result.exitCode).toBe(ExitCode.OK);
+      // RED before the fix: output is the bare string "No duplicate displayIds
+      // found. Project is clean." so JSON.parse throws.
+      const parsed = JSON.parse(result.output);
+      expect(parsed.version).toBe(1);
+      expect(parsed.data.clean).toBe(true);
+    });
   });
 });

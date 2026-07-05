@@ -6,7 +6,7 @@ import {
 } from "../../core/project-loader.js";
 import { nextLessonID, allocateTeamLessonId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
-import { resolveAndNormalizeLessonRef } from "../../core/ref-normalization.js";
+import { resolveAndNormalizeLessonRef, RefResolutionError } from "../../core/ref-normalization.js";
 import { buildLessonDigest } from "../../core/lessons.js";
 import { isTeamModeConfig } from "../../core/team-capabilities.js";
 import {
@@ -115,7 +115,16 @@ export function handleLessonGet(
   let resolvedId: string;
   try {
     resolvedId = resolveAndNormalizeLessonRef(ctx.state, id);
-  } catch {
+  } catch (err) {
+    // ISS-805: an ambiguous ref is caller input, not a missing item; classify
+    // it invalid_input so consumers can distinguish it from a genuine not_found.
+    if (err instanceof RefResolutionError && err.reason === "ambiguous") {
+      return {
+        output: formatError("invalid_input", err.message, ctx.format),
+        exitCode: ExitCode.USER_ERROR,
+        errorCode: "invalid_input",
+      };
+    }
     return {
       output: formatError("not_found", `Lesson ${id} not found`, ctx.format),
       exitCode: ExitCode.USER_ERROR,

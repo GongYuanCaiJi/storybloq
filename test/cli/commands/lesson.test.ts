@@ -1,7 +1,8 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import yargs from "yargs";
 import {
   handleLessonList,
   handleLessonGet,
@@ -11,6 +12,7 @@ import {
   handleLessonReinforce,
   handleLessonDelete,
 } from "../../../src/cli/commands/lesson.js";
+import { registerLessonCommand } from "../../../src/cli/register.js";
 import { ExitCode } from "../../../src/core/output-formatter.js";
 import { CliValidationError } from "../../../src/cli/helpers.js";
 import { initProject } from "../../../src/core/init.js";
@@ -145,6 +147,20 @@ describe("handleLessonGet", () => {
     const ctx = makeCtx();
     const result = handleLessonGet("L-999", ctx);
     expect(result.output).toContain("not_found");
+    expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+  });
+
+  it("ISS-805: reports invalid_input (not not_found) for an ambiguous ref", () => {
+    const ctx = makeCtx({
+      state: makeState({
+        lessons: [
+          makeLesson({ id: "l-000000000000bb01", displayId: "L-900" }),
+          makeLesson({ id: "l-000000000000bb02", displayId: "L-900" }),
+        ],
+      }),
+    });
+    const result = handleLessonGet("L-900", ctx);
+    expect(result.errorCode).toBe("invalid_input");
     expect(result.exitCode).toBe(ExitCode.USER_ERROR);
   });
 });
@@ -414,5 +430,79 @@ describe("handleLessonDelete", () => {
     await expect(
       handleLessonDelete("L-999", "md", dir),
     ).rejects.toThrow();
+  });
+});
+
+// ISS-805 / T8: the real `lesson delete` command wrapper resolves the ref
+// through loadProject before deleting. An ambiguous displayId is caller input,
+// so the wrapper must surface invalid_input (not conflict). The fixture is a
+// real initProject project (valid roadmap) so loadProject succeeds and the
+// ambiguous ref actually reaches resolveAndNormalizeLessonRef.
+describe("ISS-805: lesson delete wrapper maps ambiguous ref to invalid_input", () => {
+  const dirs: string[] = [];
+  let origCwd: string;
+  afterEach(async () => {
+    process.chdir(origCwd);
+    process.exitCode = undefined;
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+
+  function makeLessonFile(id: string, displayId: string): unknown {
+    return {
+      id,
+      displayId,
+      title: `Lesson ${id}`,
+      content: "content",
+      context: "context",
+      source: "manual",
+      tags: [],
+      reinforcements: 0,
+      lastValidated: "2026-03-27",
+      createdDate: "2026-03-27",
+      updatedDate: "2026-03-27",
+      supersedes: null,
+      status: "active",
+    };
+  }
+
+  it("emits invalid_input for an ambiguous L-900 through the real delete wrapper", async () => {
+    origCwd = process.cwd();
+    const dir = await mkdtemp(join(tmpdir(), "lesson-del-ambig-"));
+    dirs.push(dir);
+    await initProject(dir, { name: "test" });
+    const lessonsDir = join(dir, ".story", "lessons");
+    await mkdir(lessonsDir, { recursive: true });
+    await writeFile(
+      join(lessonsDir, "l-000000000000cc01.json"),
+      JSON.stringify(makeLessonFile("l-000000000000cc01", "L-900"), null, 2) + "\n",
+    );
+    await writeFile(
+      join(lessonsDir, "l-000000000000cc02.json"),
+      JSON.stringify(makeLessonFile("l-000000000000cc02", "L-900"), null, 2) + "\n",
+    );
+    process.chdir(dir);
+
+    const chunks: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(((chunk: string | Uint8Array) => {
+        chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString());
+        return true;
+      }) as typeof process.stdout.write);
+    process.exitCode = undefined;
+    try {
+      await registerLessonCommand(
+        yargs(["lesson", "delete", "L-900", "--format", "json"]),
+      )
+        .exitProcess(false)
+        .parseAsync();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const parsed = JSON.parse(chunks.join("").trim());
+    // RED before the fix: parsed.error.code === "conflict".
+    expect(parsed.error.code).toBe("invalid_input");
+    expect(process.exitCode).toBe(ExitCode.USER_ERROR);
   });
 });

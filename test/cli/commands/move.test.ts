@@ -372,3 +372,44 @@ describe("handleTicketMove (ISS-753: error paths set exitCode 1)", () => {
     expect(result.output).toContain("rebalance-ranks");
   });
 });
+
+describe("ISS-805: early-validation --format json envelopes", () => {
+  // These validations return before withProjectLock, so no real project is needed.
+  const stubRoot = "/nonexistent-move-root";
+
+  it("both --after and --before with format json is parseable with ok:false", async () => {
+    const result = await handleTicketMove("T-001", stubRoot, {
+      after: "T-002",
+      before: "T-003",
+      format: "json",
+    });
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+    expect(typeof parsed.error).toBe("string");
+  });
+
+  it("neither --after nor --before with format json is parseable with ok:false", async () => {
+    const result = await handleTicketMove("T-001", stubRoot, { format: "json" });
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+  });
+
+  it("self-move with format json is parseable with ok:false", async () => {
+    const result = await handleTicketMove("T-001", stubRoot, {
+      after: "T-001",
+      format: "json",
+    });
+    expect(result.exitCode).toBe(1);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.ok).toBe(false);
+    expect(String(parsed.error)).toContain("itself");
+  });
+
+  it("keeps the plain-text md shape for early validations", async () => {
+    const result = await handleTicketMove("T-001", stubRoot, { format: "md" });
+    expect(result.exitCode).toBe(1);
+    expect(result.output).toBe("Error: specify --after or --before.");
+  });
+});

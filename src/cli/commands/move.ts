@@ -17,16 +17,25 @@ export async function handleTicketMove(
 ): Promise<CommandResult> {
   const format = options.format ?? "md";
 
+  // ISS-805: the three pre-lock validations must honor --format json too, using
+  // the same { ok:false, error } shape the in-lock fail() helper below emits.
+  const earlyFail = (message: string): CommandResult => ({
+    output: format === "json"
+      ? JSON.stringify({ ok: false, error: message }, null, 2)
+      : `Error: ${message}`,
+    exitCode: 1,
+  });
+
   if (options.after && options.before) {
-    return { output: "Error: specify --after or --before, not both.", exitCode: 1 };
+    return earlyFail("specify --after or --before, not both.");
   }
   if (!options.after && !options.before) {
-    return { output: "Error: specify --after or --before.", exitCode: 1 };
+    return earlyFail("specify --after or --before.");
   }
 
   const targetRef = (options.after ?? options.before)!;
   if (targetRef === id) {
-    return { output: "Error: cannot move a ticket relative to itself.", exitCode: 1 };
+    return earlyFail("cannot move a ticket relative to itself.");
   }
 
   const { withProjectLock, writeTicketUnlocked } = await import("../../core/project-loader.js");

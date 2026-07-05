@@ -5,7 +5,7 @@ import {
 } from "../../core/project-loader.js";
 import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
-import { resolveAndNormalizeNoteRef } from "../../core/ref-normalization.js";
+import { resolveAndNormalizeNoteRef, RefResolutionError } from "../../core/ref-normalization.js";
 import {
   formatNoteList,
   formatNote,
@@ -94,7 +94,16 @@ export function handleNoteGet(
   let resolvedId: string;
   try {
     resolvedId = resolveAndNormalizeNoteRef(ctx.state, id);
-  } catch {
+  } catch (err) {
+    // ISS-805: an ambiguous ref is caller input, not a missing item; classify
+    // it invalid_input so consumers can distinguish it from a genuine not_found.
+    if (err instanceof RefResolutionError && err.reason === "ambiguous") {
+      return {
+        output: formatError("invalid_input", err.message, ctx.format),
+        exitCode: ExitCode.USER_ERROR,
+        errorCode: "invalid_input",
+      };
+    }
     return {
       output: formatError("not_found", `Note ${id} not found`, ctx.format),
       exitCode: ExitCode.USER_ERROR,

@@ -90,7 +90,7 @@ export async function runReadCommand(
       return;
     }
     if (err instanceof RefResolutionError) {
-      const code = err.reason === "missing" ? "not_found" : "conflict";
+      const code = err.reason === "missing" ? "not_found" : "invalid_input";
       writeOutput(formatError(code, err.message, format));
       process.exitCode = ExitCode.USER_ERROR;
       return;
@@ -131,7 +131,7 @@ export async function runReadCommandWithRoot(
       return;
     }
     if (err instanceof RefResolutionError) {
-      const code = err.reason === "missing" ? "not_found" : "conflict";
+      const code = err.reason === "missing" ? "not_found" : "invalid_input";
       writeOutput(formatError(code, err.message, format));
       process.exitCode = ExitCode.USER_ERROR;
       return;
@@ -193,7 +193,7 @@ export async function runDeleteCommand(
       return;
     }
     if (err instanceof RefResolutionError) {
-      const code = err.reason === "missing" ? "not_found" : "conflict";
+      const code = err.reason === "missing" ? "not_found" : "invalid_input";
       writeOutput(formatError(code, err.message, format));
       process.exitCode = ExitCode.USER_ERROR;
       return;

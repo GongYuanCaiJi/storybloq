@@ -355,19 +355,26 @@ export function registerGcCommand(yargs: Argv): Argv {
         process.exitCode = ExitCode.USER_ERROR;
         return;
       }
+      const gcFormat = (argv.format as "md" | "json") ?? "md";
       try {
         const { handleGc } = await import("./commands/gc.js");
         const result = await handleGc(root, {
           apply: argv.apply as boolean,
           force: argv.force as boolean,
           retentionDays: argv["retention-days"] as number,
-          format: (argv.format as "md" | "json") ?? "md",
+          format: gcFormat,
         });
         writeOutput(result.output);
         if (result.exitCode) process.exitCode = result.exitCode;
       } catch (err: unknown) {
+        // ISS-805 R3: a post-validation handler failure must still honor
+        // --format json, emitting one parseable { ok:false, error } object.
         const message = err instanceof Error ? err.message : String(err);
-        writeOutput(message);
+        writeOutput(
+          gcFormat === "json"
+            ? JSON.stringify({ ok: false, error: message }, null, 2)
+            : message,
+        );
         process.exitCode = ExitCode.USER_ERROR;
       }
     },
@@ -436,23 +443,35 @@ export function registerTeamCommand(yargs: Argv): Argv {
           y2
             .positional("type", { type: "string", demandOption: true, choices: ["tickets", "issues", "notes", "lessons"], describe: "Entity type" })
             .option("count", { type: "number", default: 1, describe: "Number of IDs to reserve (1-100)" })
-            .option("format", { type: "string", choices: ["md", "json"], default: "md" })
-            .check((argv) => {
-              const c = argv.count as number;
-              if (!Number.isSafeInteger(c) || c < 1 || c > 100) return "--count must be an integer from 1 to 100";
-              return true;
-            }),
+            .option("format", { type: "string", choices: ["md", "json"], default: "md" }),
         async (argv) => {
+          const reserveFormat = (argv.format as "md" | "json") ?? "md";
+          // ISS-805 R1: validate --count BEFORE project discovery so the JSON
+          // error envelope wins even outside a project. The shared helper is
+          // also used inside handleReserve, so the check is not duplicated ad hoc.
+          const { handleReserve, validateReserveCount, formatReserveCountError } = await import("./commands/reserve.js");
+          const countError = validateReserveCount(argv.count as number);
+          if (countError) {
+            const res = formatReserveCountError(countError, reserveFormat);
+            writeOutput(res.output);
+            if (res.exitCode) process.exitCode = res.exitCode;
+            return;
+          }
           const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
           if (!root) { writeOutput("No .story/ project found."); process.exitCode = ExitCode.USER_ERROR; return; }
           try {
-            const { handleReserve } = await import("./commands/reserve.js");
-            const result = await handleReserve(root, argv.type as "tickets" | "issues" | "notes" | "lessons", argv.count as number, (argv.format as "md" | "json") ?? "md");
+            const result = await handleReserve(root, argv.type as "tickets" | "issues" | "notes" | "lessons", argv.count as number, reserveFormat);
             writeOutput(result.output);
             if (result.exitCode) process.exitCode = result.exitCode;
           } catch (err: unknown) {
+            // ISS-805 R3: a post-validation handler failure must still honor
+            // --format json, emitting one parseable { ok:false, error } object.
             const message = err instanceof Error ? err.message : String(err);
-            writeOutput(message);
+            writeOutput(
+              reserveFormat === "json"
+                ? JSON.stringify({ ok: false, error: message }, null, 2)
+                : message,
+            );
             process.exitCode = ExitCode.USER_ERROR;
           }
         },
@@ -3183,7 +3202,9 @@ export function registerLessonCommand(yargs: Argv): Argv {
               }
               const { RefResolutionError } = await import("../core/ref-normalization.js");
               if (err instanceof RefResolutionError) {
-                const code = err.reason === "missing" ? "not_found" : "conflict";
+                // ISS-805: an ambiguous ref is caller input, not a project
+                // conflict; classify it invalid_input, keep missing as not_found.
+                const code = err.reason === "missing" ? "not_found" : "invalid_input";
                 writeOutput(formatError(code, err.message, format));
                 process.exitCode = ExitCode.USER_ERROR;
                 return;
