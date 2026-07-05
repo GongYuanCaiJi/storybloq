@@ -1465,10 +1465,22 @@ export function formatReference(
 
   lines.push("## MCP Tools");
   lines.push("");
+  lines.push("The tools below are registered in full mode (inside a .story/ project).");
+  lines.push("");
   for (const tool of mcpTools) {
     const params = tool.params?.length ? ` (${tool.params.join(", ")})` : "";
     lines.push(`- **${tool.name}**${params} — ${tool.description}`);
   }
+
+  lines.push("");
+  lines.push("### MCP Tools (degraded mode)");
+  lines.push("");
+  lines.push("With no .story/ project on the path, the MCP server starts degraded and registers only:");
+  lines.push("");
+  lines.push("- **storybloq_init** — bootstrap a .story/ project, then dynamically register the full tool set");
+  lines.push("- **storybloq_status** — returns setup guidance instead of a project summary");
+  lines.push("");
+  lines.push("Destructive, admin, and git-integration workflows (delete, reconcile, conflicts, resolve, merge-driver, team, gc, repair, config, feedback) are CLI-only in both modes; see the CLI Commands section above.");
 
   lines.push("");
   lines.push("## /story design");

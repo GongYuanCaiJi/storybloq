@@ -247,6 +247,55 @@ Delete a note
 storybloq note delete <id> [--format json|md]
 ```
 
+### lesson list
+List lessons with optional status/tag/source filters
+
+```
+storybloq lesson list [--status <s>] [--tag <t>] [--source <src>] [--format json|md]
+```
+
+### lesson get
+Get a lesson by ID
+
+```
+storybloq lesson get <id> [--format json|md]
+```
+
+### lesson digest
+Ranked digest of active lessons for context loading
+
+```
+storybloq lesson digest [--format json|md]
+```
+
+### lesson create
+Create a new lesson
+
+```
+storybloq lesson create --title <t> --content <c> --context <ctx> --source <src> [--tags <tags>] [--supersedes <id>] [--format json|md]
+```
+
+### lesson update
+Update a lesson
+
+```
+storybloq lesson update <id> [--title <t>] [--content <c>] [--context <ctx>] [--tags <tags>] [--status <s>] [--supersedes <id>] [--format json|md]
+```
+
+### lesson reinforce
+Reinforce a lesson: increment count and update lastValidated
+
+```
+storybloq lesson reinforce <id> [--format json|md]
+```
+
+### lesson delete
+Delete a lesson
+
+```
+storybloq lesson delete <id> [--hard] [--format json|md]
+```
+
 ### validate
 Reference integrity + schema checks on all .story/ files
 
@@ -317,7 +366,142 @@ Compatibility alias for `storybloq setup --client claude`
 storybloq setup-skill [--skip-hooks]
 ```
 
+### reconcile
+Detect and fix duplicate displayIds across all entity types
+
+```
+storybloq reconcile [--dry-run] [--ci] [--rebalance-ranks] [--format json|md]
+```
+
+### conflicts list
+List all items with unresolved merge conflicts
+
+```
+storybloq conflicts list [--format json|md]
+```
+
+### conflicts show
+Show field-level conflict detail for an item
+
+```
+storybloq conflicts show <id> [--format json|md]
+```
+
+### resolve
+Resolve merge conflicts on a .story/ item
+
+```
+storybloq resolve <id> [--field <f>] [--use ours|theirs] [--value <json>] [--format json|md]
+```
+
+### merge-driver
+Git merge driver for .story/ JSON files (registered via team setup)
+
+```
+storybloq merge-driver <ancestor> <ours> <theirs> <pathname>
+```
+
+### team init
+Enable team mode on this project
+
+```
+storybloq team init [--claim-staleness-hours N] [--id-allocator local|git-refs] [--format json|md]
+```
+
+### team setup
+Install the git merge driver and .gitattributes for team mode
+
+```
+storybloq team setup [--format json|md]
+```
+
+### team doctor
+Run team health checks on the project
+
+```
+storybloq team doctor [--ci] [--format json|md]
+```
+
+### team reserve
+Reserve display IDs via remote git refs
+
+```
+storybloq team reserve <type> [--count N] [--format json|md]
+```
+
+### team config
+Show or set team configuration
+
+```
+storybloq team config get|set [key] [value] [--format json|md]
+```
+
+### gc
+Remove tombstoned files past retention period
+
+```
+storybloq gc [--apply] [--force] [--retention-days N] [--format json|md]
+```
+
+### repair
+Fix stale references in .story/ data
+
+```
+storybloq repair [--dry-run] [--canonicalize-refs]
+```
+
+### config
+Manage project configuration (recipe overrides)
+
+```
+storybloq config <subcommand> [--format json|md]
+```
+
+### migrate
+Migrate config schema to the latest version
+
+```
+storybloq migrate [--dry-run] [--format json|md]
+```
+
+### feedback
+Community feedback via GitHub Issues
+
+```
+storybloq feedback list|create|vote [args] [--format json|md]
+```
+
+### dispatch
+Dispatch work to Agent View background sessions
+
+```
+storybloq dispatch [ids..] [--format json|md]
+```
+
+### node add
+Add a federation node to an orchestrator project
+
+```
+storybloq node add <name> --path <p> [--role <r>] [--kind <k>] [--format json|md]
+```
+
+### node update
+Update a federation node's metadata
+
+```
+storybloq node update <name> [--path <p>] [--role <r>] [--format json|md]
+```
+
+### node remove
+Remove a federation node from an orchestrator project
+
+```
+storybloq node remove <name> [--format json|md]
+```
+
 ## MCP Tools
+
+The tools below are registered in full mode (inside a .story/ project).
 
 - **storybloq_status** — Project summary: phase statuses, ticket/issue counts, blockers
 - **storybloq_phase_list** — All phases with derived status
@@ -364,6 +548,23 @@ storybloq setup-skill [--skip-hooks]
 - **storybloq_review_lenses_prepare** (stage, diff, changedFiles, ticketDescription?, reviewRound?, priorDeferrals?) — Prepare multi-lens review — activation, secrets gate, context packaging, prompt building
 - **storybloq_review_lenses_synthesize** (stage?, lensResults, activeLenses, skippedLenses, reviewRound?, reviewId?) — Synthesize lens results — schema validation, blocking policy, merger prompt generation
 - **storybloq_review_lenses_judge** (mergerResultRaw, stage?, lensesCompleted, lensesFailed, lensesInsufficientContext?, lensesSkipped?, convergenceHistory?) — Prepare judge prompt — verdict calibration, convergence tracking
+- **storybloq_autonomous_guide** (sessionId?, action, mode?, ticketId?) — Autonomous session orchestrator — call at every decision point to drive PICK_TICKET through COMPLETE
+- **storybloq_session_report** (sessionId) — Structured analysis of an autonomous session (works even if project state is corrupted)
+- **storybloq_register_subprocess** (pid, cmd, category?, sessionId?) — Register a running subprocess so monitors can tell slow builds from hung agents
+- **storybloq_unregister_subprocess** (pid, sessionId?) — Unregister a subprocess after it completes (idempotent)
+- **storybloq_node_list** — List configured federation nodes in an orchestrator project
+- **storybloq_node_init** (node, type?, language?) — Initialize .story/ in a federation child node from the orchestrator
+- **storybloq_node_add** (name, path, role?, kind?) — Add a federation node to an orchestrator project's config
+- **storybloq_node_update** (name, path?, role?) — Update a federation node's metadata (shallow-merge)
+
+### MCP Tools (degraded mode)
+
+With no .story/ project on the path, the MCP server starts degraded and registers only:
+
+- **storybloq_init** — bootstrap a .story/ project, then dynamically register the full tool set
+- **storybloq_status** — returns setup guidance instead of a project summary
+
+Destructive, admin, and git-integration workflows (delete, reconcile, conflicts, resolve, merge-driver, team, gc, repair, config, feedback) are CLI-only in both modes; see the CLI Commands section above.
 
 ## /story design
 

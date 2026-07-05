@@ -140,7 +140,7 @@ function registerDegradedTools(server: McpServer): void {
     if (result.warnings.length > 0) {
       lines.push(`Warnings: ${result.warnings.join("; ")}`);
     }
-    lines.push("", "All 49 storybloq tools are now registered. If your MCP client still only shows storybloq_init + storybloq_status, the tool-list-changed notification was missed -- either retry the first post-init tool call (some clients refetch on error) or restart the MCP client. Use storybloq_phase_create to add phases and storybloq_ticket_create to add tickets.");
+    lines.push("", "The full storybloq tool set is now registered. If your MCP client still only shows storybloq_init + storybloq_status, the tool-list-changed notification was missed -- either retry the first post-init tool call (some clients refetch on error) or restart the MCP client. Use storybloq_phase_create to add phases and storybloq_ticket_create to add tickets.");
     return { content: [{ type: "text" as const, text: lines.join("\n") }] };
   });
 }

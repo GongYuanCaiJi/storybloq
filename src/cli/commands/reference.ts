@@ -205,6 +205,45 @@ export const COMMANDS: readonly CommandEntry[] = [
     usage: "storybloq note delete <id> [--format json|md]",
   },
   {
+    name: "lesson list",
+    description: "List lessons with optional status/tag/source filters",
+    usage: "storybloq lesson list [--status <s>] [--tag <t>] [--source <src>] [--format json|md]",
+    flags: ["--status", "--tag", "--source"],
+  },
+  {
+    name: "lesson get",
+    description: "Get a lesson by ID",
+    usage: "storybloq lesson get <id> [--format json|md]",
+  },
+  {
+    name: "lesson digest",
+    description: "Ranked digest of active lessons for context loading",
+    usage: "storybloq lesson digest [--format json|md]",
+  },
+  {
+    name: "lesson create",
+    description: "Create a new lesson",
+    usage: "storybloq lesson create --title <t> --content <c> --context <ctx> --source <src> [--tags <tags>] [--supersedes <id>] [--format json|md]",
+    flags: ["--title", "--content", "--context", "--source", "--tags", "--supersedes"],
+  },
+  {
+    name: "lesson update",
+    description: "Update a lesson",
+    usage: "storybloq lesson update <id> [--title <t>] [--content <c>] [--context <ctx>] [--tags <tags>] [--status <s>] [--supersedes <id>] [--format json|md]",
+    flags: ["--title", "--content", "--context", "--tags", "--status", "--supersedes"],
+  },
+  {
+    name: "lesson reinforce",
+    description: "Reinforce a lesson: increment count and update lastValidated",
+    usage: "storybloq lesson reinforce <id> [--format json|md]",
+  },
+  {
+    name: "lesson delete",
+    description: "Delete a lesson",
+    usage: "storybloq lesson delete <id> [--hard] [--format json|md]",
+    flags: ["--hard"],
+  },
+  {
     name: "validate",
     description: "Reference integrity + schema checks on all .story/ files",
     usage: "storybloq validate [--format json|md]",
@@ -259,6 +298,111 @@ export const COMMANDS: readonly CommandEntry[] = [
     usage: "storybloq setup-skill [--skip-hooks]",
     flags: ["--skip-hooks"],
   },
+  {
+    name: "reconcile",
+    description: "Detect and fix duplicate displayIds across all entity types",
+    usage: "storybloq reconcile [--dry-run] [--ci] [--rebalance-ranks] [--format json|md]",
+    flags: ["--dry-run", "--ci", "--rebalance-ranks"],
+  },
+  {
+    name: "conflicts list",
+    description: "List all items with unresolved merge conflicts",
+    usage: "storybloq conflicts list [--format json|md]",
+  },
+  {
+    name: "conflicts show",
+    description: "Show field-level conflict detail for an item",
+    usage: "storybloq conflicts show <id> [--format json|md]",
+  },
+  {
+    name: "resolve",
+    description: "Resolve merge conflicts on a .story/ item",
+    usage: "storybloq resolve <id> [--field <f>] [--use ours|theirs] [--value <json>] [--format json|md]",
+    flags: ["--field", "--use", "--value"],
+  },
+  {
+    name: "merge-driver",
+    description: "Git merge driver for .story/ JSON files (registered via team setup)",
+    usage: "storybloq merge-driver <ancestor> <ours> <theirs> <pathname>",
+  },
+  {
+    name: "team init",
+    description: "Enable team mode on this project",
+    usage: "storybloq team init [--claim-staleness-hours N] [--id-allocator local|git-refs] [--format json|md]",
+    flags: ["--claim-staleness-hours", "--id-allocator"],
+  },
+  {
+    name: "team setup",
+    description: "Install the git merge driver and .gitattributes for team mode",
+    usage: "storybloq team setup [--format json|md]",
+  },
+  {
+    name: "team doctor",
+    description: "Run team health checks on the project",
+    usage: "storybloq team doctor [--ci] [--format json|md]",
+    flags: ["--ci"],
+  },
+  {
+    name: "team reserve",
+    description: "Reserve display IDs via remote git refs",
+    usage: "storybloq team reserve <type> [--count N] [--format json|md]",
+    flags: ["--count"],
+  },
+  {
+    name: "team config",
+    description: "Show or set team configuration",
+    usage: "storybloq team config get|set [key] [value] [--format json|md]",
+  },
+  {
+    name: "gc",
+    description: "Remove tombstoned files past retention period",
+    usage: "storybloq gc [--apply] [--force] [--retention-days N] [--format json|md]",
+    flags: ["--apply", "--force", "--retention-days"],
+  },
+  {
+    name: "repair",
+    description: "Fix stale references in .story/ data",
+    usage: "storybloq repair [--dry-run] [--canonicalize-refs]",
+    flags: ["--dry-run", "--canonicalize-refs"],
+  },
+  {
+    name: "config",
+    description: "Manage project configuration (recipe overrides)",
+    usage: "storybloq config <subcommand> [--format json|md]",
+  },
+  {
+    name: "migrate",
+    description: "Migrate config schema to the latest version",
+    usage: "storybloq migrate [--dry-run] [--format json|md]",
+    flags: ["--dry-run"],
+  },
+  {
+    name: "feedback",
+    description: "Community feedback via GitHub Issues",
+    usage: "storybloq feedback list|create|vote [args] [--format json|md]",
+  },
+  {
+    name: "dispatch",
+    description: "Dispatch work to Agent View background sessions",
+    usage: "storybloq dispatch [ids..] [--format json|md]",
+  },
+  {
+    name: "node add",
+    description: "Add a federation node to an orchestrator project",
+    usage: "storybloq node add <name> --path <p> [--role <r>] [--kind <k>] [--format json|md]",
+    flags: ["--path", "--role", "--kind"],
+  },
+  {
+    name: "node update",
+    description: "Update a federation node's metadata",
+    usage: "storybloq node update <name> [--path <p>] [--role <r>] [--format json|md]",
+    flags: ["--path", "--role"],
+  },
+  {
+    name: "node remove",
+    description: "Remove a federation node from an orchestrator project",
+    usage: "storybloq node remove <name> [--format json|md]",
+  },
 ];
 
 export const MCP_TOOLS: readonly McpToolEntry[] = [
@@ -307,6 +451,14 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_review_lenses_prepare", description: "Prepare multi-lens review — activation, secrets gate, context packaging, prompt building", params: ["stage", "diff", "changedFiles", "ticketDescription?", "reviewRound?", "priorDeferrals?"] },
   { name: "storybloq_review_lenses_synthesize", description: "Synthesize lens results — schema validation, blocking policy, merger prompt generation", params: ["stage?", "lensResults", "activeLenses", "skippedLenses", "reviewRound?", "reviewId?"] },
   { name: "storybloq_review_lenses_judge", description: "Prepare judge prompt — verdict calibration, convergence tracking", params: ["mergerResultRaw", "stage?", "lensesCompleted", "lensesFailed", "lensesInsufficientContext?", "lensesSkipped?", "convergenceHistory?"] },
+  { name: "storybloq_autonomous_guide", description: "Autonomous session orchestrator — call at every decision point to drive PICK_TICKET through COMPLETE", params: ["sessionId?", "action", "mode?", "ticketId?"] },
+  { name: "storybloq_session_report", description: "Structured analysis of an autonomous session (works even if project state is corrupted)", params: ["sessionId"] },
+  { name: "storybloq_register_subprocess", description: "Register a running subprocess so monitors can tell slow builds from hung agents", params: ["pid", "cmd", "category?", "sessionId?"] },
+  { name: "storybloq_unregister_subprocess", description: "Unregister a subprocess after it completes (idempotent)", params: ["pid", "sessionId?"] },
+  { name: "storybloq_node_list", description: "List configured federation nodes in an orchestrator project" },
+  { name: "storybloq_node_init", description: "Initialize .story/ in a federation child node from the orchestrator", params: ["node", "type?", "language?"] },
+  { name: "storybloq_node_add", description: "Add a federation node to an orchestrator project's config", params: ["name", "path", "role?", "kind?"] },
+  { name: "storybloq_node_update", description: "Update a federation node's metadata (shallow-merge)", params: ["name", "path?", "role?"] },
 ];
 
 export function handleReference(format: OutputFormat): string {
