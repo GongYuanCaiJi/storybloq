@@ -152,7 +152,7 @@ async function main(): Promise<void> {
     { name: "storybloq", version },
     {
       instructions: root
-        ? "Start with storybloq_status for a project overview, then storybloq_ticket_next for the highest-priority work, then storybloq_handover_latest for session context."
+        ? "Start with storybloq_status for a project overview, then storybloq_ticket_next for the highest-priority work, then storybloq_handover_latest for session context. On clients with multi-agent orchestration (background dynamic workflows or subagents), suggest the /story orchestrate working style for large backlogs rather than waiting to be asked (requires the storybloq skill)."
         : "No .story/ project found. Use storybloq_init to initialize a new project, or navigate to a directory with .story/.",
       capabilities: {
         experimental: {

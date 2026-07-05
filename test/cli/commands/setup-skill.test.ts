@@ -1583,3 +1583,62 @@ describe("Codex setup helpers", () => {
     expect(settings.hooks.SessionStart[0]!.hooks[0]!.command).toContain("--codex-hook-json");
   });
 });
+
+// T-414: /story surfaces orchestrate proactively at context load when the client
+// is capable AND the backlog is orchestrate-sized. The gates must be spelled out
+// deterministically in the skill text so any agent executes them identically.
+describe("T-414: orchestrate discoverability", () => {
+  it("SKILL.md Part 3 offers the Orchestrate-the-backlog option with the exact rendered description", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    expect(content).toContain("Orchestrate the backlog");
+    expect(content).toContain(
+      "drive the backlog with tiered background agents: enrichment pass, review gates, batched ships",
+    );
+    // R6: exactly three explicit options in this state; "Something else" is dropped.
+    expect(content).toContain("DROP \"Something else\"");
+  });
+
+  it("SKILL.md spells out the deterministic Gate B backlog-size algorithm", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    // storybloq_recommend loaded with count: 10.
+    expect(content).toContain("count: 10");
+    // issue rows are verified actionable via storybloq_issue_get.
+    expect(content).toContain("storybloq_issue_get");
+    // kind "action" rows are excluded.
+    expect(content).toContain("never count a row whose `kind` is `\"action\"`");
+    // status verification.
+    expect(content).toContain("open` or `inprogress");
+  });
+
+  it("SKILL.md Gate A uses an exact-name allowlist that fails closed", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    expect(content).toContain("exact tool name");
+    expect(content).toContain("fails closed");
+    // The allowlist names.
+    expect(content).toContain("`Workflow`");
+    expect(content).toContain("`Agent`");
+    expect(content).toContain("`Task`");
+  });
+
+  it("SKILL.md pins storybloq_node_list as the federation-bypass source for Gate B", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    expect(content).toContain("storybloq_node_list returns at least one configured node");
+  });
+
+  it("mcp/index.ts appends the orchestrate nudge to the ROOT-branch instructions string", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "mcp", "index.ts"), "utf-8");
+    // R3: contiguous substring spanning the existing root-branch text into the new
+    // sentence, pinning placement to the root (project-found) branch.
+    expect(content).toContain(
+      "for session context. On clients with multi-agent orchestration",
+    );
+    expect(content).toContain("/story orchestrate");
+  });
+
+  it("orchestrator-mode.md records the opt-in as either invocation or selection (R8)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    expect(content).toContain(
+      "the prior /story orchestrate invocation or the Orchestrate-the-backlog selection",
+    );
+  });
+});

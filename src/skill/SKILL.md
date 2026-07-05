@@ -131,15 +131,25 @@ If the guard fired via a guide error path, apply these rules in order:
 2. Optionally, re-call `storybloq_status` to augment the banner with state/ticket/mode details. If the status response includes the same sessionId, use the enriched info for the banner; if not, render the banner with only the sessionId and the error's description.
 3. If the error does NOT name a resolvable full `sessionId` AND `storybloq_status` returns no matching session, STOP. Do NOT offer any Resume or Cancel action in that state. Tell the user: "A session appears to block this action but cannot be safely identified. Please inspect `.story/sessions/` or run `storybloq session list` before retrying."
 
+**Orchestrate gates (compute BEFORE composing Part 1).**
+
+Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (with `count: 10`) and evaluate BOTH gates below; only then compose Part 1, and render Part 1, Part 2, Part 3 in that order. The gates decide whether the `/story orchestrate` working style is surfaced at all -- this is a recommendation, never an auto-start; selecting it still routes through the explicit opt-in in `orchestrator-mode.md` Step 1.
+
+- **Gate A -- capability (exact-name allowlist, fails closed).** Probe your own harness for background-orchestration tools by EXACT tool name only. No fuzzy or keyword matching. The allowlist of names that signal capability is exactly `Workflow`, `Agent`, and `Task` -- the documented multi-agent tool names across supported clients (`Workflow` for dynamic-workflow clients; `Agent` and `Task` for subagent clients). Gate A passes only when at least one of those exact tool names is available to you in this session. Any other or ambiguous tool surface fails closed: Gate A does not pass and the orchestrate option is simply not surfaced.
+
+- **Gate B -- backlog size (deterministic).** Compute over the loaded `storybloq_recommend` result (`count: 10`): count every row whose `kind` is `"ticket"`; for every row whose `kind` is `"issue"`, call `storybloq_issue_get` and count it ONLY when its status is `open` or `inprogress` AND no explicit blocker or owner-gated marker appears in its `impact` or `resolution` fields; never count a row whose `kind` is `"action"`. Gate B passes when that count is 5 or more. Federation bypass: on an orchestrator project, Gate B ALSO passes when storybloq_node_list returns at least one configured node (storybloq_node_list is the source of truth for the node count).
+
+Record whether both gates passed; Part 1 and Part 3 below branch on that single result.
+
 **Part 1: Conversational intro (2-3 sentences)**
 
-Open with the project name and progress. Mention what the last session accomplished in one sentence. Note anything important (no git repo, open issues, blockers). Keep it brief -- the tables carry the detail.
+Open with the project name and progress. Mention what the last session accomplished in one sentence. Note anything important (no git repo, open issues, blockers). Keep it brief -- the tables carry the detail. When BOTH orchestrate gates passed, add one sentence noting the actionable backlog is orchestrate-sized, so driving it with tiered background agents is an option (for example: "The actionable backlog is large enough to orchestrate, so I can drive it with tiered background agents instead of one ticket at a time.").
 
 **Part 2: Structured tables (REQUIRED -- always show these, do not fold into prose)**
 
 You MUST show the following tables after the prose intro. Do not summarize them in paragraph form.
 
-**Ready to Work table** -- call `storybloq_recommend` for context-aware suggestions. `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table:
+**Ready to Work table** -- call `storybloq_recommend` with `count: 10` for context-aware suggestions (the table still renders only the top 5 rows, with "(+N more)"; the full 10 rows feed the orchestrate backlog-size gate below). `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table:
 
 ```
 ## Ready to Work
@@ -187,7 +197,9 @@ Show this once or twice, then never again.
 
 **Part 3: AskUserQuestion**
 
-End with `AskUserQuestion`:
+End with `AskUserQuestion`. Which variant depends on the orchestrate-gate result computed above.
+
+Default state (the orchestrate gates did NOT both pass):
 - question: "What would you like to do?"
 - header: "Next"
 - options:
@@ -197,6 +209,13 @@ End with `AskUserQuestion`:
 - (Other always available for free-text input)
 
 Autonomous mode is last -- most users want to collaborate, not hand off control.
+
+Orchestrate variant (ONLY when Gate A and Gate B BOTH passed): render exactly THREE explicit options and DROP "Something else" (the question tool's built-in free-text Other path covers it):
+- "Work on [first recommended ticket ID + title]" -- the top ticket from the Ready table
+- "Orchestrate the backlog" -- drive the backlog with tiered background agents: enrichment pass, review gates, batched ships
+- "Autonomous mode" -- I'll pick tickets, plan, review, build, commit, and loop until done
+
+Note (agent-facing meta-rules, do NOT render as option text): "Orchestrate the backlog" sits directly above "Autonomous mode". Mark exactly one option `(Recommended)`: give it to "Orchestrate the backlog" ONLY when the backlog is large AND there is no single obvious in-progress thread; otherwise the top ticket keeps `(Recommended)` and orchestrate is offered without the marker. Never exceed three explicit options in this state. Selecting "Orchestrate the backlog" routes to `orchestrator-mode.md` with Step 1 unchanged (node guard + blast-radius confirmation), so the recommendation never bypasses the explicit opt-in.
 
 **Active session variant (REPLACES the normal summary when Step 0.5 surfaced any active session):**
 
