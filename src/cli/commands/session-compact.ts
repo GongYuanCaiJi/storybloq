@@ -21,6 +21,8 @@ import { WORKFLOW_STATES } from "../../autonomous/session-types.js";
 import { writeShutdownMarker } from "../../autonomous/liveness.js";
 import { loadProject } from "../../core/project-loader.js";
 import { writeResumeMarker, removeResumeMarker } from "../../autonomous/resume-marker.js";
+import { findLatestHandover } from "../../federation/handover-utils.js";
+import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
 // session-compact-prepare (PreCompact hook)
@@ -79,68 +81,198 @@ export async function handleSessionCompactPrepare(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Sanitize a repository-controlled string before it is written into model
+ * context (SessionStart hook output). Handover filenames/dates can carry
+ * control characters; strip C0 controls + DEL + C1 controls (incl. NEL, which
+ * JS `\s` does not cover), collapse whitespace, trim, and length-bound so an
+ * injected value cannot break out of the breadcrumb framing.
+ */
+function sanitizeForContext(s: string, max = 200): string {
+  const stripped = Array.from(s)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0);
+      // drop C0 (0x00-0x1f), DEL (0x7f), and C1 (0x80-0x9f) control ranges
+      return code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f);
+    })
+    .join("");
+  return stripped.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+/**
+ * Build a lightweight post-compaction continuity breadcrumb for the case where
+ * there is NO active autonomous session (the /story orchestrate pen-driving
+ * case). Points the resumed session at the latest handover + `storybloq recap`
+ * so project context is not lost. Informational, not imperative. Never throws.
+ */
+async function buildCompactionBreadcrumb(root: string): Promise<string | null> {
+  try {
+    let latest: Awaited<ReturnType<typeof findLatestHandover>> = null;
+    try {
+      latest = await findLatestHandover(join(root, ".story", "handovers"));
+    } catch {
+      latest = null; // handovers dir missing or unreadable
+    }
+    const lines = ["Storybloq project context was compacted."];
+    if (latest) {
+      const file = sanitizeForContext(latest.filename);
+      const date = latest.date ? ` (${sanitizeForContext(latest.date, 20)})` : "";
+      const heading = latest.heading ? ` -- ${sanitizeForContext(latest.heading)}` : "";
+      lines.push(`Latest handover file: ${file}${date}${heading}`);
+    }
+    lines.push("To reload full project state, run: storybloq recap");
+    return lines.join("\n") + "\n";
+  } catch {
+    return null; // never throw -- hook must exit 0
+  }
+}
+
+/**
+ * Read the SessionStart hook JSON from a stream and return its `source`
+ * (e.g. "startup" | "resume" | "compact"), or undefined. Read at the CLI
+ * boundary so the handler stays a pure unit. Never hangs (hard timeout) and
+ * never throws, both required so the hook always exits 0.
+ */
+export async function readHookStdinSource(
+  stream: NodeJS.ReadableStream & { isTTY?: boolean },
+  timeoutMs = 200,
+): Promise<string | undefined> {
+  if (stream.isTTY) return undefined;
+  const raw = await new Promise<string>((resolve) => {
+    let data = "";
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(data);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      data += chunk.toString();
+      if (data.length > 65536) finish(); // cap: hook JSON is tiny
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      stream.removeListener("data", onData);
+      stream.removeListener("end", finish);
+      stream.removeListener("error", finish);
+      if (typeof stream.pause === "function") {
+        try {
+          stream.pause();
+        } catch {
+          // noop: releasing the stream is best-effort
+        }
+      }
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    stream.on("data", onData);
+    stream.once("end", finish);
+    stream.once("error", finish);
+    if (typeof stream.resume === "function") {
+      try {
+        stream.resume();
+      } catch {
+        finish();
+      }
+    }
+  });
+  try {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const parsed = JSON.parse(trimmed) as { source?: unknown };
+    return typeof parsed.source === "string" ? parsed.source : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * SessionStart hook entry point. Outputs resume instruction for compacted sessions.
  * - Resolves project root + workspace from cwd
  * - Finds resumable session (compactPending + active + workspace match)
  * - Fresh: outputs normal resume instruction
  * - Fresh + resumeBlocked: outputs blocked-resume instruction
  * - Stale (>1hr): outputs stale recovery message
- * - No match: silent (no output)
+ * - No match: injects a lightweight compaction continuity breadcrumb (the
+ *   /story orchestrate pen-driving case) on a post-compaction start, else silent
+ * - Never throws; always exits 0 (hook must not block compaction)
  */
-export async function handleSessionResumePrompt(options: { codexHookJson?: boolean } = {}): Promise<void> {
-  const root = discoverProjectRoot();
-  if (!root) return; // No .story/ — silent
+export async function handleSessionResumePrompt(
+  options: { codexHookJson?: boolean; source?: string } = {},
+): Promise<void> {
+  try {
+    const root = discoverProjectRoot();
+    if (!root) return; // No .story/ -- silent
 
-  const match = findResumableSession(root);
-  if (!match) {
-    // T-183: Clean orphaned marker if no compactPending session exists at all
-    removeResumeMarker(root);
-    return;
-  }
+    const writeResumeMessage = (message: string): void => {
+      if (options.codexHookJson) {
+        process.stdout.write(JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            additionalContext: message,
+          },
+        }) + "\n");
+        return;
+      }
+      process.stdout.write(message);
+    };
 
-  const { info, stale } = match;
-  const sessionId = info.state.sessionId;
-  const writeResumeMessage = (message: string): void => {
-    if (options.codexHookJson) {
-      process.stdout.write(JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: "SessionStart",
-          additionalContext: message,
-        },
-      }) + "\n");
+    const match = findResumableSession(root);
+    if (!match) {
+      // T-183: Clean orphaned marker if no compactPending session exists at all
+      removeResumeMarker(root);
+      // No autonomous session to resume. On a post-compaction start, inject a
+      // lightweight continuity breadcrumb so an orchestrate/pen session (which
+      // has no autonomous session) does not lose project context. `source` is
+      // the primary gate; the `undefined && !codexHookJson` clause is an
+      // intentional fail-open for the Claude plaintext path (matcher already
+      // "compact") and legacy installed hooks that predate the stdin read.
+      const shouldEmitBreadcrumb =
+        options.source === "compact" ||
+        (options.source === undefined && !options.codexHookJson);
+      if (shouldEmitBreadcrumb) {
+        const breadcrumb = await buildCompactionBreadcrumb(root);
+        if (breadcrumb) writeResumeMessage(breadcrumb);
+      }
       return;
     }
-    process.stdout.write(message);
-  };
 
-  // Stale check first — stale sessions get stale message regardless of resumeBlocked
-  if (stale) {
-    // Stale session — output recovery message (not silence)
+    const { info, stale } = match;
+    const sessionId = info.state.sessionId;
+
+    // Stale check first -- stale sessions get stale message regardless of resumeBlocked
+    if (stale) {
+      // Stale session -- output recovery message (not silence)
+      writeResumeMessage(
+        `Stale compacted session ${sessionId} found (never resumed).\n` +
+        `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
+        `or call storybloq_autonomous_guide with:\n` +
+        `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+      );
+      return;
+    }
+
+    if (info.state.resumeBlocked) {
+      // Blocked resume -- output recovery instructions
+      writeResumeMessage(
+        `Autonomous session ${sessionId} has a blocked resume (git validation failed).\n` +
+        `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
+        `or check git status and call storybloq_autonomous_guide with:\n` +
+        `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+      );
+      return;
+    }
+
+    // Fresh session -- output normal resume instruction
     writeResumeMessage(
-      `Stale compacted session ${sessionId} found (never resumed).\n` +
-      `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
-      `or call storybloq_autonomous_guide with:\n` +
+      `Continue the autonomous coding session. Call \`storybloq_autonomous_guide\` with:\n` +
       `{"sessionId": "${sessionId}", "action": "resume"}\n`,
     );
-    return;
-  }
-
-  if (info.state.resumeBlocked) {
-    // Blocked resume — output recovery instructions
-    writeResumeMessage(
-      `Autonomous session ${sessionId} has a blocked resume (git validation failed).\n` +
-      `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
-      `or check git status and call storybloq_autonomous_guide with:\n` +
-      `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+  } catch (err) {
+    // Never throw -- the hook must exit 0. Best-effort stderr log only.
+    process.stderr.write(
+      `[storybloq] resume-prompt failed: ${err instanceof Error ? err.message : String(err)}\n`,
     );
-    return;
   }
-
-  // Fresh session — output normal resume instruction
-  writeResumeMessage(
-    `Continue the autonomous coding session. Call \`storybloq_autonomous_guide\` with:\n` +
-    `{"sessionId": "${sessionId}", "action": "resume"}\n`,
-  );
 }
 
 // ---------------------------------------------------------------------------

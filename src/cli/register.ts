@@ -3798,8 +3798,15 @@ export function registerSessionCommand(yargs: Argv): Argv {
               describe: "Emit Codex SessionStart hook JSON instead of plain text",
             }),
           async (argv) => {
-            const { handleSessionResumePrompt } = await import("./commands/session-compact.js");
-            await handleSessionResumePrompt({ codexHookJson: argv["codex-hook-json"] === true });
+            try {
+              const { handleSessionResumePrompt, readHookStdinSource } = await import("./commands/session-compact.js");
+              const source = await readHookStdinSource(process.stdin);
+              await handleSessionResumePrompt({ codexHookJson: argv["codex-hook-json"] === true, source });
+            } catch (err) {
+              process.stderr.write(
+                `[storybloq] resume-prompt failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
           },
         )
         .command(

@@ -116,6 +116,23 @@ describe("setup-skill", () => {
     expect(content).toContain("REMAINS an orchestrator");
   });
 
+  it("orchestrator-mode.md carries the reconstruction-cost handover cadence (wave boundary is the floor, not the ceiling)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    // dedicated cadence section
+    expect(content).toContain("## Handover cadence");
+    // the wave boundary is a floor, not the only trigger
+    expect(content).toContain("wave boundary (step 7) is the FLOOR");
+    // reconstruction-cost trigger + two-weights + ledger-capture rule
+    expect(content).toContain("exceeds the cost of writing the checkpoint");
+    expect(content).toContain("one compaction away from gone");
+    // the cadence section sits inside the doctrine, before the per-item pipeline
+    const cadenceIdx = content.indexOf("## Handover cadence");
+    const pipelineIdx = content.indexOf("## The 6-stage per-item pipeline");
+    expect(cadenceIdx).toBeGreaterThan(-1);
+    expect(pipelineIdx).toBeGreaterThan(-1);
+    expect(cadenceIdx).toBeLessThan(pipelineIdx);
+  });
+
   it("SKILL.md ticket-and-issue discipline points orchestrator filings at the enrichment template", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     expect(content).toContain("ticket or issue");

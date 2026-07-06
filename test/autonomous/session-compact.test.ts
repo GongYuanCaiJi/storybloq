@@ -5,9 +5,10 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import {
   prepareForCompact,
   findResumableSession,
@@ -19,7 +20,7 @@ import {
 } from "../../src/autonomous/session.js";
 import { evaluatePressure } from "../../src/autonomous/context-pressure.js";
 import { WORKFLOW_STATES, type FullSessionState } from "../../src/autonomous/session-types.js";
-import { handleSessionResumePrompt } from "../../src/cli/commands/session-compact.js";
+import { handleSessionResumePrompt, readHookStdinSource } from "../../src/cli/commands/session-compact.js";
 import { discoverProjectRoot } from "../../src/core/project-root-discovery.js";
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,51 @@ async function createTestSession(state: FullSessionState): Promise<string> {
   mkdirSync(sessDir, { recursive: true });
   writeSessionSync(sessDir, state);
   return sessDir;
+}
+
+/** Create a bare .story/ project root (assigned to testRoot for cleanup), optionally with a handover file. */
+async function makeProjectRoot(
+  opts: { handover?: { name: string; body?: string } } = {},
+): Promise<string> {
+  testRoot = await mkdtemp(join(tmpdir(), "storybloq-compact-"));
+  mkdirSync(join(testRoot, ".story"), { recursive: true });
+  writeFileSync(join(testRoot, ".story", "config.json"), JSON.stringify({ name: "test" }), "utf-8");
+  if (opts.handover) {
+    const dir = join(testRoot, ".story", "handovers");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, opts.handover.name), opts.handover.body ?? "# Handover heading\n\nbody\n", "utf-8");
+  }
+  return testRoot;
+}
+
+/** Run handleSessionResumePrompt with cwd at root + stdout captured; returns the emitted string. */
+async function runResumePromptCapturing(
+  root: string,
+  options: Parameters<typeof handleSessionResumePrompt>[0],
+): Promise<string> {
+  const cwd = process.cwd();
+  const oldStoryRoot = process.env.STORYBLOQ_PROJECT_ROOT;
+  const oldClaudeRoot = process.env.CLAUDESTORY_PROJECT_ROOT;
+  const chunks: string[] = [];
+  const oldWrite = process.stdout.write;
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  try {
+    delete process.env.STORYBLOQ_PROJECT_ROOT;
+    delete process.env.CLAUDESTORY_PROJECT_ROOT;
+    process.chdir(root);
+    await handleSessionResumePrompt(options);
+  } finally {
+    process.chdir(cwd);
+    if (oldStoryRoot === undefined) delete process.env.STORYBLOQ_PROJECT_ROOT;
+    else process.env.STORYBLOQ_PROJECT_ROOT = oldStoryRoot;
+    if (oldClaudeRoot === undefined) delete process.env.CLAUDESTORY_PROJECT_ROOT;
+    else process.env.CLAUDESTORY_PROJECT_ROOT = oldClaudeRoot;
+    process.stdout.write = oldWrite;
+  }
+  return chunks.join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +342,184 @@ describe("handleSessionResumePrompt", () => {
     expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
     expect(parsed.hookSpecificOutput.additionalContext).toContain("storybloq_autonomous_guide");
     expect(parsed.hookSpecificOutput.additionalContext).toContain(state.sessionId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Compaction continuity breadcrumb (no active autonomous session)
+// The /story orchestrate pen-driving case: post-compaction start, no session.
+// ---------------------------------------------------------------------------
+
+describe("handleSessionResumePrompt compaction breadcrumb", () => {
+  it("emits a handover pointer + recap breadcrumb on a compact start with no autonomous session", async () => {
+    const root = await makeProjectRoot({
+      handover: { name: "2026-07-01-wave-boundary.md", body: "# Wave 3 boundary pushed\n\nbody\n" },
+    });
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+    expect(out).toContain("compacted");
+    expect(out).toContain("2026-07-01-wave-boundary.md");
+    expect(out).toContain("2026-07-01");
+    expect(out).toContain("Wave 3 boundary pushed");
+    expect(out).toContain("storybloq recap");
+  });
+
+  it("emits a minimal breadcrumb (recap only) when there are no handovers yet", async () => {
+    const root = await makeProjectRoot();
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+    expect(out).toContain("compacted");
+    expect(out).toContain("storybloq recap");
+    expect(out).not.toContain("Latest handover");
+  });
+
+  it("stays silent on a Codex non-compact start (startup/resume/clear)", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md" } });
+    expect(await runResumePromptCapturing(root, { codexHookJson: true, source: "startup" })).toBe("");
+    expect(await runResumePromptCapturing(root, { codexHookJson: true, source: undefined })).toBe("");
+  });
+
+  it("wraps the breadcrumb as SessionStart JSON on the Codex compact path", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md", body: "# Heading X\n" } });
+    const out = await runResumePromptCapturing(root, { codexHookJson: true, source: "compact" });
+    const parsed = JSON.parse(out);
+    expect(parsed.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(parsed.hookSpecificOutput.additionalContext).toContain("storybloq recap");
+  });
+
+  it("does NOT emit a breadcrumb when an autonomous session is resumable (emits the resume instruction)", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md" } });
+    const real = realpathSync(root);
+    const sessionId = "00000000-0000-0000-0000-000000000005";
+    const sessDir = join(real, ".story", "sessions", sessionId);
+    mkdirSync(sessDir, { recursive: true });
+    writeSessionSync(sessDir, makeState({
+      sessionId,
+      state: "COMPACT",
+      compactPending: true,
+      compactPreparedAt: new Date().toISOString(),
+      preCompactState: "IMPLEMENT",
+      lease: {
+        workspaceId: real,
+        lastHeartbeat: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+      },
+    }));
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+    expect(out).toContain("storybloq_autonomous_guide");
+    expect(out).toContain(sessionId);
+    expect(out).not.toContain("storybloq recap");
+  });
+
+  it("plaintext no-session: fails open on undefined source, silent on a non-compact source", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md" } });
+    // legacy / no-source plaintext (Claude matcher is already "compact") -> fail open
+    expect(await runResumePromptCapturing(root, { source: undefined })).toContain("storybloq recap");
+    // an explicit non-compact source -> silent (protects against a broadened/misconfigured matcher)
+    expect(await runResumePromptCapturing(root, { source: "startup" })).toBe("");
+  });
+
+  it("cleans an orphaned resume marker and still emits the breadcrumb", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md" } });
+    const real = realpathSync(root);
+    const markerPath = join(real, ".claude", "rules", "autonomous-resume.md");
+    mkdirSync(join(real, ".claude", "rules"), { recursive: true });
+    writeFileSync(markerPath, "stale marker\n", "utf-8");
+    expect(existsSync(markerPath)).toBe(true);
+
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+
+    expect(existsSync(markerPath)).toBe(false);
+    expect(out).toContain("storybloq recap");
+  });
+
+  it("treats a workspace-mismatched compactPending session as no-match: cleans marker, emits breadcrumb", async () => {
+    const root = await makeProjectRoot({ handover: { name: "2026-07-01-x.md" } });
+    const real = realpathSync(root);
+    const sessionId = "00000000-0000-0000-0000-000000000009";
+    const sessDir = join(real, ".story", "sessions", sessionId);
+    mkdirSync(sessDir, { recursive: true });
+    writeSessionSync(sessDir, makeState({
+      sessionId,
+      state: "COMPACT",
+      compactPending: true,
+      compactPreparedAt: new Date().toISOString(),
+      preCompactState: "IMPLEMENT",
+      lease: {
+        workspaceId: "a-different-workspace",
+        lastHeartbeat: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 45 * 60 * 1000).toISOString(),
+      },
+    }));
+    const markerPath = join(real, ".claude", "rules", "autonomous-resume.md");
+    mkdirSync(join(real, ".claude", "rules"), { recursive: true });
+    writeFileSync(markerPath, "stale\n", "utf-8");
+
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+
+    expect(out).toContain("storybloq recap");
+    expect(out).not.toContain("storybloq_autonomous_guide");
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  it("strips control characters from interpolated handover fields (prompt-injection defense)", async () => {
+    const root = await makeProjectRoot();
+    const dir = join(testRoot, ".story", "handovers");
+    mkdirSync(dir, { recursive: true });
+    // heading line carries BELL (0x07), DEL (0x7f), and NEL (0x85, a C1 control) inside it
+    writeFileSync(join(dir, "2026-07-01-inject.md"), "# Head\x07ing\x7f\x85 done\n", "utf-8");
+    const out = await runResumePromptCapturing(root, { source: "compact" });
+    const handoverLine = out.split("\n").find((l) => l.includes("Latest handover file:"));
+    expect(handoverLine).toBeDefined();
+    // no C0 control chars, DEL, or C1 controls survive into model context
+    expect(Array.from(handoverLine!).some((ch) => { const c = ch.charCodeAt(0); return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f); })).toBe(false);
+    expect(handoverLine).toContain("done");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readHookStdinSource: reads SessionStart `source` from stdin, never hangs
+// ---------------------------------------------------------------------------
+
+describe("readHookStdinSource", () => {
+  it("parses `source` from piped hook JSON", async () => {
+    const stream = new PassThrough();
+    const p = readHookStdinSource(stream, 500);
+    stream.end(JSON.stringify({ source: "compact", session_id: "x" }));
+    expect(await p).toBe("compact");
+  });
+
+  it("returns the source for startup and undefined for invalid / empty / missing-field", async () => {
+    const s1 = new PassThrough();
+    const p1 = readHookStdinSource(s1, 500);
+    s1.end(JSON.stringify({ source: "startup" }));
+    expect(await p1).toBe("startup");
+
+    const s2 = new PassThrough();
+    const p2 = readHookStdinSource(s2, 500);
+    s2.end("not json");
+    expect(await p2).toBeUndefined();
+
+    const s3 = new PassThrough();
+    const p3 = readHookStdinSource(s3, 500);
+    s3.end("");
+    expect(await p3).toBeUndefined();
+
+    const s4 = new PassThrough();
+    const p4 = readHookStdinSource(s4, 500);
+    s4.end(JSON.stringify({ notSource: 1 }));
+    expect(await p4).toBeUndefined();
+  });
+
+  it("never hangs: resolves undefined after the timeout on a stream that never ends", async () => {
+    const stream = new PassThrough(); // never .end()
+    const start = Date.now();
+    const result = await readHookStdinSource(stream, 20);
+    expect(result).toBeUndefined();
+    expect(Date.now() - start).toBeLessThan(2000);
+  });
+
+  it("returns undefined for a TTY stream (no hook JSON expected)", async () => {
+    const stream = Object.assign(new PassThrough(), { isTTY: true });
+    expect(await readHookStdinSource(stream, 500)).toBeUndefined();
   });
 });
 

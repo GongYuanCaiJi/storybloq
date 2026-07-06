@@ -12,7 +12,7 @@ Storybloq is the durable STATE plane, background agents are the ephemeral EXECUT
 | enriched description | the portable, byte-verified spec (it carries the context so the implementer does not have to) |
 | note | ratified owner constraints + decision briefs, injected verbatim into prompts |
 | lesson | compounding rails, injected at every context load via the digest |
-| handover | crash-safe loop boundary -- the re-entry point after any disruption |
+| handover | crash-safe loop boundary AND intra-wave checkpoint -- the re-entry point after any disruption |
 | snapshot | diff baseline so recaps stay meaningful |
 | sizing (free-text convention, see below) | the labor-scheduling signal inside the enriched description |
 
@@ -125,6 +125,20 @@ HISTORY: <the full prior text, quoted -- descriptions are corrected additively, 
 
 PLAN_REVIEW and CODE_REVIEW/BYTE-REVIEW SHOULD use the project's configured backends: `recipeOverrides.reviewBackends` in `.story/config.json`, with per-stage `stages.PLAN_REVIEW.backends` / `stages.CODE_REVIEW.backends` taking precedence. When codex is configured (via codex-bridge), use it -- a second model with different training catches what the authoring model is blind to. Inspector-tier adversarial subagents are the fallback when no backend is configured, and the second leg alongside codex: byte-verifying the report against repo reality is their job even when codex has reviewed the diff. On modest session tiers with no stronger tier to route up to, lean HARDER on the cross-model leg: reviewer independence compensates for tier.
 
+## Handover cadence
+
+The wave boundary (step 7) is the FLOOR for handovers, not the whole rule. A single item can be a multi-stage, multi-hour, locally-committed-but-unpushed unit of work; if handovers fire only at wave boundaries, a compaction or crash mid-item loses everything since the last boundary. The trigger is reconstruction cost, not the wave:
+
+- **Checkpoint whenever the cost to reconstruct your unrecorded state, if the session died right now, exceeds the cost of writing the checkpoint.** These states are examples, not a whitelist; when unsure, checkpoint (a handover is cheap; re-deriving a multi-round plan approval from a transcript is not):
+  - a local commit that is not yet pushed (git has it, origin does not),
+  - a gate or decision milestone landed -- a plan approved after review rounds, an architecture ruling, an owner ratification -- EVEN with no commit yet,
+  - substantial uncommitted work in flight, especially before any expensive or irreversible step (a deploy-on-push, a paid-API probe, a long build),
+  - you can no longer summarize what happened since the last handover in one line.
+- **Two weights.** Wave-boundary handovers are the full synthesis of step 7 (deltas, evidence, owner-gate register, next wave). Intra-wave checkpoints are light deltas: what shipped, what was decided, the current fragile state (local-only commits, in-flight stage), and the immediate next step. Only the latest handovers are reloaded on re-entry, so more-frequent-lighter is strictly safer at low cost.
+- **Decisions land in the ledger the moment they are made, not only in a handover.** A reconstruction-expensive decision -- a plan approved after N rounds, an architecture ruling -- is captured as a note or folded into the item's enriched description immediately, exactly as enrichment and audit output must (step 7). The handover then points at it. This is the primary durability mechanism; checkpoint handovers are the re-entry net. A decision that lives only in session context is one compaction away from gone.
+
+Compaction note: `/story auto` gets an automatic post-compaction resume prompt; an orchestrate/pen session driving directly has no autonomous session, so on compaction the resume hook injects only a lightweight continuity breadcrumb (latest handover + `storybloq recap`). That breadcrumb restores only what is already durable -- which is why decisions must reach the ledger continuously, above.
+
 ## The 6-stage per-item pipeline (inside dynamic workflows)
 
 1. **PLAN** *(hands; inspector tier for L/risk)* -- read the enriched item + cited notes + the ACTUAL code; re-verify VERIFIED STATE with cheap greps; write a markdown plan: exact edits, tests, migration/deploy safety, post-deploy probe, explicit out-of-scope.
@@ -182,7 +196,7 @@ Waves in different repos: wrap per-repo chains in `parallel([...])`. The enrichm
 - **DO gate every irreversible action on the byte-review verdict.** Nothing pushes to a prod-deploying branch on an implementer's word, regardless of which model implemented. The gates catch real bugs: ISS-767..770 were four confirmed release-gating defects surfaced by this pattern's adversarial reviewers.
 - **DO verify-then-trust, including yourself:** `git fetch` before trusting ahead/behind counts; prefer CI/deploy run state over local ref math; after any disruption, verify pen ownership before writing -- the run journals show who holds the pen (L-021).
 - **DO recover, never redo.** On dynamic-workflow clients, re-launch a failed run with `resumeFromRunId` (completed agents return cached; only the failed stage re-runs); on subagent or dispatch paths, re-dispatch only the failed stage. If the dead agent left commits, edit the failed stage's prompt into verify-and-complete: byte-verify the inherited commits against the approved plan, run the suites, finish the remainder. If subagent capacity is throttled, the main loop may take over a SHIP stage directly.
-- **DO keep the cadence:** snapshot -> handover -> ledger commit+push after every wave loop; owner-gate register in every handover; lessons at session end.
+- **DO keep the cadence:** the wave boundary is the floor, not the ceiling. Snapshot -> handover -> ledger commit+push after every wave loop, PLUS a light checkpoint handover whenever unrecorded state would be expensive to reconstruct (any local-but-unpushed commit, a landed plan or decision even without a commit, or before any irreversible step), AND land reconstruction-expensive decisions in the ledger (a note or the enriched item) the moment they are made. Owner-gate register in every handover; lessons at session end. See "Handover cadence".
 - **DO file every follow-up ticket or issue in the enrichment template.** Every ticket or issue the orchestrator files during a run is born in the template (CONTEXT / VERIFIED STATE @ sha / SCOPE / OUT OF SCOPE / ACCEPTANCE / PITFALLS / VERIFICATION / SIZING) with byte-verified file:line facts. Anything the orchestrator files for later execution must be portable enough for the lowest permitted execution tier, so it is born in the enrichment template rather than paying the enrichment debt downstream. A bare-paragraph ticket or issue filing is a defect in wave acceptance. This covers actionable follow-up work only: decision-brief notes, lessons, handovers, and non-actionable ledger corrections keep their own formats.
 - **DO NOT amend, rebase, or force-push.** Fix-round commits are NEW commits, even on local unpushed work. One-commit-per-item is a nicety, never a reason to `git commit --amend`: amending collides with the standing no-amend rule and rewrites shared history.
 - **DO NOT let agents file or close items.** Agents report; the orchestrator files (after checking existing items) and closes (on evidence).
