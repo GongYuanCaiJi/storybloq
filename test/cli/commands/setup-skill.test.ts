@@ -133,6 +133,26 @@ describe("setup-skill", () => {
     expect(cadenceIdx).toBeLessThan(pipelineIdx);
   });
 
+  it("orchestrator-mode.md carries the cost-vs-performance dispatch rubric (balance, not always-cheapest, pin every dispatch)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "orchestrator-mode.md"), "utf-8");
+    // the explicit, followable dispatch instruction
+    expect(content).toContain("Dispatch rubric -- classify, route, pin");
+    // balance framing, leaning to performance -- not a cost-minimization ladder
+    expect(content).toContain("balance cost against performance");
+    expect(content).toContain("lean toward performance");
+    // the floor is the cheapest RELIABLE tier, not the absolute cheapest
+    expect(content).toContain("cheapest tier that still does it RELIABLY");
+    // explicit pinning is the rule; inheritance is the bug
+    expect(content).toContain("Pin every dispatch; inheritance is the bug");
+    // the doctrine stays model-agnostic: no model name appears in the Model economy section
+    const secStart = content.indexOf("## Model economy");
+    const secEnd = content.indexOf("## The enrichment pass");
+    expect(secStart).toBeGreaterThan(-1);
+    expect(secEnd).toBeGreaterThan(secStart);
+    const modelEconomy = content.slice(secStart, secEnd);
+    expect(modelEconomy).not.toMatch(/\b(Opus|Fable|Sonnet|Haiku)\b/);
+  });
+
   it("SKILL.md ticket-and-issue discipline points orchestrator filings at the enrichment template", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     expect(content).toContain("ticket or issue");

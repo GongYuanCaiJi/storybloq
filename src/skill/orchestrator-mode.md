@@ -1,6 +1,6 @@
 # Orchestrator Mode
 
-This file is referenced from SKILL.md for `/story orchestrate`. It instructs the main session to act as an **orchestrator/pen**: durable state lives in storybloq, implementation runs in background subagents (a tier below the session model when the client offers one), adversarial review gates run at or above the session model, and the main context holds only conclusions.
+This file is referenced from SKILL.md for `/story orchestrate`. It instructs the main session to act as an **orchestrator/pen**: durable state lives in storybloq, implementation runs in background subagents (pinned to the cheapest tier that does the work well -- often below an expensive session tier), adversarial review gates run at or above the session model, and the main context holds only conclusions.
 
 ## The two planes
 
@@ -50,31 +50,41 @@ This guard has precedence over every "do not ask the user" rule in this file, ex
 
 ## Model economy: where judgment lives
 
-Tiering is BIDIRECTIONAL and relative to whatever model the session runs -- no specific pairing is assumed. Labor de-escalates below the session model; judgment ESCALATES above it when the user's plan offers a stronger tier. This is a design principle, not a cost tip:
+Dispatch is a BALANCE of two SEPARATE axes -- performance (how well a tier does THIS task) and cost -- chosen for value and LEANING TOWARD PERFORMANCE. It is NOT a single ladder where cheaper means weaker, and it is NOT "always go cheaper" (that would floor everything). Cut cost only where a cheaper tier loses no significant performance on the task; when the performance delta is uncertain, err UP. The strongest tier available is frequently the most EXPENSIVE, and the session often runs on it, so spending it on work a cheaper tier does just as well is pure waste.
 
-- **HANDS = one tier below the session model, when the client offers one.** XS/S/M implementation against an enriched spec, structured-output breadth scans, fix rounds, batched ships -- the stages that follow a spec.
-- **INSPECTOR = the strongest reasonably available tier, never below the session model.** PLAN_REVIEW, CODE_REVIEW/BYTE-REVIEW, release-gate audits, security and design decisions, and L-sized or risk-flagged implementations (auth, RLS, money paths, anything that can brick login or deploys) run here -- routed UP via per-call model overrides when a stronger tier than the session default is available.
-- **The PEN = the session model.** The orchestration loop itself (wave planning, acceptance, ledger writes) stays at the session tier, because it IS the session.
+**Dispatch rubric -- classify, route, pin.** For every unit of work you dispatch, decide the tier in this order, then pin it:
 
-The asymmetry is the safety property: cheaper hands, same-or-stronger inspector. Two invariants hold in every configuration:
+1. **Judgment** -- a gate (PLAN_REVIEW, CODE_REVIEW/BYTE-REVIEW), a ruling, a security or design decision, or an L-sized or risk-flagged implementation (auth, RLS, money paths, anything that can brick login or deploys) -> the strongest available tier. Never traded down for cost.
+2. **Trivial or mechanical** -- rote edits, pure plumbing, tool-driving, relaying prompts or output -> the floor: the cheapest tier that still does it RELIABLY, not the absolute cheapest. A stronger tier buys nothing here, but a tier whose output you cannot trust is BELOW the floor and is never dispatched, even for trivial work.
+3. **Ordinary labor** -- XS/S/M coding against an enriched spec, structured-output scans, fix rounds, batched ships (push/watch/verify) -> the tier whose performance is worth its cost (hands): default a strong tier below an expensive pen (equivalent quality on ordinary enriched work, less cost). Do NOT spend the pen on labor by inheritance or default, and never the floor (that loses performance). Use the top tier deliberately -- not by inheritance -- when it is the only tier available or when the item's complexity or evidence shows it measurably changes the outcome.
 
-1. **The reviewer is never a cheaper model than the implementer.**
-2. **The session model is the FLOOR for judgment, not the ceiling:** judgment runs at the strongest reasonably available tier and never below the session model; labor may run below it.
+Then PIN the chosen tier explicitly on the dispatch, and keep the reviewer never below the item's inspector target. The three roles the rubric routes to:
 
-| Your session model | HANDS | INSPECTOR |
-|---|---|---|
-| Top tier | one tier down (e.g. Opus) | the session model (gates simply inherit) |
-| Mid tier (e.g. Opus or Sonnet) | one tier down (e.g. Sonnet or Haiku), or the same tier | route gates up to the stronger tier when available; otherwise the session model |
-| Single-model client, or no other tier | the session model | the session model |
+- **The PEN = the session, and it is spent sparingly.** Wave planning, acceptance, the rulings only it should make, and ledger writes stay at the session tier because they ARE the session. Everything it can hand down, it hands down: on an expensive session tier, labor typed by the pen is the single most wasteful thing the loop can do.
+- **HANDS = the tier whose performance on the labor is worth its cost -- NOT "one tier below because coding is easy."** Real implementation goes to the tier that does it well for the least cost; under an expensive top-tier pen that is usually a strong tier one step down (equivalent quality on ordinary enriched work, far cheaper), escalated back up when the item genuinely needs the top tier. It is never the floor (that loses performance) and never the pen by default (no better result for the premium).
+- **INSPECTOR = the most capable tier available, never below the implementer.** The gates and release-gate audits run here, routed UP via per-call `model` overrides when a stronger tier than the session exists. Judgment is chosen on performance alone; it is never traded down for price.
 
-Model names above are illustrative only; no rule in this file names a model. In the last row the pattern is STILL worth running: the value is the structure -- the enrichment pass, byte-verified gates, one pen per repo, batched ships -- not just the cost asymmetry. Upward routing depends on the stronger tier being available on the user's plan; when it is not, judgment stays at the session tier and the cross-model `reviewBackends` leg carries the independence. In-product precedent: storybloq's own lens system already does this -- `lensConfig.lensModels` defaults the security and concurrency lenses to a stronger tier than the default lens model, because those are judgment lenses.
+**Pin every dispatch; inheritance is the bug.** A dispatch with no `model` INHERITS the session model -- and on an expensive pen that silently runs labor at the priciest rate in the room, chosen by no one. "Are you on the cheap tier for that?" must never be answerable with "I don't know, it inherited whatever I run on." Explicit pinning is BOTH the accountability (you can always account for what a dispatch cost) AND the only way the tradeoff gets made (you cannot balance cost against performance on a choice you never consciously made). The one legitimate omission on a dispatch is a consciously-chosen session-tier run on a client that exposes no explicit override -- a recorded equal-tier decision, never the default that lets labor ride the pen (the pen's own loop also runs at the session tier, but that is the session itself, not a dispatch).
 
-- **An audit or review agent runs at the inspector tier when its task is judgment,** even when it looks like fan-out labor. Pinning a reviewer below its implementer's tier to save tokens is the classic misuse.
-- **The inverse misuse is running plumbing at the inspector tier.** An agent that merely drives a tool -- generates a diff, calls an MCP endpoint, relays prompts or output -- is labor no matter how important the pipeline it serves: the judgment lives in the tool and the prompt, not the driver. Prepare steps, review-backend drivers, and mergers run at the hands tier; only the judges and adversarial reviewers inherit the inspector tier. Burning inspector budget on drivers is how sessions hit limits mid-gate.
+**The safety axis is CAPABILITY, not cost.** Two invariants hold in every configuration:
+
+1. **The reviewer is never LESS CAPABLE than the implementer.** Rank reviewers by capability, never by price: a reviewer may cost less than its implementer, but it may never be the weaker judge. (This is the old "never a cheaper reviewer" rule, restated on the axis that actually carries the safety -- "cheaper" always meant "weaker.")
+2. **The session tier is the CAPABILITY FLOOR for judgment, not the ceiling, and not a target for labor.** Judgment runs at the most capable tier available and never below the session; labor runs where its performance justifies its cost, which on an expensive session tier is usually a tier below it, never automatically at the pen.
+
+| Session tier | HANDS -- real coding | Floor -- trivial/mechanical | INSPECTOR -- gates + audits |
+|---|---|---|---|
+| Expensive top tier (nothing stronger exists) | a strong tier below: equivalent quality on ordinary work, less cost; escalate genuinely complex items up | the cheapest RELIABLE tier | the session (nothing above to route to) |
+| Cheaper mid tier (a stronger, pricier tier exists) | the same tier (peer), a step down only for simpler slices | the cheapest RELIABLE tier | route UP to the stronger tier |
+| Single-model client (no other tier) | the session -- an EXPLICIT equal-tier pin, or documented session-tier omission where no override exists | the session | the session |
+
+Tiers described here are illustrative; the rule is the SHAPE -- balance cost against performance, lean toward performance, pin the choice, rank the inspector by capability -- and no rule in this file names a model. The bottom row still pays: the value is the STRUCTURE (enrichment pass, byte-verified gates, one pen per repo, batched ships), not the cost gap, and even there the choice is pinned. Upward routing depends on the stronger tier being available on the user's plan; when it is not, judgment stays at the session tier and the cross-model `reviewBackends` leg carries the independence. In-product precedent: storybloq's lens system already ranks by capability -- `lensConfig.lensModels` defaults the security and concurrency lenses to a stronger tier than the default lens model, because those are judgment lenses.
+
+- **An audit or review agent runs at the inspector tier when its task is judgment,** even when it looks like fan-out labor. Cost-trimming applies to LABOR; pinning a reviewer below its implementer's tier to save tokens is the classic misuse -- judgment is the one thing you never trade down.
+- **The inverse misuse is running plumbing at the inspector tier.** An agent that merely drives a tool -- generates a diff, calls an MCP endpoint, relays prompts or output -- is labor no matter how important the pipeline it serves: the judgment lives in the tool and the prompt, not the driver. Prepare steps, review-backend drivers, and mergers run at the hands tier (the floor of it, for pure plumbing); only the judges, adversarial reviewers, and the spec-authoring enrichment pass (it gates every downstream tier) get the inspector tier. Burning inspector budget on drivers is how sessions hit limits mid-gate.
 - **Sizing classifies the LABOR; risk flags classify the JUDGMENT.** Judgment never gets downgraded.
 - The riskiest items get a staged rollout (audit -> shadow -> enforce): the first pass ships only observe-only stages; enforcement ships separately after shadow evidence. The plan states the stage boundary explicitly.
 
-Shipped vs convention: there is no `recipeOverrides.stages.*.model` config key. Tiering is done with per-subagent `model` overrides (a per-call parameter, or the agent definition's model frontmatter); omitting the override inherits the session model, the judgment floor. Downgraded hands are only safe AFTER the enrichment pass below -- a weaker model on a stale spec produces confident nonsense; the same model on a byte-verified spec with the inspector behind it produces shippable work.
+Shipped vs convention: there is no `recipeOverrides.stages.*.model` config key. Tiering is done with per-subagent `model` overrides (a per-call parameter, or the agent definition's model frontmatter). Pin EVERY dispatch: omitting the override inherits the session model, which is the accountability hole and the tradeoff hole at once -- on an expensive pen it runs labor at the top rate no one chose. The legitimate inherits are two: the pen's own loop, because that IS the session and not a dispatch; and a recorded session-tier dispatch on a client that exposes no explicit session-tier override. Every other dispatch pins a model explicitly. Downgraded hands are only safe AFTER the enrichment pass below -- any model on a stale spec produces confident nonsense; the same tier on a byte-verified spec with the inspector behind it produces shippable work.
 
 ## The enrichment pass (run once per wave, before dispatching hands)
 
@@ -91,7 +101,7 @@ Template (SIZING is a free-text convention; there is no `ticket.sizing` field):
 
 ```
 CONTEXT: <what + why, 2-3 sentences>
-VERIFIED STATE @ <sha> (<date>): <exact file:line facts, re-derived at HEAD, that a weaker model can trust>
+VERIFIED STATE @ <sha> (<date>): <exact file:line facts, re-derived at HEAD, that a lower-cost execution tier can trust>
 SCOPE: <numbered concrete steps, each naming exact files; smallest-correct-change bias>
 OUT OF SCOPE: <explicit list -- the fence for eager models>
 ACCEPTANCE: <item-scoped testable criteria + test plan (the item's suites, NEW tests, RED-without-the-change expectation); require the item's own tests green with no NEW failures vs the recorded tip baseline, never a global "npm test green">
@@ -103,7 +113,7 @@ HISTORY: <the full prior text, quoted -- descriptions are corrected additively, 
 
 ## Sizing -> scheduling
 
-- **XS/S/M** -> hands. **L or risk-flagged** -> the inspector tier. Review gates run at the inspector tier for all of them.
+- **Trivial/mechanical** -> the floor (the cheapest tier that still does it reliably). **XS/S/M** -> hands. **L or risk-flagged** -> the inspector tier. Review gates run at the inspector tier for all of them.
 - Order waves **smallest-first** so progress banks early and an interruption costs the least.
 - **Batch ships:** collect ~3 review-clean items per ship (one push, one deploy, per-item live verification from each spec's VERIFICATION section). A risky item always ships alone, fenced by a ship immediately before and after it.
 
@@ -123,7 +133,7 @@ HISTORY: <the full prior text, quoted -- descriptions are corrected additively, 
 
 ## Review backends
 
-PLAN_REVIEW and CODE_REVIEW/BYTE-REVIEW SHOULD use the project's configured backends: `recipeOverrides.reviewBackends` in `.story/config.json`, with per-stage `stages.PLAN_REVIEW.backends` / `stages.CODE_REVIEW.backends` taking precedence. When codex is configured (via codex-bridge), use it -- a second model with different training catches what the authoring model is blind to. Inspector-tier adversarial subagents are the fallback when no backend is configured, and the second leg alongside codex: byte-verifying the report against repo reality is their job even when codex has reviewed the diff. On modest session tiers with no stronger tier to route up to, lean HARDER on the cross-model leg: reviewer independence compensates for tier.
+PLAN_REVIEW and CODE_REVIEW/BYTE-REVIEW SHOULD use the project's configured backends: `recipeOverrides.reviewBackends` in `.story/config.json`, with per-stage `stages.PLAN_REVIEW.backends` / `stages.CODE_REVIEW.backends` taking precedence. When codex is configured (via codex-bridge), use it -- a second model with different training catches what the authoring model is blind to. A configured backend REPLACES the inspector-tier reviewer only when it is known to be at least as capable as the selected inspector tier for that gate (judgment is never traded below the strongest tier); when it is only at or above the implementer's tier, it is an independence leg, not a replacement, and the inspector-tier byte-review still runs. Inspector-tier adversarial subagents are the fallback when no backend is configured, and the second leg alongside codex: byte-verifying the report against repo reality is their job even when codex has reviewed the diff. On modest session tiers with no stronger tier to route up to, lean HARDER on the cross-model leg: reviewer independence compensates for tier.
 
 ## Handover cadence
 
@@ -143,7 +153,7 @@ Compaction note: `/story auto` gets an automatic post-compaction resume prompt; 
 
 1. **PLAN** *(hands; inspector tier for L/risk)* -- read the enriched item + cited notes + the ACTUAL code; re-verify VERIFIED STATE with cheap greps; write a markdown plan: exact edits, tests, migration/deploy safety, post-deploy probe, explicit out-of-scope.
 2. **PLAN_REVIEW** *(inspector tier / configured backends)* -- verify the plan implements SCOPE exactly, stays out of OUT OF SCOPE, meets ACCEPTANCE, respects every PITFALL. Verdict `approve`/`revise`; on revise, one revision round addressing EVERY finding (address or rebut in the plan text).
-3. **IMPLEMENT** *(hands; inspector tier for L/risk)* -- follow the approved plan exactly (deviations justified in the report). Meet the item's ACCEPTANCE: the item's tests green, at least one proven RED->GREEN, and no NEW suite failures vs the recorded tip baseline (report run counts before/after; a pre-existing red test is not this item's stop). Item status updated via storybloq CLI in the same commit as the code. Commit locally; do NOT push.
+3. **IMPLEMENT** *(floor for trivial/mechanical; hands; inspector tier for L/risk)* -- follow the approved plan exactly (deviations justified in the report). Meet the item's ACCEPTANCE: the item's tests green, at least one proven RED->GREEN, and no NEW suite failures vs the recorded tip baseline (report run counts before/after; a pre-existing red test is not this item's stop). Item status updated via storybloq CLI in the same commit as the code. Commit locally; do NOT push.
 4. **CODE_REVIEW + BYTE-REVIEW** *(inspector tier / configured backends -- this verdict gates the ship)* -- byte-verify the REPORT against repo reality: commits exist as described, RED->GREEN re-derived (not trusted), logs show real EXECUTED test counts (runner totals include skips; subtract them), ledger matches bytes, no invented wire/contract codes. When the implementer reports a suite failure as pre-existing or unrelated, do NOT hard-block on it: re-derive the claim in the parent-commit worktree (it must fail there identically, untouched by the diff) and accept it only if it holds; a false pre-existing claim is itself a `revise`. On revise: fix round -> re-review; still dirty -> stop the chain and return to the orchestrator.
 5. **SHIP** *(hands, batched)* -- fetch first; push; watch CI + deploy to conclusion; live-verify health plus each shipped item's VERIFICATION section against production bytes. Deploy failure -> documented remediation only, never a blind retry.
 6. **PROBE-LOOP** -- exercise the real production path; verify actual bytes/artifacts, never status codes; fix the root layer; LOCK every probe as a regression test or a documented manual-probe checklist entry. Cheap probes fold into stage 5's live-verify; anything unprobeable is stated as an honest boundary with its test-lock named.
@@ -157,16 +167,23 @@ Acceptance is item-scoped at every gate: an item passes on ITS tests and probe w
 ## Dynamic-workflow skeleton (tiered models)
 
 ```js
-const HANDS = '<one tier below the session model>'         // single-model client: set to undefined -> everything runs at the session tier
-const INSPECTOR = undefined                                // undefined -> the session model (the floor); set to a stronger tier when the plan offers one
+// Pin EVERY tier explicitly. An omitted `model` inherits the session model -- on an expensive
+// pen that silently runs labor at the priciest rate no one chose. Resolve these to concrete
+// model ids for THIS session before dispatching: named and accountable, never undefined.
+const HANDS     = '<cheapest tier that codes WELL>'                  // real implementation + ships; often a strong tier below an expensive pen
+const FLOOR     = '<cheapest tier that does trivial work RELIABLY>'  // rote edits / pure plumbing / tool-driving ONLY; never an unreliable tier
+const INSPECTOR = '<most capable available tier>'                    // gates + judgment; never below HANDS; == the session when nothing is stronger, routed UP when it is
+// Single-model client: no other tier exists. Pin all three to the session model's OWN id by name
+// (an explicit equal-tier decision); where the client exposes no model override, running at the
+// session tier via omission is the one acknowledged fallback -- a recorded equal-tier choice, not a silent inherit.
 const ITEMS = [
-  { id: 'ISS-201', collapsed: true },                      // XS -> hands, plan collapsed (disclosed)
-  { id: 'T-310' },                                         // S/M -> hands plan + implement
-  { id: 'T-295', judgment: true, risky: true },            // L / risk-flagged -> inspector-tier implementer
+  { id: 'ISS-201', trivial: true, collapsed: true },       // trivial/mechanical -> FLOOR; XS also collapses stages 1-2 (disclosed)
+  { id: 'T-310' },                                         // S/M real coding -> HANDS
+  { id: 'T-295', judgment: true, risky: true },            // L / risk-flagged -> INSPECTOR-tier implementer
 ]
 let shipQueue = []
 for (const it of ITEMS) {                                  // sequential: same repo = one pen
-  const exec = it.judgment ? INSPECTOR : HANDS             // undefined model -> inherit the session model
+  const exec = it.judgment ? INSPECTOR : it.trivial ? FLOOR : HANDS   // every branch an explicit pinned tier -- no inherit
   let plan = it.collapsed ? null
     : await agent(planPrompt(it), { label: `plan:${it.id}`, schema: PLAN, model: exec })
   if (plan) {
@@ -178,14 +195,14 @@ for (const it of ITEMS) {                                  // sequential: same r
   if (review.verdict === 'revise') { /* fix round (exec) -> re-review (inspector); still dirty -> break */ }
   shipQueue.push(it.id)
   if (shipQueue.length >= 3 || isLast(it) || it.risky) {   // batched ships; risky items deploy alone
-    const ship = await agent(shipPrompt(shipQueue), { label: `ship:${shipQueue.length}`, schema: RESULT, model: exec })
+    const ship = await agent(shipPrompt(shipQueue), { label: `ship:${shipQueue.length}`, schema: RESULT, model: HANDS })  // ship is operational labor -> hands, never the inspector tier even for a risky item
     shipQueue = []
     if (!ship || ship.status === 'blocked') break          // stop for the orchestrator
   }
 }
 ```
 
-Waves in different repos: wrap per-repo chains in `parallel([...])`. The enrichment pass is its own earlier run: `parallel(GROUPS.map(g => () => agent(enrichPrompt(g), { schema: OUT })))` -- read-only in code, ledger-writes only, and only against items outside any running chain's wave.
+Waves in different repos: wrap per-repo chains in `parallel([...])`. The enrichment pass is its own earlier run: `parallel(GROUPS.map(g => () => agent(enrichPrompt(g), { schema: OUT, model: INSPECTOR })))` -- inspector-tier because enrichment authors the specs that gate every downstream tier; pinned, never inherited; read-only in code, ledger-writes only, and only against items outside any running chain's wave.
 
 **Script practicalities (dynamic-workflow clients).** Hardcode the wave's item constants inside the script: workflow args can arrive stringified on some clients, so an args-marshalled ITEMS array is unreliable. The script is plain JS, not a template -- an apostrophe inside a single-quoted string reads as a syntax error, so quote prompt strings with backticks or escape the apostrophe. The RESULT schema for IMPLEMENT and fix rounds carries a `followUps` array (each entry: title, rationale, evidence) so out-of-scope work the implementer surfaces returns as structured output the orchestrator can file, never as prose a strict-output client could silently drop. Resume is PREFIX-CACHED on the sequence of agent calls: a recovery edit must touch ONLY post-processing logic and not-yet-run prompts. Editing a completed agent's prompt, a shared prompt constant, or a schema invalidates the cache from that point and re-pays that agent's work, so leave those bytes untouched when re-launching with `resumeFromRunId`.
 
@@ -194,6 +211,7 @@ Waves in different repos: wrap per-repo chains in `parallel([...])`. The enrichm
 - **DO keep one pen per repo.** Never two waves, or an orchestrator edit and a wave, in the same repo concurrently. Read-only scout/enrichment agents are the only exception (with the ledger-write restriction above).
 - **DO run the second-pen protocol.** A shared working tree has no private commits: any pen's push publishes ALL local commits, which on a deploy-on-push repo can bypass the ship gate. Before pushing, check `git log origin/main..HEAD` and either wait or explicitly accept carrying the other pen's commits. Ship agents treat origin==HEAD as a verifiable arrival state (check WHAT landed and that CI ran green on that sha), not an anomaly.
 - **DO gate every irreversible action on the byte-review verdict.** Nothing pushes to a prod-deploying branch on an implementer's word, regardless of which model implemented. The gates catch real bugs: ISS-767..770 were four confirmed release-gating defects surfaced by this pattern's adversarial reviewers.
+- **DO pin every dispatch's model as a deliberate choice -- know what you dispatched.** Prefer an explicit tier id on every dispatch; inheritance is the ABSENCE of a decision, and on an expensive pen it runs labor at the top rate no one chose, so "I do not know what tier it ran, it inherited" is never an acceptable answer to the owner. The one acceptable omission is a consciously-chosen session-tier run on a client that exposes no explicit override -- a recorded equal-tier decision, never the default that lets labor ride the pen. Match each dispatch to the tier whose performance is worth its cost; keep judgment at the strongest tier, never traded down for price. See "Model economy".
 - **DO verify-then-trust, including yourself:** `git fetch` before trusting ahead/behind counts; prefer CI/deploy run state over local ref math; after any disruption, verify pen ownership before writing -- the run journals show who holds the pen (L-021).
 - **DO recover, never redo.** On dynamic-workflow clients, re-launch a failed run with `resumeFromRunId` (completed agents return cached; only the failed stage re-runs); on subagent or dispatch paths, re-dispatch only the failed stage. If the dead agent left commits, edit the failed stage's prompt into verify-and-complete: byte-verify the inherited commits against the approved plan, run the suites, finish the remainder. If subagent capacity is throttled, the main loop may take over a SHIP stage directly.
 - **DO keep the cadence:** the wave boundary is the floor, not the ceiling. Snapshot -> handover -> ledger commit+push after every wave loop, PLUS a light checkpoint handover whenever unrecorded state would be expensive to reconstruct (any local-but-unpushed commit, a landed plan or decision even without a commit, or before any irreversible step), AND land reconstruction-expensive decisions in the ledger (a note or the enriched item) the moment they are made. Owner-gate register in every handover; lessons at session end. See "Handover cadence".
