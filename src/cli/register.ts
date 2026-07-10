@@ -3782,10 +3782,20 @@ export function registerSessionCommand(yargs: Argv): Argv {
         .command(
           "compact-prepare",
           "Prepare session for compaction (PreCompact hook)",
-          () => {},
-          async () => {
-            const { handleSessionCompactPrepare } = await import("./commands/session-compact.js");
-            await handleSessionCompactPrepare();
+          (y2) =>
+            y2.option("client", {
+              type: "string",
+              choices: ["claude", "codex"] as const,
+              default: "claude" as const,
+              describe: "AI client invoking the PreCompact hook",
+            }),
+          async (argv) => {
+            const { handleSessionCompactPrepare, readHookStdinContext } = await import("./commands/session-compact.js");
+            const hookContext = await readHookStdinContext(process.stdin);
+            await handleSessionCompactPrepare({
+              client: argv.client as "claude" | "codex",
+              clientTaskId: hookContext.sessionId,
+            });
           },
         )
         .command(
@@ -3799,9 +3809,13 @@ export function registerSessionCommand(yargs: Argv): Argv {
             }),
           async (argv) => {
             try {
-              const { handleSessionResumePrompt, readHookStdinSource } = await import("./commands/session-compact.js");
-              const source = await readHookStdinSource(process.stdin);
-              await handleSessionResumePrompt({ codexHookJson: argv["codex-hook-json"] === true, source });
+              const { handleSessionResumePrompt, readHookStdinContext } = await import("./commands/session-compact.js");
+              const hookContext = await readHookStdinContext(process.stdin);
+              await handleSessionResumePrompt({
+                codexHookJson: argv["codex-hook-json"] === true,
+                source: hookContext.source,
+                clientTaskId: hookContext.sessionId,
+              });
             } catch (err) {
               process.stderr.write(
                 `[storybloq] resume-prompt failed: ${err instanceof Error ? err.message : String(err)}\n`,

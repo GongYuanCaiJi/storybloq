@@ -15,9 +15,16 @@ import {
   withSessionLock,
   appendEvent,
   refreshLease,
+  isLeaseExpired,
   type ActiveSessionInfo,
 } from "../../autonomous/session.js";
 import { WORKFLOW_STATES } from "../../autonomous/session-types.js";
+import {
+  isSameOwnerTask,
+  normalizeClientTaskId,
+  ownerTaskForClient,
+  type StorybloqClient,
+} from "../../autonomous/client-profile.js";
 import { writeShutdownMarker } from "../../autonomous/liveness.js";
 import { loadProject } from "../../core/project-loader.js";
 import { writeResumeMarker, removeResumeMarker } from "../../autonomous/resume-marker.js";
@@ -36,7 +43,14 @@ import { join } from "node:path";
  * - Emits stderr on real failures
  * - Always exits 0 (hook must not block compaction)
  */
-export async function handleSessionCompactPrepare(): Promise<void> {
+export interface SessionCompactPrepareOptions {
+  readonly client?: StorybloqClient;
+  readonly clientTaskId?: string;
+}
+
+export async function handleSessionCompactPrepare(
+  options: SessionCompactPrepareOptions = {},
+): Promise<void> {
   const root = discoverProjectRoot();
   if (!root) return; // No .story/ — silent no-op
 
@@ -44,6 +58,27 @@ export async function handleSessionCompactPrepare(): Promise<void> {
     await withSessionLock(root, async () => {
       const active = findActiveSessionFull(root);
       if (!active) return; // No active session — silent no-op
+
+      const client = options.client ?? "claude";
+      const environmentTaskId = client === "codex"
+        ? process.env.CODEX_THREAD_ID
+        : process.env.CLAUDE_CODE_SESSION_ID;
+      const clientTaskId = normalizeClientTaskId(options.clientTaskId)
+        ?? normalizeClientTaskId(environmentTaskId);
+      const callerTask = ownerTaskForClient(client, clientTaskId);
+      const sameOwner = isSameOwnerTask(active.state.ownerTask, callerTask);
+      const legacySameOwner = !active.state.ownerTask &&
+        callerTask?.client === "claude" &&
+        active.state.claudeCodeSessionId === callerTask.id;
+      const fullyUnownedLegacy = !active.state.ownerTask && !active.state.claudeCodeSessionId;
+
+      if (!sameOwner && !legacySameOwner && !fullyUnownedLegacy) {
+        process.stderr.write(
+          `[storybloq] compact-prepare skipped: active session ${active.state.sessionId} ` +
+          `is not owned by this ${client} task.\n`,
+        );
+        return;
+      }
 
       // prepareForCompact FIRST (fast state.json write — ensures compactPending persisted)
       try {
@@ -132,11 +167,16 @@ async function buildCompactionBreadcrumb(root: string): Promise<string | null> {
  * boundary so the handler stays a pure unit. Never hangs (hard timeout) and
  * never throws, both required so the hook always exits 0.
  */
-export async function readHookStdinSource(
+export interface SessionStartHookContext {
+  readonly source?: string;
+  readonly sessionId?: string;
+}
+
+export async function readHookStdinContext(
   stream: NodeJS.ReadableStream & { isTTY?: boolean },
   timeoutMs = 200,
-): Promise<string | undefined> {
-  if (stream.isTTY) return undefined;
+): Promise<SessionStartHookContext> {
+  if (stream.isTTY) return {};
   const raw = await new Promise<string>((resolve) => {
     let data = "";
     let done = false;
@@ -177,12 +217,33 @@ export async function readHookStdinSource(
   });
   try {
     const trimmed = raw.trim();
-    if (!trimmed) return undefined;
-    const parsed = JSON.parse(trimmed) as { source?: unknown };
-    return typeof parsed.source === "string" ? parsed.source : undefined;
+    if (!trimmed) return {};
+    const parsed = JSON.parse(trimmed) as { source?: unknown; session_id?: unknown };
+    const sessionId = typeof parsed.session_id === "string"
+      ? normalizeClientTaskId(parsed.session_id)
+      : null;
+    return {
+      ...(typeof parsed.source === "string" ? { source: parsed.source } : {}),
+      ...(sessionId ? { sessionId } : {}),
+    };
   } catch {
-    return undefined;
+    return {};
   }
+}
+
+/** Backward-compatible source-only reader used by existing callers and tests. */
+export async function readHookStdinSource(
+  stream: NodeJS.ReadableStream & { isTTY?: boolean },
+  timeoutMs = 200,
+): Promise<string | undefined> {
+  return (await readHookStdinContext(stream, timeoutMs)).source;
+}
+
+function codexTaskMarker(clientTaskId: string | undefined): string {
+  const normalized = normalizeClientTaskId(clientTaskId);
+  return normalized
+    ? `[storybloq-client-task]\nclient=codex\nid=${normalized}\n[/storybloq-client-task]\n`
+    : "";
 }
 
 /**
@@ -197,18 +258,25 @@ export async function readHookStdinSource(
  * - Never throws; always exits 0 (hook must not block compaction)
  */
 export async function handleSessionResumePrompt(
-  options: { codexHookJson?: boolean; source?: string } = {},
+  options: { codexHookJson?: boolean; source?: string; clientTaskId?: string } = {},
 ): Promise<void> {
   try {
+    const environmentTaskId = options.codexHookJson
+      ? process.env.CODEX_THREAD_ID
+      : process.env.CLAUDE_CODE_SESSION_ID;
+    const explicitTaskId = normalizeClientTaskId(options.clientTaskId);
+    const inheritedTaskId = normalizeClientTaskId(environmentTaskId);
+    const clientTaskId = explicitTaskId ?? inheritedTaskId ?? undefined;
     const root = discoverProjectRoot();
     if (!root) return; // No .story/ -- silent
 
     const writeResumeMessage = (message: string): void => {
       if (options.codexHookJson) {
+        const additionalContext = codexTaskMarker(clientTaskId) + message;
         process.stdout.write(JSON.stringify({
           hookSpecificOutput: {
             hookEventName: "SessionStart",
-            additionalContext: message,
+            additionalContext,
           },
         }) + "\n");
         return;
@@ -232,12 +300,65 @@ export async function handleSessionResumePrompt(
       if (shouldEmitBreadcrumb) {
         const breadcrumb = await buildCompactionBreadcrumb(root);
         if (breadcrumb) writeResumeMessage(breadcrumb);
+      } else if (options.codexHookJson && clientTaskId) {
+        writeResumeMessage("");
       }
       return;
     }
 
     const { info, stale } = match;
     const sessionId = info.state.sessionId;
+    const callerTask = ownerTaskForClient(
+      options.codexHookJson ? "codex" : "claude",
+      clientTaskId,
+    );
+    const sameOwner = isSameOwnerTask(info.state.ownerTask, callerTask);
+    const legacySameOwner = !info.state.ownerTask &&
+      callerTask?.client === "claude" &&
+      info.state.claudeCodeSessionId === callerTask.id;
+    const unownedLegacy = !info.state.ownerTask && !info.state.claudeCodeSessionId;
+    const hasRecordedOwner = !!info.state.ownerTask || !!info.state.claudeCodeSessionId;
+    const verifiedSameOwner = sameOwner || legacySameOwner || unownedLegacy;
+    const leaseExpired = isLeaseExpired(info.state);
+    const ticket = sanitizeForContext(
+      info.state.ticket?.displayId ?? info.state.ticket?.id ?? "The autonomous ticket",
+      40,
+    );
+
+    if (!callerTask && hasRecordedOwner) {
+      const command = options.codexHookJson ? "$story" : "/story";
+      writeResumeMessage(
+        `${ticket} has a compacted session with a recorded owner, but this task's identity is unavailable. ` +
+        `Run ${command} to verify ownership before recovery.\n`,
+      );
+      return;
+    }
+
+    if (!verifiedSameOwner) {
+      if (leaseExpired) {
+        const command = options.codexHookJson ? "$story" : "/story";
+        writeResumeMessage(
+          `${ticket} has an expired compacted session. Run ${command} and choose Resume here, End session, or Back.\n`,
+        );
+      } else if (info.state.ownerTask) {
+        const ownerClient = info.state.ownerTask.client === "codex" ? "Codex" : "Claude Code";
+        const command = options.codexHookJson ? "$story" : "/story";
+        writeResumeMessage(
+          `${ticket} is compacted in another live ${ownerClient} task. ` +
+          `Run ${command} to open or monitor the owner. Recover here only after confirming that task is gone.\n`,
+        );
+      } else {
+        const command = options.codexHookJson ? "$story" : "/story";
+        writeResumeMessage(
+          `${ticket} is compacted in another live legacy Claude Code task. ` +
+          `Continue from the original task, or run ${command} to monitor it. ` +
+          `Recover here only after confirming that task is gone.\n`,
+        );
+      }
+      return;
+    }
+
+    const taskArg = callerTask ? `, "clientTaskId": "${callerTask.id}"` : "";
 
     // Stale check first -- stale sessions get stale message regardless of resumeBlocked
     if (stale) {
@@ -246,7 +367,7 @@ export async function handleSessionResumePrompt(
         `Stale compacted session ${sessionId} found (never resumed).\n` +
         `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
         `or call storybloq_autonomous_guide with:\n` +
-        `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+        `{"sessionId": "${sessionId}", "action": "resume"${taskArg}}\n`,
       );
       return;
     }
@@ -257,7 +378,7 @@ export async function handleSessionResumePrompt(
         `Autonomous session ${sessionId} has a blocked resume (git validation failed).\n` +
         `Run "storybloq session clear-compact ${sessionId}" to recover, ` +
         `or check git status and call storybloq_autonomous_guide with:\n` +
-        `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+        `{"sessionId": "${sessionId}", "action": "resume"${taskArg}}\n`,
       );
       return;
     }
@@ -265,7 +386,7 @@ export async function handleSessionResumePrompt(
     // Fresh session -- output normal resume instruction
     writeResumeMessage(
       `Continue the autonomous coding session. Call \`storybloq_autonomous_guide\` with:\n` +
-      `{"sessionId": "${sessionId}", "action": "resume"}\n`,
+      `{"sessionId": "${sessionId}", "action": "resume"${taskArg}}\n`,
     );
   } catch (err) {
     // Never throw -- the hook must exit 0. Best-effort stderr log only.
@@ -281,7 +402,7 @@ export async function handleSessionResumePrompt(
 
 /**
  * Admin command to clear stale compact markers.
- * - Valid preCompactState: clears resumeBlocked, refreshes compactPreparedAt (keeps compactPending).
+ * - Valid preCompactState: repairs compactPending, clears resumeBlocked, and refreshes compactPreparedAt.
  *   User must call resume for actual state restoration (HEAD validation runs there).
  * - Invalid preCompactState: ends session (SESSION_END + admin_recovery).
  */
@@ -301,7 +422,7 @@ export async function handleSessionClearCompact(root: string, sessionId?: string
       if (!info) throw new Error("No compactPending session found. Specify the session ID manually.");
     }
 
-    if (!info.state.compactPending) {
+    if (!info.state.compactPending && info.state.state !== "COMPACT") {
       throw new Error(`Session ${info.state.sessionId} is not in compact-pending state`);
     }
 
@@ -310,12 +431,20 @@ export async function handleSessionClearCompact(root: string, sessionId?: string
     const isValidState = preCompactState && SAFE_RESUME_STATES.includes(preCompactState as typeof SAFE_RESUME_STATES[number]);
 
     if (isValidState) {
-      // Valid: clear resumeBlocked, refresh timestamp (keeps compactPending for discovery)
+      // Valid: repair the marker and keep the session discoverable for resume.
       writeSessionSync(info.dir, {
         ...info.state,
+        compactPending: true,
         resumeBlocked: false,
         compactPreparedAt: new Date().toISOString(),
       });
+      const hasKnownLiveOwner = !isLeaseExpired(info.state) &&
+        (!!info.state.ownerTask || !!info.state.claudeCodeSessionId);
+      if (hasKnownLiveOwner) {
+        return `Compact markers cleared for session ${info.state.sessionId}. Ownership was not changed. ` +
+          "Resume from the recorded owner task. Recovery elsewhere must use the client's " +
+          "explicit owner-gone confirmation flow.";
+      }
       return `Compact markers cleared for session ${info.state.sessionId}. Resume with:\n` +
         `storybloq_autonomous_guide {"sessionId": "${info.state.sessionId}", "action": "resume"}`;
     }

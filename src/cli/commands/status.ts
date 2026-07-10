@@ -1,5 +1,5 @@
 import { formatStatus, formatFederatedStatus } from "../../core/output-formatter.js";
-import { scanActiveSessions } from "../../core/session-scan.js";
+import { scanSessionSummaries } from "../../core/session-scan.js";
 import { resolveAllNodes } from "../../federation/resolver.js";
 import { scanAllSummaries } from "../../federation/scanner.js";
 import { buildFederationState } from "../../federation/state.js";
@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { CommandContext, CommandResult } from "../types.js";
 
 export async function handleStatus(ctx: CommandContext): Promise<CommandResult> {
-  const sessions = scanActiveSessions(ctx.root);
+  const { activeSessions, resumableSessions } = scanSessionSummaries(ctx.root);
   const config = ctx.state.config;
 
   const isOrchestrator = config.type === "orchestrator";
@@ -34,8 +34,8 @@ export async function handleStatus(ctx: CommandContext): Promise<CommandResult> 
       // best-effort cache write
     }
 
-    return { output: formatFederatedStatus(fedState, config, ctx.format, sessions) };
+    return { output: formatFederatedStatus(fedState, config, ctx.format, activeSessions, resumableSessions) };
   }
 
-  return { output: formatStatus(ctx.state, ctx.format, sessions) };
+  return { output: formatStatus(ctx.state, ctx.format, activeSessions, resumableSessions) };
 }

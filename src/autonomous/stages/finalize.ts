@@ -64,12 +64,23 @@ export class FinalizeStage implements WorkflowStage {
       }
     }
 
+    const landingDecision = ctx.state.landingDecision?.stage === "CODE_REVIEW"
+      ? ctx.state.landingDecision
+      : null;
+    const landingCopy = landingDecision
+      ? [
+          "",
+          `Code review reached round ${landingDecision.round}/${landingDecision.maxReviewRounds} with zero blocking findings. Non-blocking findings were deferred as follow-ups. Commit this work; do not reopen implementation for those deferred findings.`,
+        ]
+      : [];
+
     // ISS-099: Single combined instruction -- stage, verify, commit in one round-trip
     return {
       instruction: [
         "# Finalize",
         "",
         "Code review passed. Time to commit.",
+        ...landingCopy,
         "",
         "1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)",
         ctx.state.ticket ? `2. Update ticket ${ticketLabel(ctx)} status to "complete" in .story/` : "",

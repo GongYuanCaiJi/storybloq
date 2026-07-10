@@ -170,12 +170,17 @@ export class PlanReviewStage implements WorkflowStage {
     const reviewerBackend = report.reviewer
       ?? (computedReviewer === "codex" && report.notes && /codex\b.*\b(unavail|limit|failed|down|error|usage)/i.test(report.notes) ? "agent" : null)
       ?? computedReviewer;
+    const unresolvedCriticalCount = findings.filter(
+      (f) => f.severity === "critical" &&
+        f.disposition !== "addressed" && f.disposition !== "deferred",
+    ).length;
     planReviews.push({
       round: roundNum,
       reviewer: reviewerBackend,
       verdict,
       findingCount: findings.length,
       criticalCount: findings.filter((f) => f.severity === "critical").length,
+      unresolvedCriticalCount,
       majorCount: findings.filter((f) => f.severity === "major").length,
       suggestionCount: findings.filter((f) => f.severity === "suggestion").length,
       codexSessionId: report.reviewerSessionId,
@@ -225,6 +230,7 @@ export class PlanReviewStage implements WorkflowStage {
       verdict,
       findingsCount: findings.length,
       severityCounts: { critical: criticalCount, major: majorCount, minor: minorCount, suggestion: suggestionCount },
+      unresolvedCriticalCount,
       startedAt: startedAt ?? new Date().toISOString(),
       durationMs,
       summary,

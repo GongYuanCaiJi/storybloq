@@ -48,7 +48,7 @@ export class PlanStage implements WorkflowStage {
         '```',
       ].join("\n"),
       reminders: [
-        "Write the plan as a markdown file — do NOT use Claude Code's plan mode.",
+        "Write the plan as a markdown file -- do NOT use client-native plan mode.",
         "Do NOT ask the user for approval.",
       ],
       transitionedFrom: ctx.state.previousState ?? undefined,

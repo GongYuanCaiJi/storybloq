@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { z } from "zod";
+import { CLIENT_TASK_ID_PATTERN, type OwnerTask } from "./client-profile.js";
 import { CROCKFORD_CLASS } from "../models/types.js";
 
 /** Combined ticket + issue ID regex for targetWork validation (sequential + canonical). ISS-703: canonical char class derived from CROCKFORD_CLASS. */
@@ -202,6 +203,8 @@ export interface SessionState {
   readonly pendingInstruction?: string | null;
   readonly pendingInstructionSetAt?: string | null;
   readonly claudeCodeSessionId?: string | null;
+  readonly ownerTask?: OwnerTask | null;
+  readonly compactPending?: boolean;
   readonly binaryFingerprint?: { readonly mtime: string; readonly sha256: string } | null;
   readonly runningSubprocesses?: ReadonlyArray<{
     readonly pid: number;
@@ -215,6 +218,7 @@ export interface SessionState {
     readonly verdict: string;
     readonly findingCount: number;
     readonly criticalCount: number;
+    readonly unresolvedCriticalCount?: number;
     readonly majorCount: number;
     readonly suggestionCount: number;
     readonly durationMs: number;
@@ -264,6 +268,10 @@ export interface StatusPayloadActive {
   readonly pendingInstruction: string | null;
   readonly pendingInstructionSetAt: string | null;
   readonly claudeCodeSessionId: string | null;
+  readonly ownerTask: OwnerTask | null;
+  readonly leaseExpiresAt: string | null;
+  readonly leaseState: "live" | "expired" | "missing" | "invalid";
+  readonly compactPending: boolean;
   readonly binaryFingerprint: { readonly mtime: string; readonly sha256: string } | null;
   readonly runningSubprocesses: ReadonlyArray<{
     readonly pid: number;
@@ -277,6 +285,7 @@ export interface StatusPayloadActive {
     readonly verdict: string;
     readonly findingCount: number;
     readonly criticalCount: number;
+    readonly unresolvedCriticalCount?: number;
     readonly majorCount: number;
     readonly suggestionCount: number;
     readonly durationMs: number;
@@ -343,6 +352,7 @@ export interface ReviewRecord {
   readonly verdict: string;
   readonly findingCount: number;
   readonly criticalCount: number;
+  readonly unresolvedCriticalCount?: number;
   readonly majorCount: number;
   readonly suggestionCount: number;
   readonly codexSessionId?: string;
@@ -435,6 +445,7 @@ export const SessionStateSchema = z.object({
       verdict: z.string(),
       findingCount: z.number(),
       criticalCount: z.number(),
+      unresolvedCriticalCount: z.number().optional(),
       majorCount: z.number(),
       suggestionCount: z.number(),
       codexSessionId: z.string().optional(),
@@ -446,6 +457,7 @@ export const SessionStateSchema = z.object({
       verdict: z.string(),
       findingCount: z.number(),
       criticalCount: z.number(),
+      unresolvedCriticalCount: z.number().optional(),
       majorCount: z.number(),
       suggestionCount: z.number(),
       codexSessionId: z.string().optional(),
@@ -509,6 +521,12 @@ export const SessionStateSchema = z.object({
     lastHeartbeat: z.string(),
     expiresAt: z.string(),
   }),
+
+  ownerTask: z.object({
+    client: z.enum(["claude", "codex"]),
+    id: z.string().min(1).max(128).regex(CLIENT_TASK_ID_PATTERN),
+    boundAt: z.string(),
+  }).nullish(),
 
   // Context pressure
   contextPressure: z.object({
@@ -694,11 +712,25 @@ export const SessionStateSchema = z.object({
     verdict: z.string(),
     findingCount: z.number(),
     criticalCount: z.number(),
+    unresolvedCriticalCount: z.number().optional(),
     majorCount: z.number(),
     suggestionCount: z.number(),
     durationMs: z.number(),
     summary: z.string(),
   }).nullish(),
+  landingDecision: z.object({
+    stage: z.string(),
+    round: z.number(),
+    maxReviewRounds: z.number(),
+    reason: z.string(),
+    findingCounts: z.object({
+      critical: z.number(),
+      major: z.number(),
+      minor: z.number(),
+      suggestion: z.number(),
+    }),
+    timestamp: z.string(),
+  }).nullable().default(null),
   recentDeferrals: z.object({
     total: z.number(),
     critical: z.number(),
@@ -752,6 +784,10 @@ export interface GuideInput {
   readonly ticketId?: string;
   /** T-188: Target work items for targeted auto mode. Array of T-XXX and ISS-XXX IDs. */
   readonly targetWork?: readonly string[];
+  /** Client task/thread identity used for same-task continuation and safe recovery. */
+  readonly clientTaskId?: string;
+  /** Explicitly recover a COMPACT session after confirming its recorded owner is gone. */
+  readonly takeover?: boolean;
 }
 
 // ---------------------------------------------------------------------------

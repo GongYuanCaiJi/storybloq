@@ -170,6 +170,7 @@ export function formatStatus(
   state: ProjectState,
   format: OutputFormat,
   activeSessions: readonly ActiveSessionSummary[] = [],
+  resumableSessions: readonly ActiveSessionSummary[] = [],
 ): string {
   const phases = phasesWithStatus(state);
   const data = {
@@ -192,6 +193,7 @@ export function formatStatus(
       leafCount: p.leafCount,
     })),
     ...(activeSessions.length > 0 ? { activeSessions } : {}),
+    ...(resumableSessions.length > 0 ? { resumableSessions } : {}),
   };
 
   if (format === "json") {
@@ -217,13 +219,27 @@ export function formatStatus(
     lines.push(`${indicator} **${escapeMarkdownInline(p.phase.name)}** (${p.leafCount} tickets) — ${escapeMarkdownInline(summary)}`);
   }
 
-  if (activeSessions.length > 0) {
+  const resumableIds = new Set(resumableSessions.map((session) => session.sessionId));
+  const ordinaryActiveSessions = activeSessions.filter((session) => !resumableIds.has(session.sessionId));
+  if (ordinaryActiveSessions.length > 0) {
     lines.push("");
     lines.push("## Active Sessions");
     lines.push("");
-    for (const s of activeSessions) {
+    for (const s of ordinaryActiveSessions) {
       const ticket = s.ticketId ? `${s.ticketId}: ${escapeMarkdownInline(s.ticketTitle ?? "")}` : "no ticket";
-      lines.push(`- ${s.sessionId.slice(0, 8)}: ${s.state} -- ${ticket} (${s.mode} mode)`);
+      const owner = s.ownerTask ? ` in a ${s.ownerTask.client === "codex" ? "Codex" : "Claude Code"} task` : "";
+      lines.push(`- ${ticket} -- ${s.state}${owner} (${s.mode} mode)`);
+    }
+  }
+
+  if (resumableSessions.length > 0) {
+    lines.push("");
+    lines.push("## Resumable Sessions");
+    lines.push("");
+    for (const s of resumableSessions) {
+      const ticket = s.ticketId ? `${s.ticketId}: ${escapeMarkdownInline(s.ticketTitle ?? "")}` : `session ${s.sessionId.slice(0, 8)}`;
+      const lease = s.leaseState === "expired" ? "expired lease" : `${s.leaseState ?? "unknown"} lease`;
+      lines.push(`- ${ticket} -- COMPACT recovery available (${lease})`);
     }
   }
 
@@ -243,6 +259,7 @@ export function formatFederatedStatus(
   config: Config,
   format: OutputFormat,
   activeSessions: readonly ActiveSessionSummary[] = [],
+  resumableSessions: readonly ActiveSessionSummary[] = [],
 ): string {
   const sanitizedNodes = fedState.nodes.map((node) => ({
     name: node.name,
@@ -258,6 +275,8 @@ export function formatFederatedStatus(
     federation: { ...fedState, nodes: sanitizedNodes },
     project: config.project,
     type: config.type,
+    ...(activeSessions.length > 0 ? { activeSessions } : {}),
+    ...(resumableSessions.length > 0 ? { resumableSessions } : {}),
   };
 
   if (format === "json") {
@@ -297,13 +316,25 @@ export function formatFederatedStatus(
     }
   }
 
-  if (activeSessions.length > 0) {
+  const resumableIds = new Set(resumableSessions.map((session) => session.sessionId));
+  const ordinaryActiveSessions = activeSessions.filter((session) => !resumableIds.has(session.sessionId));
+  if (ordinaryActiveSessions.length > 0) {
     lines.push("");
     lines.push("## Active Sessions");
     lines.push("");
-    for (const s of activeSessions) {
+    for (const s of ordinaryActiveSessions) {
       const ticket = s.ticketId ? `${s.ticketId}: ${escapeMarkdownInline(s.ticketTitle ?? "")}` : "no ticket";
-      lines.push(`- ${s.sessionId.slice(0, 8)}: ${s.state} -- ${ticket} (${s.mode} mode)`);
+      lines.push(`- ${ticket} -- ${s.state} (${s.mode} mode)`);
+    }
+  }
+
+  if (resumableSessions.length > 0) {
+    lines.push("");
+    lines.push("## Resumable Sessions");
+    lines.push("");
+    for (const s of resumableSessions) {
+      const ticket = s.ticketId ? `${s.ticketId}: ${escapeMarkdownInline(s.ticketTitle ?? "")}` : `session ${s.sessionId.slice(0, 8)}`;
+      lines.push(`- ${ticket} -- COMPACT recovery available (${s.leaseState ?? "unknown"} lease)`);
     }
   }
 
@@ -1385,7 +1416,7 @@ export function formatSelftestResult(
   const lines: string[] = ["# Self-test Report", ""];
 
   // Group results by entity
-  const entities: Array<"ticket" | "issue" | "note"> = ["ticket", "issue", "note"];
+  const entities: Array<"ticket" | "issue" | "note" | "lesson"> = ["ticket", "issue", "note", "lesson"];
   for (const entity of entities) {
     const checks = result.results.filter((r) => r.entity === entity);
     if (checks.length === 0) continue;
@@ -1404,6 +1435,13 @@ export function formatSelftestResult(
     for (const err of result.cleanupErrors) {
       lines.push(`- ${err}`);
     }
+    lines.push("");
+  }
+
+  if (result.warnings.length > 0) {
+    lines.push("## Warnings");
+    lines.push("");
+    for (const warning of result.warnings) lines.push(`- ${warning}`);
     lines.push("");
   }
 
@@ -1505,7 +1543,7 @@ export function formatReference(
   lines.push("/story orchestrate               # guard checks, explicit opt-in, then the wave loop");
   lines.push("```");
   lines.push("");
-  lines.push("Requires explicit opt-in via AskUserQuestion before any agents are dispatched, and refuses to start while any federation node has an active autonomous session (one pen per repo; the per-node check reads each node's `.story/sessions/` directly because orchestrator status does not scan node repos). The full procedure -- enrichment template, sizing convention, 6-stage pipeline, workflow-script skeleton, critical rules -- is in `orchestrator-mode.md`. Needs a client with background dynamic workflows or subagents; degrades to `storybloq dispatch` or refuses cleanly otherwise.");
+  lines.push("Requires explicit opt-in via AskUserQuestion before any agents are dispatched, and refuses to start while any federation node has an active autonomous session (one pen per repo; the per-node check reads each node's `.story/sessions/` directly because orchestrator status does not scan node repos). The full procedure -- enrichment template, sizing convention, 6-stage pipeline, workflow-script skeleton, critical rules -- is in `orchestrator-mode.md`. Needs a client with background dynamic workflows or subagents; Claude can also use the Agent View-backed `storybloq dispatch` path. Codex users can orchestrate when exact callable subagent tools are present; product-managed Codex dispatch remains unshipped.");
   lines.push("");
   lines.push("`/story` surfaces this option proactively at context load when the client is capable and the actionable backlog is orchestrate-sized, so you do not have to know the command exists; it stays a recommendation, and selecting it still routes through the explicit opt-in.");
   lines.push("");

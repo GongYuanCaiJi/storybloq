@@ -167,6 +167,28 @@ afterEach(() => {
 });
 
 describe("ISS-654: handleStart targetWork canonicalization (end-to-end)", () => {
+  it("persists the resolved client task owner without removing Claude compatibility fields", async () => {
+    const oldClient = process.env.STORYBLOQ_CLIENT;
+    process.env.STORYBLOQ_CLIENT = "codex";
+    try {
+      const root = track(buildProject());
+      const result = await handleAutonomousGuide(root, {
+        action: "start",
+        sessionId: null,
+        mode: "auto",
+        clientTaskId: "codex-task-123",
+      });
+      expect(result.isError).toBeFalsy();
+      const session = startedSession(root);
+      expect(session.ownerTask).toMatchObject({ client: "codex", id: "codex-task-123" });
+      expect(typeof session.ownerTask?.boundAt).toBe("string");
+      expect("claudeCodeSessionId" in session).toBe(true);
+    } finally {
+      if (oldClient === undefined) delete process.env.STORYBLOQ_CLIENT;
+      else process.env.STORYBLOQ_CLIENT = oldClient;
+    }
+  });
+
   it("display-id input is persisted as canonical ids with a display map", async () => {
     const root = track(buildProject());
     const result = await handleAutonomousGuide(root, {

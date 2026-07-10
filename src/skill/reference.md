@@ -503,7 +503,7 @@ storybloq node remove <name> [--format json|md]
 
 The tools below are registered in full mode (inside a .story/ project).
 
-- **storybloq_status** — Project summary: phase statuses, ticket/issue counts, blockers
+- **storybloq_status** (format?) — Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata.
 - **storybloq_phase_list** — All phases with derived status
 - **storybloq_phase_current** — First non-complete phase
 - **storybloq_phase_tickets** (phaseId) — Leaf tickets for a specific phase
@@ -548,7 +548,7 @@ The tools below are registered in full mode (inside a .story/ project).
 - **storybloq_review_lenses_prepare** (stage, diff, changedFiles, ticketDescription?, reviewRound?, priorDeferrals?, sessionId?) — Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, complete lens prompts
 - **storybloq_review_lenses_synthesize** (stage?, lensResults, activeLenses, skippedLenses, reviewRound?, reviewId?, diff?, changedFiles?, sessionId?) — Run the @storybloq/lenses merger pipeline programmatically over raw lens outputs; returns the ReviewVerdict envelope (no merger agent)
 - **storybloq_review_lenses_judge** (reviewVerdict, convergenceHistory?) — Deterministic three-value verdict mapping over the synthesize ReviewVerdict plus convergence history (no judge agent)
-- **storybloq_autonomous_guide** (sessionId?, action, mode?, ticketId?) — Autonomous session orchestrator — call at every decision point to drive PICK_TICKET through COMPLETE
+- **storybloq_autonomous_guide** (sessionId?, action, mode?, ticketId?, clientTaskId?, takeover?) — Autonomous session orchestrator -- call at every decision point to drive PICK_TICKET through COMPLETE
 - **storybloq_session_report** (sessionId) — Structured analysis of an autonomous session (works even if project state is corrupted)
 - **storybloq_register_subprocess** (pid, cmd, category?, sessionId?) — Register a running subprocess so monitors can tell slow builds from hung agents
 - **storybloq_unregister_subprocess** (pid, sessionId?) — Unregister a subprocess after it completes (idempotent)
@@ -588,7 +588,7 @@ Drive a multi-repo federation (or a large single-repo backlog) as an orchestrato
 /story orchestrate               # guard checks, explicit opt-in, then the wave loop
 ```
 
-Requires explicit opt-in via AskUserQuestion before any agents are dispatched, and refuses to start while any federation node has an active autonomous session (one pen per repo; the per-node check reads each node's `.story/sessions/` directly because orchestrator status does not scan node repos). The full procedure -- enrichment template, sizing convention, 6-stage pipeline, workflow-script skeleton, critical rules -- is in `orchestrator-mode.md`. Needs a client with background dynamic workflows or subagents; degrades to `storybloq dispatch` or refuses cleanly otherwise.
+Requires explicit opt-in via AskUserQuestion before any agents are dispatched, and refuses to start while any federation node has an active autonomous session (one pen per repo; the per-node check reads each node's `.story/sessions/` directly because orchestrator status does not scan node repos). The full procedure -- enrichment template, sizing convention, 6-stage pipeline, workflow-script skeleton, critical rules -- is in `orchestrator-mode.md`. Needs a client with background dynamic workflows or subagents; Claude can also use the Agent View-backed `storybloq dispatch` path. Codex users can orchestrate when exact callable subagent tools are present; product-managed Codex dispatch remains unshipped.
 
 `/story` surfaces this option proactively at context load when the client is capable and the actionable backlog is orchestrate-sized, so you do not have to know the command exists; it stays a recommendation, and selecting it still routes through the explicit opt-in.
 

@@ -8,6 +8,7 @@ import { detectBranchAffinity, checkAffinityMismatch, buildAffinityAnnotation, b
 import { canClaim, buildClaim } from "../../core/claims.js";
 import { gitUserEmail } from "../git-inspector.js";
 import { displayIdOf } from "../../core/resolver.js";
+import { storybloqClientProfile } from "../client-profile.js";
 
 /**
  * PICK_TICKET stage -- Claude selects the next ticket to work on.
@@ -203,7 +204,12 @@ export class PickTicketStage implements WorkflowStage {
           action: "goto",
           target: "HANDOVER",
           result: {
-            instruction: buildMismatchHandoverInstruction(affinity, ticketLabel, ctx.state.sessionId),
+            instruction: buildMismatchHandoverInstruction(
+              affinity,
+              ticketLabel,
+              ctx.state.sessionId,
+              storybloqClientProfile().storyCommand,
+            ),
             reminders: [],
             transitionedFrom: "PICK_TICKET",
           },
@@ -278,6 +284,7 @@ export class PickTicketStage implements WorkflowStage {
       ticket: { id: ticket.id, displayId: ticket.displayId, title: ticket.title, claimed: true },
       reviews: { plan: [], code: [] },
       finalizeCheckpoint: null,
+      landingDecision: null,
       ticketStartedAt: new Date().toISOString(),
       ...(claimObj ? { pendingTicketClaim: claimObj } : {}),
     });
@@ -299,7 +306,7 @@ export class PickTicketStage implements WorkflowStage {
           '```',
         ].join("\n"),
         reminders: [
-          "Write the plan as a markdown file — do NOT use Claude Code's plan mode.",
+          "Write the plan as a markdown file -- do NOT use client-native plan mode.",
           "Do NOT ask the user for approval.",
         ],
         transitionedFrom: "PICK_TICKET",
@@ -350,7 +357,12 @@ export class PickTicketStage implements WorkflowStage {
           action: "goto",
           target: "HANDOVER",
           result: {
-            instruction: buildMismatchHandoverInstruction(affinity, issueLabel, ctx.state.sessionId),
+            instruction: buildMismatchHandoverInstruction(
+              affinity,
+              issueLabel,
+              ctx.state.sessionId,
+              storybloqClientProfile().storyCommand,
+            ),
             reminders: [],
             transitionedFrom: "PICK_TICKET",
           },
@@ -413,6 +425,7 @@ export class PickTicketStage implements WorkflowStage {
       ticket: undefined,
       reviews: { plan: [], code: [] },
       finalizeCheckpoint: null,
+      landingDecision: null,
     });
 
     return { action: "goto", target: "ISSUE_FIX" };

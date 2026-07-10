@@ -406,7 +406,7 @@ export const COMMANDS: readonly CommandEntry[] = [
 ];
 
 export const MCP_TOOLS: readonly McpToolEntry[] = [
-  { name: "storybloq_status", description: "Project summary: phase statuses, ticket/issue counts, blockers" },
+  { name: "storybloq_status", description: "Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata.", params: ["format?"] },
   { name: "storybloq_phase_list", description: "All phases with derived status" },
   { name: "storybloq_phase_current", description: "First non-complete phase" },
   { name: "storybloq_phase_tickets", description: "Leaf tickets for a specific phase", params: ["phaseId"] },
@@ -451,7 +451,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_review_lenses_prepare", description: "Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, complete lens prompts", params: ["stage", "diff", "changedFiles", "ticketDescription?", "reviewRound?", "priorDeferrals?", "sessionId?"] },
   { name: "storybloq_review_lenses_synthesize", description: "Run the @storybloq/lenses merger pipeline programmatically over raw lens outputs; returns the ReviewVerdict envelope (no merger agent)", params: ["stage?", "lensResults", "activeLenses", "skippedLenses", "reviewRound?", "reviewId?", "diff?", "changedFiles?", "sessionId?"] },
   { name: "storybloq_review_lenses_judge", description: "Deterministic three-value verdict mapping over the synthesize ReviewVerdict plus convergence history (no judge agent)", params: ["reviewVerdict", "convergenceHistory?"] },
-  { name: "storybloq_autonomous_guide", description: "Autonomous session orchestrator — call at every decision point to drive PICK_TICKET through COMPLETE", params: ["sessionId?", "action", "mode?", "ticketId?"] },
+  { name: "storybloq_autonomous_guide", description: "Autonomous session orchestrator -- call at every decision point to drive PICK_TICKET through COMPLETE", params: ["sessionId?", "action", "mode?", "ticketId?", "clientTaskId?", "takeover?"] },
   { name: "storybloq_session_report", description: "Structured analysis of an autonomous session (works even if project state is corrupted)", params: ["sessionId"] },
   { name: "storybloq_register_subprocess", description: "Register a running subprocess so monitors can tell slow builds from hung agents", params: ["pid", "cmd", "category?", "sessionId?"] },
   { name: "storybloq_unregister_subprocess", description: "Unregister a subprocess after it completes (idempotent)", params: ["pid", "sessionId?"] },

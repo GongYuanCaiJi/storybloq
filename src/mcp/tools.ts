@@ -14,6 +14,7 @@ import { initProject } from "../core/init.js";
 import { handleNodeList } from "../cli/commands/node.js";
 import { resolveNodePath } from "../federation/resolver.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/session-types.js";
+import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
 
@@ -67,6 +68,7 @@ import {
   NOTE_STATUSES,
   LESSON_STATUSES,
   LESSON_SOURCES,
+  type OutputFormat,
 } from "../models/types.js";
 import type { CommandContext, CommandResult } from "../cli/types.js";
 
@@ -140,8 +142,11 @@ const INFRASTRUCTURE_ERROR_CODES: readonly string[] = [
 ];
 
 
-/** Consistent error text format for all isError: true MCP responses. */
-function formatMcpError(code: string, message: string): string {
+/** Consistent error format for all isError: true MCP read responses. */
+function formatMcpError(code: string, message: string, format: OutputFormat = "md"): string {
+  if (format === "json") {
+    return JSON.stringify({ version: 1, error: { code, message } }, null, 2);
+  }
   return `[${code}] ${message}`;
 }
 
@@ -149,7 +154,7 @@ function formatMcpError(code: string, message: string): string {
  * Shared pipeline for all MCP read tools.
  *
  * 1. Load project (permissive mode)
- * 2. Build CommandContext with format: "md"
+ * 2. Build CommandContext with the requested format (default: "md")
  * 3. Call handler
  * 4. Classify result via errorCode + INFRASTRUCTURE_ERROR_CODES
  * 5. Prepend integrity warning notice if warnings present
@@ -158,6 +163,7 @@ export async function runMcpReadTool(
   pinnedRoot: string,
   handler: (ctx: CommandContext) => Promise<CommandResult> | CommandResult,
   effectiveRoot?: string,
+  format: OutputFormat = "md",
 ): Promise<McpToolResult> {
   // Liveness is always anchored to pinnedRoot (the orchestrator), not the effective node root.
   try { touchMcpLiveness(pinnedRoot); } catch { /* best-effort */ }
@@ -165,14 +171,14 @@ export async function runMcpReadTool(
   try {
     const { state, warnings } = await loadProject(loadRoot);
     const handoversDir = join(loadRoot, ".story", "handovers");
-    const ctx: CommandContext = { state, warnings, root: loadRoot, handoversDir, format: "md" };
+    const ctx: CommandContext = { state, warnings, root: loadRoot, handoversDir, format };
 
     const result = await handler(ctx);
 
     // Classify: infrastructure errorCode → isError: true
     if (result.errorCode && INFRASTRUCTURE_ERROR_CODES.includes(result.errorCode)) {
       return {
-        content: [{ type: "text", text: formatMcpError(result.errorCode, result.output) }],
+        content: [{ type: "text", text: formatMcpError(result.errorCode, result.output, format) }],
         isError: true,
       };
     }
@@ -187,26 +193,39 @@ export async function runMcpReadTool(
       (INTEGRITY_WARNING_TYPES as readonly string[]).includes(w.type),
     );
     if (integrityWarnings.length > 0) {
-      const details = integrityWarnings
-        .slice(0, 5)
-        .map((w) => `  - ${w.file}: ${w.message}`)
-        .join("\n");
-      const more = integrityWarnings.length > 5
-        ? `\n  ... and ${integrityWarnings.length - 5} more. Run storybloq_validate for the full list.`
-        : "";
-      text = `Warning: ${integrityWarnings.length} item(s) skipped due to data integrity issues:\n${details}${more}\n\n${text}`;
+      if (format === "json") {
+        const parsed = JSON.parse(text) as Record<string, unknown>;
+        text = JSON.stringify({
+          ...parsed,
+          warnings: integrityWarnings.map((warning) => ({
+            type: warning.type,
+            file: warning.file,
+            message: warning.message,
+          })),
+          partial: true,
+        }, null, 2);
+      } else {
+        const details = integrityWarnings
+          .slice(0, 5)
+          .map((w) => `  - ${w.file}: ${w.message}`)
+          .join("\n");
+        const more = integrityWarnings.length > 5
+          ? `\n  ... and ${integrityWarnings.length - 5} more. Run storybloq_validate for the full list.`
+          : "";
+        text = `Warning: ${integrityWarnings.length} item(s) skipped due to data integrity issues:\n${details}${more}\n\n${text}`;
+      }
     }
 
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {
-      return { content: [{ type: "text", text: formatMcpError(err.code, err.message) }], isError: true };
+      return { content: [{ type: "text", text: formatMcpError(err.code, err.message, format) }], isError: true };
     }
     if (err instanceof CliValidationError) {
-      return { content: [{ type: "text", text: formatMcpError(err.code, err.message) }], isError: true };
+      return { content: [{ type: "text", text: formatMcpError(err.code, err.message, format) }], isError: true };
     }
     const message = err instanceof Error ? err.message : String(err);
-    return { content: [{ type: "text", text: formatMcpError("io_error", message) }], isError: true };
+    return { content: [{ type: "text", text: formatMcpError("io_error", message, format) }], isError: true };
   }
 }
 
@@ -282,8 +301,12 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
 
   server.registerTool("storybloq_status", {
     description: "Project summary: phase statuses, ticket/issue counts, blockers, current phase",
-  }, async () => {
-    const result = await runMcpReadTool(pinnedRoot, handleStatus);
+    inputSchema: {
+      format: z.enum(["md", "json"]).optional().describe("Output format (default: md)"),
+    },
+  }, async (args) => {
+    const format = args.format ?? "md";
+    const result = await runMcpReadTool(pinnedRoot, handleStatus, undefined, format);
     // ISS-570 G2: prepend update-available notice so /story's first MCP
     // call surfaces 'newer storybloq available' proactively. Synchronous
     // cache read; a background refresh is kicked off so the NEXT status
@@ -293,7 +316,7 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
       const running = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
       const info = readUpdateCacheSync(running);
       refreshUpdateCacheInBackground();
-      if (info?.updateAvailable && result.content[0]?.type === "text") {
+      if (format === "md" && info?.updateAvailable && result.content[0]?.type === "text") {
         const banner = `A newer storybloq is available (v${info.latestVersion}). Run \`npm install -g @storybloq/storybloq@latest\` -- the CLI will auto-refresh the /story skill on next invocation.\n\n`;
         return {
           ...result,
@@ -1139,6 +1162,10 @@ export function registerAllTools(server: McpServer, pinnedRoot: string): void {
     inputSchema: {
       sessionId: z.string().uuid().nullable().describe("Session ID (null for start action)"),
       action: z.enum(["start", "report", "resume", "pre_compact", "cancel"]).describe("Action to perform"),
+      clientTaskId: z.string().min(1).max(128).regex(CLIENT_TASK_ID_PATTERN).optional()
+        .describe("Current AI-client task/thread id. Codex passes CODEX_THREAD_ID; Claude is detected automatically."),
+      takeover: z.boolean().optional()
+        .describe("Resume only: recover a COMPACT session after explicitly confirming its recorded owner task is gone."),
       mode: z.enum(["auto", "review", "plan", "guided"]).optional().describe("Execution tier (start action only): auto=full autonomous, review=code review only, plan=plan+review, guided=single ticket"),
       ticketId: z.string().optional().describe("Ticket ID for tiered modes (review, plan, guided). Required for non-auto modes."),
       targetWork: z.array(z.string().regex(TARGET_WORK_ID_REGEX)).max(150).optional().describe("For start action only: array of T-XXX and ISS-XXX IDs to work on in order. Empty or omitted = standard auto mode."),
