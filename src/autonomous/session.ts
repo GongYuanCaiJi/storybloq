@@ -101,6 +101,8 @@ export function createSession(
       ticketsCompleted: 0,
       compactionCount: 0,
       eventsLogBytes: 0,
+      workItemsAtLastCompaction: 0,
+      eventsLogBytesAtLastCompaction: 0,
     },
     pendingProjectMutation: null,
     resumeFromRevision: null,

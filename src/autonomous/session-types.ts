@@ -535,6 +535,8 @@ export const SessionStateSchema = z.object({
     ticketsCompleted: z.number().default(0),
     compactionCount: z.number().default(0),
     eventsLogBytes: z.number().default(0),
+    workItemsAtLastCompaction: z.number().int().min(0).optional(),
+    eventsLogBytesAtLastCompaction: z.number().int().min(0).optional(),
   }).default({ level: "low", guideCallCount: 0, ticketsCompleted: 0, compactionCount: 0, eventsLogBytes: 0 }),
 
   // Pending project mutation (for crash recovery)
@@ -803,7 +805,7 @@ export interface SessionSummary {
   readonly branch: string | null;
 }
 
-export type ContextAdvice = "ok";
+export type ContextAdvice = "ok" | "compact-now";
 
 export interface GuideOutput {
   readonly sessionId: string;

@@ -14,6 +14,8 @@ This file is referenced from SKILL.md for `/story auto` / `$story auto`, review,
 4. The guide advances through: PICK_TICKET -> PLAN -> PLAN_REVIEW -> IMPLEMENT -> CODE_REVIEW -> FINALIZE -> COMPLETE -> loop
 5. Continue until the guide returns SESSION_END
 
+**Ticket review depth:** Optional ticket metadata `reviewRisk` accepts `low`, `medium`, or `high` and sets the minimum PLAN_REVIEW depth to one, two, or three rounds. Set it with `storybloq ticket meta set T-001 reviewRisk '"high"'` or `storybloq_ticket_meta_set`. Legacy `risk` metadata remains compatible. Malformed explicit values fail closed to high, and risk metadata never skips a review stage.
+
 **Frontend design:** If the current ticket involves UI, frontend, components, layouts, or styling, read `design/design.md` in the same directory as the skill file for design principles. Load the relevant platform reference from `design/references/`. Apply the priority order (clarity > hierarchy > platform correctness > accessibility > state completeness) during both planning and implementation.
 
 ## Precedence: task-aware active-session guard
@@ -40,7 +42,7 @@ Before any guide call that could start, resume, or cancel a session, run SKILL.m
 
 **Codex:** use a trusted repo and a sandbox/approval profile that allows the intended edits and test commands. Ensure Storybloq MCP is registered with `STORYBLOQ_CLIENT=codex`, then restart Codex or start a new session after setup or MCP source changes so the live MCP process reloads. Check `/hooks` after setup: Codex requires non-managed command hooks to be reviewed and trusted before they run, so an installed `SessionStart`, `PreCompact`, or `Stop` hook is not necessarily active until trusted. `$story auto` does not require Codex subagents; keep the guide loop in the main thread unless the user explicitly chooses `$story orchestrate`.
 
-**Storybloq handles compaction automatically** when hooks are installed and trusted. Context is preserved across compactions; do not cancel only because context feels large.
+**Storybloq handles compaction automatically** when hooks are installed and trusted. `compactThreshold` (`medium`, `high`, or `critical`) is enforced at a clean COMPLETE boundary: the guide requests `pre_compact`, then the same session resumes and continues with pressure reset for the new context window. Context is preserved across compactions; do not cancel only because context feels large.
 
 **If the guide says to compact:** In the owning task, call the guide with `action: "pre_compact"` and `clientTaskId`, run the client's compaction command, then let the SessionStart marker/guard resume the same full `sessionId` with `clientTaskId`. No second confirmation is needed when `ownerTask` matches or when migrating an unowned legacy session. A different recorded owner requires confirmation that the old task is gone plus `takeover: true`.
 

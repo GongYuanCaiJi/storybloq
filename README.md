@@ -117,6 +117,8 @@ Inside Claude Code or Codex:
 
 Both clients support context loading, autonomous mode, MCP, and compaction/status hooks. Codex Desktop can open an autonomous session's owning task and relay an exact owner response to it; Codex CLI safely falls back to a manual task switch. Autonomous code review defaults to a 12-round landing cap (clamped upward by ticket risk): unresolved critical findings and rejects still block, while non-blocking findings become follow-up issues at the cap. Set `recipeOverrides.stages.CODE_REVIEW.maxReviewRounds` to `0` to disable the cap explicitly.
 
+`recipeOverrides.compactThreshold` accepts `medium`, `high` (default), or `critical`. When pressure reaches that level and the current item is complete, autonomous mode prepares the same session for COMPACT recovery instead of ending it. Successful resume resets pressure for the new context window while preserving cumulative completed work.
+
 Outside the AI client, the same state is one `storybloq` invocation away.
 
 <p align="center">
@@ -378,6 +380,8 @@ Each record is its own file. IDs are sequential within type (`T-001`, `T-002`, .
 Create operations are safe to run in parallel. ID assignment and the create write happen together under a project lock, so concurrent creators are serialized and each receives a distinct sequential ID. A create can never silently overwrite an existing record; under heavy simultaneous contention a creator fails loudly with an error rather than colliding.
 
 Ticket and issue records preserve unknown JSON fields. Use `storybloq ticket meta` and `storybloq issue meta` to read or mutate those custom passthrough fields without touching core Storybloq fields. Values are JSON, and dot paths address nested objects, for example `storybloq ticket meta set T-001 integration.linear '"ABC-123"'`.
+
+Autonomous plan-review depth can be seeded per ticket with `reviewRisk` metadata (`low`, `medium`, or `high`). For example, `storybloq ticket meta set T-001 reviewRisk '"high"'` requires at least three plan-review rounds. Legacy `risk` metadata is also recognized, but `reviewRisk` is the canonical key. This setting changes review depth only; it never skips a review stage.
 
 ## Example workflow
 

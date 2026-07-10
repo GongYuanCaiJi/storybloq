@@ -5,7 +5,13 @@
  */
 import { describe, it, expect } from "vitest";
 import { evaluatePressure } from "../../src/autonomous/context-pressure.js";
-import { assessRisk, requiredRounds, nextReviewer } from "../../src/autonomous/review-depth.js";
+import {
+  assessRisk,
+  nextReviewer,
+  normalizeRiskLevel,
+  requiredRounds,
+  reviewRiskForTicket,
+} from "../../src/autonomous/review-depth.js";
 import type { FullSessionState, PressureLevel } from "../../src/autonomous/session-types.js";
 
 // ---------------------------------------------------------------------------
@@ -153,6 +159,19 @@ describe("review-depth helpers", () => {
     expect(assessRisk({ totalLines: 10, filesChanged: 1, insertions: 5, deletions: 5 })).toBe("low");
     expect(assessRisk({ totalLines: 100, filesChanged: 3, insertions: 60, deletions: 40 })).toBe("medium");
     expect(assessRisk({ totalLines: 300, filesChanged: 5, insertions: 200, deletions: 100 })).toBe("high");
+  });
+
+  it("resolves canonical and legacy ticket review-risk metadata", () => {
+    expect(reviewRiskForTicket({ reviewRisk: "high" })).toBe("high");
+    expect(reviewRiskForTicket({ risk: "medium" })).toBe("medium");
+    expect(reviewRiskForTicket({ reviewRisk: "low", risk: "high" })).toBe("low");
+    expect(reviewRiskForTicket({})).toBe("low");
+  });
+
+  it("fails closed for malformed explicit ticket risk", () => {
+    expect(reviewRiskForTicket({ reviewRisk: "unknown" })).toBe("high");
+    expect(reviewRiskForTicket({ risk: 3 })).toBe("high");
+    expect(normalizeRiskLevel("unknown", "high")).toBe("high");
   });
 });
 

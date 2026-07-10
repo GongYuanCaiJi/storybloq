@@ -1,6 +1,6 @@
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
-import { evaluatePressure } from "../context-pressure.js";
+import { evaluatePressure, pressureMeetsThreshold } from "../context-pressure.js";
 import { nextTickets } from "../../core/queries.js";
 import { findFirstPostComplete, type NextStageResult } from "./registry.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
@@ -9,9 +9,9 @@ import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinit
 /**
  * COMPLETE stage -- Ticket completed, decide next action.
  *
- * enter(): Auto-advances -- evaluates pressure, checks ticket cap, routes to
- *          PICK_TICKET (continue) or HANDOVER (done). Returns StageAdvance,
- *          not StageResult, so the walker processes it immediately.
+ * enter(): Evaluates pressure and the ticket cap. It normally auto-advances to
+ *          PICK_TICKET or HANDOVER, but pauses with a compaction instruction
+ *          when the configured threshold is reached at this clean boundary.
  *
  * report(): Not normally called -- CompleteStage auto-advances from enter().
  *           If called (e.g. crash recovery), delegates to enter() logic.
@@ -25,7 +25,7 @@ import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinit
 export class CompleteStage implements WorkflowStage {
   readonly id = "COMPLETE";
 
-  async enter(ctx: StageContext): Promise<StageAdvance> {
+  async enter(ctx: StageContext): Promise<StageResult | StageAdvance> {
     const pressure = evaluatePressure(ctx.state);
     ctx.writeState({
       contextPressure: { ...ctx.state.contextPressure, level: pressure },
@@ -94,6 +94,19 @@ export class CompleteStage implements WorkflowStage {
       }
     }
 
+    if (
+      nextTarget === "PICK_TICKET" &&
+      pressureMeetsThreshold(pressure, ctx.state.config.compactThreshold)
+    ) {
+      ctx.appendEvent("pressure_compaction_requested", {
+        level: pressure,
+        compactThreshold: ctx.state.config.compactThreshold,
+        ticketsDone,
+        issuesDone,
+      });
+      return this.buildCompactionResult(ctx, pressure, ticketsDone, issuesDone);
+    }
+
     if (nextTarget === "HANDOVER") {
       return this.buildHandoverResult(ctx, targetedRemaining, ticketsDone, issuesDone);
     }
@@ -106,7 +119,39 @@ export class CompleteStage implements WorkflowStage {
   }
 
   async report(ctx: StageContext, _report: GuideReportInput): Promise<StageAdvance> {
-    return this.enter(ctx);
+    const result = await this.enter(ctx);
+    return "action" in result
+      ? result
+      : { action: "retry", instruction: result.instruction, reminders: result.reminders };
+  }
+
+  private buildCompactionResult(
+    ctx: StageContext,
+    pressure: string,
+    ticketsDone: number,
+    issuesDone: number,
+  ): StageResult {
+    return {
+      instruction: [
+        "# Context Compaction Required",
+        "",
+        `Context pressure is **${pressure}**, which reached the configured \`compactThreshold\` (**${ctx.state.config.compactThreshold}**).`,
+        `${ticketsDone} ticket(s) and ${issuesDone} issue(s) are complete. The current item is finalized, and more work remains.`,
+        "",
+        "Prepare the same autonomous session for compaction now:",
+        '```json',
+        `{ "sessionId": "${ctx.state.sessionId}", "action": "pre_compact" }`,
+        '```',
+        "",
+        "After the guide reports Ready for Compact, run the client's compaction command. The owning task will resume this same session at COMPLETE and continue to the next item.",
+      ].join("\n"),
+      reminders: [
+        "Do not write a terminal handover or start another session.",
+        "Call pre_compact before selecting more work.",
+      ],
+      transitionedFrom: ctx.state.previousState ?? undefined,
+      contextAdvice: "compact-now",
+    };
   }
 
   // ---------------------------------------------------------------------------

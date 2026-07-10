@@ -419,7 +419,7 @@ Do NOT search source code for this. The full config.json schema is shown below. 
   "recipe": "string (default: coding)",
   "recipeOverrides": {
     "maxTicketsPerSession": "number (0 = unlimited, default: 0)",
-    "compactThreshold": "string (high/medium/low, default: high)",
+    "compactThreshold": "string (medium/high/critical, default: high)",
     "reviewBackends": ["codex", "agent"],
     "handoverInterval": "number (default: 3)",
     "stages": {

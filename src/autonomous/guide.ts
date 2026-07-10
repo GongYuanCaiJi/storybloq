@@ -8,6 +8,7 @@ import {
   type GuideOutput,
   type FullSessionState,
   type SessionSummary,
+  type ContextAdvice,
   type WorkflowState,
 } from "./session-types.js";
 import {
@@ -33,8 +34,8 @@ import {
 } from "./session.js";
 import { isFinishedOrphan, isOrphanCandidate, type OrphanCheckContext } from "./orphan-detector.js";
 import { assertTransition } from "./state-machine.js";
-import { evaluatePressure } from "./context-pressure.js";
-import { assessRisk, requiredRounds, nextReviewer } from "./review-depth.js";
+import { evaluatePressure, pressureAfterCompaction } from "./context-pressure.js";
+import { reviewRiskForTicket } from "./review-depth.js";
 import {
   spawnAliveSidecar,
   killSidecar,
@@ -65,7 +66,11 @@ import { buildAutoStartEventData, buildTieredStartEventData } from "./event-data
 import { resolveWorkId } from "./id-resolution.js";
 import { checkAutonomousConflicts } from "./conflicts-guard.js";
 import { detectBranchAffinity, buildAffinityAnnotation } from "./branch-affinity.js";
-import { isSameOwnerTask, ownerTaskForCurrentClient } from "./client-profile.js";
+import {
+  isSameOwnerTask,
+  legacyClaudeSessionIdForOwner,
+  ownerTaskForCurrentClient,
+} from "./client-profile.js";
 import {
   handleHandoverLatest,
   handleHandoverCreate,
@@ -1087,8 +1092,8 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
 
     // T-260: Liveness infrastructure
     const fp = computeBinaryFingerprint();
-    const ccSessionId = ownerTask?.client === "claude"
-      ? ownerTask.id
+    const ccSessionId = ownerTask
+      ? legacyClaudeSessionIdForOwner(ownerTask, null)
       : captureClaudeCodeSessionId();
     try {
       sidecarPid = spawnAliveSidecar(telemetryDirPath(dir));
@@ -1203,7 +1208,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
           id: ticket.id,
           displayId: ticketResolution.displayId,
           title: ticket.title,
-          risk: assessRisk(ticket).risk,
+          risk: reviewRiskForTicket(ticket),
           claimed: true,
         },
       };
@@ -1784,6 +1789,10 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
     leaseWasExpired || legacySameOwner || unownedLegacy || (knownForeignOwner && args.takeover === true)
   );
   const reboundOwnerTask = shouldRebindOwner ? callerTask : info.state.ownerTask;
+  const reboundClaudeCodeSessionId = legacyClaudeSessionIdForOwner(
+    reboundOwnerTask,
+    info.state.claudeCodeSessionId,
+  );
   const ownerTaskRebindReason = shouldRebindOwner
     ? leaseWasExpired
       ? "expired_lease"
@@ -1841,6 +1850,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
       ...refreshLease(info.state),
       resumeBlocked: true,
       ownerTask: reboundOwnerTask,
+      claudeCodeSessionId: reboundClaudeCodeSessionId,
     } as FullSessionState, "always");
     appendEvent(info.dir, {
       rev: blockedState.revision,
@@ -1904,10 +1914,11 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
       reviews: recoveryReviews,
       ticket: recoveryTicket,
       guideCallCount: 0,
-      contextPressure: { ...info.state.contextPressure, guideCallCount: 0, compactionCount: (info.state.contextPressure?.compactionCount ?? 0) + 1 },
+      contextPressure: pressureAfterCompaction(info.state),
       git: { ...info.state.git, expectedHead: headResult.data.hash, mergeBase: headResult.data.hash },
       sidecarPid: resumeSidecarPid,
       ownerTask: reboundOwnerTask,
+      claudeCodeSessionId: reboundClaudeCodeSessionId,
     } as FullSessionState, "always");
 
     appendEvent(info.dir, {
@@ -2057,11 +2068,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
 
   // Branch A: HEAD matches — normal resume (or own-commit drift from T-184)
   // ISS-036c: reset guideCallCount after compact to prevent false critical pressure
-  const resumePressure = {
-    ...info.state.contextPressure,
-    guideCallCount: 0,
-    compactionCount: (info.state.contextPressure?.compactionCount ?? 0) + 1,
-  };
+  const resumePressure = pressureAfterCompaction(info.state);
   const written = writeSessionAndRefresh(root, info.dir, {
     ...refreshLease(info.state),
     state: resumeState,
@@ -2071,11 +2078,12 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
     compactPreparedAt: null,
     resumeBlocked: false,
     guideCallCount: 0,
-    contextPressure: { ...resumePressure, level: evaluatePressure({ ...info.state, guideCallCount: 0, contextPressure: resumePressure } as FullSessionState) },
+    contextPressure: resumePressure,
     // T-184: Update expectedHead on own-commit drift (mergeBase stays at branch-off point)
     ...(ownCommitDrift ? { git: { ...info.state.git, expectedHead: headResult.data.hash } } : {}),
     sidecarPid: resumeSidecarPid,
     ownerTask: reboundOwnerTask,
+    claudeCodeSessionId: reboundClaudeCodeSessionId,
   } as FullSessionState, "always");
   appendEvent(info.dir, {
     rev: written.revision,
@@ -2523,6 +2531,7 @@ function guideResult(
     instruction: string;
     reminders?: readonly string[];
     transitionedFrom?: string;
+    contextAdvice?: ContextAdvice;
   },
 ): McpToolResult {
   const summary: SessionSummary = {
@@ -2540,9 +2549,9 @@ function guideResult(
   // T-178: Inject global anti-cancel reminder for auto mode
   const allReminders = [...(opts.reminders ?? [])];
   if ((state.mode === "auto" || !state.mode) && currentState !== "SESSION_END") {
-    allReminders.push(
-      "NEVER cancel this session due to context size. Compaction is automatic — Storybloq preserves all session state across compactions via hooks.",
-    );
+    allReminders.push(opts.contextAdvice === "compact-now"
+      ? "Do not cancel this session due to context size. Follow the compaction instruction so Storybloq can preserve and resume this session."
+      : "NEVER cancel this session due to context size. Compaction is automatic — Storybloq preserves all session state across compactions via hooks.");
   }
 
   const output: GuideOutput = {
@@ -2551,7 +2560,7 @@ function guideResult(
     transitionedFrom: opts.transitionedFrom,
     instruction: opts.instruction,
     reminders: allReminders,
-    contextAdvice: "ok",
+    contextAdvice: opts.contextAdvice ?? "ok",
     sessionSummary: summary,
   };
 
@@ -2566,6 +2575,7 @@ function guideResult(
     `**Risk:** ${summary.risk}`,
     `**Completed:** ${summary.completed.length > 0 ? summary.completed.join(", ") : "none"}`,
     `**Tickets done:** ${summary.completed.length}`,
+    output.contextAdvice !== "ok" ? `**Context advice:** ${output.contextAdvice}` : "",
     summary.branch ? `**Branch:** ${summary.branch}` : "",
     state.verificationCounters
       ? `**Verification:** ${state.verificationCounters.proposed} proposed, ${state.verificationCounters.verified} verified, ${state.verificationCounters.rejected} rejected, ${state.verificationCounters.filed} filed`
