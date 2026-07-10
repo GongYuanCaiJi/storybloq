@@ -7,18 +7,20 @@ import type { FullSessionState, PressureLevel } from "./session-types.js";
 interface Limits { calls: number; tickets: number; bytes: number; }
 
 /**
- * Threshold presets keyed by compactThreshold config value.
- * "high" = default (moderate) — compact when pressure reaches "high".
- * "critical" = conservative — only compact at critical pressure.
- * "medium" = aggressive — compact earlier.
+ * Threshold presets keyed by compactThreshold config value. The setting has
+ * two coordinated effects: it selects the signal limits below and the minimum
+ * pressure rank accepted by pressureMeetsThreshold().
+ * "high" = default (moderate); rotate when pressure reaches "high".
+ * "critical" = conservative; use higher limits and rotate only at critical.
+ * "medium" = aggressive; use lower limits and rotate at medium.
  *
  * Default tier ("high") thresholds:
  * | Level    | Condition                              | Action                    |
  * |----------|----------------------------------------|---------------------------|
  * | low      | <30 calls, <3 tickets, <150KB events   | Continue                  |
  * | medium   | 30+ calls OR 3+ tickets OR >150KB      | Continue                  |
- * | high     | 60+ calls OR 5+ tickets OR >800KB      | Compact at next COMPLETE  |
- * | critical | >90 calls OR 8+ tickets OR >1.5MB      | Compact at next COMPLETE  |
+ * | high     | 60+ calls OR 5+ tickets OR >800KB      | Rotate at next COMPLETE   |
+ * | critical | >90 calls OR 8+ tickets OR >1.5MB      | Rotate at next COMPLETE   |
  */
 const THRESHOLDS: Record<string, { critical: Limits; high: Limits; medium: Limits }> = {
   critical: {

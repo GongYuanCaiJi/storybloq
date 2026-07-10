@@ -117,7 +117,7 @@ Inside Claude Code or Codex:
 
 Both clients support context loading, autonomous mode, MCP, and compaction/status hooks. Codex Desktop can open an autonomous session's owning task and relay an exact owner response to it; Codex CLI safely falls back to a manual task switch. Autonomous code review defaults to a 12-round landing cap (clamped upward by ticket risk): unresolved critical findings and rejects still block, while non-blocking findings become follow-up issues at the cap. Set `recipeOverrides.stages.CODE_REVIEW.maxReviewRounds` to `0` to disable the cap explicitly.
 
-`recipeOverrides.compactThreshold` accepts `medium`, `high` (default), or `critical`. When pressure reaches that level and the current item is complete, autonomous mode prepares the same session for COMPACT recovery instead of ending it. Successful resume resets pressure for the new context window while preserving cumulative completed work.
+`recipeOverrides.compactThreshold` accepts `medium`, `high` (default), or `critical`. The value selects both the pressure limits and the rotation trigger: `medium` uses lower limits and rotates at medium pressure, while `critical` uses higher limits and waits for critical pressure. At a clean COMPLETE boundary, threshold pressure ends the bounded session through HANDOVER because Storybloq cannot invoke a client compaction command. When the client itself compacts, the PreCompact and SessionStart hooks preserve the same session; pressure resets only after SessionStart confirms `source: compact`.
 
 Outside the AI client, the same state is one `storybloq` invocation away.
 

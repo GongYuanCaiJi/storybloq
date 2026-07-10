@@ -296,6 +296,7 @@ describe("CompleteStage", () => {
     writeFileSync(join(testRoot, ".story", "tickets", "T-999.json"), JSON.stringify({
       id: "T-999", title: "Test", description: "", type: "task", status: "open",
       phase: null, order: 10, createdDate: "2026-01-01", completedDate: null, blockedBy: [],
+      parentTicket: null,
     }), "utf-8");
     const state = makeState({
       state: "COMPLETE",
@@ -325,6 +326,12 @@ describe("CompleteStage", () => {
     writeFileSync(join(testRoot, ".story", "tickets", "T-999.json"), JSON.stringify({
       id: "T-999", title: "Test", description: "", type: "task", status: "open",
       phase: null, order: 10, createdDate: "2026-01-01", completedDate: null, blockedBy: [],
+      parentTicket: null,
+    }), "utf-8");
+    writeFileSync(join(testRoot, ".story", "issues", "ISS-999.json"), JSON.stringify({
+      id: "ISS-999", title: "Remaining work", status: "open", severity: "medium",
+      components: [], impact: "Keeps the session active.", resolution: null,
+      resolvedDate: null, discoveredDate: "2026-01-01", relatedTickets: [], location: [],
     }), "utf-8");
     const state = makeState({
       state: "COMPLETE",

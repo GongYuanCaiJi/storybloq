@@ -11,6 +11,7 @@ import {
   findResumableSession,
   findSessionById,
   prepareForCompact,
+  markCompactionObserved,
   writeSessionSync,
   withSessionLock,
   appendEvent,
@@ -306,7 +307,8 @@ export async function handleSessionResumePrompt(
       return;
     }
 
-    const { info, stale } = match;
+    let { info } = match;
+    const { stale } = match;
     const sessionId = info.state.sessionId;
     const callerTask = ownerTaskForClient(
       options.codexHookJson ? "codex" : "claude",
@@ -324,6 +326,32 @@ export async function handleSessionResumePrompt(
       info.state.ticket?.displayId ?? info.state.ticket?.id ?? "The autonomous ticket",
       40,
     );
+
+    // The SessionStart hook is the proof that client context actually changed.
+    // A guide-level pre_compact call only prepares state and must not reset
+    // pressure by itself. Mark only a verified owner on source=compact.
+    if (options.source === "compact" && verifiedSameOwner) {
+      try {
+        const observed = await withSessionLock(root, async () => {
+          const current = findSessionById(root, sessionId);
+          if (!current || current.state.state !== "COMPACT" || !current.state.compactPending) {
+            return null;
+          }
+          const written = markCompactionObserved(current.dir, current.state);
+          appendEvent(current.dir, {
+            rev: written.revision,
+            type: "client_compaction_observed",
+            timestamp: written.compactObservedAt!,
+            data: { source: options.source, client: callerTask?.client ?? null },
+          });
+          return { ...current, state: written };
+        });
+        if (observed) info = observed;
+      } catch {
+        // Best-effort hook metadata. Resume remains safe because pressure is
+        // preserved when this marker cannot be written.
+      }
+    }
 
     if (!callerTask && hasRecordedOwner) {
       const command = options.codexHookJson ? "$story" : "/story";
@@ -437,6 +465,7 @@ export async function handleSessionClearCompact(root: string, sessionId?: string
         compactPending: true,
         resumeBlocked: false,
         compactPreparedAt: new Date().toISOString(),
+        compactObservedAt: null,
       });
       const hasKnownLiveOwner = !isLeaseExpired(info.state) &&
         (!!info.state.ownerTask || !!info.state.claudeCodeSessionId);
@@ -458,6 +487,7 @@ export async function handleSessionClearCompact(root: string, sessionId?: string
       terminationReason: "admin_recovery",
       compactPending: false,
       compactPreparedAt: null,
+      compactObservedAt: null,
       resumeBlocked: false,
     });
     writeShutdownMarker(info.dir);
@@ -547,6 +577,7 @@ export async function handleSessionStop(root: string, sessionId?: string): Promi
       deferralsUnfiled: hasUnfiledDeferrals,
       compactPending: false,
       compactPreparedAt: null,
+      compactObservedAt: null,
       resumeBlocked: false,
       preCompactState: null,
       resumeFromRevision: null,

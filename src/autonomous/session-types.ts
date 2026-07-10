@@ -547,7 +547,11 @@ export const SessionStateSchema = z.object({
   preCompactState: z.string().nullable().default(null),
   compactPending: z.boolean().default(false),
   compactPreparedAt: z.string().nullable().default(null),
+  compactObservedAt: z.string().nullable().default(null),
   resumeBlocked: z.boolean().default(false),
+
+  // Last cumulative work boundary reserved for an automatic checkpoint handover.
+  lastCheckpointWorkCount: z.number().int().min(0).default(0),
 
   // Session termination
   terminationReason: z
@@ -805,7 +809,7 @@ export interface SessionSummary {
   readonly branch: string | null;
 }
 
-export type ContextAdvice = "ok" | "compact-now";
+export type ContextAdvice = "ok";
 
 export interface GuideOutput {
   readonly sessionId: string;

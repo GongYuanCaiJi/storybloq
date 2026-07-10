@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -185,7 +185,7 @@ describe("CompleteStage pressure compaction", () => {
     }
   });
 
-  it("requests pre_compact at high pressure without ending the session", async () => {
+  it("routes to HANDOVER at high pressure when Storybloq cannot invoke client compaction", async () => {
     addOpenWork();
     const state = makeState({
       contextPressure: {
@@ -200,10 +200,12 @@ describe("CompleteStage pressure compaction", () => {
 
     const result = await stage.enter(ctx);
 
-    expect(isStageAdvance(result)).toBe(false);
-    expect(instructionOf(result)).toContain("Context Compaction Required");
-    expect(instructionOf(result)).toContain('"action": "pre_compact"');
-    if (!isStageAdvance(result)) expect(result.contextAdvice).toBe("compact-now");
+    expect(isStageAdvance(result)).toBe(true);
+    if (isStageAdvance(result) && result.action === "goto") {
+      expect(result.target).toBe("HANDOVER");
+    }
+    expect(instructionOf(result)).toContain("Context Rotation Required");
+    expect(instructionOf(result)).not.toContain('"action": "pre_compact"');
     expect(ctx.state.state).toBe("COMPLETE");
     expect(ctx.state.status).toBe("active");
   });
@@ -232,7 +234,7 @@ describe("CompleteStage pressure compaction", () => {
     expect(isStageAdvance(result)).toBe(true);
   });
 
-  it("requests compaction at critical pressure under the critical threshold", async () => {
+  it("routes to HANDOVER at critical pressure under the critical threshold", async () => {
     addOpenWork();
     const state = makeState({
       contextPressure: {
@@ -253,8 +255,11 @@ describe("CompleteStage pressure compaction", () => {
 
     const result = await stage.enter(ctx);
 
-    expect(isStageAdvance(result)).toBe(false);
-    expect(instructionOf(result)).toContain("Context Compaction Required");
+    expect(isStageAdvance(result)).toBe(true);
+    if (isStageAdvance(result) && result.action === "goto") {
+      expect(result.target).toBe("HANDOVER");
+    }
+    expect(instructionOf(result)).toContain("Context Rotation Required");
   });
 
   it("lets normal end-of-work HANDOVER win over pressure compaction", async () => {
@@ -275,10 +280,10 @@ describe("CompleteStage pressure compaction", () => {
     if (isStageAdvance(result) && result.action === "goto") {
       expect(result.target).toBe("HANDOVER");
     }
-    expect(instructionOf(result)).not.toContain("Context Compaction Required");
+    expect(instructionOf(result)).not.toContain("Context Rotation Required");
   });
 
-  it("repeats the pre_compact instruction when COMPLETE receives a report", async () => {
+  it("routes a COMPLETE report to HANDOVER instead of a contradictory retry", async () => {
     addOpenWork();
     const state = makeState({
       contextPressure: {
@@ -293,9 +298,39 @@ describe("CompleteStage pressure compaction", () => {
 
     const result = await stage.report(ctx, { completedAction: "acknowledged" });
 
-    expect(result.action).toBe("retry");
-    if (result.action === "retry") {
-      expect(result.instruction).toContain('"action": "pre_compact"');
+    expect(result.action).toBe("goto");
+    if (result.action === "goto") {
+      expect(result.target).toBe("HANDOVER");
+      expect("result" in result ? result.result?.instruction : "").toContain("Context Rotation Required");
+      expect("result" in result ? result.result?.instruction : "").not.toContain('"action": "pre_compact"');
     }
+  });
+
+  it("writes one checkpoint when COMPLETE re-enters at the same work boundary", async () => {
+    addOpenWork();
+    const completedTickets = Array.from({ length: 3 }, (_, index) => ({ id: `T-${index + 1}` }));
+    const ctx = new StageContext(root, sessionDir, makeState({
+      completedTickets,
+      guideCallCount: 0,
+      contextPressure: {
+        level: "low",
+        guideCallCount: 0,
+        ticketsCompleted: 3,
+        compactionCount: 0,
+        eventsLogBytes: 0,
+      },
+      config: {
+        maxTicketsPerSession: 0,
+        compactThreshold: "high",
+        reviewBackends: ["codex", "agent"],
+        handoverInterval: 3,
+      },
+    }), makeRecipe());
+
+    await stage.enter(ctx);
+    await stage.enter(ctx);
+
+    expect(readdirSync(join(root, ".story", "handovers"))).toHaveLength(1);
+    expect(ctx.state.lastCheckpointWorkCount).toBe(3);
   });
 });

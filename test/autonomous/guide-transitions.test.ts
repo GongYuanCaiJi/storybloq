@@ -13,6 +13,7 @@ import {
   reviewRiskForTicket,
 } from "../../src/autonomous/review-depth.js";
 import type { FullSessionState, PressureLevel } from "../../src/autonomous/session-types.js";
+import { effectiveCodeReviewMaxRounds } from "../../src/autonomous/session-diagnostics.js";
 
 // ---------------------------------------------------------------------------
 // Helper: build a minimal FullSessionState for testing
@@ -172,6 +173,9 @@ describe("review-depth helpers", () => {
     expect(reviewRiskForTicket({ reviewRisk: "unknown" })).toBe("high");
     expect(reviewRiskForTicket({ risk: 3 })).toBe("high");
     expect(normalizeRiskLevel("unknown", "high")).toBe("high");
+    expect(effectiveCodeReviewMaxRounds("unknown", {
+      CODE_REVIEW: { maxReviewRounds: 1 },
+    })).toBe(3);
   });
 });
 

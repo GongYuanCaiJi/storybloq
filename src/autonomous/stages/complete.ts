@@ -1,4 +1,4 @@
-import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
+import type { WorkflowStage, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput } from "../session-types.js";
 import { evaluatePressure, pressureMeetsThreshold } from "../context-pressure.js";
 import { nextTickets } from "../../core/queries.js";
@@ -10,8 +10,9 @@ import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinit
  * COMPLETE stage -- Ticket completed, decide next action.
  *
  * enter(): Evaluates pressure and the ticket cap. It normally auto-advances to
- *          PICK_TICKET or HANDOVER, but pauses with a compaction instruction
- *          when the configured threshold is reached at this clean boundary.
+ *          PICK_TICKET or HANDOVER. Because neither supported client exposes a
+ *          callable compaction action, threshold pressure ends at HANDOVER
+ *          instead of claiming that client context was compacted.
  *
  * report(): Not normally called -- CompleteStage auto-advances from enter().
  *           If called (e.g. crash recovery), delegates to enter() logic.
@@ -25,7 +26,7 @@ import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinit
 export class CompleteStage implements WorkflowStage {
   readonly id = "COMPLETE";
 
-  async enter(ctx: StageContext): Promise<StageResult | StageAdvance> {
+  async enter(ctx: StageContext): Promise<StageAdvance> {
     const pressure = evaluatePressure(ctx.state);
     ctx.writeState({
       contextPressure: { ...ctx.state.contextPressure, level: pressure },
@@ -56,9 +57,6 @@ export class CompleteStage implements WorkflowStage {
         },
       } as StageAdvance;
     }
-
-    // ISS-084: Checkpoint at handoverInterval boundaries
-    await this.tryCheckpoint(ctx, totalWorkDone, ticketsDone, issuesDone);
 
     // Load project state for routing decisions
     let projectState;
@@ -98,18 +96,22 @@ export class CompleteStage implements WorkflowStage {
       nextTarget === "PICK_TICKET" &&
       pressureMeetsThreshold(pressure, ctx.state.config.compactThreshold)
     ) {
-      ctx.appendEvent("pressure_compaction_requested", {
+      ctx.appendEvent("pressure_rotation_requested", {
         level: pressure,
         compactThreshold: ctx.state.config.compactThreshold,
         ticketsDone,
         issuesDone,
       });
-      return this.buildCompactionResult(ctx, pressure, ticketsDone, issuesDone);
+      return this.buildPressureRotationResult(ctx, pressure, ticketsDone, issuesDone);
     }
 
     if (nextTarget === "HANDOVER") {
       return this.buildHandoverResult(ctx, targetedRemaining, ticketsDone, issuesDone);
     }
+
+    // ISS-084: Checkpoint only when this session will continue. A terminal or
+    // pressure-rotation handover supersedes the periodic checkpoint.
+    await this.tryCheckpoint(ctx, totalWorkDone, ticketsDone, issuesDone);
 
     // PICK_TICKET path
     if (targetedRemaining !== null) {
@@ -119,38 +121,36 @@ export class CompleteStage implements WorkflowStage {
   }
 
   async report(ctx: StageContext, _report: GuideReportInput): Promise<StageAdvance> {
-    const result = await this.enter(ctx);
-    return "action" in result
-      ? result
-      : { action: "retry", instruction: result.instruction, reminders: result.reminders };
+    return this.enter(ctx);
   }
 
-  private buildCompactionResult(
+  private buildPressureRotationResult(
     ctx: StageContext,
     pressure: string,
     ticketsDone: number,
     issuesDone: number,
-  ): StageResult {
+  ): StageAdvance {
     return {
-      instruction: [
-        "# Context Compaction Required",
-        "",
-        `Context pressure is **${pressure}**, which reached the configured \`compactThreshold\` (**${ctx.state.config.compactThreshold}**).`,
-        `${ticketsDone} ticket(s) and ${issuesDone} issue(s) are complete. The current item is finalized, and more work remains.`,
-        "",
-        "Prepare the same autonomous session for compaction now:",
-        '```json',
-        `{ "sessionId": "${ctx.state.sessionId}", "action": "pre_compact" }`,
-        '```',
-        "",
-        "After the guide reports Ready for Compact, run the client's compaction command. The owning task will resume this same session at COMPLETE and continue to the next item.",
-      ].join("\n"),
-      reminders: [
-        "Do not write a terminal handover or start another session.",
-        "Call pre_compact before selecting more work.",
-      ],
-      transitionedFrom: ctx.state.previousState ?? undefined,
-      contextAdvice: "compact-now",
+      action: "goto",
+      target: "HANDOVER",
+      result: {
+        instruction: [
+          "# Context Rotation Required",
+          "",
+          `Context pressure is **${pressure}**, which reached the configured \`compactThreshold\` (**${ctx.state.config.compactThreshold}**).`,
+          `${ticketsDone} ticket(s) and ${issuesDone} issue(s) are complete. The current item is finalized, and more work remains.`,
+          "",
+          "Compaction was not confirmed, and Storybloq cannot invoke the client's compaction command. End this bounded session at the clean item boundary and write a handover for the next task.",
+          "",
+          'Call me with completedAction: "handover_written" and include the content in handoverContent.',
+        ].join("\n"),
+        reminders: [
+          "Do not select another item in this session.",
+          "Write the context-rotation handover now.",
+        ],
+        transitionedFrom: "COMPLETE",
+        contextAdvice: "ok",
+      },
     };
   }
 
@@ -166,7 +166,12 @@ export class CompleteStage implements WorkflowStage {
   ): Promise<void> {
     const handoverInterval = ctx.state.config.handoverInterval ?? 5;
     if (handoverInterval <= 0 || totalWorkDone <= 0 || totalWorkDone % handoverInterval !== 0) return;
+    const previousCheckpointWorkCount = ctx.state.lastCheckpointWorkCount ?? 0;
+    if (previousCheckpointWorkCount >= totalWorkDone) return;
 
+    // Persist the boundary before the external handover write. Checkpoints are
+    // best-effort, so a crash may omit one, but it must never duplicate one.
+    ctx.writeState({ lastCheckpointWorkCount: totalWorkDone });
     try {
       const { handleHandoverCreate } = await import("../../cli/commands/handover.js");
       const completedIds = ctx.state.completedTickets.map((t) => (t as Record<string, unknown>).displayId as string | undefined ?? t.id).join(", ");
@@ -181,7 +186,12 @@ export class CompleteStage implements WorkflowStage {
         "This is an automatic mid-session checkpoint. The session is still active.",
       ].join("\n");
       await handleHandoverCreate(content, "checkpoint", "md", ctx.root);
-    } catch { /* best-effort */ }
+    } catch {
+      try {
+        ctx.writeState({ lastCheckpointWorkCount: previousCheckpointWorkCount });
+      } catch { /* best-effort */ }
+      return;
+    }
 
     try {
       const { loadProject } = await import("../../core/project-loader.js");
