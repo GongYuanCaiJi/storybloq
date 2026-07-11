@@ -468,6 +468,11 @@ describe("Storybloq Bus store", () => {
     const busRoot = join(value.root, ".story", "bus");
     await rm(busRoot, { recursive: true });
 
+    await expect(busDoctor(value.root)).resolves.toEqual({
+      healthy: true,
+      summary: expect.objectContaining({ enabled: true, initialized: false }),
+      findings: [],
+    });
     await expect(checkBusShip(value.root)).resolves.toEqual({ clear: true, blockers: [] });
     await expect(busSummary(value.root)).resolves.toMatchObject({
       enabled: true,

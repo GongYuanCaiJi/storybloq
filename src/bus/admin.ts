@@ -8,6 +8,8 @@ import { BusError } from "./errors.js";
 import { durableCreate, readJsonNoFollow } from "./io.js";
 import {
   assertBusLayout,
+  assertBusIgnoreFileSafe,
+  assertBusRuntimeIgnored,
   busRuntimeExists,
   createBusPathsForInitialization,
   resolveBusPaths,
@@ -60,6 +62,10 @@ export async function resolveInitializedBusPaths(root: string): Promise<BusPaths
 export async function initializeBus(root: string): Promise<InitializeBusResult> {
   let enabledNow = false;
   await withProjectLock(root, { strict: true }, async ({ state }) => {
+    const storyRoot = join(root, ".story");
+    await assertBusIgnoreFileSafe(storyRoot);
+    await ensureGitignoreEntries(join(storyRoot, ".gitignore"), ["bus/"]);
+    await assertBusRuntimeIgnored(storyRoot);
     if (state.config.features.bus !== true) {
       await writeConfigUnlocked({
         ...state.config,
@@ -67,7 +73,6 @@ export async function initializeBus(root: string): Promise<InitializeBusResult> 
       }, root);
       enabledNow = true;
     }
-    await ensureGitignoreEntries(join(root, ".story", ".gitignore"), ["bus/"]);
   });
 
   const paths = await createBusPathsForInitialization(root);

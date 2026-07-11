@@ -24,7 +24,21 @@ async function rejectSymlink(path: string, label: string): Promise<void> {
   }
 }
 
-async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> {
+export async function assertBusIgnoreFileSafe(storyRoot: string): Promise<void> {
+  const path = join(storyRoot, ".gitignore");
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new BusError("invalid_input", ".story/.gitignore must be a regular file");
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+}
+
+export async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> {
+  await assertBusIgnoreFileSafe(storyRoot);
   let raw: string;
   try {
     raw = await readFile(join(storyRoot, ".gitignore"), "utf-8");
@@ -35,8 +49,14 @@ async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> {
       err,
     );
   }
-  const entries = raw.split(/\r?\n/).map((line) => line.trim());
-  if (!entries.includes("bus/")) {
+  let ignored = false;
+  for (const entry of raw.split(/\r?\n/).map((line) => line.trim())) {
+    const normalized = entry.startsWith("/") ? entry.slice(1) : entry;
+    const pattern = normalized.startsWith("!/") ? `!${normalized.slice(2)}` : normalized;
+    if (pattern === "bus/") ignored = true;
+    else if (pattern === "!bus" || pattern.startsWith("!bus/")) ignored = false;
+  }
+  if (!ignored) {
     throw new BusError(
       "conflict",
       "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",

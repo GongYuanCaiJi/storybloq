@@ -466,7 +466,9 @@ export function registerBusCommand(yargs: Argv): Argv {
         async (argv) => {
           const format = formatValue(argv.format);
           await runBus(format, busDoctor, (result) => result.healthy
-            ? "Storybloq Bus is healthy."
+            ? result.summary.initialized
+              ? "Storybloq Bus is healthy."
+              : "Storybloq Bus is enabled but not initialized in this checkout. Run `storybloq bus init` to participate."
             : `Storybloq Bus has ${result.findings.length} finding(s):\n${result.findings.map((finding) => `- ${finding}`).join("\n")}`,
           (result) => !result.healthy);
         },

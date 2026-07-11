@@ -80,6 +80,23 @@ describe("FINALIZE Storybloq Bus gate", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("blocks a partially present Bus runtime without recreating it", async () => {
+    const fixture = await createBusFixture("finalize-bus-partial-runtime");
+    fixtures.push(fixture);
+    const pending = join(fixture.root, ".story", "bus", "mailboxes", "reviewer", "pending");
+    await rm(pending, { recursive: true });
+    const sessionDir = join(fixture.root, ".story", "sessions", state().sessionId);
+    await mkdir(sessionDir, { recursive: true });
+
+    const result = await new FinalizeStage().enter(
+      new StageContext(fixture.root, sessionDir, state(), recipe()),
+    );
+
+    expect((result as { instruction: string }).instruction).toContain("Finalize blocked by Storybloq Bus");
+    expect((result as { instruction: string }).instruction).toContain("storybloq bus doctor");
+    await expect(access(pending)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("blocks an unacknowledged critical notice before staging", async () => {
     const fixture = await createBusFixture("finalize-bus");
     fixtures.push(fixture);

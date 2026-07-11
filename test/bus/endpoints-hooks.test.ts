@@ -117,6 +117,49 @@ describe("Storybloq Bus endpoint succession", () => {
     })).rejects.toMatchObject({ code: "unauthorized" });
   });
 
+  it("prefers a fresh succession record over same-task consumed retries", async () => {
+    const value = await fixture();
+    const transcriptPath = "/tmp/claude-stable-task-transcript.jsonl";
+    const first = await mintCompactionSuccession({
+      root: value.root,
+      client: "claude",
+      clientTaskId: value.reviewerTaskId,
+      transcriptPath,
+    });
+    await expect(consumeCompactionSuccession({
+      root: value.root,
+      client: "claude",
+      clientTaskId: value.reviewerTaskId,
+      transcriptPath,
+    })).resolves.toMatchObject({ endpointId: value.reviewer.endpointId });
+
+    const second = await mintCompactionSuccession({
+      root: value.root,
+      client: "claude",
+      clientTaskId: value.reviewerTaskId,
+      transcriptPath,
+    });
+    expect(second?.successionId).not.toBe(first?.successionId);
+    await expect(consumeCompactionSuccession({
+      root: value.root,
+      client: "claude",
+      clientTaskId: value.reviewerTaskId,
+      transcriptPath,
+    })).resolves.toMatchObject({ endpointId: value.reviewer.endpointId });
+
+    const secondRecord = JSON.parse(await readFile(
+      join(value.root, ".story", "bus", "succession", `${second!.successionId}.json`),
+      "utf-8",
+    ));
+    expect(secondRecord.consumedAt).not.toBeNull();
+    await expect(consumeCompactionSuccession({
+      root: value.root,
+      client: "claude",
+      clientTaskId: value.reviewerTaskId,
+      transcriptPath,
+    })).resolves.toMatchObject({ endpointId: value.reviewer.endpointId });
+  });
+
   it("rejects forged and expired succession evidence", async () => {
     const value = await fixture();
     const transcriptPath = "/tmp/claude-transcript-1.jsonl";

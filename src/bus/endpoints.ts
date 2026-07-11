@@ -437,16 +437,29 @@ export async function consumeCompactionSuccession(input: {
   const paths = await resolveInitializedBusPaths(input.root);
   const transcriptHash = sha256(input.transcriptPath);
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
-    const matches: Array<{ path: string; record: BusSuccession }> = [];
+    const freshMatches: Array<{ path: string; record: BusSuccession }> = [];
+    const retryMatches: Array<{ path: string; record: BusSuccession }> = [];
     const now = Date.now();
     for (const candidate of await liveSuccessionRecords(paths.succession, now)) {
       const record = candidate.record;
-      if (record.client === input.client && record.kind === "compact" &&
-          record.transcriptHash === transcriptHash &&
-          (!record.consumedAt || record.toTaskId === taskId)) matches.push(candidate);
+      if (record.client !== input.client || record.kind !== "compact" ||
+          record.transcriptHash !== transcriptHash) continue;
+      if (!record.consumedAt) freshMatches.push(candidate);
+      else if (record.toTaskId === taskId) retryMatches.push(candidate);
     }
-    if (matches.length !== 1) return null;
-    const match = matches[0]!;
+    if (freshMatches.length > 1) return null;
+    let match = freshMatches[0];
+    if (!match) {
+      const endpointIds = new Set(retryMatches.map((candidate) => candidate.record.endpointId));
+      if (endpointIds.size !== 1) return null;
+      match = retryMatches.reduce<typeof retryMatches[number] | undefined>((latest, candidate) => {
+        if (!latest) return candidate;
+        const order = candidate.record.createdAt.localeCompare(latest.record.createdAt) ||
+          candidate.record.successionId.localeCompare(latest.record.successionId);
+        return order > 0 ? candidate : latest;
+      }, undefined);
+    }
+    if (!match) return null;
     return withHardenedLock(join(paths.locks, `endpoint-${match.record.endpointId}.lock`), async () => {
       const endpointPath = join(paths.endpoints, `${match.record.endpointId}.json`);
       const endpoint = await readJsonNoFollow(endpointPath, BusEndpointSchema);

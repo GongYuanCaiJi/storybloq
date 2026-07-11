@@ -967,6 +967,9 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
   const paths = await resolveBusPaths(root, false);
+  if (!await busRuntimeExists(paths.busRoot)) {
+    return { healthy: true, summary: emptyBusSummary(), findings: [] };
+  }
   const findings = await busLayoutFindings(paths);
   if (findings.length > 0) {
     return { healthy: false, summary: emptyBusSummary(), findings };
