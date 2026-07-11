@@ -44,7 +44,7 @@ async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> {
   }
 }
 
-export async function resolveBusPaths(projectRoot: string, create = false): Promise<BusPaths> {
+export async function resolveBusPaths(projectRoot: string, _create?: false): Promise<BusPaths> {
   let canonicalProject: string;
   try {
     canonicalProject = await realpath(resolve(projectRoot));
@@ -82,25 +82,62 @@ export async function resolveBusPaths(projectRoot: string, create = false): Prom
   ] as const) {
     await rejectSymlink(path, label);
   }
-  if (create) {
-    await assertBusRuntimeIgnored(storyRoot);
-    for (const directory of [
-      busRoot,
-      paths.threads,
-      paths.endpoints,
-      paths.succession,
-      paths.mailboxes,
-      join(paths.mailboxes, "implementer"),
-      join(paths.mailboxes, "implementer", "pending"),
-      join(paths.mailboxes, "reviewer"),
-      join(paths.mailboxes, "reviewer", "pending"),
-      paths.locks,
-    ]) {
-      await mkdir(directory, { recursive: true, mode: 0o700 });
-      await rejectSymlink(directory, relative(canonicalProject, directory));
-    }
+  return paths;
+}
+
+function requiredBusDirectories(paths: BusPaths): string[] {
+  return [
+    paths.busRoot,
+    paths.threads,
+    paths.endpoints,
+    paths.succession,
+    paths.mailboxes,
+    join(paths.mailboxes, "implementer"),
+    join(paths.mailboxes, "implementer", "pending"),
+    join(paths.mailboxes, "reviewer"),
+    join(paths.mailboxes, "reviewer", "pending"),
+    paths.locks,
+  ];
+}
+
+export async function createBusPathsForInitialization(projectRoot: string): Promise<BusPaths> {
+  const paths = await resolveBusPaths(projectRoot);
+  await assertBusRuntimeIgnored(paths.storyRoot);
+  for (const directory of requiredBusDirectories(paths)) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await rejectSymlink(directory, relative(paths.projectRoot, directory));
   }
   return paths;
+}
+
+export async function busRuntimeExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new BusError("io_error", `Cannot inspect Bus runtime: ${err instanceof Error ? err.message : String(err)}`, err);
+  }
+}
+
+export async function busLayoutFindings(paths: BusPaths): Promise<string[]> {
+  const findings: string[] = [];
+  for (const directory of requiredBusDirectories(paths)) {
+    try {
+      const stat = await lstat(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        findings.push(`layout: ${directory} is not a regular directory`);
+      }
+    } catch (err) {
+      findings.push(`layout: ${directory}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return findings;
+}
+
+export async function assertBusLayout(paths: BusPaths): Promise<void> {
+  const findings = await busLayoutFindings(paths);
+  if (findings.length > 0) throw new BusError("corrupt", findings.join("; "));
 }
 
 export function assertContainedPath(root: string, target: string): void {

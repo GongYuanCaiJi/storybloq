@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { z } from "zod";
+import { resolveInitializedBusPaths } from "./admin.js";
 import { canonicalHash, hashWithoutKey } from "./canonical.js";
 import { BusError } from "./errors.js";
 import { durableWrite, listRegularJsonFiles, readJsonNoFollow } from "./io.js";
@@ -191,7 +192,7 @@ function derivedContent(folded: FoldedBusThread) {
 }
 
 export async function writeDerivedThread(root: string, folded: FoldedBusThread): Promise<void> {
-  const paths = await resolveBusPaths(root, false);
+  const paths = await resolveInitializedBusPaths(root);
   const record = BusDerivedRecordSchema.parse({
     ...derivedContent(folded),
     updatedAt: new Date().toISOString(),
@@ -203,7 +204,7 @@ export async function writeDerivedThread(root: string, folded: FoldedBusThread):
 }
 
 export async function ensureDerivedThread(root: string, folded: FoldedBusThread): Promise<boolean> {
-  const paths = await resolveBusPaths(root, false);
+  const paths = await resolveInitializedBusPaths(root);
   const path = join(paths.threads, folded.thread.threadId, "derived.json");
   try {
     const current = await readJsonNoFollow(path, BusDerivedRecordSchema);

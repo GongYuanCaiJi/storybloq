@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { access, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { loadProject } from "../core/project-loader.js";
@@ -21,8 +21,15 @@ import {
 } from "./io.js";
 import { withHardenedLock } from "./lock.js";
 import { readBusHookPolicy } from "./hooks.js";
-import { readBusInstance } from "./admin.js";
-import { resolveBusPaths, roleMailboxPath, type BusPaths } from "./paths.js";
+import { readBusInstance, resolveInitializedBusPaths } from "./admin.js";
+import {
+  assertBusLayout,
+  busLayoutFindings,
+  busRuntimeExists,
+  resolveBusPaths,
+  roleMailboxPath,
+  type BusPaths,
+} from "./paths.js";
 import {
   BUS_MAX_ENTRY_BYTES,
   BusEntrySchema,
@@ -549,7 +556,7 @@ export async function sendBusMessage(root: string, input: BusSendInput): Promise
   }
   const loaded = await loadProject(root);
   const config = assertBusEnabled(loaded.state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) => {
     const normalized = normalizeSend(
       loaded.state,
@@ -602,16 +609,6 @@ async function pathExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
-  }
-}
-
-async function busRuntimeExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw new BusError("io_error", `Cannot inspect Bus runtime: ${err instanceof Error ? err.message : String(err)}`, err);
   }
 }
 
@@ -724,7 +721,7 @@ export async function pollBus(root: string, input: {
 }): Promise<BusPollResult> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint, persist) => {
     const requestedLimit = Number.isFinite(input.limit) ? Math.floor(input.limit!) : 20;
     const limit = Math.max(1, Math.min(100, requestedLimit));
@@ -803,7 +800,7 @@ export async function acknowledgeBusMessage(root: string, input: {
   if (!MessageIdSchema.safeParse(input.messageId).success) throw new BusError("invalid_input", "Invalid message id");
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) => {
     const threadId = await findMessageThread(paths, endpoint.role, input.messageId);
     if (!threadId) throw new BusError("not_found", "Bus message not found");
@@ -884,7 +881,7 @@ export async function updateBusThread(root: string, input: {
 }): Promise<FoldedBusThread> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) =>
     withHardenedLock(join(paths.locks, `thread-${input.threadId}.lock`), async () => {
     let folded = await foldBusThread(paths.projectRoot, input.threadId);
@@ -964,41 +961,6 @@ function emptyBusSummary(): BusSummary {
     quarantined: 0,
     hookDelivery: { claude: false, codex: false },
   };
-}
-
-function requiredBusDirectories(paths: BusPaths): string[] {
-  return [
-    paths.busRoot,
-    paths.threads,
-    paths.endpoints,
-    paths.succession,
-    paths.mailboxes,
-    join(paths.mailboxes, "implementer"),
-    join(paths.mailboxes, "implementer", "pending"),
-    join(paths.mailboxes, "reviewer"),
-    join(paths.mailboxes, "reviewer", "pending"),
-    paths.locks,
-  ];
-}
-
-async function busLayoutFindings(paths: BusPaths): Promise<string[]> {
-  const findings: string[] = [];
-  for (const directory of requiredBusDirectories(paths)) {
-    try {
-      const stat = await lstat(directory);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) {
-        findings.push(`layout: ${directory} is not a regular directory`);
-      }
-    } catch (err) {
-      findings.push(`layout: ${directory}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-  return findings;
-}
-
-async function assertBusLayout(paths: BusPaths): Promise<void> {
-  const findings = await busLayoutFindings(paths);
-  if (findings.length > 0) throw new BusError("corrupt", findings.join("; "));
 }
 
 export async function busDoctor(root: string): Promise<BusDoctorResult> {

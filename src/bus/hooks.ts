@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { loadProject } from "../core/project-loader.js";
+import { resolveInitializedBusPaths } from "./admin.js";
 import { assertBusEnabled } from "./config.js";
 import { BusError } from "./errors.js";
 import { durableWrite, readJsonNoFollow } from "./io.js";
@@ -43,7 +44,7 @@ export async function setBusHookPolicy(
   enabled: boolean,
 ): Promise<BusHookPolicy> {
   assertBusEnabled((await loadProject(root)).state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveInitializedBusPaths(root);
   return withHardenedLock(join(paths.locks, "hook-policy.lock"), async () => {
     const current = await readBusHookPolicy(paths.projectRoot);
     const next = BusHookPolicySchema.parse({

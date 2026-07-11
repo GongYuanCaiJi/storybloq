@@ -475,6 +475,10 @@ describe("Storybloq Bus store", () => {
       endpoints: 0,
       pendingMessages: 0,
     });
+    await expect(reviewSend(value)).rejects.toMatchObject({
+      code: "not_found",
+      message: "Bus is not initialized in this checkout. Run `storybloq bus init` first.",
+    });
     await expect(readdir(busRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 

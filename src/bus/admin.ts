@@ -6,7 +6,13 @@ import { withProjectLock, writeConfigUnlocked } from "../core/project-loader.js"
 import { canonicalHash } from "./canonical.js";
 import { BusError } from "./errors.js";
 import { durableCreate, readJsonNoFollow } from "./io.js";
-import { resolveBusPaths } from "./paths.js";
+import {
+  assertBusLayout,
+  busRuntimeExists,
+  createBusPathsForInitialization,
+  resolveBusPaths,
+  type BusPaths,
+} from "./paths.js";
 
 export const BusInstanceSchema = z.object({
   schema: z.literal("storybloq-bus-instance/v1"),
@@ -22,13 +28,33 @@ export interface InitializeBusResult {
   readonly restartRequired: boolean;
 }
 
-export async function readBusInstance(root: string): Promise<z.infer<typeof BusInstanceSchema>> {
-  const paths = await resolveBusPaths(root, false);
+async function readBusInstanceAtPaths(paths: BusPaths): Promise<z.infer<typeof BusInstanceSchema>> {
   const instance = await readJsonNoFollow(join(paths.busRoot, "instance.json"), BusInstanceSchema);
   if (instance.projectRootHash !== canonicalHash(paths.projectRoot)) {
     throw new BusError("conflict", "Bus instance belongs to a different canonical project root");
   }
   return instance;
+}
+
+export async function readBusInstance(root: string): Promise<z.infer<typeof BusInstanceSchema>> {
+  return readBusInstanceAtPaths(await resolveBusPaths(root));
+}
+
+export async function resolveInitializedBusPaths(root: string): Promise<BusPaths> {
+  const paths = await resolveBusPaths(root);
+  if (!await busRuntimeExists(paths.busRoot)) {
+    throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus init` first.");
+  }
+  await assertBusLayout(paths);
+  try {
+    await readBusInstanceAtPaths(paths);
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") {
+      throw new BusError("corrupt", "Bus runtime is missing instance.json. Run `storybloq bus doctor` for details.", err);
+    }
+    throw err;
+  }
+  return paths;
 }
 
 export async function initializeBus(root: string): Promise<InitializeBusResult> {
@@ -44,7 +70,7 @@ export async function initializeBus(root: string): Promise<InitializeBusResult> 
     await ensureGitignoreEntries(join(root, ".story", ".gitignore"), ["bus/"]);
   });
 
-  const paths = await resolveBusPaths(root, true);
+  const paths = await createBusPathsForInitialization(root);
   const instancePath = join(paths.busRoot, "instance.json");
   try {
     const existing = await readBusInstance(paths.projectRoot);

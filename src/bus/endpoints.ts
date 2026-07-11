@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { z } from "zod";
 import { normalizeClientTaskId, type StorybloqClient } from "../autonomous/client-profile.js";
 import { loadProject } from "../core/project-loader.js";
-import { readBusInstance } from "./admin.js";
+import { resolveInitializedBusPaths } from "./admin.js";
 import { canonicalHash, sha256 } from "./canonical.js";
 import { assertBusEnabled } from "./config.js";
 import { BusError } from "./errors.js";
@@ -196,15 +196,7 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
   const taskId = normalizeClientTaskId(input.clientTaskId);
   if (!taskId) throw new BusError("invalid_input", "A valid client task id is required to join the Bus");
   assertBusEnabled((await loadProject(root)).state.config);
-  const paths = await resolveBusPaths(root, false);
-  try {
-    await readBusInstance(paths.projectRoot);
-  } catch (err) {
-    if (err instanceof BusError && err.code === "not_found") {
-      throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus init` first.");
-    }
-    throw err;
-  }
+  const paths = await resolveInitializedBusPaths(root);
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
     const listed = await listEndpoints(paths.projectRoot);
     if (listed.findings.length > 0) {
@@ -293,7 +285,7 @@ export async function assertEndpointCaller(
   }
   const taskId = normalizeClientTaskId(clientTaskId);
   if (!taskId) throw new BusError("unauthorized", "A valid client task id is required");
-  const paths = await resolveBusPaths(root, false);
+  const paths = await resolveInitializedBusPaths(root);
   const endpoint = await readJsonNoFollow(join(paths.endpoints, `${endpointId}.json`), BusEndpointSchema);
   if (endpoint.retiredAt || endpoint.clientTaskId !== taskId) {
     throw new BusError("unauthorized", "Endpoint ownership does not match this task");
@@ -319,7 +311,7 @@ async function withEndpointLock<T>(
   if (!EndpointIdSchema.safeParse(endpointId).success) {
     throw new BusError("invalid_input", "Invalid endpoint id");
   }
-  const paths = await resolveBusPaths(root, false);
+  const paths = await resolveInitializedBusPaths(root);
   // Endpoint ownership spans nested thread and mailbox operations whose lock
   // waits can each reach five seconds. The outer acquisition must not expire first.
   return withHardenedLock(join(paths.locks, `endpoint-${endpointId}.lock`), async () => {
@@ -386,7 +378,7 @@ export async function mintCompactionSuccession(input: {
   if (!taskId) return null;
   const endpoint = await findEndpointForTask(input.root, input.client, taskId);
   if (!endpoint || !input.transcriptPath) return null;
-  const paths = await resolveBusPaths(input.root, false);
+  const paths = await resolveInitializedBusPaths(input.root);
   const transcriptHash = sha256(input.transcriptPath);
   return withHardenedLock(join(paths.locks, `endpoint-${endpoint.endpointId}.lock`), async () => {
     const now = Date.now();
@@ -442,7 +434,7 @@ export async function consumeCompactionSuccession(input: {
 }): Promise<BusEndpoint | null> {
   const taskId = normalizeClientTaskId(input.clientTaskId);
   if (!taskId || !input.transcriptPath) return null;
-  const paths = await resolveBusPaths(input.root, false);
+  const paths = await resolveInitializedBusPaths(input.root);
   const transcriptHash = sha256(input.transcriptPath);
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
     const matches: Array<{ path: string; record: BusSuccession }> = [];

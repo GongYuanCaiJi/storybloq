@@ -223,8 +223,8 @@ describe("Storybloq Bus endpoint succession", () => {
       message: "Bus is not initialized in this checkout. Run `storybloq bus init` first.",
     });
     await expect(setBusHookPolicy(root, ["codex"], true)).rejects.toMatchObject({
-      code: "conflict",
-      message: "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+      code: "not_found",
+      message: "Bus is not initialized in this checkout. Run `storybloq bus init` first.",
     });
     await expect(readdir(join(root, ".story", "bus"))).rejects.toMatchObject({ code: "ENOENT" });
   });
