@@ -1,10 +1,11 @@
 import { fork, type ChildProcess } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  __testing,
   acquireHardenedLock,
   releaseHardenedLock,
 } from "../../src/bus/lock.js";
@@ -77,6 +78,24 @@ describe("Storybloq Bus hardened lock", () => {
     await writeFile(lockPath, "not-json", "utf-8");
     await expect(acquireHardenedLock(lockPath, { timeoutMs: 100 }))
       .rejects.toMatchObject({ code: "corrupt" });
+  });
+
+  it("classifies a reused live PID with a mismatched signature as dead", async () => {
+    if (process.platform !== "darwin" && process.platform !== "linux") return;
+    await expect(__testing.inspectProcess(process.pid, "mismatched-process-signature"))
+      .resolves.toBe("dead");
+  });
+
+  it("rejects a lock-file symlink without touching its target", async () => {
+    const { root, lockPath } = await tempLock();
+    await import("node:fs/promises").then((fs) => fs.mkdir(dirname(lockPath), { recursive: true }));
+    const target = join(root, "lock-target.json");
+    await writeFile(target, "target remains unchanged", "utf-8");
+    await symlink(target, lockPath);
+
+    await expect(acquireHardenedLock(lockPath, { timeoutMs: 100 }))
+      .rejects.toMatchObject({ code: "corrupt" });
+    expect(await readFile(target, "utf-8")).toBe("target remains unchanged");
   });
 
   it("does not recursively break an abandoned reaper guard", async () => {

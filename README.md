@@ -134,6 +134,8 @@ storybloq bus hooks enable --client codex
 storybloq bus hooks enable --client claude
 ```
 
+Bus runtime is local and gitignored, so run `storybloq bus init` once in each checkout that will participate. A fresh checkout may report Bus as enabled but not initialized; that inactive state does not block commits or autonomous FINALIZE.
+
 The foreground protocol includes send, poll, acknowledge, thread state, status, doctor, export, and ship checks. Messages are hash-chained, idempotent, bounded, task-bound, secret-screened, and delivered through crash-recoverable recipient mailboxes. Critical messages require a matching unresolved critical issue by default. Bus text is always peer-agent advice: it never grants owner approval or authorizes merge, push, signing, deployment, credentials, spending, or destructive actions.
 
 V1 does not include a daemon, process spawning, headless resume, or automatic offline wake. Natural SessionStart/Stop hooks and explicit polling are the delivery paths. Codex Desktop remains non-wakeable.
@@ -316,7 +318,7 @@ The base tools are grouped by responsibility. Bus-enabled projects register five
 
 `storybloq_bus_send` · `storybloq_bus_poll` · `storybloq_bus_ack` · `storybloq_bus_thread_get` · `storybloq_bus_thread_update`
 
-Every call requires a stable endpoint id and the current validated client task id. Poll and thread outputs mark peer content as advisory authority. `storybloq_bus_poll` and `storybloq_bus_thread_get` are read-only; the other three retain normal MCP write approvals.
+Every call requires a stable endpoint id and the current validated client task id. Poll and thread outputs mark peer content as advisory authority. `storybloq_bus_poll` and `storybloq_bus_thread_get` are read-only with respect to canonical tracked project state; poll may reconcile gitignored `.story/bus/` runtime metadata. The other three retain normal MCP write approvals.
 
 ### Federation (orchestrator projects)
 

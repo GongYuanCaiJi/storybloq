@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { BusError } from "./errors.js";
 import type { BusRole } from "./schemas.js";
@@ -21,6 +21,26 @@ async function rejectSymlink(path: string, label: string): Promise<void> {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
+  }
+}
+
+async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(join(storyRoot, ".gitignore"), "utf-8");
+  } catch (err) {
+    throw new BusError(
+      "conflict",
+      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+      err,
+    );
+  }
+  const entries = raw.split(/\r?\n/).map((line) => line.trim());
+  if (!entries.includes("bus/")) {
+    throw new BusError(
+      "conflict",
+      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+    );
   }
 }
 
@@ -63,6 +83,7 @@ export async function resolveBusPaths(projectRoot: string, create = false): Prom
     await rejectSymlink(path, label);
   }
   if (create) {
+    await assertBusRuntimeIgnored(storyRoot);
     for (const directory of [
       busRoot,
       paths.threads,

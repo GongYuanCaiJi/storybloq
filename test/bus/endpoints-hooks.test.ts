@@ -1,5 +1,6 @@
-import { readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   consumeCompactionSuccession,
@@ -11,6 +12,7 @@ import {
   sendBusMessage,
   setBusHookPolicy,
 } from "../../src/bus/index.js";
+import { acquireHardenedLock, releaseHardenedLock } from "../../src/bus/lock.js";
 import { claimBusStopDelivery } from "../../src/cli/commands/hook-status.js";
 import {
   handleSessionCompactPrepare,
@@ -18,6 +20,7 @@ import {
   readHookStdinContext,
 } from "../../src/cli/commands/session-compact.js";
 import { enableClaudeBusHooks } from "../../src/cli/commands/setup-skill.js";
+import { initProject } from "../../src/core/init.js";
 import { PassThrough } from "node:stream";
 import { createBusFixture, type BusFixture } from "./helpers.js";
 
@@ -89,13 +92,19 @@ describe("Storybloq Bus endpoint succession", () => {
       clientTaskId: "codex-task-after-compact",
     });
     const succession = JSON.parse(await readFile(
-      join(value.root, ".story", "bus", "succession", `${minted!.tokenHash}.json`),
+      join(value.root, ".story", "bus", "succession", `${minted!.successionId}.json`),
       "utf-8",
     ));
     expect(succession).toMatchObject({
       fromTaskId: value.implementerTaskId,
       toTaskId: "codex-task-after-compact",
     });
+    expect(await consumeCompactionSuccession({
+      root: value.root,
+      client: "codex",
+      clientTaskId: "codex-task-after-compact",
+      transcriptPath,
+    })).toMatchObject({ endpointId: value.implementer.endpointId });
     expect(await consumeCompactionSuccession({
       root: value.root,
       client: "codex",
@@ -125,7 +134,7 @@ describe("Storybloq Bus endpoint succession", () => {
       transcriptPath: "/tmp/forged-transcript.jsonl",
     })).toBeNull();
 
-    const path = join(value.root, ".story", "bus", "succession", `${minted!.tokenHash}.json`);
+    const path = join(value.root, ".story", "bus", "succession", `${minted!.successionId}.json`);
     const record = JSON.parse(await readFile(path, "utf-8"));
     record.expiresAt = new Date(0).toISOString();
     await writeFile(path, JSON.stringify(record, null, 2) + "\n", "utf-8");
@@ -135,6 +144,39 @@ describe("Storybloq Bus endpoint succession", () => {
       clientTaskId: "claude-new-task",
       transcriptPath,
     })).toBeNull();
+    await expect(readFile(path, "utf-8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("finishes the succession record after a crash between endpoint and record writes", async () => {
+    const value = await fixture();
+    const transcriptPath = "/tmp/codex-transcript-crash-window.jsonl";
+    const nextTaskId = "codex-task-after-crash-window";
+    const minted = await mintCompactionSuccession({
+      root: value.root,
+      client: "codex",
+      clientTaskId: value.implementerTaskId,
+      transcriptPath,
+    });
+    const endpointPath = join(value.root, ".story", "bus", "endpoints", `${value.implementer.endpointId}.json`);
+    const endpoint = JSON.parse(await readFile(endpointPath, "utf-8"));
+    await writeFile(endpointPath, JSON.stringify({
+      ...endpoint,
+      clientTaskId: nextTaskId,
+      resumeHandle: nextTaskId,
+    }, null, 2) + "\n", "utf-8");
+
+    await expect(consumeCompactionSuccession({
+      root: value.root,
+      client: "codex",
+      clientTaskId: nextTaskId,
+      transcriptPath,
+    })).resolves.toMatchObject({ endpointId: value.implementer.endpointId, clientTaskId: nextTaskId });
+    const record = JSON.parse(await readFile(
+      join(value.root, ".story", "bus", "succession", `${minted!.successionId}.json`),
+      "utf-8",
+    ));
+    expect(record).toMatchObject({ toTaskId: nextTaskId });
+    expect(record.consumedAt).not.toBeNull();
   });
 
   it("does not let another task replace an unknown role owner", async () => {
@@ -147,8 +189,92 @@ describe("Storybloq Bus endpoint succession", () => {
       replace: true,
     })).rejects.toMatchObject({ code: "conflict" });
 
+    await expect(retireEndpoint(
+      value.root,
+      value.implementer.endpointId,
+      "token sk-proj-abcdefghijklmnopqrstuvwxyz123456",
+    )).rejects.toMatchObject({ code: "secret_detected" });
+    await expect(retireEndpoint(
+      value.root,
+      value.implementer.endpointId,
+      "unsafe\u000bcontrol",
+    )).rejects.toMatchObject({ code: "invalid_input" });
+
     const retired = await retireEndpoint(value.root, value.implementer.endpointId, "Owner confirmed the Desktop task is irrecoverable");
     expect(retired.retiredAt).not.toBeNull();
+  });
+
+  it("does not create runtime files when the feature flag is hand-set", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bus-hand-set-"));
+    extraDirs.push(root);
+    await initProject(root, { name: "bus-hand-set" });
+    const configPath = join(root, ".story", "config.json");
+    const config = JSON.parse(await readFile(configPath, "utf-8"));
+    config.features.bus = true;
+    await writeFile(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+
+    await expect(joinEndpoint(root, {
+      role: "implementer",
+      client: "codex",
+      clientTaskId: "hand-set-task",
+      surface: "codex_desktop",
+    })).rejects.toMatchObject({
+      code: "not_found",
+      message: "Bus is not initialized in this checkout. Run `storybloq bus init` first.",
+    });
+    await expect(setBusHookPolicy(root, ["codex"], true)).rejects.toMatchObject({
+      code: "conflict",
+      message: "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+    });
+    await expect(readdir(join(root, ".story", "bus"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps the endpoint acquisition budget above nested protocol-lock waits", async () => {
+    const value = await fixture();
+    const first = await sendBusMessage(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadKind: "question",
+      toRole: "implementer",
+      messageKind: "question",
+      severity: "medium",
+      body: "Verify nested lock timing",
+      refs: { ciRun: "ci-lock-budget" },
+      idempotencyKey: "lock-budget-question",
+    });
+    const locks = join(value.root, ".story", "bus", "locks");
+    const threadLock = await acquireHardenedLock(join(locks, `thread-${first.threadId}.lock`));
+    const reply = sendBusMessage(value.root, {
+      endpointId: value.implementer.endpointId,
+      clientTaskId: value.implementerTaskId,
+      threadId: first.threadId,
+      toRole: "reviewer",
+      messageKind: "reply",
+      severity: "medium",
+      body: "Nested lock timing verified",
+      refs: { ciRun: "ci-lock-budget-reply" },
+      inReplyTo: first.messageId,
+      idempotencyKey: "lock-budget-reply",
+    });
+    const endpointLockPath = join(locks, `endpoint-${value.implementer.endpointId}.lock`);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        await access(endpointLockPath);
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    await access(endpointLockPath);
+    const concurrentPoll = pollBus(value.root, {
+      endpointId: value.implementer.endpointId,
+      clientTaskId: value.implementerTaskId,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    await releaseHardenedLock(threadLock);
+
+    await expect(reply).resolves.toMatchObject({ threadId: first.threadId });
+    await expect(concurrentPoll).resolves.toMatchObject({ endpointId: value.implementer.endpointId });
   });
 });
 

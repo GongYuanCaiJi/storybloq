@@ -215,7 +215,9 @@ export function formatStatus(
     ...(bus
       ? ["error" in bus
           ? `Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`
-          : `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`]
+          : bus.initialized
+            ? `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`
+            : "Bus: enabled, not initialized in this checkout"]
       : []),
     "",
     ...formatConfigHints(state),
@@ -302,7 +304,9 @@ export function formatFederatedStatus(
     ...(bus
       ? ["error" in bus
           ? `Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`
-          : `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`]
+          : bus.initialized
+            ? `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`
+            : "Bus: enabled, not initialized in this checkout"]
       : []),
     "",
   ];

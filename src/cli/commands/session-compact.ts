@@ -350,7 +350,8 @@ export async function handleSessionResumePrompt(
               clientTaskId,
               transcriptPath: options.transcriptPath,
             })
-          : await findEndpointForTask(root, client, clientTaskId);
+          : null;
+        endpoint ??= await findEndpointForTask(root, client, clientTaskId);
         if (endpoint) {
           endpoint = await refreshEndpointForSessionStart(root, endpoint.endpointId, clientTaskId);
           if (await isBusHookDeliveryEnabled(root, client)) {

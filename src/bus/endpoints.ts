@@ -1,16 +1,18 @@
 import { execFile } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { normalizeClientTaskId, type StorybloqClient } from "../autonomous/client-profile.js";
 import { loadProject } from "../core/project-loader.js";
+import { readBusInstance } from "./admin.js";
 import { canonicalHash, sha256 } from "./canonical.js";
 import { assertBusEnabled } from "./config.js";
 import { BusError } from "./errors.js";
-import { durableCreate, durableWrite, listRegularJsonFiles, readJsonNoFollow } from "./io.js";
+import { durableCreate, durableUnlink, durableWrite, listRegularJsonFiles, readJsonNoFollow } from "./io.js";
 import { captureProcessSignature, inspectProcessIdentity, withHardenedLock } from "./lock.js";
 import { resolveBusPaths } from "./paths.js";
+import { normalizeBusText } from "./security.js";
 import {
   BusEndpointSchema,
   BusSuccessionSchema,
@@ -24,6 +26,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const SUCCESSION_TTL_MS = 15 * 60 * 1000;
+const ENDPOINT_LOCK_TIMEOUT_MS = 15_000;
 const EndpointIdSchema = z.string().uuid();
 
 interface ProcessCandidate {
@@ -193,7 +196,15 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
   const taskId = normalizeClientTaskId(input.clientTaskId);
   if (!taskId) throw new BusError("invalid_input", "A valid client task id is required to join the Bus");
   assertBusEnabled((await loadProject(root)).state.config);
-  const paths = await resolveBusPaths(root, true);
+  const paths = await resolveBusPaths(root, false);
+  try {
+    await readBusInstance(paths.projectRoot);
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") {
+      throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus init` first.");
+    }
+    throw err;
+  }
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
     const listed = await listEndpoints(paths.projectRoot);
     if (listed.findings.length > 0) {
@@ -309,6 +320,8 @@ async function withEndpointLock<T>(
     throw new BusError("invalid_input", "Invalid endpoint id");
   }
   const paths = await resolveBusPaths(root, false);
+  // Endpoint ownership spans nested thread and mailbox operations whose lock
+  // waits can each reach five seconds. The outer acquisition must not expire first.
   return withHardenedLock(join(paths.locks, `endpoint-${endpointId}.lock`), async () => {
     const path = join(paths.endpoints, `${endpointId}.json`);
     let current = await readJsonNoFollow(path, BusEndpointSchema);
@@ -319,7 +332,7 @@ async function withEndpointLock<T>(
       return next;
     };
     return handler(current, persist);
-  }, { timeoutMs: 1000 });
+  }, { timeoutMs: ENDPOINT_LOCK_TIMEOUT_MS });
 }
 
 export async function withEndpointCaller<T>(
@@ -351,10 +364,7 @@ export async function retireEndpoint(root: string, endpointId: string, reason: s
   if (!EndpointIdSchema.safeParse(endpointId).success) {
     throw new BusError("invalid_input", "Invalid endpoint id");
   }
-  const normalizedReason = reason.trim();
-  if (!normalizedReason || normalizedReason.length > 1024) {
-    throw new BusError("invalid_input", "Retirement reason must be 1-1024 characters");
-  }
+  const normalizedReason = normalizeBusText(reason, "Retirement reason", 1024);
   return withEndpointLock(root, endpointId, async (endpoint, persist) => {
     if (await endpointLiveness(endpoint) !== "unknown") {
       throw new BusError("conflict", "Forced retirement is limited to endpoints with unknown liveness");
@@ -380,21 +390,14 @@ export async function mintCompactionSuccession(input: {
   const transcriptHash = sha256(input.transcriptPath);
   return withHardenedLock(join(paths.locks, `endpoint-${endpoint.endpointId}.lock`), async () => {
     const now = Date.now();
-    for (const filename of await listRegularJsonFiles(paths.succession)) {
-      try {
-        const existing = await readJsonNoFollow(join(paths.succession, filename), BusSuccessionSchema);
-        if (existing.endpointId === endpoint.endpointId && existing.kind === "compact" &&
-            existing.transcriptHash === transcriptHash && !existing.consumedAt &&
-            new Date(existing.expiresAt).getTime() > now) return existing;
-      } catch {
-        // Doctor reports malformed succession files; do not hide a valid endpoint behind one.
-      }
+    for (const { record: existing } of await liveSuccessionRecords(paths.succession, now)) {
+      if (existing.endpointId === endpoint.endpointId && existing.kind === "compact" &&
+          existing.transcriptHash === transcriptHash && !existing.consumedAt) return existing;
     }
-    const token = randomBytes(32).toString("hex");
     const createdAt = new Date(now).toISOString();
     const succession: BusSuccession = BusSuccessionSchema.parse({
       schema: "storybloq-bus-succession/v1",
-      tokenHash: sha256(token),
+      successionId: randomUUID(),
       endpointId: endpoint.endpointId,
       client: input.client,
       fromTaskId: taskId,
@@ -404,9 +407,31 @@ export async function mintCompactionSuccession(input: {
       expiresAt: new Date(now + SUCCESSION_TTL_MS).toISOString(),
       consumedAt: null,
     });
-    await durableCreate(join(paths.succession, `${succession.tokenHash}.json`), JSON.stringify(succession, null, 2) + "\n");
+    await durableCreate(join(paths.succession, `${succession.successionId}.json`), JSON.stringify(succession, null, 2) + "\n");
     return succession;
   });
+}
+
+async function liveSuccessionRecords(
+  directory: string,
+  now: number,
+): Promise<Array<{ path: string; record: BusSuccession }>> {
+  const records: Array<{ path: string; record: BusSuccession }> = [];
+  for (const filename of await listRegularJsonFiles(directory)) {
+    try {
+      const path = join(directory, filename);
+      const record = await readJsonNoFollow(path, BusSuccessionSchema);
+      if (filename !== `${record.successionId}.json`) continue;
+      if (new Date(record.expiresAt).getTime() <= now) {
+        await durableUnlink(path);
+        continue;
+      }
+      records.push({ path, record });
+    } catch {
+      // Doctor reports malformed records; succession remains fail-closed.
+    }
+  }
+  return records;
 }
 
 export async function consumeCompactionSuccession(input: {
@@ -422,16 +447,11 @@ export async function consumeCompactionSuccession(input: {
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
     const matches: Array<{ path: string; record: BusSuccession }> = [];
     const now = Date.now();
-    for (const filename of await listRegularJsonFiles(paths.succession)) {
-      try {
-        const path = join(paths.succession, filename);
-        const record = await readJsonNoFollow(path, BusSuccessionSchema);
-        if (record.client === input.client && record.kind === "compact" &&
-            record.transcriptHash === transcriptHash && !record.consumedAt &&
-            new Date(record.expiresAt).getTime() > now) matches.push({ path, record });
-      } catch {
-        // Ignore here; doctor reports it and ambiguity still fails closed.
-      }
+    for (const candidate of await liveSuccessionRecords(paths.succession, now)) {
+      const record = candidate.record;
+      if (record.client === input.client && record.kind === "compact" &&
+          record.transcriptHash === transcriptHash &&
+          (!record.consumedAt || record.toTaskId === taskId)) matches.push(candidate);
     }
     if (matches.length !== 1) return null;
     const match = matches[0]!;
@@ -439,10 +459,22 @@ export async function consumeCompactionSuccession(input: {
       const endpointPath = join(paths.endpoints, `${match.record.endpointId}.json`);
       const endpoint = await readJsonNoFollow(endpointPath, BusEndpointSchema);
       const latestRecord = await readJsonNoFollow(match.path, BusSuccessionSchema);
-      if (latestRecord.consumedAt || endpoint.retiredAt || endpoint.client !== input.client ||
-          endpoint.clientTaskId !== latestRecord.fromTaskId || latestRecord.tokenHash !== match.record.tokenHash) {
+      if (endpoint.retiredAt || endpoint.client !== input.client ||
+          latestRecord.successionId !== match.record.successionId) {
         return null;
       }
+      if (latestRecord.consumedAt) {
+        return latestRecord.toTaskId === taskId && endpoint.clientTaskId === taskId ? endpoint : null;
+      }
+      if (endpoint.clientTaskId === taskId) {
+        await durableWrite(match.path, JSON.stringify({
+          ...latestRecord,
+          toTaskId: taskId,
+          consumedAt: new Date().toISOString(),
+        }, null, 2) + "\n");
+        return endpoint;
+      }
+      if (endpoint.clientTaskId !== latestRecord.fromTaskId) return null;
       const refreshed: BusEndpoint = BusEndpointSchema.parse({
         ...endpoint,
         clientTaskId: taskId,

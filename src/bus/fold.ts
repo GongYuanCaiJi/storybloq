@@ -13,7 +13,7 @@ import {
   type BusMessagePayload,
   type FoldedBusThread,
 } from "./schemas.js";
-import { evidenceKey } from "./security.js";
+import { evidenceKeys } from "./security.js";
 
 const ThreadIdSchema = z.string().uuid();
 const ENTRY_FILENAME = /^(\d{6})-(message|ack|state|wake)-([0-9a-f-]{36})\.json$/;
@@ -98,8 +98,8 @@ export async function foldBusThread(root: string, threadId: string): Promise<Fol
 
     if (entry.type === "message") {
       const message = entry.payload;
-      if (state === "resolved") {
-        finding = `${filename}: resolved thread received a message`;
+      if (state !== "open") {
+        finding = `${filename}: ${state} thread received a message`;
         break;
       }
       if (!thread.participantRoles.includes(message.from.role) ||
@@ -114,8 +114,7 @@ export async function foldBusThread(root: string, threadId: string): Promise<Fol
       }
       messages.push(message);
       if (actionableMessage(message)) hopCount += 1;
-      if (message.refs.commit) seenEvidence.add(evidenceKey({ commit: message.refs.commit }));
-      if (message.refs.ciRun) seenEvidence.add(evidenceKey({ ciRun: message.refs.ciRun }));
+      for (const key of evidenceKeys(message.refs)) seenEvidence.add(key);
     } else if (entry.type === "ack") {
       const message = messages.find((candidate) => candidate.messageId === entry.payload.messageId);
       if (!message || !ackTransitionAllowed(acknowledgments.get(entry.payload.messageId), entry.payload)) {
@@ -142,14 +141,16 @@ export async function foldBusThread(root: string, threadId: string): Promise<Fol
           finding = `${filename}: invalid reopen transition`;
           break;
         }
-        const key = evidenceKey(transition.evidence);
-        if (seenEvidence.has(key)) {
+        const keys = evidenceKeys(transition.evidence);
+        if (keys.every((key) => seenEvidence.has(key))) {
           finding = `${filename}: reopen evidence was already present`;
           break;
         }
         state = "open";
       }
-      if (transition.evidence) seenEvidence.add(evidenceKey(transition.evidence));
+      if (transition.evidence) {
+        for (const key of evidenceKeys(transition.evidence)) seenEvidence.add(key);
+      }
     }
 
     entries.push(entry);

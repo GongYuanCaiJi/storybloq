@@ -526,9 +526,9 @@ function formatBusBlockers(blockers: readonly string[]): string {
   return [
     "# Finalize blocked by Storybloq Bus",
     "",
-    "Resolve or explicitly acknowledge the critical peer findings before committing:",
+    "Resolve the following Bus gate before committing:",
     ...blockers.map((blocker) => `- ${blocker}`),
     "",
-    "Run `storybloq bus check --ship` after addressing them, then report the FINALIZE action again.",
+    "Use `storybloq bus check --ship` for delivery blockers or `storybloq bus doctor` for runtime integrity, then report the FINALIZE action again.",
   ].join("\n");
 }

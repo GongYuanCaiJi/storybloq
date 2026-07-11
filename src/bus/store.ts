@@ -54,7 +54,7 @@ import {
 import {
   actionableFingerprint,
   assertNoHighConfidenceSecret,
-  evidenceKey,
+  evidenceKeys,
   idempotencyKeyHash,
   normalizeBusText,
   normalizeMessageBody,
@@ -392,9 +392,6 @@ async function createThread(
     throw new BusError("invalid_input", "Invalid predecessor thread id");
   }
   return withHardenedLock(join(paths.locks, "threads.lock"), async () => {
-    const replay = await findReplayAcrossThreads(paths, endpoint.endpointId, normalized.keyHash, normalized.payloadHash);
-    if (replay) return replay;
-
     if (input.predecessorThreadId) {
       const predecessor = await foldBusThread(paths.projectRoot, input.predecessorThreadId);
       if (predecessor.integrity !== "verified" || predecessor.state !== "resolved") {
@@ -500,8 +497,6 @@ async function replyToThread(
   return withHardenedLock(join(paths.locks, `thread-${threadId}.lock`), async () => {
     let folded = await foldBusThread(paths.projectRoot, threadId);
     if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
-    const replay = replayForKey(folded, endpoint.endpointId, normalized.keyHash, normalized.payloadHash);
-    if (replay) return replay;
     if (folded.state !== "open") throw new BusError("thread_parked", `Thread is ${folded.state}`);
     if (!folded.thread.participantRoles.includes(endpoint.role) || !folded.thread.participantRoles.includes(normalized.toRole)) {
       throw new BusError("unauthorized", "Endpoint is not a participant in this thread");
@@ -563,6 +558,8 @@ export async function sendBusMessage(root: string, input: BusSendInput): Promise
       endpoint,
       input,
     );
+    // Endpoint ownership stays locked from this global replay check through
+    // publication, so create/reply paths do not need a second full fold.
     const replay = await findReplayAcrossThreads(
       paths,
       endpoint.endpointId,
@@ -605,6 +602,16 @@ async function pathExists(path: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function busRuntimeExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw new BusError("io_error", `Cannot inspect Bus runtime: ${err instanceof Error ? err.message : String(err)}`, err);
   }
 }
 
@@ -919,7 +926,7 @@ export async function updateBusThread(root: string, input: {
       if (folded.state !== "parked" || !reason || !evidence) {
         throw new BusError("invalid_input", "Reopening a parked thread requires a reason and new evidence");
       }
-      if (folded.seenEvidence.has(evidenceKey(evidence))) {
+      if (evidenceKeys(evidence).every((key) => folded.seenEvidence.has(key))) {
         throw new BusError("conflict", "Reopen evidence was already present before the park");
       }
     }
@@ -946,6 +953,7 @@ export interface BusDoctorResult {
 function emptyBusSummary(): BusSummary {
   return {
     enabled: true,
+    initialized: false,
     daemonState: "stopped",
     endpoints: 0,
     pendingMessages: 0,
@@ -1067,8 +1075,8 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   for (const filename of await listRegularJsonFiles(paths.succession)) {
     try {
       const record = await readJsonNoFollow(join(paths.succession, filename), BusSuccessionSchema);
-      if (filename !== `${record.tokenHash}.json`) {
-        findings.push(`succession: ${filename} does not match its token hash`);
+      if (filename !== `${record.successionId}.json`) {
+        findings.push(`succession: ${filename} does not match its record id`);
       }
     } catch (err) {
       findings.push(`succession ${filename}: ${err instanceof Error ? err.message : String(err)}`);
@@ -1111,6 +1119,7 @@ async function summarizeFrom(
   }
   return {
     enabled: true,
+    initialized: true,
     daemonState: "stopped",
     endpoints: endpoints.filter((endpoint) => !endpoint.retiredAt).length,
     pendingMessages: pendingIds.size,
@@ -1127,6 +1136,7 @@ export async function busSummary(root: string, state?: ProjectState): Promise<Bu
   const loadedState = state ?? (await loadProject(root)).state;
   assertBusEnabled(loadedState.config);
   const paths = await resolveBusPaths(root, false);
+  if (!await busRuntimeExists(paths.busRoot)) return emptyBusSummary();
   await assertBusLayout(paths);
   await readBusInstance(paths.projectRoot);
   return summarizeFrom(paths, loadedState, (await listEndpoints(paths.projectRoot)).endpoints);
@@ -1141,6 +1151,7 @@ export async function checkBusShip(root: string): Promise<BusShipCheck> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
   const paths = await resolveBusPaths(root, false);
+  if (!await busRuntimeExists(paths.busRoot)) return { clear: true, blockers: [] };
   await assertBusLayout(paths);
   await readBusInstance(paths.projectRoot);
   const blockers: string[] = [];

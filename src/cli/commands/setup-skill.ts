@@ -870,6 +870,8 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
   }
 }
 
+// "Read-only" here means canonical tracked project state. Bus poll may repair
+// and advance gitignored .story/bus runtime metadata while remaining advisory.
 export const CODEX_READ_ONLY_APPROVAL_TOOLS = [
   "storybloq_status",
   "storybloq_phase_list",

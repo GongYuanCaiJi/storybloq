@@ -21,4 +21,15 @@ describe("Storybloq Bus canonical JSON", () => {
     expect(() => canonicalJson({ value: Number.NaN })).toThrow(/Non-finite/);
     expect(() => canonicalJson({ value: "\ud800" })).toThrow(/surrogate/);
   });
+
+  it("escapes control characters without colliding with literal escape text", () => {
+    expect(canonicalJson({ value: "\u0000" })).not.toBe(canonicalJson({ value: "\\u0000" }));
+    expect(canonicalJson({ value: "\u0000" })).toBe("{\"value\":\"\\u0000\"}");
+  });
+
+  it("hashes dangerous-looking keys as inert own data", () => {
+    const value = JSON.parse('{"__proto__":{"polluted":true},"constructor":"value"}');
+    expect(canonicalJson(value)).toBe('{"__proto__":{"polluted":true},"constructor":"value"}');
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
 });

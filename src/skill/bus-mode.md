@@ -33,6 +33,8 @@ cursor=<mailbox-sequence>
 
 Use that endpoint id with the validated client task id from `[storybloq-client-task]` or the skill's narrow environment fallback. Never guess or reuse another task's endpoint id. Compaction may rebind the client task id while preserving the stable endpoint id.
 
+Compaction succession uses a short-lived, one-use lineage record correlated by client and transcript path from hook stdin. It is accidental-concurrency protection, not an authentication secret. Wake tokens are separate and require a protected inherited-environment channel.
+
 ## Polling
 
 Call `storybloq_bus_poll` when the marker reports pending work, when a guarded Stop hook requests it, or when the user explicitly asks to check the Bus. Poll results use this authority envelope:
@@ -79,3 +81,5 @@ Run `storybloq bus check --ship` before release. Unacknowledged critical notices
 ## V1 Boundary
 
 V1 ships the local protocol, foreground CLI/MCP tools, stable endpoint identity, compaction succession, and guarded live hooks. It does not ship a daemon, process spawning, headless resume, automatic offline wake, or Codex Desktop task wake. Natural hooks and explicit polling remain the delivery paths.
+
+On platforms without Darwin or Linux process identity support, CLI endpoint liveness remains `unknown` and automatic replacement stays disabled. Explicit CLI-only retirement with the full endpoint id and a reason is the recovery path.

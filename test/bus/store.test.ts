@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, readdir, readFile, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acknowledgeBusMessage,
   busDoctor,
+  busSummary,
   checkBusShip,
   foldBusThread,
   pollBus,
@@ -13,9 +16,11 @@ import {
   updateBusThread,
 } from "../../src/bus/index.js";
 import { BusError } from "../../src/bus/errors.js";
+import { hashWithoutKey } from "../../src/bus/canonical.js";
 import { createBusFixture, createIssue, resolveIssue, type BusFixture } from "./helpers.js";
 
 const fixtures: BusFixture[] = [];
+const exec = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((fixture) => rm(fixture.root, { recursive: true, force: true })));
@@ -84,6 +89,26 @@ describe("Storybloq Bus store", () => {
     await expect(reviewSend(value, { body: "Changed payload" })).rejects.toMatchObject({
       code: "idempotency_conflict",
     });
+  });
+
+  it("scopes identical idempotency keys to the sending endpoint", async () => {
+    const value = await fixture();
+    const first = await reviewSend(value);
+    const reply = await sendBusMessage(value.root, {
+      endpointId: value.implementer.endpointId,
+      clientTaskId: value.implementerTaskId,
+      threadId: first.threadId,
+      toRole: "reviewer",
+      messageKind: "reply",
+      severity: "medium",
+      body: "The endpoint-scoped key remains independent.",
+      refs: { ciRun: "ci-endpoint-scope" },
+      inReplyTo: first.messageId,
+      idempotencyKey: "review-question-1",
+    });
+
+    expect(reply).toMatchObject({ replayed: false, threadId: first.threadId });
+    expect(reply.messageId).not.toBe(first.messageId);
   });
 
   it("serializes concurrent writers into one contiguous hash chain", async () => {
@@ -438,6 +463,21 @@ describe("Storybloq Bus store", () => {
     await expect(readdir(pending)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("treats an absent per-checkout runtime as inactive and ship-clear", async () => {
+    const value = await fixture();
+    const busRoot = join(value.root, ".story", "bus");
+    await rm(busRoot, { recursive: true });
+
+    await expect(checkBusShip(value.root)).resolves.toEqual({ clear: true, blockers: [] });
+    await expect(busSummary(value.root)).resolves.toMatchObject({
+      enabled: true,
+      initialized: false,
+      endpoints: 0,
+      pendingMessages: 0,
+    });
+    await expect(readdir(busRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("returns BusError for ambiguous send modes", async () => {
     const value = await fixture();
     await expect(reviewSend(value, { threadKind: undefined })).rejects.toBeInstanceOf(BusError);
@@ -500,6 +540,49 @@ describe("Storybloq Bus store", () => {
       .toMatchObject({ type: "state", payload: { trigger: "duplicate_fingerprint" } });
   });
 
+  it("quarantines a forged message appended after a park transition", async () => {
+    const value = await fixture();
+    const first = await reviewSend(value);
+    const parked = await updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: first.threadId,
+      action: "park",
+      reason: "Waiting for new evidence",
+    });
+    const entriesDir = join(value.root, ".story", "bus", "threads", first.threadId, "entries");
+    const entryId = randomUUID();
+    const unsigned = {
+      schema: "storybloq-bus-entry/v1",
+      entryId,
+      threadId: first.threadId,
+      seq: 3,
+      type: "message",
+      prevHash: parked.lastHash,
+      createdAt: new Date().toISOString(),
+      entryHash: "0".repeat(64),
+      payload: {
+        ...parked.messages[0]!,
+        messageId: randomUUID(),
+        body: "Forged message after park",
+        idempotencyKeyHash: "a".repeat(64),
+        payloadHash: "b".repeat(64),
+      },
+    };
+    const entry = { ...unsigned, entryHash: hashWithoutKey(unsigned, "entryHash") };
+    await writeFile(
+      join(entriesDir, `000003-message-${entryId}.json`),
+      JSON.stringify(entry, null, 2) + "\n",
+      "utf-8",
+    );
+
+    expect(await foldBusThread(value.root, first.threadId)).toMatchObject({
+      integrity: "quarantined",
+      validThroughSeq: 2,
+      finding: expect.stringContaining("parked thread received a message"),
+    });
+  });
+
   it("requires unseen evidence to reopen a parked thread", async () => {
     const value = await fixture();
     const first = await reviewSend(value);
@@ -533,6 +616,47 @@ describe("Storybloq Bus store", () => {
       action: "reopen",
       reason: "Retry old evidence",
       evidence: { ciRun: "ci-new-evidence" },
+    })).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("records both commit and CI identities from mixed reopen evidence", async () => {
+    const value = await fixture();
+    await exec("git", ["init", "-b", "main"], { cwd: value.root });
+    await exec("git", ["config", "user.email", "bus-test@example.com"], { cwd: value.root });
+    await exec("git", ["config", "user.name", "Bus Test"], { cwd: value.root });
+    await exec("git", ["commit", "--allow-empty", "-m", "evidence"], { cwd: value.root });
+    const commit = (await exec("git", ["rev-parse", "HEAD"], { cwd: value.root })).stdout.trim();
+    const first = await reviewSend(value);
+    await updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: first.threadId,
+      action: "park",
+      reason: "Waiting for mixed evidence",
+    });
+    await updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: first.threadId,
+      action: "reopen",
+      reason: "Commit and CI evidence arrived",
+      evidence: { commit, ciRun: "ci-mixed-evidence" },
+    });
+    await updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: first.threadId,
+      action: "park",
+      reason: "Waiting for evidence newer than the mixed pair",
+    });
+
+    await expect(updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: first.threadId,
+      action: "reopen",
+      reason: "Retrying the CI half of old evidence",
+      evidence: { ciRun: "ci-mixed-evidence" },
     })).rejects.toMatchObject({ code: "conflict" });
   });
 

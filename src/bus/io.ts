@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rename, unlink } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { ZodType } from "zod";
@@ -20,15 +21,35 @@ export async function syncDirectory(directory: string): Promise<void> {
   }
 }
 
-async function writeDurableTemp(target: string, content: string): Promise<string> {
+type DurableTempWriter = (handle: FileHandle, content: string) => Promise<void>;
+
+const defaultTempWriter: DurableTempWriter = async (handle, content) => {
+  await handle.writeFile(content, "utf-8");
+  await handle.sync();
+};
+
+async function writeDurableTemp(
+  target: string,
+  content: string,
+  writer: DurableTempWriter = defaultTempWriter,
+): Promise<string> {
   await mkdir(dirname(target), { recursive: true, mode: 0o700 });
   const temp = `${target}.tmp.${process.pid}.${randomUUID()}`;
   const handle = await open(temp, "wx", 0o600);
+  let failure: unknown;
   try {
-    await handle.writeFile(content, "utf-8");
-    await handle.sync();
-  } finally {
+    await writer(handle, content);
+  } catch (err) {
+    failure = err;
+  }
+  try {
     await handle.close();
+  } catch (err) {
+    failure ??= err;
+  }
+  if (failure) {
+    await unlink(temp).catch(() => undefined);
+    throw failure;
   }
   return temp;
 }
@@ -138,3 +159,5 @@ export async function rejectPathSymlink(path: string): Promise<void> {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
 }
+
+export const __testing = { writeDurableTemp };

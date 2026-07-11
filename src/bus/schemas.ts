@@ -213,7 +213,7 @@ export type BusEndpoint = z.infer<typeof BusEndpointSchema>;
 
 export const BusSuccessionSchema = z.object({
   schema: z.literal("storybloq-bus-succession/v1"),
-  tokenHash: Sha256Schema,
+  successionId: UuidSchema,
   endpointId: UuidSchema,
   client: BusClientSchema,
   fromTaskId: z.string().regex(CLIENT_TASK_ID_PATTERN),
@@ -242,6 +242,7 @@ export interface FoldedBusThread {
 
 export interface BusSummary {
   readonly enabled: true;
+  readonly initialized: boolean;
   readonly daemonState: "stopped";
   readonly endpoints: number;
   readonly pendingMessages: number;

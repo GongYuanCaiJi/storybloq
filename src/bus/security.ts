@@ -95,6 +95,9 @@ export function actionableFingerprint(input: {
   });
 }
 
-export function evidenceKey(evidence: { commit?: string; ciRun?: string }): string {
-  return evidence.commit ? `commit:${evidence.commit.toLowerCase()}` : `ci:${evidence.ciRun ?? ""}`;
+export function evidenceKeys(evidence: { commit?: string; ciRun?: string }): string[] {
+  return [
+    ...(evidence.commit ? [`commit:${evidence.commit.toLowerCase()}`] : []),
+    ...(evidence.ciRun ? [`ci:${evidence.ciRun}`] : []),
+  ];
 }

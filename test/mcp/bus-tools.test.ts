@@ -105,9 +105,28 @@ describe("feature-gated Storybloq Bus MCP tools", () => {
     const parsed = JSON.parse(result.content[0]!.text);
     expect(parsed.data.bus).toMatchObject({
       enabled: true,
+      initialized: true,
       endpoints: 2,
       pendingMessages: 0,
       daemonState: "stopped",
     });
+  });
+
+  it("reports an enabled but uninitialized fresh checkout without an error", async () => {
+    const fixture = await createBusFixture("mcp-bus-fresh-checkout");
+    roots.push(fixture.root);
+    await rm(join(fixture.root, ".story", "bus"), { recursive: true, force: true });
+    const status = captureTools(fixture.root).get("storybloq_status")!;
+
+    const result = await status.handler(parsedArgs(status, { format: "json" }));
+    const parsed = JSON.parse(result.content[0]!.text);
+
+    expect(parsed.data.bus).toMatchObject({
+      enabled: true,
+      initialized: false,
+      endpoints: 0,
+      pendingMessages: 0,
+    });
+    expect(parsed.data.bus.error).toBeUndefined();
   });
 });

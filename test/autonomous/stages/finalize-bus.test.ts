@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { access, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { FinalizeStage } from "../../../src/autonomous/stages/finalize.js";
@@ -63,6 +63,23 @@ function state(): FullSessionState {
 }
 
 describe("FINALIZE Storybloq Bus gate", () => {
+  it("does not block a fresh checkout whose gitignored Bus runtime is absent", async () => {
+    const fixture = await createBusFixture("finalize-bus-fresh-checkout");
+    fixtures.push(fixture);
+    await rm(join(fixture.root, ".story", "bus"), { recursive: true });
+    const sessionDir = join(fixture.root, ".story", "sessions", state().sessionId);
+    await mkdir(sessionDir, { recursive: true });
+
+    const result = await new FinalizeStage().enter(
+      new StageContext(fixture.root, sessionDir, state(), recipe()),
+    );
+
+    expect((result as { instruction: string }).instruction).toContain("# Finalize");
+    expect((result as { instruction: string }).instruction).not.toContain("blocked by Storybloq Bus");
+    await expect(access(join(fixture.root, ".story", "bus")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("blocks an unacknowledged critical notice before staging", async () => {
     const fixture = await createBusFixture("finalize-bus");
     fixtures.push(fixture);

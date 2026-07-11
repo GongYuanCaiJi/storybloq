@@ -454,7 +454,9 @@ export function registerBusCommand(yargs: Argv): Argv {
         async (argv) => {
           const format = formatValue(argv.format);
           await runBus(format, busSummary, (summary) =>
-            `Bus: ${summary.endpoints} endpoints, ${summary.pendingMessages} pending, ${summary.openThreads} open, ${summary.parkedThreads} parked, ${summary.quarantined} quarantined. Hooks: Claude ${summary.hookDelivery.claude ? "on" : "off"}, Codex ${summary.hookDelivery.codex ? "on" : "off"}.`);
+            summary.initialized
+              ? `Bus: ${summary.endpoints} endpoints, ${summary.pendingMessages} pending, ${summary.openThreads} open, ${summary.parkedThreads} parked, ${summary.quarantined} quarantined. Hooks: Claude ${summary.hookDelivery.claude ? "on" : "off"}, Codex ${summary.hookDelivery.codex ? "on" : "off"}.`
+              : "Bus is enabled but not initialized in this checkout. Run `storybloq bus init` to participate.");
         },
       )
       .command(
