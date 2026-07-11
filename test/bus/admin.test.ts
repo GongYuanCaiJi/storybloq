@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initializeBus } from "../../src/bus/index.js";
+import { assertBusRuntimeIgnored } from "../../src/bus/paths.js";
 import { initProject } from "../../src/core/init.js";
 
 const roots: string[] = [];
@@ -50,6 +51,28 @@ describe("Storybloq Bus initialization", () => {
     const root = await project("bus-init-ignore-negation");
     const ignorePath = join(root, ".story", ".gitignore");
     await writeFile(ignorePath, `${await readFile(ignorePath, "utf-8")}bus/\n!bus/\n`, "utf-8");
+
+    await expect(initializeBus(root)).rejects.toMatchObject({ code: "conflict" });
+    const config = JSON.parse(await readFile(join(root, ".story", "config.json"), "utf-8"));
+    expect(config.features.bus).not.toBe(true);
+    await expect(access(join(root, ".story", "bus"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("accepts an anchored Bus rule with unrelated surrounding entries", async () => {
+    const root = await project("bus-init-ignore-anchored");
+    await writeFile(
+      join(root, ".story", ".gitignore"),
+      "# local runtime\ncache/\n/bus/\nstatus.json\n",
+      "utf-8",
+    );
+
+    await expect(assertBusRuntimeIgnored(join(root, ".story"))).resolves.toBeUndefined();
+  });
+
+  it("rejects glob negations that could re-include Bus runtime", async () => {
+    const root = await project("bus-init-ignore-glob-negation");
+    const ignorePath = join(root, ".story", ".gitignore");
+    await writeFile(ignorePath, `${await readFile(ignorePath, "utf-8")}bus/\n!*\n`, "utf-8");
 
     await expect(initializeBus(root)).rejects.toMatchObject({ code: "conflict" });
     const config = JSON.parse(await readFile(join(root, ".story", "config.json"), "utf-8"));

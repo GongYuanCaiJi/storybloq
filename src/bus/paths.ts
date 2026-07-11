@@ -55,6 +55,9 @@ export async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> 
     const pattern = normalized.startsWith("!/") ? `!${normalized.slice(2)}` : normalized;
     if (pattern === "bus/") ignored = true;
     else if (pattern === "!bus" || pattern.startsWith("!bus/")) ignored = false;
+    else if (pattern.startsWith("!")) {
+      throw new BusError("conflict", "Bus ignore safety cannot be verified with negation patterns");
+    }
   }
   if (!ignored) {
     throw new BusError(

@@ -134,7 +134,7 @@ storybloq bus hooks enable --client codex
 storybloq bus hooks enable --client claude
 ```
 
-Bus runtime is local and gitignored, so run `storybloq bus init` once in each checkout that will participate. Status and doctor report a fresh checkout as enabled but not initialized; that healthy inactive state does not block commits or autonomous FINALIZE. Other Bus commands and MCP tools never initialize the runtime implicitly.
+Bus runtime is local and gitignored, so run `storybloq bus init` once in each checkout that will participate. Status and doctor report a fresh checkout as enabled but not initialized; that healthy inactive state does not block commits or autonomous FINALIZE. Other Bus commands and MCP tools never initialize the runtime implicitly. Initialization rejects symlinked ignore files and negation patterns because it cannot safely prove that Git will exclude the complete runtime otherwise.
 
 The foreground protocol includes send, poll, acknowledge, thread state, status, doctor, export, and ship checks. Messages are hash-chained, idempotent, bounded, task-bound, secret-screened, and delivered through crash-recoverable recipient mailboxes. Critical messages require a matching unresolved critical issue by default. Bus text is always peer-agent advice: it never grants owner approval or authorizes merge, push, signing, deployment, credentials, spending, or destructive actions.
 
