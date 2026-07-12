@@ -59,6 +59,8 @@ async function runCli(): Promise<void> {
     registerSetupCommand,
     registerSetupSkillCommand,
     registerHookStatusCommand,
+    registerWakerRunCommand,
+    registerLimitStatusCommand,
     registerConfigCommand,
     registerSessionCommand,
     registerRepairCommand,
@@ -90,7 +92,7 @@ async function runCli(): Promise<void> {
   // a background update check so the next invocation's banner is fresh.
   if (!shouldSkipHousekeeping(dispatchedArgv)) {
     const { preCommandHousekeeping } = await import("./housekeeping.js");
-    await preCommandHousekeeping(version);
+    await preCommandHousekeeping(version, dispatchedArgv);
   }
 
   class HandledError extends Error {
@@ -153,6 +155,8 @@ async function runCli(): Promise<void> {
   cli = registerSetupCommand(cli);
   cli = registerSetupSkillCommand(cli);
   cli = registerHookStatusCommand(cli);
+  cli = registerWakerRunCommand(cli);
+  cli = registerLimitStatusCommand(cli);
   cli = registerConfigCommand(cli);
   cli = registerNodeCommand(cli);
   cli = registerSessionCommand(cli);

@@ -352,6 +352,13 @@ Run native Codex plan or code review for an autonomous session
 storybloq codex-review plan|code --session <id> --format guide-report
 ```
 
+### limit-status
+Show pending usage-limit auto-resumes (global across projects); cancel or requeue records
+
+```
+storybloq limit-status [--cancel <key>] [--requeue <key>] [--format json|md]
+```
+
 ### setup
 Install Storybloq skill, MCP, and hooks for Claude, Codex, or both
 

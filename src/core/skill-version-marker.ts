@@ -146,7 +146,14 @@ async function refreshCodexConfigIfPresent(): Promise<void> {
  * a UX degradation, not a blocker. The user's original command still
  * runs.
  */
-export async function autoRefreshSkillIfStale(runningVersion: string): Promise<boolean> {
+export async function autoRefreshSkillIfStale(
+  runningVersion: string,
+  opts: { reconcileLimitHooks?: boolean } = {},
+): Promise<boolean> {
+  // Default true for ordinary upgrades; a `setup --skip-hooks` invocation
+  // passes false so the version refresh does not install limit hooks the user
+  // explicitly opted out of.
+  const reconcileLimitHooks = opts.reconcileLimitHooks !== false;
   const staleTargets = skillTargets().filter((target) => isSkillStale(runningVersion, target.id));
   if (staleTargets.length === 0) return false;
 
@@ -241,6 +248,28 @@ export async function autoRefreshSkillIfStale(runningVersion: string): Promise<b
           `storybloq: legacy hook sweep or register failed (non-fatal): ${sweepMsg}\n` +
           `  Run 'storybloq setup --client all' manually to retry.\n`,
         );
+      }
+
+      // T-424: reconcile the limit-stop hooks (not count-gated: the legacy
+      // sweep only touches existing entries and can never install an absent
+      // hook type, so upgrades would otherwise never add StopFailure to the
+      // installed base). Honors the global kill switch (disabled => removed)
+      // AND a `setup --skip-hooks` opt-out (reconcileLimitHooks === false).
+      if (reconcileLimitHooks) {
+        try {
+          const { ensureLimitHooksRegistered } = await import("../cli/commands/setup-skill.js");
+          const limitHooks = await ensureLimitHooksRegistered(undefined, bin);
+          if (limitHooks.action === "installed") {
+            process.stderr.write("storybloq: registered limit-stop auto-resume hooks on version advance\n");
+          } else if (limitHooks.action === "removed") {
+            process.stderr.write("storybloq: removed limit-stop hooks (auto-resume disabled globally)\n");
+          }
+        } catch (limitErr: unknown) {
+          const limitMsg = limitErr instanceof Error ? limitErr.message : String(limitErr);
+          process.stderr.write(
+            `storybloq: limit-stop hook reconcile failed (non-fatal): ${limitMsg}\n`,
+          );
+        }
       }
     }
 

@@ -7,6 +7,7 @@ import { writeFederationCache } from "../../federation/cache.js";
 import { CrossNodeBlockingResolver } from "../../federation/cross-node-resolver.js";
 import { join } from "node:path";
 import type { CommandContext, CommandResult } from "../types.js";
+import type { LimitStopSummary } from "../../core/limit-ledger.js";
 import { busSummary } from "../../bus/store.js";
 import { BusError } from "../../bus/errors.js";
 import { isBusEnabled } from "../../bus/config.js";
@@ -14,6 +15,15 @@ import { isBusEnabled } from "../../bus/config.js";
 export async function handleStatus(ctx: CommandContext): Promise<CommandResult> {
   const { activeSessions, resumableSessions } = scanSessionSummaries(ctx.root);
   const config = ctx.state.config;
+
+  // T-424: pending limit auto-resumes for this project (best-effort).
+  let limitStops: LimitStopSummary[] = [];
+  try {
+    const { listLimitStopsForProject } = await import("../../core/limit-ledger.js");
+    limitStops = listLimitStopsForProject(ctx.root);
+  } catch {
+    // Status must render even when the global ledger is unreadable.
+  }
   let bus;
   if (isBusEnabled(config)) {
     try {
@@ -51,8 +61,8 @@ export async function handleStatus(ctx: CommandContext): Promise<CommandResult> 
       // best-effort cache write
     }
 
-    return { output: formatFederatedStatus(fedState, config, ctx.format, activeSessions, resumableSessions, bus) };
+    return { output: formatFederatedStatus(fedState, config, ctx.format, activeSessions, resumableSessions, bus, limitStops) };
   }
 
-  return { output: formatStatus(ctx.state, ctx.format, activeSessions, resumableSessions, bus) };
+  return { output: formatStatus(ctx.state, ctx.format, activeSessions, resumableSessions, bus, limitStops) };
 }

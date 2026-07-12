@@ -80,6 +80,6 @@ Run `storybloq bus check --ship` before release. Unacknowledged critical notices
 
 ## V1 Boundary
 
-V1 ships the local protocol, foreground CLI/MCP tools, stable endpoint identity, compaction succession, and guarded live hooks. It does not ship a daemon, process spawning, headless resume, automatic offline wake, or Codex Desktop task wake. Natural hooks and explicit polling remain the delivery paths.
+V1 ships the local protocol, foreground CLI/MCP tools, stable endpoint identity, compaction succession, and guarded live hooks. It does not ship a daemon, process spawning, headless resume, automatic offline wake, or Codex Desktop task wake. Natural hooks and explicit polling remain the delivery paths. One scoped exception outside the Bus: usage-limit auto-resume (T-424) runs a transient detached waker process (not a daemon -- it exits when no actionable records remain; inert stood-down manual records do not keep it polling) that headlessly resumes limit-stopped Claude Code sessions at reset. That waker is limit-recovery only; it is not a Bus delivery path.
 
 On platforms without Darwin or Linux process identity support, CLI endpoint liveness remains `unknown` and automatic replacement stays disabled. Explicit CLI-only retirement with the full endpoint id and a reason is the recovery path.

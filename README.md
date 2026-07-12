@@ -122,6 +122,20 @@ Both clients support context loading, autonomous mode, MCP, and compaction/statu
 
 Outside the AI client, the same state is one `storybloq` invocation away.
 
+## Usage-limit auto-resume
+
+Claude Code sessions stop at usage limits ("You've hit your usage limit"), and overnight autonomous work silently dies with them. Storybloq detects the stop through Claude Code's `StopFailure` hook, parses the reset time from the session transcript, records the stop in a global ledger (`~/.claude/storybloq/limit-ledger.json`), and resumes the session when the limit resets. On by default once hooks are installed.
+
+- **Autonomous sessions** are parked on the same recovery lane as compaction and woken headlessly through the full state machine -- ownership rebind, git-HEAD validation, and recovery mapping all apply, so a wake after the workspace changed is validated, not blindly replayed. Sessions stopped mid-FINALIZE are never auto-resumed (commit replay is not proven safe); you get a notification with manual recovery steps instead.
+- **Plain sessions** get a desktop notification at reset with the exact `claude --resume` command. Per-project opt-in (`limitResume.plainMode: "headless"`) wakes them headlessly instead.
+- **Permission posture is never escalated.** A session that ran with `--dangerously-skip-permissions` is only woken with that flag if the project explicitly opts in (`limitResume.inheritBypass: true`); otherwise it notifies.
+
+The wake is driven by a transient detached waker process, not a daemon: it polls the ledger every 30 seconds, resumes what is due (attempt-capped, staggered, concurrency-bounded), and exits when nothing is pending. It survives laptop sleep but not reboot or logout -- after a reboot, the next `storybloq` invocation or hook fire in any project respawns it, so weekly-scale waits recover on your next activity. That trade is the cost of "no daemon."
+
+Inspect and manage the queue with `storybloq limit-status` (`--cancel <key>` destroys a pending auto-resume, `--requeue <key>` retries a stood-down record). Disable globally with `{"limitResume": {"enabled": false}}` in `~/.claude/storybloq/config.json`, or per project via `limitResume` in `.story/config.json` (also `maxAttempts`, `staggerMs`, `maxConcurrent`, `notify`, and more).
+
+Prior art: the detection-and-reparse approach is modeled on [unsnooze](https://github.com/saaranshM/unsnooze) (MIT), which pioneered transcript-based limit detection and reset-time parsing for tmux-hosted sessions. Storybloq's version drops the tmux layer in favor of the documented hook surface and resumes autonomous sessions through its own state machine instead of a keystroke.
+
 ## Storybloq Bus
 
 Storybloq Bus is an optional local coordination protocol for one implementer task and one reviewer task. Runtime state lives under gitignored `.story/bus/`; confirmed findings still become canonical Storybloq issues with durable source provenance before they are sent as issue notices.
@@ -138,7 +152,7 @@ Bus runtime is local and gitignored, so run `storybloq bus init` once in each ch
 
 The foreground protocol includes send, poll, acknowledge, thread state, status, doctor, export, and ship checks. Messages are hash-chained, idempotent, bounded, task-bound, secret-screened, and delivered through crash-recoverable recipient mailboxes. Critical messages require a matching unresolved critical issue by default. Bus text is always peer-agent advice: it never grants owner approval or authorizes merge, push, signing, deployment, credentials, spending, or destructive actions.
 
-V1 does not include a daemon, process spawning, headless resume, or automatic offline wake. Natural SessionStart/Stop hooks and explicit polling are the delivery paths. Codex Desktop remains non-wakeable.
+V1 does not include a daemon, process spawning, headless resume, or automatic offline wake as Bus delivery paths. Natural SessionStart/Stop hooks and explicit polling are the delivery paths. Codex Desktop remains non-wakeable. (Usage-limit auto-resume, above, is a scoped exception outside the Bus: its transient waker recovers limit-stopped sessions and is not a message delivery path.)
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/Storybloq/storybloq/main/assets/autonomous.png" alt="Autonomous mode running a ticket through plan, implement, test, review" />
@@ -242,6 +256,7 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq blocker list` · `blocker add` · `blocker clear` | External dependencies blocking progress |
 | `storybloq snapshot` · `storybloq recap` | Capture state and diff against the last snapshot |
 | `storybloq export [--phase <id>] [--all] [--format json\|md]` | Self-contained project document |
+| `storybloq limit-status [--cancel <key>] [--requeue <key>]` | Pending usage-limit auto-resumes (global across projects) |
 
 ### Storybloq Bus (opt-in)
 
@@ -365,6 +380,21 @@ Injects a compact-aware resume prompt. Codex setup uses the same command with `-
 ```
 
 `storybloq bus hooks enable` is a separate project opt-in. It adds endpoint metadata and pending counts to SessionStart, and permits the synchronous Stop hook to block once for each new mailbox cursor. Peer payload bytes never appear in hook output. Claude's shared hook structure is upgraded once and remains guarded by project-local policy; Codex uses `storybloq hook-status --client codex`.
+
+### StopFailure (usage-limit detection)
+
+Runs `storybloq session limit-stop` when a Claude Code session stops on a rate limit, recording the stop for auto-resume (see Usage-limit auto-resume above). Setup also adds a second SessionStart matcher group (`"resume"`) carrying the same `session resume-prompt` command so a manual reopen of a limit-stopped session gets limit-aware guidance. Both entries are Claude-only, reconciled on every upgrade, and removed automatically when the global kill switch is set.
+
+```json
+{
+  "hooks": {
+    "StopFailure": [{
+      "matcher": "rate_limit",
+      "hooks": [{ "type": "command", "command": "storybloq session limit-stop" }]
+    }]
+  }
+}
+```
 
 ## Library usage
 

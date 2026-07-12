@@ -288,6 +288,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--session", "--format"],
   },
   {
+    name: "limit-status",
+    description: "Show pending usage-limit auto-resumes (global across projects); cancel or requeue records",
+    usage: "storybloq limit-status [--cancel <key>] [--requeue <key>] [--format json|md]",
+    flags: ["--cancel", "--requeue", "--format"],
+  },
+  {
     name: "setup",
     description: "Install Storybloq skill, MCP, and hooks for Claude, Codex, or both",
     usage: "storybloq setup [--client claude|codex|all] [--skip-hooks]",

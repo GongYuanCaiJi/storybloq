@@ -560,6 +560,21 @@ export const SessionStateSchema = z.object({
   compactObservedAt: z.string().nullable().default(null),
   resumeBlocked: z.boolean().default(false),
 
+  // T-424: Usage-limit interruption. Rides the COMPACT lane; interruptionKind
+  // discriminates the two park reasons (absent = "compact" for back-compat).
+  // limitPermissionMode is the AUTHORITY for wake posture (written only under
+  // withSessionLock from the StopFailure hook payload, enum-validated) -- the
+  // global ledger is a work queue, never a posture source.
+  interruptionKind: z.enum(["compact", "limit"]).nullish(),
+  limitStopPending: z.boolean().default(false),
+  limitResumeAt: z.number().nullable().default(null),
+  // Closed set at the SCHEMA level, not just at write time: this field is the
+  // posture authority, so a hand-corrupted value must degrade to null (no
+  // flag, safest posture) rather than pass through as an arbitrary string.
+  // .catch(null) keeps a malformed value from bricking the whole session read.
+  limitPermissionMode: z.enum(["bypassPermissions", "acceptEdits", "default", "plan"]).nullable().catch(null).default(null),
+  limitEventId: z.string().nullable().default(null),
+
   // Last cumulative work boundary reserved for an automatic checkpoint handover.
   lastCheckpointWorkCount: z.number().int().min(0).default(0),
 

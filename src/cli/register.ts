@@ -3741,6 +3741,92 @@ export function registerHookStatusCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// limit-status (T-424: pending limit auto-resumes)
+// ---------------------------------------------------------------------------
+
+export function registerLimitStatusCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "limit-status",
+    "Show pending usage-limit auto-resumes (global, all projects)",
+    (y) =>
+      y
+        .option("cancel", {
+          type: "string",
+          describe: "Cancel the pending auto-resume for a record key or client session id",
+        })
+        .option("requeue", {
+          type: "string",
+          describe: "Return a manual/failed record to the wake queue",
+        })
+        .option("format", {
+          choices: ["json", "md"] as const,
+          default: "md" as const,
+          describe: "Output format",
+        }),
+    async (argv) => {
+      const { handleLimitStatus } = await import("./commands/limit-status.js");
+      try {
+        const result = await handleLimitStatus({
+          cancel: argv.cancel as string | undefined,
+          requeue: argv.requeue as string | undefined,
+          format: argv.format as "json" | "md",
+        });
+        process.stdout.write(result.output + "\n");
+        if (result.errorCode) process.exitCode = 1;
+      } catch (err: unknown) {
+        process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+        process.exitCode = 1;
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// waker-run (T-424: hidden detached limit-waker entry point)
+// ---------------------------------------------------------------------------
+
+export function registerWakerRunCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "waker-run",
+    false as unknown as string, // hidden -- spawned detached by spawnWakerIfNeeded
+    (y) =>
+      y
+        .option("sb-waker", {
+          type: "boolean",
+          default: false,
+          hidden: true,
+          describe: "argv sentinel for PID-reuse-safe singleton identification",
+        })
+        .option("once", {
+          type: "boolean",
+          default: false,
+          hidden: true,
+          describe: "Run a single poll tick and exit (E2E simulation / debugging)",
+        }),
+    async (argv) => {
+      // Require the singleton sentinel BEFORE entering the loop. A sentinel-less
+      // run would acquire and heartbeat the waker.lock while isWakerAlive()
+      // reports it absent (its argv lacks the marker), so every later
+      // housekeeping invocation would spawn another waker that futilely contends.
+      if (argv.sbWaker !== true) {
+        process.stderr.write(
+          "[storybloq] waker-run is an internal, self-spawned command; run it via the auto-resume flow, not directly.\n",
+        );
+        return;
+      }
+      try {
+        const { runWaker } = await import("../autonomous/waker.js");
+        await runWaker(undefined, argv.once === true ? { maxTicks: 1 } : {});
+      } catch (err) {
+        process.stderr.write(
+          `[storybloq] waker exited with error: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // config
 // ---------------------------------------------------------------------------
 
@@ -3899,13 +3985,42 @@ export function registerSessionCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "limit-stop",
+          "Record a usage-limit stop for auto-resume (StopFailure hook)",
+          (y2) => y2,
+          async () => {
+            try {
+              const { handleSessionLimitStop, readHookStdinContext } = await import("./commands/session-compact.js");
+              const hookContext = await readHookStdinContext(process.stdin);
+              await handleSessionLimitStop({
+                clientTaskId: hookContext.sessionId,
+                cwd: hookContext.cwd,
+                transcriptPath: hookContext.transcriptPath,
+                errorType: hookContext.errorType,
+                permissionMode: hookContext.permissionMode,
+              });
+            } catch (err) {
+              // Hook contract: always exit 0; the session is already stopped.
+              process.stderr.write(
+                `[storybloq] limit-stop failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+          },
+        )
+        .command(
           "clear-compact [sessionId]",
           "Clear stale compact marker (admin)",
           (y2) =>
-            y2.positional("sessionId", {
-              type: "string",
-              describe: "Session ID (optional — scans for compactPending session if omitted)",
-            }),
+            y2
+              .positional("sessionId", {
+                type: "string",
+                describe: "Session ID (optional — scans for compactPending session if omitted)",
+              })
+              .option("force", {
+                type: "boolean",
+                default: false,
+                describe: "Required for limit-stopped sessions (destroys the pending auto-resume)",
+              }),
           async (argv) => {
             const { discoverProjectRoot } = await import("../core/project-root-discovery.js");
             const root = discoverProjectRoot();
@@ -3916,7 +4031,9 @@ export function registerSessionCommand(yargs: Argv): Argv {
             }
             const { handleSessionClearCompact } = await import("./commands/session-compact.js");
             try {
-              const result = await handleSessionClearCompact(root, argv.sessionId as string | undefined);
+              const result = await handleSessionClearCompact(root, argv.sessionId as string | undefined, {
+                force: argv.force === true,
+              });
               process.stdout.write(result + "\n");
             } catch (err: unknown) {
               process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
@@ -4187,7 +4304,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
         )
         .demandCommand(
           1,
-          "Specify a session subcommand: compact-prepare, resume-prompt, clear-compact, stop, list, show, repair, delete, health, watch",
+          "Specify a session subcommand: compact-prepare, resume-prompt, limit-stop, clear-compact, stop, list, show, repair, delete, health, watch",
         )
         .strict(),
     () => {},

@@ -56,7 +56,7 @@ function livenessLog(tag: string, detail: Record<string, unknown>): void {
   try { process.stderr.write("liveness:" + tag + " " + JSON.stringify(detail) + "\n"); } catch { /* best-effort */ }
 }
 
-function sleepMs(ms: number): void {
+export function sleepMs(ms: number): void {
   if (ms <= 0) return;
   const deadline = Date.now() + ms;
   try {
@@ -114,48 +114,114 @@ function getProcessPpid(pid: number): number | null {
   return null;
 }
 
-function hasSidecarSignature(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+/**
+ * Same-uid argv-marker check: true only when `pid` is alive, owned by our uid,
+ * and its command line carries EVERY one of `markers` (all-markers semantics:
+ * a process matching only some markers -- e.g. an interactive `claude --resume
+ * <id>` sharing the session UUID with a wake child -- is a non-match). Bare
+ * kill(pid,0) liveness is NOT PID-reuse-safe; this is the identity layer that
+ * makes it safe. Exported for T-424 (waker sentinel + wake-child identity).
+ */
+export function hasArgvSignature(pid: number, markers: readonly string[]): boolean {
+  return probeArgvSignature(pid, markers) === "match";
+}
+
+/**
+ * Tri-state argv identity probe. "match" = the process exists, belongs to us,
+ * and carries EVERY marker. "absent" = the process is gone, belongs to another
+ * uid, or its (readable) argv lacks a marker -- i.e. the identified child is
+ * definitively not there (dead or PID-reused). "unknown" = the process EXISTS
+ * (kill(pid, 0) reaches it) but its argv could not be inspected (ps failure,
+ * truncated /proc read, unsupported platform); callers supervising a child
+ * must treat "unknown" as possibly-alive and retry, never as confirmed death.
+ */
+export function probeArgvSignature(pid: number, markers: readonly string[]): "match" | "absent" | "unknown" {
+  if (!Number.isInteger(pid) || pid <= 0) return "absent";
+  if (markers.length === 0) return "absent";
+  let exists = true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ESRCH") return "absent";
+    // EPERM: exists but not ours -> the uid checks below would reject it
+    // anyway; treat as PID reuse by another user.
+    if ((err as NodeJS.ErrnoException).code === "EPERM") return "absent";
+    exists = false; // unexpected failure: fall through to argv inspection
+  }
   try {
     if (process.platform === "darwin") {
-      const out = execFileSync("/bin/ps", ["-p", String(pid), "-o", "uid=,command="], {
+      // `-ww` = unlimited width: without it BSD `ps` truncates the command
+      // column (~default width), which would drop a marker that sits near the
+      // END of a long argv -- e.g. the wake-child attempt sentinel at the tail
+      // of a ~280-char prompt -- making a LIVE child read as "absent" (a
+      // positively-confirmed death). That would let the supervisor spawn a
+      // second child on the same transcript. Full width keeps every marker
+      // visible so all-markers matching is sound.
+      const out = execFileSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "uid=,command="], {
         encoding: "utf-8",
         timeout: 500,
         stdio: ["ignore", "pipe", "ignore"],
       });
       const line = out.trim();
-      if (!line) return false;
+      if (!line) return exists ? "unknown" : "absent";
       const firstSpace = line.indexOf(" ");
-      if (firstSpace < 0) return false;
+      if (firstSpace < 0) return "unknown";
       const uid = Number(line.slice(0, firstSpace).trim());
       const command = line.slice(firstSpace + 1);
       const myUid = getOurUid();
-      if (myUid < 0 || uid !== myUid) return false;
-      return command.includes(SIDECAR_ARGV_MARKER) || command.includes(SIDECAR_SENTINEL);
+      if (myUid < 0) return "unknown";
+      if (uid !== myUid) return "absent";
+      return markers.every((m) => command.includes(m)) ? "match" : "absent";
     }
     if (process.platform === "linux") {
       const pidDir = "/proc/" + pid;
       const st1 = fs.statSync(pidDir);
       const myUid = getOurUid();
-      if (myUid < 0 || st1.uid !== myUid) return false;
+      if (myUid < 0) return "unknown";
+      if (st1.uid !== myUid) return "absent";
       const fd = fs.openSync(pidDir + "/cmdline", "r");
       try {
-        const cmdStat = fs.fstatSync(fd);
-        const size = Math.min(cmdStat.size || CMDLINE_MAX_BYTES, CMDLINE_MAX_BYTES);
-        const buf = Buffer.alloc(size);
-        const bytes = fs.readSync(fd, buf, 0, size, 0);
+        // procfs cmdline reports st_size 0, so size the buffer at the cap. A
+        // single readSync can also SHORT-read; loop until EOF or the cap. If the
+        // cap fills WITHOUT EOF a required marker may lie beyond it -> return
+        // "unknown" (possibly-alive), NEVER "absent" (a false confirmed death
+        // would let the supervisor spawn a second child on the same transcript).
+        const buf = Buffer.alloc(CMDLINE_MAX_BYTES);
+        let read = 0;
+        let sawEof = false;
+        while (read < buf.length) {
+          const n = fs.readSync(fd, buf, read, buf.length - read, read);
+          if (n <= 0) { sawEof = true; break; }
+          read += n;
+        }
         const st2 = fs.statSync(pidDir);
-        if (st2.uid !== st1.uid || st2.ino !== st1.ino) return false;
-        const cmd = buf.slice(0, bytes).toString("utf-8").replace(/\0/g, " ");
-        return cmd.includes(SIDECAR_ARGV_MARKER) || cmd.includes(SIDECAR_SENTINEL);
+        if (st2.uid !== st1.uid || st2.ino !== st1.ino) return "unknown";
+        if (!sawEof) return "unknown"; // cap filled before EOF: cannot rule out a marker past it
+        const cmd = buf.slice(0, read).toString("utf-8").replace(/\0/g, " ");
+        return markers.every((m) => cmd.includes(m)) ? "match" : "absent";
       } finally {
         try { fs.closeSync(fd); } catch { /* ignore */ }
       }
     }
-    return false;
+    // Unsupported platform: existence is known, identity is not.
+    return "unknown";
   } catch {
-    return false;
+    // ps/proc inspection failed while kill(pid, 0) says the process exists:
+    // identity is unknown -- do NOT report a live pid as absent.
+    return exists ? "unknown" : "absent";
   }
+}
+
+function hasSidecarSignature(pid: number): boolean {
+  // ANY-marker contract (preserved from the pre-T-424 implementation): the
+  // osascript sidecar command line is long and `ps -o command=` can truncate
+  // it, so a live sidecar may show only one of the two markers. Requiring BOTH
+  // (all-markers) would misclassify such a sidecar as absent and let it be
+  // replaced/killed. All-markers semantics are correct only for wake-child
+  // identity (session UUID + attempt id must both be present); the sidecar
+  // deliberately matches on either. `||` short-circuits, so the common
+  // both-markers-present case stays a single probe.
+  return hasArgvSignature(pid, [SIDECAR_ARGV_MARKER]) || hasArgvSignature(pid, [SIDECAR_SENTINEL]);
 }
 
 function waitForExit(pid: number, deadlineMs: number, signatureGuard: () => boolean): "exited" | "timeout" | "lost-signature" {
@@ -220,7 +286,7 @@ function inspectExistingLock(lockPath: string): LockInspection {
   }
 }
 
-type UnlinkResult =
+export type UnlinkResult =
   | { unlinked: true }
   | { unlinked: false; reason: "foreign" | "symlink" | "error" | "raced" };
 
@@ -228,10 +294,15 @@ type UnlinkResult =
 // verification. When expectedInode/expectedToken are provided we require the
 // currently-linked file to match before unlinking — this protects against a
 // concurrent holder replacing the lock between inspect and unlink.
-function safeUnlinkLock(
+// expectedRenewedAt additionally fences against an IN-PLACE lease renewal by the
+// SAME holder (same inode+token, newer renewedAt): a lease that looked stealable
+// at inspect time is fresh again and must NOT be stolen. Exported for T-424
+// (limit-lock reuses the verified-unlink primitive).
+export function safeUnlinkLock(
   lockPath: string,
   expectedInode?: number | null,
   expectedToken?: string | null,
+  expectedRenewedAt?: number | null,
 ): UnlinkResult {
   let fd: number;
   try {
@@ -266,19 +337,29 @@ function safeUnlinkLock(
     // unlink. This preserves the invariant that a valid, differently-owned
     // lock is never broken while letting us release corrupted bodies on
     // inodes we own.
-    if (expectedToken !== undefined && expectedToken !== null) {
-      if (st.size <= LOCK_MAX_BYTES && st.size >= 0) {
-        const buf = Buffer.alloc(Math.min(st.size || 0, LOCK_MAX_BYTES));
-        let bodyParsed: any = null;
-        let parseOk = false;
-        try {
-          if (buf.length > 0) fs.readSync(fd, buf, 0, buf.length, 0);
-          bodyParsed = JSON.parse(buf.toString("utf-8"));
-          parseOk = true;
-        } catch { /* unparseable: treat as corruption on our inode */ }
-        if (parseOk && bodyParsed && typeof bodyParsed === "object" &&
+    if ((expectedToken != null || expectedRenewedAt != null) && st.size <= LOCK_MAX_BYTES && st.size >= 0) {
+      const buf = Buffer.alloc(Math.min(st.size || 0, LOCK_MAX_BYTES));
+      let bodyParsed: any = null;
+      let parseOk = false;
+      try {
+        if (buf.length > 0) fs.readSync(fd, buf, 0, buf.length, 0);
+        bodyParsed = JSON.parse(buf.toString("utf-8"));
+        parseOk = true;
+      } catch { /* unparseable: treat as corruption on our inode */ }
+      if (parseOk && bodyParsed && typeof bodyParsed === "object") {
+        // A NEW holder raced in (different token) -> never unlink.
+        if (expectedToken != null &&
             typeof bodyParsed.token === "string" &&
             bodyParsed.token !== expectedToken) {
+          return { unlinked: false, reason: "raced" };
+        }
+        // The SAME holder renewed the lease in place (same token+inode, newer
+        // renewedAt) after we inspected it as stealable -> the lock is fresh, so
+        // stealing it would evict a live holder and violate singleton ownership.
+        if (expectedRenewedAt != null &&
+            typeof bodyParsed.renewedAt === "number" &&
+            Number.isFinite(bodyParsed.renewedAt) &&
+            bodyParsed.renewedAt !== expectedRenewedAt) {
           return { unlinked: false, reason: "raced" };
         }
       }

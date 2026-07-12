@@ -18,6 +18,7 @@ import type { DoctorResult } from "./team-doctor.js";
 import type { ActiveSessionSummary } from "./session-scan.js";
 import type { SelftestResult } from "../cli/commands/selftest.js";
 import type { BusSummary } from "../bus/schemas.js";
+import type { LimitStopSummary } from "./limit-ledger.js";
 import { phasesWithStatus, isBlockerCleared } from "./queries.js";
 
 function resolveTicketRefDisplay(ref: string, state: ProjectState): string {
@@ -168,12 +169,48 @@ function formatConfigHints(state: ProjectState): string[] {
 
 // --- Format Functions ---
 
+/** T-424: md lines for the limit-stopped section (shared by both status formatters). */
+function limitStopsSection(limitStops: readonly LimitStopSummary[]): string[] {
+  if (limitStops.length === 0) return [];
+  // Neutral heading: the section mixes SCHEDULED records (stopped/deferred) with
+  // in-progress and stood-down ones, so "auto-resume pending" would mislabel the
+  // manual/cancelling/resuming rows.
+  const lines = ["", "## Limit-stop records", ""];
+  for (const s of limitStops) {
+    const when = new Date(s.nextAttemptAt).toLocaleString();
+    const target = s.sessionType === "autonomous" && s.storybloqSessionId
+      ? `session ${s.storybloqSessionId.slice(0, 8)}`
+      : `plain session ${s.clientTaskId.slice(0, 8)}`;
+    // Action text follows STATUS, not just mode: only stopped/deferred are
+    // actually SCHEDULED; manual is stood down, resuming/interactive are
+    // in-progress, and cancelling/preparing are transitions.
+    const action = s.status === "manual"
+      ? (s.reasonCode === "cancellation_blocked"
+          ? "cancellation blocked on a live wake child"
+          : `stood down -- requeue: storybloq limit-status --requeue ${s.key}`)
+      : s.status === "cancelling"
+        ? "cancellation in progress"
+        : s.status === "preparing"
+          ? "detection in progress"
+          : s.status === "resuming"
+            ? "auto-resume in progress"
+            : s.status === "interactive"
+              ? "interactive resume in progress"
+              : s.mode === "headless" ? `auto-resumes ~${when}` : `notifies ~${when}`;
+    const reason = s.reasonCode ? ` [${s.reasonCode}]` : "";
+    lines.push(`- ${target} -- ${s.status}${reason}, ${s.limitType} limit, ${action} (attempts ${s.wakeAttempts})`);
+  }
+  lines.push("", "Manage with: storybloq limit-status [--cancel <key>] [--requeue <key>]");
+  return lines;
+}
+
 export function formatStatus(
   state: ProjectState,
   format: OutputFormat,
   activeSessions: readonly ActiveSessionSummary[] = [],
   resumableSessions: readonly ActiveSessionSummary[] = [],
   bus?: BusSummary | { readonly enabled: true; readonly error: { readonly code: string; readonly message: string } },
+  limitStops: readonly LimitStopSummary[] = [],
 ): string {
   const phases = phasesWithStatus(state);
   const data = {
@@ -198,6 +235,7 @@ export function formatStatus(
     ...(activeSessions.length > 0 ? { activeSessions } : {}),
     ...(resumableSessions.length > 0 ? { resumableSessions } : {}),
     ...(bus ? { bus } : {}),
+    ...(limitStops.length > 0 ? { limitStops } : {}),
   };
 
   if (format === "json") {
@@ -254,6 +292,8 @@ export function formatStatus(
     }
   }
 
+  lines.push(...limitStopsSection(limitStops));
+
   if (state.isEmptyScaffold) {
     lines.push("");
     lines.push(EMPTY_SCAFFOLD_HEADING);
@@ -272,6 +312,7 @@ export function formatFederatedStatus(
   activeSessions: readonly ActiveSessionSummary[] = [],
   resumableSessions: readonly ActiveSessionSummary[] = [],
   bus?: BusSummary | { readonly enabled: true; readonly error: { readonly code: string; readonly message: string } },
+  limitStops: readonly LimitStopSummary[] = [],
 ): string {
   const sanitizedNodes = fedState.nodes.map((node) => ({
     name: node.name,
@@ -290,6 +331,7 @@ export function formatFederatedStatus(
     ...(activeSessions.length > 0 ? { activeSessions } : {}),
     ...(resumableSessions.length > 0 ? { resumableSessions } : {}),
     ...(bus ? { bus } : {}),
+    ...(limitStops.length > 0 ? { limitStops } : {}),
   };
 
   if (format === "json") {
@@ -357,6 +399,8 @@ export function formatFederatedStatus(
       lines.push(`- ${ticket} -- COMPACT recovery available (${s.leaseState ?? "unknown"} lease)`);
     }
   }
+
+  lines.push(...limitStopsSection(limitStops));
 
   return lines.join("\n");
 }

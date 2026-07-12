@@ -581,6 +581,188 @@ export function prepareForCompact(
   };
 }
 
+// ---------------------------------------------------------------------------
+// T-424: Usage-limit stops (ride the COMPACT lane with interruptionKind="limit")
+// ---------------------------------------------------------------------------
+
+/** The closed set Claude Code's hook payload may carry; anything else is recorded as null (no flag at wake). */
+export const LIMIT_PERMISSION_MODES = ["bypassPermissions", "acceptEdits", "default", "plan"] as const;
+
+export type LimitPermissionMode = (typeof LIMIT_PERMISSION_MODES)[number];
+
+export function validateLimitPermissionMode(mode: string | null | undefined): LimitPermissionMode | null {
+  return mode && (LIMIT_PERMISSION_MODES as readonly string[]).includes(mode) ? (mode as LimitPermissionMode) : null;
+}
+
+/**
+ * Spread into a session write to atomically clear a pending interruption --
+ * the COMPACT markers plus every limit field -- so a later ordinary compaction
+ * or an independent new limit stop starts clean.
+ */
+export const CLEARED_LIMIT_FIELDS = {
+  interruptionKind: null,
+  limitStopPending: false,
+  limitResumeAt: null,
+  limitPermissionMode: null,
+  limitEventId: null,
+} as const;
+
+/**
+ * Full interruption clear (COMPACT markers + limit fields). Call under
+ * withSessionLock. Use this ONLY when the session has already left COMPACT (the
+ * successful-resume completion path): it drops compactPending and the resume
+ * target, so calling it on a still-COMPACT session would strand it as
+ * COMPACT-but-not-pending -- undiscoverable by findResumableSession and rejected
+ * by prepareForLimitStop. For cancellation of a still-parked session use
+ * downgradeLimitParkToCompact instead.
+ */
+export function clearInterruption(dir: string, state: FullSessionState): FullSessionState {
+  return writeSessionSync(dir, {
+    ...state,
+    compactPending: false,
+    compactPreparedAt: null,
+    compactObservedAt: null,
+    preCompactState: null,
+    resumeFromRevision: null,
+    resumeBlocked: false,
+    ...CLEARED_LIMIT_FIELDS,
+  });
+}
+
+/**
+ * Cancellation downgrade: convert a still-parked limit interruption back into an
+ * ORDINARY compact park so the autonomous session stays recoverable. The session
+ * remains on the COMPACT lane with compactPending true and its resume target
+ * (preCompactState + resumeFromRevision) intact -- discoverable by
+ * findResumableSession and resumable through the normal guide flow -- while every
+ * limit-specific field is cleared. compactPreparedAt is refreshed so the plain
+ * compact staleness window starts from the cancellation, not the original stop.
+ * (clearInterruption would instead strand it as COMPACT-but-not-pending.)
+ *
+ * EXCEPTION -- a FINALIZE park is NOT downgraded to a clean compact park. Doing
+ * so would clear interruptionKind, which is exactly the guide's "git state
+ * verified" acknowledgment (see guide.ts FINALIZE gate + clear-compact --force),
+ * so a cancelled FINALIZE park would then replay finalization through the
+ * generic resume path with no verification (duplicate commits). Cancelling the
+ * LEDGER record already stops any auto-resume; the session stays limit-kind so
+ * the FINALIZE gate and the clear-compact --force requirement both survive, and
+ * only the auto-resume scheduling fields are cleared.
+ */
+export function downgradeLimitParkToCompact(dir: string, state: FullSessionState): FullSessionState {
+  if (state.preCompactState === "FINALIZE" && state.interruptionKind === "limit") {
+    return writeSessionSync(dir, {
+      ...state,
+      state: "COMPACT",
+      compactPending: true,
+      compactPreparedAt: new Date().toISOString(),
+      compactObservedAt: null,
+      resumeBlocked: false,
+      // Keep interruptionKind="limit" + preCompactState + limitEventId so the
+      // FINALIZE gate holds; drop only the scheduling fields that would keep the
+      // waker treating this as live auto-resume work.
+      limitStopPending: false,
+      limitResumeAt: null,
+      limitPermissionMode: null,
+    });
+  }
+  return writeSessionSync(dir, {
+    ...state,
+    state: "COMPACT",
+    compactPending: true,
+    compactPreparedAt: new Date().toISOString(),
+    compactObservedAt: null,
+    resumeBlocked: false,
+    ...CLEARED_LIMIT_FIELDS,
+  });
+}
+
+export interface LimitStopPrepareOptions {
+  expectedHead?: string;
+  /** Hook payload permission_mode; validated against LIMIT_PERMISSION_MODES. */
+  permissionMode?: string | null;
+  /** Parsed (or fallback) reset time, epoch ms. */
+  resumeAt: number;
+  /** Shared with the ledger record -- the cross-store reconciliation key. */
+  limitEventId: string;
+}
+
+/**
+ * Park an autonomous session for a usage-limit stop. Same lane as
+ * prepareForCompact (state=COMPACT + compactPending) so every resume-path
+ * consumer works unchanged, discriminated by interruptionKind="limit".
+ *
+ * Unlike prepareForCompact this ALLOWS FINALIZE: the session is parked so it
+ * stays discoverable and explicitly recoverable, while auto-resume is disabled
+ * end-to-end (ledger mode:"notify" + handleResume's FINALIZE rejection) because
+ * replaying finalization is not proven idempotent (see T-425).
+ *
+ * Idempotent on an already-parked session (either kind): a re-limit upgrades
+ * the interruption to kind="limit" with the NEW event's reset time while
+ * preserving preCompactState/resumeFromRevision from the original park.
+ */
+export function prepareForLimitStop(
+  dir: string,
+  state: FullSessionState,
+  opts: LimitStopPrepareOptions,
+): CompactPrepareResult {
+  if (state.state === "SESSION_END") throw new Error("Session already ended");
+
+  const limitFields = {
+    interruptionKind: "limit" as const,
+    limitStopPending: true,
+    limitResumeAt: opts.resumeAt,
+    limitPermissionMode: validateLimitPermissionMode(opts.permissionMode),
+    limitEventId: opts.limitEventId,
+  };
+
+  // Already parked (compact or limit): keep the original resume target, take
+  // the new limit event's fields.
+  if (state.compactPending && state.state === "COMPACT") {
+    const updatedGit = opts.expectedHead
+      ? { ...state.git, expectedHead: opts.expectedHead }
+      : state.git;
+    writeSessionSync(dir, {
+      ...state,
+      ...limitFields,
+      compactPreparedAt: new Date().toISOString(),
+      compactObservedAt: null,
+      resumeBlocked: false,
+      git: updatedGit,
+    });
+    return {
+      sessionId: state.sessionId,
+      preCompactState: state.preCompactState ?? state.state,
+      resumeFromRevision: state.resumeFromRevision ?? state.revision,
+    };
+  }
+
+  if (state.state === "COMPACT") {
+    throw new Error("Session is in COMPACT state but not pending. Call resume or clear-compact.");
+  }
+
+  const resumeTarget = state.state === "HANDOVER" ? "PICK_TICKET" : state.state;
+
+  const written = writeSessionSync(dir, {
+    ...state,
+    ...limitFields,
+    state: "COMPACT",
+    previousState: state.state,
+    preCompactState: resumeTarget,
+    resumeFromRevision: state.revision,
+    compactPending: true,
+    compactPreparedAt: new Date().toISOString(),
+    compactObservedAt: null,
+    resumeBlocked: false,
+    git: { ...state.git, expectedHead: opts.expectedHead ?? state.git.expectedHead },
+  });
+
+  return {
+    sessionId: written.sessionId,
+    preCompactState: resumeTarget,
+    resumeFromRevision: state.revision,
+  };
+}
+
 /**
  * Find a resumable session (compactPending + active + workspace match).
  * Used by session-resume-prompt CLI (SessionStart hook).
@@ -604,6 +786,10 @@ export function findResumableSession(root: string): { info: ActiveSessionInfo; s
   }
 
   const FRESHNESS_MS = 60 * 60 * 1000; // 1 hour
+  // T-424: a limit-parked session legitimately waits hours-to-days for its
+  // reset; the 1h compact window would flag every limit resume stale (and the
+  // stale text steers users to clear-compact, destroying the pending resume).
+  const LIMIT_RESUME_GRACE_MS = 24 * 60 * 60 * 1000;
   let best: { info: ActiveSessionInfo; stale: boolean } | null = null;
   let bestPreparedAt = 0;
 
@@ -625,7 +811,9 @@ export function findResumableSession(root: string): { info: ActiveSessionInfo; s
       ? new Date(session.compactPreparedAt).getTime()
       : 0;
     const preparedAtValid = Number.isNaN(preparedAt) ? 0 : preparedAt;
-    const isStale = Date.now() - preparedAtValid > FRESHNESS_MS;
+    const isStale = session.interruptionKind === "limit" && session.limitResumeAt != null
+      ? Date.now() > session.limitResumeAt + LIMIT_RESUME_GRACE_MS
+      : Date.now() - preparedAtValid > FRESHNESS_MS;
 
     if (preparedAtValid > bestPreparedAt) {
       best = { info: { state: session, dir }, stale: isStale };

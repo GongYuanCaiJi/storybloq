@@ -37,6 +37,11 @@ function defaultSettingsPath(): string {
 export const PRECOMPACT_SUBCOMMAND = "session compact-prepare";
 export const SESSIONSTART_SUBCOMMAND = "session resume-prompt";
 export const STOP_SUBCOMMAND = "hook-status";
+// T-424: usage-limit stop detection (StopFailure hook, matcher "rate_limit").
+export const LIMITSTOP_SUBCOMMAND = "session limit-stop";
+export const STOPFAILURE_MATCHER = "rate_limit";
+/** Second SessionStart matcher group for limit wake/reopen handling (same resume-prompt command). */
+export const LIMIT_SESSIONSTART_MATCHER = "resume";
 
 // ---------------------------------------------------------------------------
 // Legacy-basename set (ISS-589)
@@ -278,6 +283,7 @@ export interface LegacyHookCounts {
   PreCompact: number;
   SessionStart: number;
   Stop: number;
+  StopFailure: number;
 }
 
 /**
@@ -296,7 +302,7 @@ export async function countLegacyHooks(
   binPath: string,
   settingsPath?: string,
 ): Promise<LegacyHookCounts> {
-  const zero: LegacyHookCounts = { PreCompact: 0, SessionStart: 0, Stop: 0 };
+  const zero: LegacyHookCounts = { PreCompact: 0, SessionStart: 0, Stop: 0, StopFailure: 0 };
   const path = settingsPath ?? defaultSettingsPath();
   if (!existsSync(path)) return zero;
 
@@ -322,9 +328,10 @@ export async function countLegacyHooks(
     ["PreCompact", PRECOMPACT_SUBCOMMAND],
     ["SessionStart", SESSIONSTART_SUBCOMMAND],
     ["Stop", STOP_SUBCOMMAND],
+    ["StopFailure", LIMITSTOP_SUBCOMMAND],
   ];
 
-  const counts: LegacyHookCounts = { PreCompact: 0, SessionStart: 0, Stop: 0 };
+  const counts: LegacyHookCounts = { PreCompact: 0, SessionStart: 0, Stop: 0, StopFailure: 0 };
   for (const [hookType, subcommand] of pairs) {
     if (!(hookType in hooks) || !Array.isArray(hooks[hookType])) continue;
     const newCommand = formatHookCommand(binPath, subcommand).trim();
@@ -358,12 +365,14 @@ export async function sweepLegacyHooks(
   const precompact = formatHookCommand(binPath, PRECOMPACT_SUBCOMMAND);
   const sessionStart = formatHookCommand(binPath, SESSIONSTART_SUBCOMMAND);
   const stop = formatHookCommand(binPath, STOP_SUBCOMMAND);
+  const limitStop = formatHookCommand(binPath, LIMITSTOP_SUBCOMMAND);
 
   let total = 0;
   const pairs: Array<[string, string, string]> = [
     ["PreCompact", PRECOMPACT_SUBCOMMAND, precompact],
     ["SessionStart", SESSIONSTART_SUBCOMMAND, sessionStart],
     ["Stop", STOP_SUBCOMMAND, stop],
+    ["StopFailure", LIMITSTOP_SUBCOMMAND, limitStop],
   ];
   for (const [hookType, subcommand, newCommand] of pairs) {
     try {
