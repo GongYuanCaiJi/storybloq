@@ -251,11 +251,18 @@ export function formatStatus(
     `Lessons: ${state.activeLessonCount} active, ${state.deprecatedLessonCount} deprecated`,
     `Handovers: ${state.handoverFilenames.length}`,
     ...(bus
-      ? ["error" in bus
-          ? `Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`
-          : bus.initialized
-            ? `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`
-            : "Bus: enabled, not initialized in this checkout"]
+      ? "error" in bus
+          ? [`Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`]
+          // D7: Markdown stays quiet until the Bus is enabled.
+          : bus.setupState === "disabled"
+            ? []
+            : bus.setupState === "ready"
+              ? [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`]
+              : bus.setupState === "waiting_for_peer"
+                ? ["Bus: waiting for peer; run `storybloq bus setup` in the other task"]
+                : bus.initialized
+                  ? [`Bus: ${bus.setupState}`]
+                  : ["Bus: enabled, not set up in this checkout; run `storybloq bus setup`"]
       : []),
     "",
     ...formatConfigHints(state),
@@ -344,11 +351,18 @@ export function formatFederatedStatus(
     `Federation: ${fedState.nodeCount} nodes (${fedState.reachableCount} reachable${fedState.unreachableCount > 0 ? `, ${fedState.unreachableCount} unreachable` : ""})`,
     `Tickets: ${fedState.totalCompleteTickets}/${fedState.totalTickets} across all nodes | Issues: ${fedState.totalOpenIssues} open`,
     ...(bus
-      ? ["error" in bus
-          ? `Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`
-          : bus.initialized
-            ? `Bus: ${bus.endpoints} endpoints, ${bus.pendingMessages} pending, ${bus.openThreads} open, ${bus.parkedThreads} parked, ${bus.quarantined} quarantined; hooks Claude ${bus.hookDelivery.claude ? "on" : "off"}, Codex ${bus.hookDelivery.codex ? "on" : "off"}`
-            : "Bus: enabled, not initialized in this checkout"]
+      ? "error" in bus
+          ? [`Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`]
+          // D7: Markdown stays quiet until the Bus is enabled.
+          : bus.setupState === "disabled"
+            ? []
+            : bus.setupState === "ready"
+              ? [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`]
+              : bus.setupState === "waiting_for_peer"
+                ? ["Bus: waiting for peer; run `storybloq bus setup` in the other task"]
+                : bus.initialized
+                  ? [`Bus: ${bus.setupState}`]
+                  : ["Bus: enabled, not set up in this checkout; run `storybloq bus setup`"]
       : []),
     "",
   ];
@@ -1606,7 +1620,7 @@ export function formatReference(
 
   lines.push("## MCP Tools");
   lines.push("");
-  lines.push("The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are feature-gated and appear only when `features.bus` is enabled at MCP process start.");
+  lines.push("The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are always registered in full mode; when the Bus is disabled or uninitialized they return setup guidance pointing at `storybloq bus setup`, with no MCP restart required.");
   lines.push("");
   for (const tool of mcpTools) {
     const params = tool.params?.length ? ` (${tool.params.join(", ")})` : "";

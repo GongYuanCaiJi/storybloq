@@ -56,7 +56,14 @@ export async function claimBusStopDelivery(
   if (!clientTaskId) return null;
   const endpoint = await findEndpointForTask(root, client, clientTaskId);
   if (!endpoint) return null;
-  const pending = await pendingMailboxCursor(root, endpoint.role);
+  let pending: { cursor: number; count: number };
+  try {
+    pending = await pendingMailboxCursor(root, endpoint.endpointId, clientTaskId);
+  } catch {
+    // Ownership could not be proven under lock (e.g. the endpoint was rebound
+    // or retired between lookup and read); the Stop hook fails open.
+    return null;
+  }
   if (pending.count === 0) return null;
 
   let claimed = false;

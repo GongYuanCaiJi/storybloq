@@ -1,17 +1,18 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { normalizeClientTaskId, type StorybloqClient } from "../autonomous/client-profile.js";
 import { loadProject } from "../core/project-loader.js";
-import { resolveInitializedBusPaths } from "./admin.js";
+import { resolveInitializedBusPaths, resolveInitializedBusPathsForJoin } from "./admin.js";
 import { canonicalHash, sha256 } from "./canonical.js";
 import { assertBusEnabled } from "./config.js";
 import { BusError } from "./errors.js";
-import { durableCreate, durableUnlink, durableWrite, listRegularJsonFiles, readJsonNoFollow } from "./io.js";
+import { durableCreate, durableUnlink, durableWrite, listRegularJsonFiles, readJsonNoFollow, rejectPathSymlink, syncDirectory } from "./io.js";
 import { captureProcessSignature, inspectProcessIdentity, withHardenedLock } from "./lock.js";
-import { resolveBusPaths } from "./paths.js";
+import { assertBusLayout, endpointMailboxPath, resolveBusPaths, type BusPaths } from "./paths.js";
 import { normalizeBusText } from "./security.js";
 import {
   BusEndpointSchema,
@@ -19,7 +20,6 @@ import {
   type BusClient,
   type BusEndpoint,
   type BusProcessRef,
-  type BusRole,
   type BusSuccession,
   type BusSurface,
 } from "./schemas.js";
@@ -28,6 +28,73 @@ const execFileAsync = promisify(execFile);
 const SUCCESSION_TTL_MS = 15 * 60 * 1000;
 const ENDPOINT_LOCK_TIMEOUT_MS = 15_000;
 const EndpointIdSchema = z.string().uuid();
+const POINTER_FILENAME = /^(\d{12})-([0-9a-f-]{36})\.json$/;
+
+// Remove empty orphan mailboxes left by a join that was interrupted AFTER the new
+// mailbox dir was created but BEFORE the endpoint record was committed. Such a crash
+// leaves a UUID-named mailbox dir with no endpoint record; this reclaims it so it
+// cannot accumulate as litter (or, on a build where the layout assertion flags
+// orphans, brick subsequent joins). Only an orphan with ZERO pointers in its root and
+// pending/ is removed: a non-empty orphan holds unread mail addressed to a deleted
+// endpoint and is left for `bus doctor` to report rather than silently discarded.
+// Must be called under endpoints.lock so no concurrent join can create the matching
+// record between the no-record check and the remove. A symlinked or non-directory
+// entry is left untouched (no traversal, caught later by mkdir/assertBusLayout).
+// An orphan mailbox is safe to reclaim ONLY when it is provably empty: its root holds
+// exactly a real (non-symlink) `pending` directory and nothing else, and pending/ is
+// itself empty. ANY other state -- a mailbox pointer, counter.json, a hidden/renamed/
+// symlinked file, a nested directory, or an enumeration failure -- means the orphan may
+// hold unread mail or corruption evidence, so it is PRESERVED for `bus doctor` rather
+// than deleted. Fails closed (returns false) on any inability to prove emptiness.
+async function orphanIsProvablyEmpty(orphan: string): Promise<boolean> {
+  let rootEntries;
+  try {
+    rootEntries = await readdir(orphan, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  const meaningful = rootEntries.filter((entry) => entry.name !== "." && entry.name !== "..");
+  if (meaningful.length !== 1) return false;
+  const only = meaningful[0]!;
+  if (only.name !== "pending" || !only.isDirectory() || only.isSymbolicLink()) return false;
+  let pendingEntries;
+  try {
+    pendingEntries = await readdir(join(orphan, "pending"), { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  return pendingEntries.every((entry) => entry.name === "." || entry.name === "..");
+}
+
+async function removeEmptyOrphanMailboxes(
+  paths: BusPaths,
+  registeredEndpointIds: ReadonlySet<string>,
+): Promise<void> {
+  let entries;
+  try {
+    entries = await readdir(paths.mailboxes, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  for (const entry of entries) {
+    if (entry.name === "." || entry.name === "..") continue;
+    if (!entry.isDirectory() || entry.isSymbolicLink() ||
+        !EndpointIdSchema.safeParse(entry.name).success || registeredEndpointIds.has(entry.name)) {
+      continue;
+    }
+    const orphan = endpointMailboxPath(paths, entry.name);
+    // Guard against symlink traversal before the recursive remove.
+    await rejectPathSymlink(orphan);
+    // Reclaim ONLY a provably-empty orphan. A pointer regex over listRegularJsonFiles
+    // would treat a renamed/hidden/symlinked pointer (or a counter.json, nested dir, or
+    // enumeration error) as "empty" and `rm` it, destroying unread mail or corruption
+    // evidence doctor should report. Preserve on anything but an empty real pending dir.
+    if (!(await orphanIsProvablyEmpty(orphan))) continue;
+    await rm(orphan, { recursive: true, force: true });
+    await syncDirectory(paths.mailboxes);
+  }
+}
 
 interface ProcessCandidate {
   readonly pid: number;
@@ -93,6 +160,11 @@ async function findClientProcess(client: BusClient): Promise<{ surface: BusSurfa
     pid = next;
   }
   return { surface: client === "claude" ? "claude_cli" : null, process: null };
+}
+
+/** Best-effort client surface detection from process ancestry (marker hint). */
+export async function detectClientSurface(client: BusClient): Promise<BusSurface | null> {
+  return (await findClientProcess(client)).surface;
 }
 
 async function gitOutput(root: string, args: string[]): Promise<string | null> {
@@ -185,50 +257,110 @@ export async function refreshEndpointForSessionStart(
 }
 
 export interface JoinEndpointInput {
-  readonly role: BusRole;
   readonly client: StorybloqClient;
   readonly clientTaskId: string;
   readonly surface?: BusSurface;
-  readonly replace?: boolean;
+  /** Endpoint id of a positively-proven-offline incumbent to replace. */
+  readonly replace?: string;
 }
+
+const EndpointIdInputSchema = z.string().uuid();
 
 export async function joinEndpoint(root: string, input: JoinEndpointInput): Promise<{ endpoint: BusEndpoint; existing: boolean }> {
   const taskId = normalizeClientTaskId(input.clientTaskId);
   if (!taskId) throw new BusError("invalid_input", "A valid client task id is required to join the Bus");
+  // An explicit surface inherently incompatible with the client (claude must be
+  // claude_cli; codex is never claude_cli) is invalid_input regardless of process
+  // ancestry AND regardless of whether this is a new join or a same-task rejoin.
+  // Checked before the runtime is touched so the contract holds on every path,
+  // including the same-task early return and heal below.
+  if (input.surface && ((input.client === "claude" && input.surface !== "claude_cli") ||
+      (input.client === "codex" && input.surface === "claude_cli"))) {
+    throw new BusError("invalid_input", `Surface ${input.surface} is not valid for the ${input.client} client`);
+  }
   assertBusEnabled((await loadProject(root)).state.config);
-  const paths = await resolveInitializedBusPaths(root);
+  // Join uses the base-runtime resolution rather than the full-layout assertion so
+  // it can reach and heal a missing endpoint mailbox/pending child. The strict
+  // resolveInitializedBusPaths runs assertBusLayout up front, which requires every
+  // endpoint's pending dir and would throw `corrupt` before the heal code below
+  // could run. Every return path re-runs assertBusLayout AFTER the heal/creation so
+  // full-layout validation still happens once the layout is whole again.
+  const paths = await resolveInitializedBusPathsForJoin(root);
   return withHardenedLock(join(paths.locks, "endpoints.lock"), async () => {
     const listed = await listEndpoints(paths.projectRoot);
     if (listed.findings.length > 0) {
       throw new BusError("corrupt", `Endpoint registry is corrupt: ${listed.findings[0]}`);
     }
+    // Same-task rejoin returns the existing endpoint (role is per-message now).
     const sameTask = listed.endpoints.find((endpoint) =>
       !endpoint.retiredAt && endpoint.client === input.client && endpoint.clientTaskId === taskId,
     );
     if (sameTask) {
-      if (sameTask.role !== input.role) {
-        throw new BusError("conflict", `This task already owns the ${sameTask.role} endpoint`);
-      }
+      // Heal a mailbox dir lost to a crash (e.g. mid-join on an older build) so
+      // endpoint-scoped ops do not brick against assertBusLayout. Run this
+      // unconditionally rather than only when the mailbox root is absent: a
+      // partial crash can leave the mailbox root present while its required
+      // pending child is gone, and a root-existence check would then skip the
+      // heal and let assertBusLayout keep rejecting every endpoint-scoped op.
+      // mkdir recursive is a no-op when the pending child already exists, so
+      // this stays cheap on the common healthy path.
+      const mailbox = endpointMailboxPath(paths, sameTask.endpointId);
+      // Guard the relaxed-resolution heal against symlink traversal. The join-scoped
+      // resolver deliberately skips per-endpoint mailbox validation so this heal can
+      // run, so a tampered runtime could point mailboxes/<id> or its pending child at
+      // an external directory; the recursive mkdir below would then follow the symlink
+      // and create/write OUTSIDE .story/bus before assertBusLayout (which runs only
+      // afterward) could reject it. Path-string containment does not stop symlink
+      // traversal, so lstat each path without following it and fail closed on a symlink.
+      // rejectPathSymlink tolerates a genuinely absent path (the heal case); non-symlink
+      // corruption (a regular file where a dir belongs) causes no traversal and is caught
+      // by mkdir/assertBusLayout.
+      await rejectPathSymlink(mailbox);
+      await rejectPathSymlink(join(mailbox, "pending"));
+      await mkdir(join(mailbox, "pending"), { recursive: true, mode: 0o700 });
+      await syncDirectory(mailbox);
+      await syncDirectory(paths.mailboxes);
+      // The heal restored this endpoint's mailbox/pending child, so the full
+      // layout is whole again: run the strict assertion now (after the heal) to
+      // recover the validation the join-scoped resolution deliberately skipped.
+      await assertBusLayout(paths);
       return { endpoint: sameTask, existing: true };
     }
 
-    const incumbent = listed.endpoints.find((endpoint) => !endpoint.retiredAt && endpoint.role === input.role);
-    if (incumbent) {
+    // Validate a --replace incumbent (positively-proven-offline, keeping the v1
+    // rule) without mutating anything yet. The retire write is deferred below
+    // until every fallible check has passed so a later throw cannot leave the
+    // incumbent retired with no replacement.
+    let replaceIncumbent: BusEndpoint | null = null;
+    if (input.replace) {
+      if (!EndpointIdInputSchema.safeParse(input.replace).success) {
+        throw new BusError("invalid_input", "Invalid endpoint id for --replace");
+      }
+      const incumbent = listed.endpoints.find(
+        (endpoint) => !endpoint.retiredAt && endpoint.endpointId === input.replace,
+      );
+      if (!incumbent) {
+        throw new BusError("not_found", "No active endpoint matches the --replace id");
+      }
       const liveness = await endpointLiveness(incumbent);
-      if (liveness !== "offline" || input.replace !== true) {
+      if (liveness !== "offline") {
         throw new BusError(
           "conflict",
-          `${input.role} is owned by an ${liveness} endpoint. Replacement requires positive offline proof and --replace.`,
+          `Endpoint ${incumbent.endpointId} is ${liveness}. Replacement requires positive offline proof.`,
         );
       }
-      const retiredAt = new Date().toISOString();
-      await durableWrite(join(paths.endpoints, `${incumbent.endpointId}.json`), JSON.stringify({
-        ...incumbent,
-        state: "offline",
-        retiredAt,
-        retiredReason: "replaced",
-        lastSeenAt: retiredAt,
-      }, null, 2) + "\n");
+      replaceIncumbent = incumbent;
+    }
+
+    // Two-endpoint invariant: at most two active (non-retired) endpoints.
+    const activeAfterReplace = listed.endpoints.filter(
+      (endpoint) => !endpoint.retiredAt && endpoint.endpointId !== input.replace,
+    );
+    if (activeAfterReplace.length >= 2) {
+      throw new BusError(
+        "conflict",
+        "The Bus already has two active endpoints. Pass --replace <endpoint-id> with a proven-offline incumbent to take its place.",
+      );
     }
 
     const detected = await findClientProcess(input.client);
@@ -243,6 +375,14 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
         (input.client === "codex" && surface === "claude_cli")) {
       throw new BusError("invalid_input", "Cannot determine the client surface safely; pass --surface explicitly");
     }
+
+    // Prepare every fallible, non-registry-mutating step BEFORE the incumbent
+    // retire write, so a throw or crash in preparation cannot leave the
+    // incumbent retired with no committed replacement. Resolve the git/process
+    // binding, construct the full endpoint record, and create + fsync the
+    // replacement mailbox here; the only work left after this point is the two
+    // registry mutations (retire write, then replacement create), performed
+    // back to back with no fallible step between them.
     const binding = await gitBinding(paths.projectRoot);
     const processRef = await processRefFor(
       surface,
@@ -250,9 +390,8 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
     );
     const now = new Date().toISOString();
     const endpoint: BusEndpoint = BusEndpointSchema.parse({
-      schema: "storybloq-bus-endpoint/v1",
+      schema: "storybloq-bus-endpoint/v2",
       endpointId: randomUUID(),
-      role: input.role,
       client: input.client,
       surface,
       clientTaskId: taskId,
@@ -270,6 +409,49 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
       retiredAt: null,
       retiredReason: null,
     });
+    // Reclaim any empty orphan mailbox left by a PRIOR join that crashed after its
+    // mailbox mkdir but before committing its endpoint record. Done under the held
+    // endpoints.lock and before the layout assertion so an interrupted join is
+    // recoverable (the next join succeeds) instead of leaving accumulating litter.
+    // Registered endpoints (retired or active) keep their mailboxes and are never
+    // touched; a non-empty orphan is preserved for doctor to report.
+    await removeEmptyOrphanMailboxes(paths, new Set(listed.endpoints.map((candidate) => candidate.endpointId)));
+    // Validate the EXISTING layout BEFORE creating the new endpoint's mailbox. If a
+    // prior endpoint's mailbox is damaged, asserting only after the mkdir (the
+    // previous order) would leave a new orphan mailbox behind when the assertion
+    // throws. The join-scoped resolution deliberately skipped this assertion so the
+    // same-task heal above could run; the new-endpoint path has no heal, so a new
+    // mailbox is created only once the existing layout is known whole.
+    await assertBusLayout(paths);
+    // The endpoint owns a mailbox created lazily at join. Fsync the new mailbox
+    // dir (so its pending child is durable) and its parent (so the mailbox dir
+    // entry is durable) before the endpoint record is committed. Otherwise a
+    // crash could persist an endpoint whose mailbox dir is gone, which
+    // assertBusLayout then rejects as corrupt, bricking every endpoint-scoped op.
+    const mailbox = endpointMailboxPath(paths, endpoint.endpointId);
+    await mkdir(join(mailbox, "pending"), { recursive: true, mode: 0o700 });
+    await syncDirectory(mailbox);
+    await syncDirectory(paths.mailboxes);
+
+    // Registry mutation window. Every fallible preparation step is already done,
+    // so the retire write and the replacement create run back to back with no
+    // fallible work between them, shrinking the crash window to the gap between
+    // two durable writes. A crash in that residual gap (incumbent retired, the
+    // replacement not yet created) is degraded-but-recoverable, not bricked: if
+    // the incumbent was the sole active endpoint the Bus then has zero active
+    // endpoints, and re-running `bus setup` performs a fresh same-task join that
+    // mints a new endpoint. A full durable-intent transaction is intentionally
+    // not used for this pass.
+    if (replaceIncumbent) {
+      const retiredAt = new Date().toISOString();
+      await durableWrite(join(paths.endpoints, `${replaceIncumbent.endpointId}.json`), JSON.stringify({
+        ...replaceIncumbent,
+        state: "offline",
+        retiredAt,
+        retiredReason: "replaced",
+        lastSeenAt: retiredAt,
+      }, null, 2) + "\n");
+    }
     await durableCreate(join(paths.endpoints, `${endpoint.endpointId}.json`), JSON.stringify(endpoint, null, 2) + "\n");
     return { endpoint, existing: false };
   });

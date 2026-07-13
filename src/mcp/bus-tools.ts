@@ -2,19 +2,26 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   acknowledgeBusMessage,
+  assertBusEnabled,
+  classifyBusRuntime,
   getBusThread,
   pollBus,
+  pollV1,
   sendBusMessage,
   updateBusThread,
+  updateV1Thread,
   BusError,
 } from "../bus/index.js";
+import { loadProject } from "../core/project-loader.js";
 import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 
 const EndpointIdSchema = z.string().uuid();
 const ThreadIdSchema = z.string().uuid();
 const MessageIdSchema = z.string().uuid();
 const ClientTaskIdSchema = z.string().regex(CLIENT_TASK_ID_PATTERN);
-const RoleSchema = z.enum(["implementer", "reviewer"]);
+// Deprecated: routing is always to the sole peer. Accepted for backward
+// compatibility, ignored by the store.
+const DeprecatedRoleSchema = z.enum(["implementer", "reviewer"]);
 const ThreadKindSchema = z.enum(["issue_notice", "question", "coordination", "patch_request"]);
 const MessageKindSchema = z.enum(["issue_notice", "question", "reply", "status", "patch_request", "claim", "release"]);
 const SeveritySchema = z.enum(["critical", "high", "medium", "low", "info"]);
@@ -80,7 +87,7 @@ export function registerBusTools(server: McpServer, pinnedRoot: string, onCall?:
       threadId: ThreadIdSchema.optional().describe("Existing thread id for a reply"),
       threadKind: ThreadKindSchema.optional().describe("Required when creating a thread"),
       predecessorThreadId: ThreadIdSchema.optional().describe("Resolved predecessor for a successor thread"),
-      toRole: RoleSchema,
+      toRole: DeprecatedRoleSchema.optional().describe("Deprecated and ignored: messages route to the sole peer endpoint"),
       messageKind: MessageKindSchema,
       severity: SeveritySchema,
       body: z.string().min(1).max(65536),
@@ -94,7 +101,6 @@ export function registerBusTools(server: McpServer, pinnedRoot: string, onCall?:
     threadId: args.threadId,
     threadKind: args.threadKind,
     predecessorThreadId: args.predecessorThreadId,
-    toRole: args.toRole,
     messageKind: args.messageKind,
     severity: args.severity,
     body: args.body,
@@ -110,7 +116,12 @@ export function registerBusTools(server: McpServer, pinnedRoot: string, onCall?:
       clientTaskId: ClientTaskIdSchema,
       limit: z.number().int().min(1).max(100).optional(),
     },
-  }, (args) => invoke(() => pollBus(pinnedRoot, args), onCall));
+  }, (args) => invoke(async () => {
+    // Gate enablement before the v1-vs-v2 dispatch: the v1 legacy-drain path never asserts.
+    assertBusEnabled((await loadProject(pinnedRoot)).state.config);
+    // D5 legacy-drain: a v1 runtime polls through legacy-v1.ts (send stays refused).
+    return (await classifyBusRuntime(pinnedRoot)) === "v1" ? pollV1(pinnedRoot, args) : pollBus(pinnedRoot, args);
+  }, onCall));
 
   server.registerTool("storybloq_bus_ack", {
     description: "Acknowledge one Bus message addressed to this endpoint. Acknowledgment records delivery disposition and does not resolve canonical work.",
@@ -143,5 +154,11 @@ export function registerBusTools(server: McpServer, pinnedRoot: string, onCall?:
       resolution: z.string().min(1).max(8192).optional(),
       evidence: EvidenceSchema.optional(),
     },
-  }, (args) => invoke(async () => serializedThread(await updateBusThread(pinnedRoot, args)), onCall));
+  }, (args) => invoke(async () => {
+    // Gate enablement before the v1-vs-v2 dispatch: the v1 legacy-drain path never asserts.
+    assertBusEnabled((await loadProject(pinnedRoot)).state.config);
+    // D5 legacy-drain: a v1 runtime parks or resolves through legacy-v1.ts (no reopen).
+    if ((await classifyBusRuntime(pinnedRoot)) === "v1") return updateV1Thread(pinnedRoot, args);
+    return serializedThread(await updateBusThread(pinnedRoot, args));
+  }, onCall));
 }

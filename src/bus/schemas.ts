@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 
-export const BUS_SCHEMA_VERSION = 1 as const;
+export const BUS_SCHEMA_VERSION = 2 as const;
 export const DEFAULT_BUS_MAX_BODY_BYTES = 16 * 1024;
 export const DEFAULT_BUS_MAX_HOPS = 8;
 export const BUS_MAX_ENTRY_BYTES = 32 * 1024;
@@ -15,6 +15,8 @@ const OpaqueStringSchema = z.string().min(1).max(256).refine(
 );
 const GitObjectSchema = z.string().regex(/^[a-f0-9]{4,64}$/i);
 
+// BusRole survives only as a derived display concept and for reading archived v1
+// records. v2 messages are endpoint-addressed; role is never declared or enforced.
 export const BusRoleSchema = z.enum(["implementer", "reviewer"]);
 export type BusRole = z.infer<typeof BusRoleSchema>;
 
@@ -46,13 +48,26 @@ export type BusMessageKind = z.infer<typeof BusMessageKindSchema>;
 export const BusSeveritySchema = z.enum(["critical", "high", "medium", "low", "info"]);
 export type BusSeverity = z.infer<typeof BusSeveritySchema>;
 
+/**
+ * Derived role rule (single source of truth). issue_notice/patch_request imply
+ * the sender acted as reviewer; claim/release imply implementer; question/reply/
+ * status are unlabeled (null). Used only for display/export/poll envelopes. No
+ * enforcement: any endpoint may send any kind (that is the fluidity).
+ */
+export function derivedRole(kind: BusMessageKind): BusRole | null {
+  if (kind === "issue_notice" || kind === "patch_request") return "reviewer";
+  if (kind === "claim" || kind === "release") return "implementer";
+  return null;
+}
+
 export const BusTopicRefSchema = z.object({
   issue: OpaqueStringSchema.optional(),
   ticket: OpaqueStringSchema.optional(),
   commit: GitObjectSchema.optional(),
   ciRun: OpaqueStringSchema.optional(),
-}).strict().refine(
-  (value) => Object.values(value).some((entry) => entry !== undefined),
+}).passthrough().refine(
+  (value) => value.issue !== undefined || value.ticket !== undefined ||
+    value.commit !== undefined || value.ciRun !== undefined,
   "At least one topic reference is required",
 );
 export type BusTopicRef = z.infer<typeof BusTopicRefSchema>;
@@ -60,27 +75,27 @@ export type BusTopicRef = z.infer<typeof BusTopicRefSchema>;
 export const BusEvidenceRefSchema = z.object({
   commit: GitObjectSchema.optional(),
   ciRun: OpaqueStringSchema.optional(),
-}).strict().refine(
+}).passthrough().refine(
   (value) => value.commit !== undefined || value.ciRun !== undefined,
   "A commit or CI run reference is required",
 );
 export type BusEvidenceRef = z.infer<typeof BusEvidenceRefSchema>;
 
 export const BusThreadRecordSchema = z.object({
-  schema: z.literal("storybloq-bus-thread/v1"),
+  schema: z.literal("storybloq-bus-thread/v2"),
   threadId: UuidSchema,
   kind: BusThreadKindSchema,
   topicRef: BusTopicRefSchema,
-  participantRoles: z.tuple([BusRoleSchema, BusRoleSchema]).refine(
+  participants: z.tuple([UuidSchema, UuidSchema]).refine(
     ([first, second]) => first !== second,
-    "Thread participants must have distinct roles",
+    "Thread participants must be two distinct endpoints",
   ),
   maxHops: z.number().int().min(2).max(32),
   createdByEndpoint: UuidSchema,
   createdAt: IsoTimestampSchema,
   predecessorThreadId: UuidSchema.optional(),
   threadHash: Sha256Schema,
-}).strict();
+}).passthrough();
 export type BusThreadRecord = z.infer<typeof BusThreadRecordSchema>;
 
 export const BusMessageRefsSchema = z.object({
@@ -89,18 +104,17 @@ export const BusMessageRefsSchema = z.object({
   commit: GitObjectSchema.optional(),
   ciRun: OpaqueStringSchema.optional(),
   files: z.array(z.string().min(1).max(1024)).max(64).optional(),
-}).strict();
+}).passthrough();
 export type BusMessageRefs = z.infer<typeof BusMessageRefsSchema>;
 
 export const BusMessagePayloadSchema = z.object({
   messageId: UuidSchema,
   from: z.object({
     endpointId: UuidSchema,
-    role: BusRoleSchema,
     client: BusClientSchema,
     authority: z.literal("peer_agent"),
-  }).strict(),
-  toRole: BusRoleSchema,
+  }).passthrough(),
+  to: UuidSchema,
   kind: BusMessageKindSchema,
   severity: BusSeveritySchema,
   body: z.string().min(1).max(65536),
@@ -108,7 +122,7 @@ export const BusMessagePayloadSchema = z.object({
   inReplyTo: UuidSchema.nullable(),
   idempotencyKeyHash: Sha256Schema,
   payloadHash: Sha256Schema,
-}).strict();
+}).passthrough();
 export type BusMessagePayload = z.infer<typeof BusMessagePayloadSchema>;
 
 export const BusAckPayloadSchema = z.object({
@@ -116,7 +130,7 @@ export const BusAckPayloadSchema = z.object({
   byEndpoint: UuidSchema,
   disposition: z.enum(["accepted", "rejected", "deferred"]),
   reason: z.string().min(1).max(4096).optional(),
-}).strict().superRefine((value, ctx) => {
+}).passthrough().superRefine((value, ctx) => {
   if ((value.disposition === "rejected" || value.disposition === "deferred") && !value.reason) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: "A reason is required" });
   }
@@ -131,7 +145,14 @@ export const BusStatePayloadSchema = z.object({
   evidence: BusEvidenceRefSchema.optional(),
   automatic: z.boolean().optional(),
   trigger: z.enum(["hop_cap", "duplicate_fingerprint"]).optional(),
-}).strict();
+  // For an AUTOMATIC park ONLY: bind the park state entry to the exact idempotent send
+  // operation that triggered it. entryHash covers the payload, so these are tamper-
+  // evident; committedAutomaticPark requires both to match the replaying receipt, so a
+  // tampered receipt whose stateEntryHash names a DIFFERENT same-endpoint automatic park
+  // is rejected rather than misattributed. Absent on manual park/resolve/reopen.
+  idempotencyKeyHash: Sha256Schema.optional(),
+  payloadHash: Sha256Schema.optional(),
+}).passthrough();
 export type BusStatePayload = z.infer<typeof BusStatePayloadSchema>;
 
 export const BusWakePayloadSchema = z.object({
@@ -141,57 +162,56 @@ export const BusWakePayloadSchema = z.object({
   batchCursor: z.number().int().nonnegative(),
   action: z.enum(["requested", "poll_observed", "failed"]),
   reason: z.string().min(1).max(1024).optional(),
-}).strict();
+}).passthrough();
 export type BusWakePayload = z.infer<typeof BusWakePayloadSchema>;
 
 const BusEntryBaseSchema = z.object({
-  schema: z.literal("storybloq-bus-entry/v1"),
+  schema: z.literal("storybloq-bus-entry/v2"),
   entryId: UuidSchema,
   threadId: UuidSchema,
   seq: z.number().int().positive(),
   prevHash: Sha256Schema,
   createdAt: IsoTimestampSchema,
   entryHash: Sha256Schema,
-}).strict();
+});
 
 export const BusEntrySchema = z.discriminatedUnion("type", [
-  BusEntryBaseSchema.extend({ type: z.literal("message"), payload: BusMessagePayloadSchema }).strict(),
-  BusEntryBaseSchema.extend({ type: z.literal("ack"), payload: BusAckPayloadSchema }).strict(),
-  BusEntryBaseSchema.extend({ type: z.literal("state"), payload: BusStatePayloadSchema }).strict(),
-  BusEntryBaseSchema.extend({ type: z.literal("wake"), payload: BusWakePayloadSchema }).strict(),
+  BusEntryBaseSchema.extend({ type: z.literal("message"), payload: BusMessagePayloadSchema }).passthrough(),
+  BusEntryBaseSchema.extend({ type: z.literal("ack"), payload: BusAckPayloadSchema }).passthrough(),
+  BusEntryBaseSchema.extend({ type: z.literal("state"), payload: BusStatePayloadSchema }).passthrough(),
+  BusEntryBaseSchema.extend({ type: z.literal("wake"), payload: BusWakePayloadSchema }).passthrough(),
 ]);
 export type BusEntry = z.infer<typeof BusEntrySchema>;
 
 export const BusMailboxPointerSchema = z.object({
-  schema: z.literal("storybloq-bus-mailbox/v1"),
-  role: BusRoleSchema,
+  schema: z.literal("storybloq-bus-mailbox/v2"),
+  endpointId: UuidSchema,
   mailboxSeq: z.number().int().positive(),
   messageId: UuidSchema,
   threadId: UuidSchema,
   entrySeq: z.number().int().positive(),
   entryHash: Sha256Schema,
   createdAt: IsoTimestampSchema,
-}).strict();
+}).passthrough();
 export type BusMailboxPointer = z.infer<typeof BusMailboxPointerSchema>;
 
 export const BusMailboxCounterSchema = z.object({
   schema: z.literal("storybloq-bus-mailbox-counter/v1"),
   nextSeq: z.number().int().positive(),
   updatedAt: IsoTimestampSchema,
-}).strict();
+}).passthrough();
 export type BusMailboxCounter = z.infer<typeof BusMailboxCounterSchema>;
 
 export const BusProcessRefSchema = z.object({
   pid: z.number().int().positive(),
   signature: z.string().min(1).max(512),
   capturedAt: IsoTimestampSchema,
-}).strict();
+}).passthrough();
 export type BusProcessRef = z.infer<typeof BusProcessRefSchema>;
 
 export const BusEndpointSchema = z.object({
-  schema: z.literal("storybloq-bus-endpoint/v1"),
+  schema: z.literal("storybloq-bus-endpoint/v2"),
   endpointId: UuidSchema,
-  role: BusRoleSchema,
   client: BusClientSchema,
   surface: BusSurfaceSchema,
   clientTaskId: z.string().regex(CLIENT_TASK_ID_PATTERN),
@@ -208,7 +228,7 @@ export const BusEndpointSchema = z.object({
   lastBlockedMailboxSeq: z.number().int().nonnegative(),
   retiredAt: IsoTimestampSchema.nullable(),
   retiredReason: z.string().min(1).max(1024).nullable(),
-}).strict();
+}).passthrough();
 export type BusEndpoint = z.infer<typeof BusEndpointSchema>;
 
 export const BusSuccessionSchema = z.object({
@@ -223,7 +243,7 @@ export const BusSuccessionSchema = z.object({
   createdAt: IsoTimestampSchema,
   expiresAt: IsoTimestampSchema,
   consumedAt: IsoTimestampSchema.nullable(),
-}).strict();
+}).passthrough();
 export type BusSuccession = z.infer<typeof BusSuccessionSchema>;
 
 export interface FoldedBusThread {
@@ -240,10 +260,30 @@ export interface FoldedBusThread {
   readonly finding?: string;
 }
 
+export type BusSetupState =
+  | "disabled"
+  | "not_initialized"
+  | "invalid"
+  | "disconnected"
+  | "waiting_for_peer"
+  | "ready";
+
+export type BusDeliveryMode = "live" | "partial" | "poll";
+
+export interface BusParticipantSummary {
+  readonly client: BusClient;
+  readonly surface: BusSurface;
+  readonly state: "attached" | "offline" | "unknown";
+}
+
 export interface BusSummary {
-  readonly enabled: true;
+  readonly enabled: boolean;
   readonly initialized: boolean;
   readonly daemonState: "stopped";
+  readonly setupState: BusSetupState;
+  readonly deliveryMode: BusDeliveryMode;
+  readonly participants: readonly BusParticipantSummary[];
+  readonly nextActions: readonly string[];
   readonly endpoints: number;
   readonly pendingMessages: number;
   readonly unacknowledgedCritical: number;

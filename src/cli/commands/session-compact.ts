@@ -74,12 +74,14 @@ import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import {
   consumeCompactionSuccession,
+  detectClientSurface,
   findEndpointForTask,
   isBusHookDeliveryEnabled,
   mintCompactionSuccession,
   pendingMailboxCursor,
   refreshEndpointForSessionStart,
   type BusEndpoint,
+  type BusSurface,
 } from "../../bus/index.js";
 
 // ---------------------------------------------------------------------------
@@ -354,18 +356,25 @@ export async function readHookStdinSource(
   return (await readHookStdinContext(stream, timeoutMs)).source;
 }
 
-function codexTaskMarker(clientTaskId: string | undefined): string {
+function codexTaskMarker(clientTaskId: string | undefined, surface: BusSurface | null): string {
   const normalized = normalizeClientTaskId(clientTaskId);
-  return normalized
-    ? `[storybloq-client-task]\nclient=codex\nid=${normalized}\n[/storybloq-client-task]\n`
+  if (!normalized) return "";
+  // D8: validated surface hint so `bus setup` can distinguish codex_cli from
+  // codex_desktop, which process ancestry cannot always determine.
+  const surfaceLine = surface === "codex_cli" || surface === "codex_desktop"
+    ? `surface=${surface}\n`
     : "";
+  return `[storybloq-client-task]\nclient=codex\nid=${normalized}\n${surfaceLine}[/storybloq-client-task]\n`;
 }
 
+// D8: role-free marker. Roles are per-message now, so the marker carries the
+// stable surface and declares role_mode instead of a fixed role.
 function busEndpointMarker(endpoint: BusEndpoint, pending: { cursor: number; count: number }): string {
   return [
     "[storybloq-bus-endpoint]",
     `endpoint=${endpoint.endpointId}`,
-    `role=${endpoint.role}`,
+    `surface=${endpoint.surface}`,
+    `role_mode=per_message`,
     `pending=${pending.count}`,
     `cursor=${pending.cursor}`,
     "[/storybloq-bus-endpoint]",
@@ -655,6 +664,7 @@ export async function handleSessionResumePrompt(
 
     const client: StorybloqClient = options.codexHookJson ? "codex" : "claude";
     let busMarker = "";
+    let codexSurface: BusSurface | null = null;
     if (clientTaskId) {
       try {
         let endpoint = options.source === "compact" && options.transcriptPath
@@ -668,18 +678,22 @@ export async function handleSessionResumePrompt(
         endpoint ??= await findEndpointForTask(root, client, clientTaskId);
         if (endpoint) {
           endpoint = await refreshEndpointForSessionStart(root, endpoint.endpointId, clientTaskId);
+          codexSurface = endpoint.surface;
           if (await isBusHookDeliveryEnabled(root, client)) {
-            busMarker = busEndpointMarker(endpoint, await pendingMailboxCursor(root, endpoint.role));
+            busMarker = busEndpointMarker(endpoint, await pendingMailboxCursor(root, endpoint.endpointId, clientTaskId));
           }
         }
       } catch {
         // Session continuity must not depend on Bus endpoint refresh.
       }
     }
+    if (options.codexHookJson && !codexSurface) {
+      codexSurface = await detectClientSurface("codex").catch(() => null);
+    }
 
     const writeResumeMessage = (message: string): void => {
       if (options.codexHookJson) {
-        const additionalContext = codexTaskMarker(clientTaskId) + busMarker + message;
+        const additionalContext = codexTaskMarker(clientTaskId, codexSurface) + busMarker + message;
         process.stdout.write(JSON.stringify({
           hookSpecificOutput: {
             hookEventName: "SessionStart",

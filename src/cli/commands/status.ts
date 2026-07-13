@@ -10,7 +10,6 @@ import type { CommandContext, CommandResult } from "../types.js";
 import type { LimitStopSummary } from "../../core/limit-ledger.js";
 import { busSummary } from "../../bus/store.js";
 import { BusError } from "../../bus/errors.js";
-import { isBusEnabled } from "../../bus/config.js";
 
 export async function handleStatus(ctx: CommandContext): Promise<CommandResult> {
   const { activeSessions, resumableSessions } = scanSessionSummaries(ctx.root);
@@ -24,19 +23,19 @@ export async function handleStatus(ctx: CommandContext): Promise<CommandResult> 
   } catch {
     // Status must render even when the global ledger is unreadable.
   }
+  // D7: the Bus capability block is always present in JSON (even when disabled);
+  // the Markdown formatter stays quiet until the Bus is enabled.
   let bus;
-  if (isBusEnabled(config)) {
-    try {
-      bus = await busSummary(ctx.root, ctx.state);
-    } catch (err) {
-      bus = {
-        enabled: true as const,
-        error: {
-          code: err instanceof BusError ? err.code : "io_error",
-          message: err instanceof Error ? err.message : String(err),
-        },
-      };
-    }
+  try {
+    bus = await busSummary(ctx.root, ctx.state);
+  } catch (err) {
+    bus = {
+      enabled: true as const,
+      error: {
+        code: err instanceof BusError ? err.code : "io_error",
+        message: err instanceof Error ? err.message : String(err),
+      },
+    };
   }
 
   const isOrchestrator = config.type === "orchestrator";

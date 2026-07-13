@@ -17,7 +17,6 @@ import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS } from "../autonomous/s
 import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired } from "../autonomous/session.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
-import { ConfigSchema } from "../models/config.js";
 import { registerBusTools } from "./bus-tools.js";
 
 // ISS-407: Cache active session dir to avoid O(n) directory scan on every MCP call.
@@ -305,14 +304,12 @@ function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { 
 }
 
 export function registerAllTools(server: McpServer, pinnedRoot: string): void {
-  try {
-    const parsed = ConfigSchema.safeParse(JSON.parse(readFileSync(join(pinnedRoot, ".story", "config.json"), "utf-8")));
-    if (parsed.success && parsed.data.features.bus === true) {
-      registerBusTools(server, pinnedRoot, () => touchMcpLiveness(pinnedRoot));
-    }
-  } catch {
-    // Normal tools still register. Project loading reports config damage.
-  }
+  // D6: the five Bus tools always register for a full project (degraded no-project
+  // mode keeps its two-tool surface elsewhere). When Bus is disabled or the
+  // runtime is not initialized, the handlers return setup guidance pointing at
+  // `storybloq bus setup`, so a CLI `bus setup` makes the already-running server
+  // usable with no restart and no tool-list change.
+  registerBusTools(server, pinnedRoot, () => touchMcpLiveness(pinnedRoot));
 
   // --- No-arg tools ---
 

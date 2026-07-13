@@ -4,5 +4,7 @@ export * from "./endpoints.js";
 export * from "./errors.js";
 export * from "./fold.js";
 export * from "./hooks.js";
+export * from "./idempotency.js";
+export * from "./legacy-v1.js";
 export * from "./schemas.js";
 export * from "./store.js";

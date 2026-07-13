@@ -61,7 +61,7 @@ describe("Storybloq Bus store", () => {
       source: "storybloq_bus",
       authority: "peer_agent",
       integrity: "verified",
-      sender: { role: "reviewer", client: "claude" },
+      sender: { role: null, client: "claude" },
       message: { messageId: sent.messageId, body: "Can you verify the recovery boundary?" },
     });
     await expect(pollBus(value.root, {
@@ -149,7 +149,7 @@ describe("Storybloq Bus store", () => {
   it("recovers a pending pointer and reconstructs a deleted pointer", async () => {
     const value = await fixture();
     await reviewSend(value);
-    const mailbox = join(value.root, ".story", "bus", "mailboxes", "implementer");
+    const mailbox = join(value.root, ".story", "bus", "mailboxes", value.implementer.endpointId);
     const pointer = (await readdir(mailbox)).find((name) => /^\d{12}-.*\.json$/.test(name));
     if (!pointer) throw new Error("pointer not found");
     await rename(join(mailbox, pointer), join(mailbox, "pending", pointer));
@@ -171,11 +171,11 @@ describe("Storybloq Bus store", () => {
 
   it("clears an orphan pending intent without serving it", async () => {
     const value = await fixture();
-    const mailbox = join(value.root, ".story", "bus", "mailboxes", "implementer");
+    const mailbox = join(value.root, ".story", "bus", "mailboxes", value.implementer.endpointId);
     const messageId = randomUUID();
     const pointer = {
-      schema: "storybloq-bus-mailbox/v1",
-      role: "implementer",
+      schema: "storybloq-bus-mailbox/v2",
+      endpointId: value.implementer.endpointId,
       mailboxSeq: 1,
       messageId,
       threadId: randomUUID(),
@@ -197,7 +197,7 @@ describe("Storybloq Bus store", () => {
   it("recovers a deleted mailbox counter without reusing a sequence", async () => {
     const value = await fixture();
     await reviewSend(value);
-    const mailbox = join(value.root, ".story", "bus", "mailboxes", "implementer");
+    const mailbox = join(value.root, ".story", "bus", "mailboxes", value.implementer.endpointId);
     await unlink(join(mailbox, "counter.json"));
     await reviewSend(value, {
       body: "Can you verify the second recovery boundary?",
@@ -278,7 +278,7 @@ describe("Storybloq Bus store", () => {
   it("rebuilds corrupt derived state and removes a restored post-ack pointer", async () => {
     const value = await fixture();
     const sent = await reviewSend(value);
-    const mailbox = join(value.root, ".story", "bus", "mailboxes", "implementer");
+    const mailbox = join(value.root, ".story", "bus", "mailboxes", value.implementer.endpointId);
     const pointerName = (await readdir(mailbox)).find((name) => /^\d{12}-.*\.json$/.test(name));
     if (!pointerName) throw new Error("pointer not found");
     const pointerBody = await readFile(join(mailbox, pointerName), "utf-8");
@@ -373,6 +373,52 @@ describe("Storybloq Bus store", () => {
       .toMatch(/parked Bus thread with unresolved critical issue/);
   });
 
+  it("clears the ship gate when an unacked critical thread is resolved, but not while it stays open", async () => {
+    const value = await fixture();
+    const issueId = await createIssue(value.root, "critical");
+    const sent = await sendBusMessage(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadKind: "question",
+      messageKind: "question",
+      severity: "critical",
+      body: "Can the release boundary lose critical state?",
+      refs: { issue: issueId },
+      idempotencyKey: "shipgate-critical-1",
+    });
+    // Control: an unresolved, unacked critical thread blocks the ship gate.
+    expect((await checkBusShip(value.root)).blockers.join("\n")).toMatch(/unacknowledged critical/);
+
+    // Resolving the thread with evidence supersedes the per-message ack and clears
+    // the unacked-critical blocker (Fix A) even though the message was never acked.
+    // A question-kind thread does not require its canonical issue resolved first, so
+    // this isolates the resolve-clears-the-gate behavior from issue resolution.
+    await updateBusThread(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadId: sent.threadId,
+      action: "resolve",
+      resolution: "Superseded by an evidenced resolution",
+      evidence: { ciRun: "ci-shipgate-resolved" },
+    });
+    expect(await checkBusShip(value.root)).toEqual({ clear: true, blockers: [] });
+
+    // Control 2: a second unresolved unacked-critical thread stays blocked, proving
+    // resolve clears the gate per-thread rather than disabling the critical check.
+    const issueTwo = await createIssue(value.root, "critical");
+    await sendBusMessage(value.root, {
+      endpointId: value.reviewer.endpointId,
+      clientTaskId: value.reviewerTaskId,
+      threadKind: "question",
+      messageKind: "question",
+      severity: "critical",
+      body: "A second critical question",
+      refs: { issue: issueTwo },
+      idempotencyKey: "shipgate-critical-2",
+    });
+    expect((await checkBusShip(value.root)).clear).toBe(false);
+  });
+
   it("rejects high-confidence secrets in bodies, refs, and state text", async () => {
     const value = await fixture();
     await expect(reviewSend(value, {
@@ -452,7 +498,7 @@ describe("Storybloq Bus store", () => {
 
   it("reports a missing protocol directory without recreating it", async () => {
     const value = await fixture();
-    const pending = join(value.root, ".story", "bus", "mailboxes", "reviewer", "pending");
+    const pending = join(value.root, ".story", "bus", "mailboxes", value.reviewer.endpointId, "pending");
     await rm(pending, { recursive: true });
 
     const doctor = await busDoctor(value.root);
@@ -482,7 +528,7 @@ describe("Storybloq Bus store", () => {
     });
     await expect(reviewSend(value)).rejects.toMatchObject({
       code: "not_found",
-      message: "Bus is not initialized in this checkout. Run `storybloq bus init` first.",
+      message: "Bus is not initialized in this checkout. Run `storybloq bus setup` first.",
     });
     await expect(readdir(busRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
@@ -562,7 +608,7 @@ describe("Storybloq Bus store", () => {
     const entriesDir = join(value.root, ".story", "bus", "threads", first.threadId, "entries");
     const entryId = randomUUID();
     const unsigned = {
-      schema: "storybloq-bus-entry/v1",
+      schema: "storybloq-bus-entry/v2",
       entryId,
       threadId: first.threadId,
       seq: 3,

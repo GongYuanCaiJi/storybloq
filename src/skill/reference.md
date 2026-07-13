@@ -486,17 +486,24 @@ storybloq dispatch [ids..] [--format json|md]
 ```
 
 ### bus init
-Enable the local Storybloq Bus
+Low-level initializer: enable the local Storybloq Bus v2 for this project (prefer `storybloq bus setup`). Initializes a fresh v2 runtime only; if a v1 runtime is present it refuses with `upgrade_required` and directs you to `storybloq bus setup`, which resolves this task's identity and runs the guided drain/upgrade.
 
 ```
 storybloq bus init [--format json|md]
 ```
 
-### bus join
-Bind the current client task to one exclusive Bus role
+### bus setup
+Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when live) enables this client's hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).
 
 ```
-storybloq bus join implementer|reviewer [--client claude|codex] [--task-id <id>] [--surface <surface>] [--replace] [--format json|md]
+storybloq bus setup [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--delivery live|poll] [--force-archive] [--format json|md]
+```
+
+### bus join
+Deprecated: roles are now per-message, so the legacy role argument is ignored. Use `storybloq bus setup`.
+
+```
+storybloq bus join [legacy-role] [--client claude|codex] [--task-id <id>] [--surface <surface>] [--replace <endpoint-id>] [--format json|md]
 ```
 
 ### bus leave
@@ -514,10 +521,10 @@ storybloq bus endpoint retire <endpoint-id> --force --reason <text> [--format js
 ```
 
 ### bus send
-Create a Bus thread or send a reply
+Create a Bus thread or send a reply. Routing always targets the sole peer; `--to` is deprecated and ignored.
 
 ```
-storybloq bus send --to <role> --kind <kind> --body <text> --idempotency-key <key> [--thread <id>] [--thread-kind <kind>] [--issue <id>] [--ticket <id>] [--commit <sha>] [--ci-run <id>] [--file <path>] [--format json|md]
+storybloq bus send --kind <kind> --body <text> --idempotency-key <key> [--to <role>] [--thread <id>] [--thread-kind <kind>] [--issue <id>] [--ticket <id>] [--commit <sha>] [--ci-run <id>] [--file <path>] [--format json|md]
 ```
 
 ### bus poll
@@ -599,7 +606,7 @@ storybloq node remove <name> [--format json|md]
 
 ## MCP Tools
 
-The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are feature-gated and appear only when `features.bus` is enabled at MCP process start.
+The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are always registered in full mode; when the Bus is disabled or uninitialized they return setup guidance pointing at `storybloq bus setup`, with no MCP restart required.
 
 - **storybloq_status** (format?) - Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata.
 - **storybloq_phase_list** - All phases with derived status
@@ -650,7 +657,7 @@ The base tools below are registered in full mode (inside a .story/ project). The
 - **storybloq_session_report** (sessionId) - Structured analysis of an autonomous session (works even if project state is corrupted)
 - **storybloq_register_subprocess** (pid, cmd, category?, sessionId?) - Register a running subprocess so monitors can tell slow builds from hung agents
 - **storybloq_unregister_subprocess** (pid, sessionId?) - Unregister a subprocess after it completes (idempotent)
-- **storybloq_bus_send** (endpointId, clientTaskId, threadId?, threadKind?, predecessorThreadId?, toRole, messageKind, severity, body, refs?, inReplyTo?, idempotencyKey) - Send a task-bound advisory peer message
+- **storybloq_bus_send** (endpointId, clientTaskId, threadId?, threadKind?, predecessorThreadId?, toRole?, messageKind, severity, body, refs?, inReplyTo?, idempotencyKey) - Send a task-bound advisory peer message; routes to the sole peer (toRole is deprecated, optional, and ignored)
 - **storybloq_bus_poll** (endpointId, clientTaskId, limit?) - Poll a task-bound endpoint mailbox with peer-authority envelopes
 - **storybloq_bus_ack** (endpointId, clientTaskId, messageId, disposition, reason?) - Record delivery disposition without resolving canonical work
 - **storybloq_bus_thread_get** (endpointId, clientTaskId, threadId) - Read a participant thread's verified prefix and folded state

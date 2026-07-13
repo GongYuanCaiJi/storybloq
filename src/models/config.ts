@@ -13,11 +13,13 @@ export const FeaturesSchema = z
 
 export type Features = z.infer<typeof FeaturesSchema>;
 
+// 1.8.0: passthrough (was strict) so future additive bus.* settings never brick
+// older readers project-wide (ISS-858 pattern). No new tracked-config keys here.
 export const BusConfigSchema = z.object({
   maxBodyBytes: z.number().int().min(1024).max(65536).optional(),
   maxHops: z.number().int().min(2).max(32).optional(),
   requireIssueForCritical: z.boolean().optional(),
-}).strict();
+}).passthrough();
 
 export type BusConfig = z.infer<typeof BusConfigSchema>;
 

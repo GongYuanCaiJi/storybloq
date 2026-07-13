@@ -1,7 +1,7 @@
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { z } from "zod";
 import { BusError } from "./errors.js";
-import type { BusRole } from "./schemas.js";
 
 export interface BusPaths {
   readonly projectRoot: string;
@@ -11,8 +11,12 @@ export interface BusPaths {
   readonly endpoints: string;
   readonly succession: string;
   readonly mailboxes: string;
+  readonly idempotency: string;
   readonly locks: string;
 }
+
+const ENDPOINT_FILENAME = /^([0-9a-f-]{36})\.json$/i;
+const EndpointIdSchema = z.string().uuid();
 
 async function rejectSymlink(path: string, label: string): Promise<void> {
   try {
@@ -45,7 +49,7 @@ export async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> 
   } catch (err) {
     throw new BusError(
       "conflict",
-      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus setup` first.",
       err,
     );
   }
@@ -62,7 +66,7 @@ export async function assertBusRuntimeIgnored(storyRoot: string): Promise<void> 
   if (!ignored) {
     throw new BusError(
       "conflict",
-      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus init` first.",
+      "Bus runtime is not protected by .story/.gitignore. Run `storybloq bus setup` first.",
     );
   }
 }
@@ -94,6 +98,7 @@ export async function resolveBusPaths(projectRoot: string, _create?: false): Pro
     endpoints: join(busRoot, "endpoints"),
     succession: join(busRoot, "succession"),
     mailboxes: join(busRoot, "mailboxes"),
+    idempotency: join(busRoot, "idempotency"),
     locks: join(busRoot, "locks"),
   };
   for (const [path, label] of [
@@ -101,6 +106,7 @@ export async function resolveBusPaths(projectRoot: string, _create?: false): Pro
     [paths.endpoints, ".story/bus/endpoints"],
     [paths.succession, ".story/bus/succession"],
     [paths.mailboxes, ".story/bus/mailboxes"],
+    [paths.idempotency, ".story/bus/idempotency"],
     [paths.locks, ".story/bus/locks"],
   ] as const) {
     await rejectSymlink(path, label);
@@ -108,17 +114,17 @@ export async function resolveBusPaths(projectRoot: string, _create?: false): Pro
   return paths;
 }
 
-function requiredBusDirectories(paths: BusPaths): string[] {
+// The v2 layout drops the hardcoded implementer/reviewer mailbox subdirs; each
+// endpoint owns a mailbox created lazily at join. These are the always-required
+// structural directories; per-endpoint mailbox dirs are validated separately.
+export function requiredBusDirectories(paths: BusPaths): string[] {
   return [
     paths.busRoot,
     paths.threads,
     paths.endpoints,
     paths.succession,
     paths.mailboxes,
-    join(paths.mailboxes, "implementer"),
-    join(paths.mailboxes, "implementer", "pending"),
-    join(paths.mailboxes, "reviewer"),
-    join(paths.mailboxes, "reviewer", "pending"),
+    paths.idempotency,
     paths.locks,
   ];
 }
@@ -143,9 +149,51 @@ export async function busRuntimeExists(path: string): Promise<boolean> {
   }
 }
 
+async function endpointMailboxDirectories(paths: BusPaths): Promise<{ directories: string[]; findings: string[] }> {
+  let entries;
+  try {
+    entries = await readdir(paths.endpoints, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { directories: [], findings: [] };
+    // A non-ENOENT enumeration failure (EACCES, EIO, ...) must fail CLOSED as a layout
+    // finding rather than throw a raw filesystem error out of busLayoutFindings/doctor.
+    // An unreadable endpoints dir could hide active endpoint records, so it is treated
+    // as corruption the Bus error contract surfaces, not an unhandled exception.
+    return { directories: [], findings: [`layout: cannot enumerate ${paths.endpoints}: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const directories: string[] = [];
+  const findings: string[] = [];
+  for (const entry of entries) {
+    // Node readdir never yields `.`/`..`; guard them only in case a future API does.
+    // A dot-prefixed entry is NOT skipped: durable-write temp files are named
+    // `<target>.tmp.<pid>.<uuid>` (never dot-prefixed), so a dot-prefixed name where
+    // an endpoint record belongs is always unexpected and must be reported, not
+    // hidden (renaming `<uuid>.json` to `.<uuid>.json` would otherwise re-open the
+    // fail-open by hiding an active endpoint from the layout scan).
+    if (entry.name === "." || entry.name === "..") continue;
+    // A symlink, a non-regular file, a dot-prefixed name, or a stem that matches the
+    // 36-char filename shape but is not a valid UUID is an unexpected entry where an
+    // active endpoint record belongs. Silently skipping it (the previous behavior) let
+    // a runtime whose active endpoint record was replaced by a symlink or directory
+    // pass assertBusLayout; record a finding instead so the layout assertion rejects it.
+    const match = ENDPOINT_FILENAME.exec(entry.name);
+    if (!entry.isFile() || entry.isSymbolicLink() || !match ||
+        !EndpointIdSchema.safeParse(match[1]!).success) {
+      findings.push(`layout: ${join(paths.endpoints, entry.name)} is not a regular <uuid>.json endpoint record`);
+      continue;
+    }
+    const mailbox = join(paths.mailboxes, match[1]!);
+    directories.push(mailbox, join(mailbox, "pending"));
+  }
+  return { directories, findings };
+}
+
 export async function busLayoutFindings(paths: BusPaths): Promise<string[]> {
   const findings: string[] = [];
-  for (const directory of requiredBusDirectories(paths)) {
+  const mailboxes = await endpointMailboxDirectories(paths);
+  findings.push(...mailboxes.findings);
+  const directories = [...requiredBusDirectories(paths), ...mailboxes.directories];
+  for (const directory of directories) {
     try {
       const stat = await lstat(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink()) {
@@ -170,8 +218,11 @@ export function assertContainedPath(root: string, target: string): void {
   }
 }
 
-export function roleMailboxPath(paths: BusPaths, role: BusRole): string {
-  const path = join(paths.mailboxes, role);
-  assertContainedPath(paths.busRoot, path);
+export function endpointMailboxPath(paths: BusPaths, endpointId: string): string {
+  if (!EndpointIdSchema.safeParse(endpointId).success) {
+    throw new BusError("invalid_input", "Invalid endpoint id");
+  }
+  const path = join(paths.mailboxes, endpointId);
+  assertContainedPath(paths.mailboxes, path);
   return path;
 }

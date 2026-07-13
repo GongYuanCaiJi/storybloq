@@ -737,6 +737,68 @@ export async function enableClaudeBusHooks(
 }
 
 /**
+ * D4 read-only Claude base-hook inspector. Verifies ~/.claude/settings.json is
+ * readable, well-formed, and already carries the base SessionStart (resume) and
+ * Stop (hook-status) Storybloq hooks that `enableClaudeBusHooks` upgrades to
+ * guarded live delivery. Never writes. Bus setup calls this in preflight so a
+ * live Claude setup cannot mutate Bus state and then fail at hook enablement.
+ */
+export async function claudeBaseHooksPresent(
+  settingsPath: string = join(homedir(), ".claude", "settings.json"),
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!existsSync(settingsPath)) {
+    return { ok: false, reason: `${settingsPath} does not exist` };
+  }
+  let raw: string;
+  try {
+    raw = await readFile(settingsPath, "utf-8");
+  } catch {
+    return { ok: false, reason: `${settingsPath} is not readable` };
+  }
+  let settings: unknown;
+  try {
+    settings = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: `${settingsPath} is not valid JSON` };
+  }
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+    return { ok: false, reason: `${settingsPath} is malformed` };
+  }
+  const hooks = (settings as Record<string, unknown>).hooks;
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) {
+    return { ok: false, reason: "Claude base hooks are not configured" };
+  }
+  const hookMap = hooks as Record<string, unknown>;
+  const hasBaseHook = (hookType: string, subcommand: string): boolean => {
+    const groups = hookMap[hookType];
+    if (!Array.isArray(groups)) return false;
+    for (const group of groups) {
+      if (typeof group !== "object" || group === null) continue;
+      const g = group as MatcherGroup;
+      if (!Array.isArray(g.hooks)) continue;
+      for (const entry of g.hooks) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const e = entry as HookEntry;
+        if (e.type !== "command" || typeof e.command !== "string") continue;
+        const parsed = parseHookCommand(e.command);
+        if (parsed === null) continue;
+        if (!STORYBLOQ_LEGACY_BASENAMES.has(parsed.binBasename)) continue;
+        if (parsed.rest === subcommand) return true;
+      }
+    }
+    return false;
+  };
+  const missing = [
+    hasBaseHook("SessionStart", SESSIONSTART_SUBCOMMAND) ? null : "SessionStart",
+    hasBaseHook("Stop", STOP_SUBCOMMAND) ? null : "Stop",
+  ].filter((value): value is string => value !== null);
+  if (missing.length > 0) {
+    return { ok: false, reason: `missing base Claude hook(s): ${missing.join(", ")}` };
+  }
+  return { ok: true };
+}
+
+/**
  * Removes a hook command from settings.json. Used for migration (ISS-032).
  */
 export async function removeHook(

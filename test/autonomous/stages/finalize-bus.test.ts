@@ -83,7 +83,7 @@ describe("FINALIZE Storybloq Bus gate", () => {
   it("blocks a partially present Bus runtime without recreating it", async () => {
     const fixture = await createBusFixture("finalize-bus-partial-runtime");
     fixtures.push(fixture);
-    const pending = join(fixture.root, ".story", "bus", "mailboxes", "reviewer", "pending");
+    const pending = join(fixture.root, ".story", "bus", "mailboxes", fixture.a.endpointId, "pending");
     await rm(pending, { recursive: true });
     const sessionDir = join(fixture.root, ".story", "sessions", state().sessionId);
     await mkdir(sessionDir, { recursive: true });

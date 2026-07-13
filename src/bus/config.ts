@@ -22,7 +22,7 @@ export function resolvedBusConfig(config: Config): ResolvedBusConfig {
 
 export function assertBusEnabled(config: Config): ResolvedBusConfig {
   if (!isBusEnabled(config)) {
-    throw new BusError("bus_disabled", "Storybloq Bus is disabled. Run `storybloq bus init` first.");
+    throw new BusError("bus_disabled", "Storybloq Bus is disabled. Run `storybloq bus setup` first.");
   }
   return resolvedBusConfig(config);
 }

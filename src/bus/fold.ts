@@ -18,6 +18,9 @@ import { evidenceKeys } from "./security.js";
 
 const ThreadIdSchema = z.string().uuid();
 const ENTRY_FILENAME = /^(\d{6})-(message|ack|state|wake)-([0-9a-f-]{36})\.json$/;
+function participantsInclude(participants: readonly [string, string], endpointId: string): boolean {
+  return participants[0] === endpointId || participants[1] === endpointId;
+}
 const BusDerivedRecordSchema = z.object({
   schema: z.literal("storybloq-bus-derived/v1"),
   threadId: z.string().uuid(),
@@ -103,9 +106,9 @@ export async function foldBusThread(root: string, threadId: string): Promise<Fol
         finding = `${filename}: ${state} thread received a message`;
         break;
       }
-      if (!thread.participantRoles.includes(message.from.role) ||
-          !thread.participantRoles.includes(message.toRole) ||
-          message.from.role === message.toRole) {
+      if (!participantsInclude(thread.participants, message.from.endpointId) ||
+          !participantsInclude(thread.participants, message.to) ||
+          message.from.endpointId === message.to) {
         finding = `${filename}: invalid message direction`;
         break;
       }

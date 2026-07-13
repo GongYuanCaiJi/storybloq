@@ -1,31 +1,49 @@
 import type { Argv } from "yargs";
 import {
   acknowledgeBusMessage,
+  assertEndpointCaller,
   busDoctor,
   busSummary,
   checkBusShip,
+  classifyBusRuntime,
+  detectClientSurface,
+  evaluateV1Drain,
   exportBusThread,
   findEndpointForTask,
+  findV1EndpointForTask,
   getBusThread,
   initializeBus,
   joinEndpoint,
   leaveEndpoint,
+  listEndpoints,
+  listV1Endpoints,
   pollBus,
+  pollV1,
+  refreshEndpointForSessionStart,
   retireEndpoint,
   sendBusMessage,
   setBusHookPolicy,
   updateBusThread,
+  updateV1Thread,
+  v1EndpointLiveness,
+  v1PathsFrom,
   type BusClient,
+  type BusDoctorResult,
   type BusEndpoint,
   type BusMessageKind,
   type BusMessageRefs,
-  type BusRole,
+  type BusRuntimeProtocol,
   type BusSeverity,
+  type BusSummary,
   type BusSurface,
   type BusThreadKind,
   type FoldedBusThread,
+  type V1PollResult,
 } from "../../bus/index.js";
 import { BusError } from "../../bus/errors.js";
+import { assertBusEnabled } from "../../bus/config.js";
+import { resolveBusPaths } from "../../bus/paths.js";
+import { loadProject } from "../../core/project-loader.js";
 import {
   currentStorybloqClient,
   normalizeClientTaskId,
@@ -97,20 +115,34 @@ function resolveTaskId(client: BusClient, explicit?: string): string {
   return taskId;
 }
 
-async function resolveOwnedEndpoint(root: string, args: IdentityArgs): Promise<{ endpoint: BusEndpoint; taskId: string }> {
+// Resolves the task-owned endpoint id. On a v1 runtime the endpoint registry is
+// read through legacy-v1.ts (v2 parsing would reject the v1 records), so the
+// D5 legacy-drain commands (poll/ack/thread park-resolve) can resolve identity.
+async function resolveOwnedEndpoint(root: string, args: IdentityArgs): Promise<{ endpointId: string; taskId: string; protocol: BusRuntimeProtocol }> {
+  // Bus must be enabled before touching any runtime. classifyBusRuntime below
+  // does not assert this, so on a disabled project with residual v1 (or v2) files
+  // the endpoint-scoped drain ops (poll, ack, thread update) could otherwise still
+  // resolve identity and mutate. Fail closed with `bus_disabled` first.
+  assertBusEnabled((await loadProject(root)).state.config);
   const client = resolveClient(args.client);
   const taskId = resolveTaskId(client, args.taskId);
+  const protocol = await classifyBusRuntime(root);
+  if (protocol === "v1") {
+    const endpointId = args.endpoint ?? await findV1EndpointForTask(root, client, taskId);
+    if (!endpointId) {
+      throw new BusError("not_found", "This task has no Bus endpoint. Run `storybloq bus setup` first.");
+    }
+    return { endpointId, taskId, protocol };
+  }
   if (args.endpoint) {
-    const endpoint = await import("../../bus/endpoints.js").then((module) =>
-      module.assertEndpointCaller(root, args.endpoint!, taskId),
-    );
-    return { endpoint, taskId };
+    const endpoint = await assertEndpointCaller(root, args.endpoint, taskId);
+    return { endpointId: endpoint.endpointId, taskId, protocol };
   }
   const endpoint = await findEndpointForTask(root, client, taskId);
   if (!endpoint) {
-    throw new BusError("not_found", "This task has no Bus endpoint. Run `storybloq bus join <role>` first.");
+    throw new BusError("not_found", "This task has no Bus endpoint. Run `storybloq bus setup` first.");
   }
-  return { endpoint, taskId };
+  return { endpointId: endpoint.endpointId, taskId, protocol };
 }
 
 function identityOptions<T>(y: Argv<T>): Argv {
@@ -167,6 +199,509 @@ function serializedThread(folded: FoldedBusThread) {
   };
 }
 
+function renderPoll(result: Awaited<ReturnType<typeof pollBus>>): string {
+  if (result.messages.length === 0) return "No pending Bus messages.";
+  return result.messages.map((envelope) => [
+    `[${envelope.mailboxSeq}] ${envelope.sender.role ?? "peer"} ${envelope.message.severity} ${envelope.message.kind}`,
+    `Thread: ${envelope.threadId} | Message: ${envelope.message.messageId}`,
+    envelope.message.body,
+  ].join("\n")).join("\n\n");
+}
+
+function renderV1Poll(result: V1PollResult): string {
+  if (result.messages.length === 0) return "No pending Bus messages.";
+  return result.messages.map((envelope) => [
+    `[${envelope.mailboxSeq}] ${envelope.sender.role} ${envelope.message.severity} ${envelope.message.kind}`,
+    `Thread: ${envelope.threadId} | Message: ${envelope.message.messageId}`,
+    envelope.message.body,
+  ].join("\n")).join("\n\n");
+}
+
+function clientLabel(surface: BusSurface): string {
+  return surface === "claude_cli" ? "Claude Code" : surface === "codex_cli" ? "Codex CLI" : "Codex Desktop";
+}
+
+function joinLabels(labels: string[]): string {
+  if (labels.length === 0) return "no clients";
+  if (labels.length === 1) return labels[0]!;
+  return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+}
+
+function deliveryLabel(mode: BusSummary["deliveryMode"]): string {
+  return mode === "live" ? "live delivery on" : mode === "partial" ? "partial delivery" : "poll delivery";
+}
+
+function renderReadiness(setupState: BusSummary["setupState"]): string {
+  switch (setupState) {
+    case "ready": return "Bus ready.";
+    case "waiting_for_peer": return "setup waiting for a peer.";
+    case "disconnected": return "no endpoints connected. Run `storybloq bus setup`.";
+    case "invalid": return "setup invalid; run `storybloq bus doctor`.";
+    case "disabled": return "the Bus is disabled. Run `storybloq bus setup`.";
+    default: return "the Bus is not set up. Run `storybloq bus setup`.";
+  }
+}
+
+// D7: doctor Markdown must omit raw endpoint UUIDs (JSON retains them). Relabels
+// ONLY the known endpoint ids to a short stable `endpoint-<first8>` tag so a
+// finding stays legible without leaking the full identifier. Thread, message,
+// and every other UUID are the exact identifiers a user needs to inspect or
+// repair, so they are left intact (a broad UUID regex would destroy them).
+function redactEndpointUuids(text: string, endpointIds: ReadonlySet<string>): string {
+  let redacted = text;
+  for (const endpointId of endpointIds) {
+    redacted = redacted.split(endpointId).join(`endpoint-${endpointId.slice(0, 8)}`);
+  }
+  return redacted;
+}
+
+// D7: build the known-endpoint UUID set the Markdown redaction relabels. The
+// source depends on the runtime: a v2 runtime enumerates the v2 endpoint
+// registry; a v1 runtime reads the LEGACY registry (v2 parsing rejects v1
+// records, returning an empty set that would leak v1 endpoint UUIDs into
+// Markdown). For v1 we also extract any well-formed UUID from the endpoint-record
+// findings themselves, so a malformed record whose id never parsed into the
+// registry is still redacted. Thread/message UUIDs are deliberately left intact
+// (only `endpoint:`-prefixed findings are scanned). Every registry read is
+// guarded; any failure falls back to an empty set so doctor always renders.
+const ENDPOINT_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// Anchored, non-global variant for testing a single directory name (a global
+// regex would carry lastIndex state across .test calls).
+const ENDPOINT_UUID_EXACT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function doctorEndpointRedactionSet(root: string, result: BusDoctorResult): Promise<ReadonlySet<string>> {
+  const ids = new Set<string>();
+  try {
+    // The parsed registry gives the well-formed endpoint ids (v1 or v2). A
+    // MALFORMED endpoint record is dropped from that parse but still surfaces its
+    // UUID filename inside an `endpoint:`-prefixed doctor finding, so both
+    // protocols also extract those finding UUIDs; otherwise a malformed record's
+    // endpoint UUID would leak unredacted in the Markdown.
+    if (await classifyBusRuntime(root) === "v1") {
+      try {
+        const paths = await resolveBusPaths(root, false);
+        const { endpoints } = await listV1Endpoints(v1PathsFrom(paths.busRoot));
+        for (const endpoint of endpoints) ids.add(endpoint.endpointId);
+      } catch {
+        // Registry unreadable; finding-extracted UUIDs below still get redacted.
+      }
+    } else {
+      try {
+        const { endpoints } = await listEndpoints(root);
+        for (const endpoint of endpoints) ids.add(endpoint.endpointId);
+      } catch {
+        // Registry unreadable; finding-extracted UUIDs below still get redacted.
+      }
+      // An orphaned mailbox or idempotency directory keeps a retired endpoint's
+      // UUID on disk after its registry record is gone, and a `receipt ...`/mailbox
+      // finding referencing it is not `endpoint:`-prefixed, so its UUID would leak
+      // unredacted. Add every UUID-named mailbox/idempotency directory name too.
+      try {
+        const { readdir } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const paths = await resolveBusPaths(root, false);
+        for (const sub of ["mailboxes", "idempotency"]) {
+          const entries = await readdir(join(paths.busRoot, sub), { withFileTypes: true }).catch(() => []);
+          for (const entry of entries) {
+            // Match on the UUID name regardless of file type: a symlink or regular
+            // file named with an orphaned endpoint UUID is exactly the corrupt layout
+            // doctor reports, and that finding is not `endpoint:`-prefixed, so its
+            // UUID would otherwise leak. The name is the redaction hint.
+            if (ENDPOINT_UUID_EXACT.test(entry.name)) ids.add(entry.name);
+          }
+        }
+      } catch {
+        // Runtime layout unreadable; registry + finding UUIDs above still redacted.
+      }
+    }
+    for (const finding of result.findings) {
+      if (!/^endpoint:/i.test(finding)) continue;
+      // Add the literal matched text (not lowercased) so the exact-string
+      // redaction split matches the UUID as it appears in the finding. Only
+      // endpoint-prefixed findings are scanned, so thread/message UUIDs survive.
+      for (const match of finding.matchAll(ENDPOINT_UUID)) ids.add(match[0]);
+    }
+    return ids;
+  } catch {
+    return ids;
+  }
+}
+
+function renderDoctorMarkdown(result: BusDoctorResult, endpointIds: ReadonlySet<string>): string {
+  // D7: readiness is always rendered, separately from integrity.
+  const readiness = renderReadiness(result.summary.setupState);
+  if (result.healthy) return `Storage healthy; ${readiness}`;
+  const findings = `Storage has ${result.findings.length} finding(s):\n${result.findings.map((finding) => `- ${redactEndpointUuids(finding, endpointIds)}`).join("\n")}`;
+  return `${findings}\nReadiness: ${readiness}`;
+}
+
+// FIX: `busDoctor` throws `bus_disabled` on a disabled project, which would
+// otherwise surface as a bare error. Render a coherent disabled readiness result
+// instead, matching how `bus status` guides a disabled project.
+interface DisabledDoctorResult {
+  readonly enabled: false;
+  readonly healthy: false;
+  readonly readiness: string;
+}
+
+function disabledDoctorResult(): DisabledDoctorResult {
+  return { enabled: false, healthy: false, readiness: renderReadiness("disabled") };
+}
+
+function renderDoctorDisabledMarkdown(result: DisabledDoctorResult): string {
+  return `Bus: disabled. Run \`storybloq bus setup\` to enable.\nReadiness: ${result.readiness}`;
+}
+
+// D7: action-oriented Markdown; no endpoint UUIDs (JSON keeps them).
+function renderStatusMarkdown(summary: BusSummary): string {
+  if (summary.setupState === "disabled" || summary.setupState === "not_initialized") {
+    return "Bus: not set up. Run `storybloq bus setup` to participate.";
+  }
+  if (summary.setupState === "invalid") {
+    return "Bus: invalid; run `storybloq bus doctor`.";
+  }
+  const state = summary.setupState === "ready" ? "ready"
+    : summary.setupState === "waiting_for_peer" ? "waiting for peer"
+    : "disconnected";
+  const connected = summary.participants.length > 0
+    ? `${joinLabels(summary.participants.map((participant) => clientLabel(participant.surface)))} connected`
+    : "no clients connected";
+  return `Bus: ${state}; ${connected}; ${deliveryLabel(summary.deliveryMode)}.`;
+}
+
+interface BusSetupArgs {
+  readonly client?: StorybloqClient;
+  readonly taskId?: string;
+  readonly surface?: BusSurface;
+  readonly delivery: "live" | "poll";
+  readonly forceArchive: boolean;
+}
+
+// D5: exact per-message record of what a --force-archive upgrade archived. The
+// structured fields are parsed from the v1 drain's unreadNoncritical line; the
+// raw line is retained so a format change degrades to a precise fallback rather
+// than a silent drop.
+interface ArchivedUnreadEntry {
+  readonly raw: string;
+  readonly role?: string;
+  readonly severity?: string;
+  readonly messageId?: string;
+  readonly threadId?: string;
+}
+
+function parseArchivedUnread(raw: string): ArchivedUnreadEntry {
+  const match = /^(?<role>\S+) mailbox: unread (?<severity>\S+) message (?<messageId>.+?) in thread (?<threadId>\S+)$/.exec(raw);
+  if (!match || !match.groups) return { raw };
+  return {
+    raw,
+    role: match.groups.role,
+    severity: match.groups.severity,
+    messageId: match.groups.messageId,
+    threadId: match.groups.threadId,
+  };
+}
+
+function formatArchivedUnread(entry: ArchivedUnreadEntry): string {
+  if (entry.messageId && entry.threadId) {
+    const parts = [`message ${entry.messageId}`, `thread ${entry.threadId}`];
+    if (entry.role) parts.push(`recipient ${entry.role}`);
+    if (entry.severity) parts.push(`severity ${entry.severity}`);
+    return parts.join(", ");
+  }
+  return entry.raw;
+}
+
+interface BusSetupResult {
+  readonly setupState: BusSummary["setupState"];
+  readonly deliveryMode: BusSummary["deliveryMode"];
+  readonly endpoints: number;
+  readonly endpointId: string;
+  readonly surface: BusSurface;
+  readonly migrated: boolean;
+  readonly archivedUnread: ArchivedUnreadEntry[];
+  readonly trackedChanges: string[];
+  readonly completedSteps: string[];
+  readonly remainingSteps: string[];
+  readonly handoff: string | null;
+  readonly nextActions: string[];
+}
+
+async function enableHooksForClient(root: string, client: BusClient): Promise<void> {
+  const setup = await import("./setup-skill.js");
+  if (client === "claude") {
+    const migrated = await setup.enableClaudeBusHooks();
+    if (migrated.skipped) {
+      throw new BusError("io_error", "Claude hooks could not be upgraded. Run `storybloq setup --client claude` first.");
+    }
+  } else {
+    const refreshed = await setup.refreshExistingCodexHooks();
+    const counts = await setup.countCodexStorybloqHooks();
+    if (refreshed.skipped || counts.PreCompact === 0 || counts.SessionStart === 0 || counts.Stop === 0) {
+      throw new BusError("io_error", "Codex hooks are incomplete. Run `storybloq setup --client codex`, review `/hooks`, then retry.");
+    }
+  }
+  await setBusHookPolicy(root, [client], true);
+}
+
+// D4 preflight: evaluate the D5 drain gate read-only over a v1 runtime so a
+// blocked upgrade never flips features.bus or writes runtime state before it
+// fails. Mirrors the authoritative gate in initializeBus (which re-checks under
+// locks); this pass is advisory and performs no persistent mutation.
+async function preflightV1Drain(root: string, callerTaskId: string, forceArchive: boolean): Promise<void> {
+  const paths = await resolveBusPaths(root, false);
+  const v1 = v1PathsFrom(paths.busRoot);
+  const { endpoints, findings } = await listV1Endpoints(v1);
+  if (findings.length > 0) {
+    throw new BusError(
+      "corrupt",
+      `The v1 Bus runtime has corrupt endpoint records that must be resolved before upgrade:\n${findings.map((finding) => `- ${finding}`).join("\n")}`,
+    );
+  }
+  for (const endpoint of endpoints) {
+    if (endpoint.retiredAt) continue;
+    if (endpoint.clientTaskId === callerTaskId) continue;
+    const liveness = await v1EndpointLiveness(endpoint);
+    if (liveness !== "offline") {
+      throw new BusError(
+        "conflict",
+        `Cannot upgrade: endpoint ${endpoint.endpointId} is ${liveness}. Every peer must be positively offline before upgrade.`,
+      );
+    }
+  }
+  const drain = await evaluateV1Drain(v1);
+  if (drain.shipBlockers.length > 0) {
+    throw new BusError(
+      "conflict",
+      `Cannot upgrade: the v1 ship gate is blocked and requires canonical resolution first:\n${drain.shipBlockers.map((blocker) => `- ${blocker}`).join("\n")}`,
+    );
+  }
+  if (drain.unreadNoncritical.length > 0 && !forceArchive) {
+    throw new BusError(
+      "conflict",
+      `Cannot upgrade: unread noncritical Bus mail remains. Ack it, or pass --force-archive to archive it read-only:\n${drain.unreadNoncritical.map((entry) => `- ${entry}`).join("\n")}`,
+    );
+  }
+  // Zero-mutation early-refusal gate only; the exact force-archived mail is
+  // reported from initializeBus's commit-time result, not from this pre-lock
+  // snapshot (a concurrent ack or migrator could change it between reads).
+}
+
+// D4 preflight: verify live delivery can enable this client's hooks without
+// mutating anything. Both clients need their base hooks already installed: Codex
+// trust is user-controlled via /hooks, and Claude Bus enablement only UPGRADES
+// existing SessionStart/Stop hooks (it does not create missing base hooks during
+// Bus setup), so both branches require the binary to resolve AND the base hooks to
+// be present. Fails before any runtime/hook-policy write.
+async function preflightLiveHooks(client: BusClient): Promise<void> {
+  const setup = await import("./setup-skill.js");
+  const bin = setup.resolveStorybloqBin();
+  if (!bin) {
+    throw new BusError(
+      "io_error",
+      `Storybloq binary could not be resolved. Run \`storybloq setup --client ${client}\` first.`,
+    );
+  }
+  if (client === "codex") {
+    const counts = await setup.countCodexStorybloqHooks();
+    if (counts.PreCompact === 0 || counts.SessionStart === 0 || counts.Stop === 0) {
+      throw new BusError(
+        "io_error",
+        "Codex base hooks are incomplete. Run `storybloq setup --client codex`, review `/hooks`, then retry (or rerun with `--delivery poll`).",
+      );
+    }
+  }
+  if (client === "claude") {
+    // enableClaudeBusHooks only upgrades hooks that already exist; if the base
+    // SessionStart/Stop hooks are absent or the settings file is malformed it
+    // would skip and fail AFTER Bus state has mutated. Gate it read-only here.
+    const base = await setup.claudeBaseHooksPresent();
+    if (!base.ok) {
+      throw new BusError(
+        "io_error",
+        `Claude base hooks are not ready${base.reason ? ` (${base.reason})` : ""}. Run \`storybloq setup --client claude\` first, then retry (or rerun with \`--delivery poll\`).`,
+      );
+    }
+  }
+}
+
+// Reads whether features.bus is already enabled, so setup only reports
+// .story/config.json as changed when it actually flips (FIX: no-op rerun).
+async function busFeatureEnabledBefore(root: string): Promise<boolean> {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  try {
+    const raw = await readFile(join(root, ".story", "config.json"), "utf-8");
+    const config = JSON.parse(raw) as { features?: { bus?: unknown } };
+    return config.features?.bus === true;
+  } catch {
+    return false;
+  }
+}
+
+// Reads whether both Bus gitignore entries already exist, so setup only reports
+// .story/.gitignore as changed when it actually adds one.
+async function busGitignoreCompleteBefore(root: string): Promise<boolean> {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  try {
+    const raw = await readFile(join(root, ".story", ".gitignore"), "utf-8");
+    const lines = new Set(raw.split("\n").map((line) => line.trim()));
+    return lines.has("bus/") && lines.has("bus-migration/");
+  } catch {
+    return false;
+  }
+}
+
+// D4: guided setup. Idempotent and resumable; every step is individually
+// idempotent, and rerunning converges from any partial state.
+async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupResult> {
+  const completedSteps: string[] = [];
+  const remainingSteps: string[] = [];
+  const trackedChanges: string[] = [];
+
+  // 1. Full preflight, zero persistent mutation. Identity, surface match, the
+  // v1 drain gate, and live-delivery hook readiness are all validated here so
+  // ANY failure exits before any config/runtime/hook-policy/ledger change.
+  const client = resolveClient(args.client);
+  const taskId = resolveTaskId(client, args.taskId);
+  // An explicit surface inherently incompatible with the client is invalid_input
+  // regardless of process ancestry; check it BEFORE the ancestry-mismatch conflict so
+  // the preflight fails closed deterministically (mirrors joinEndpoint's ordering).
+  if (args.surface && ((client === "claude" && args.surface !== "claude_cli") ||
+      (client === "codex" && args.surface === "claude_cli"))) {
+    throw new BusError("invalid_input", `Surface ${args.surface} is not valid for the ${client} client`);
+  }
+  const detectedSurface = await detectClientSurface(client).catch(() => null);
+  if (args.surface && detectedSurface && args.surface !== detectedSurface) {
+    throw new BusError("conflict", `Requested ${args.surface} does not match the detected ${detectedSurface} client process`);
+  }
+  const surface = args.surface ?? detectedSurface ?? undefined;
+  // A surface that neither --surface nor ancestry detection could resolve (a Codex
+  // session whose process was not found) must fail the preflight HERE: joinEndpoint
+  // rejects an undetermined surface, and letting it fall through would mutate
+  // features.bus, .story/.gitignore, and the runtime before that rejection,
+  // violating the zero-mutation preflight contract.
+  if (!surface) {
+    throw new BusError("invalid_input", "Cannot determine the client surface safely; pass --surface explicitly");
+  }
+
+  if (await classifyBusRuntime(root) === "v1") {
+    await preflightV1Drain(root, taskId, args.forceArchive);
+  }
+  if (args.delivery === "live") {
+    await preflightLiveHooks(client);
+  }
+  // v2 capacity/joinability preflight. initializeBus mutates features.bus,
+  // .story/.gitignore, and the runtime BEFORE joinEndpoint runs, so a capacity
+  // rejection there would leave those mutated in violation of the zero-mutation
+  // preflight contract. Replicate joinEndpoint's registry + two-endpoint rule here
+  // so a full runtime with no endpoint owned by this task fails BEFORE any mutation.
+  // A same-task rejoin is still allowed (joinEndpoint returns the existing endpoint).
+  if (await classifyBusRuntime(root) === "v2") {
+    const listed = await listEndpoints(root);
+    if (listed.findings.length > 0) {
+      throw new BusError("corrupt", `Endpoint registry is corrupt: ${listed.findings[0]}`);
+    }
+    const sameTask = listed.endpoints.find((endpoint) =>
+      !endpoint.retiredAt && endpoint.client === client && endpoint.clientTaskId === taskId,
+    );
+    const active = listed.endpoints.filter((endpoint) => !endpoint.retiredAt);
+    if (!sameTask && active.length >= 2) {
+      throw new BusError(
+        "conflict",
+        "The Bus already has two active endpoints. Pass --replace <endpoint-id> with a proven-offline incumbent to take its place.",
+      );
+    }
+  }
+
+  // 2. Initialize or upgrade (idempotent; drains + archives a v1 runtime).
+  const configWasEnabled = await busFeatureEnabledBefore(root);
+  const gitignoreWasComplete = await busGitignoreCompleteBefore(root);
+  const init = await initializeBus(root, { callerTaskId: taskId, forceArchive: args.forceArchive });
+  completedSteps.push("initialize");
+  if (!configWasEnabled) trackedChanges.push(".story/config.json");
+  if (!gitignoreWasComplete) trackedChanges.push(".story/.gitignore");
+
+  // Report the exact mail this invocation force-archived, sourced from the
+  // commit-time InitializeBusResult rather than a pre-lock preflight snapshot.
+  // initializeBus captures this list under the migration and v1 operation locks,
+  // so it reflects what was actually archived (empty unless this call both
+  // migrated a v1 runtime and force-archived unread mail).
+  const archivedUnread = init.archivedUnread.map(parseArchivedUnread);
+
+  // Join this task's endpoint or refresh the existing one. Always route through
+  // joinEndpoint first: its relaxed join resolver HEALS a missing
+  // mailboxes/<id>/pending directory (a crash state the strict session-start
+  // refresh path rejects with `corrupt`), and a same-task rejoin returns the
+  // existing endpoint. Setup is the primary resumable recovery command, so it
+  // must be able to repair that layout. Refresh the session-start fields
+  // afterward only when the endpoint already existed.
+  const joined = await joinEndpoint(root, { client, clientTaskId: taskId, surface });
+  let endpoint: BusEndpoint;
+  if (joined.existing) {
+    endpoint = await refreshEndpointForSessionStart(root, joined.endpoint.endpointId, taskId);
+    completedSteps.push("refresh-endpoint");
+  } else {
+    endpoint = joined.endpoint;
+    completedSteps.push("join-endpoint");
+  }
+
+  // Enable hooks for THIS client only when live; skip entirely when poll.
+  if (args.delivery === "live") {
+    try {
+      await enableHooksForClient(root, client);
+      completedSteps.push("enable-hooks");
+    } catch (err) {
+      remainingSteps.push(`enable-hooks: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    completedSteps.push("poll-delivery (hooks skipped)");
+  }
+
+  const summary = await busSummary(root);
+  const handoff = summary.setupState === "waiting_for_peer"
+    ? 'Bus is waiting for its peer. In the other task, say "Connect this task to Storybloq Bus."'
+    : null;
+  return {
+    setupState: summary.setupState,
+    deliveryMode: summary.deliveryMode,
+    endpoints: summary.endpoints,
+    endpointId: endpoint.endpointId,
+    surface: endpoint.surface,
+    migrated: init.migrated,
+    archivedUnread,
+    trackedChanges: [...new Set(trackedChanges)],
+    completedSteps,
+    remainingSteps,
+    handoff,
+    nextActions: [...summary.nextActions],
+  };
+}
+
+function renderSetupMarkdown(result: BusSetupResult): string {
+  const lines = [
+    `Setup: ${result.setupState}; ${deliveryLabel(result.deliveryMode)}.`,
+  ];
+  if (result.migrated) {
+    lines.push("Upgraded and archived the previous v1 runtime.");
+    if (result.archivedUnread.length > 0) {
+      lines.push(`Force-archived ${result.archivedUnread.length} unread noncritical message(s):`);
+      for (const entry of result.archivedUnread) {
+        lines.push(`- ${formatArchivedUnread(entry)}`);
+      }
+    }
+  }
+  if (result.trackedChanges.length > 0) {
+    lines.push(`Tracked changes: ${result.trackedChanges.join(", ")}. Review and commit them; setup never auto-commits.`);
+  }
+  if (result.remainingSteps.length > 0) {
+    lines.push(`Remaining steps:\n${result.remainingSteps.map((step) => `- ${step}`).join("\n")}`);
+    lines.push("Rerun `storybloq bus setup` to resume.");
+  }
+  if (result.handoff) lines.push(result.handoff);
+  return lines.join("\n");
+}
+
 export function registerBusCommand(yargs: Argv): Argv {
   return yargs.command(
     "bus",
@@ -178,17 +713,23 @@ export function registerBusCommand(yargs: Argv): Argv {
         (y2) => formatOption(y2),
         async (argv) => {
           const format = formatValue(argv.format);
-          await runBus(format, initializeBus, (result) => {
-            const restart = result.restartRequired ? " Restart connected MCP clients to load the Bus tools." : "";
-            return `Storybloq Bus is enabled. Instance: ${result.instanceId}.${restart}`;
-          });
+          await runBus(format, async (root) => {
+            // bus init is the low-level v2 initializer only. A v1 upgrade needs the
+            // caller's identity to exempt its own endpoint from the drain offline
+            // proof and runs a guided preflight/join, which is `bus setup`'s job; a
+            // second identity-less migration path here would block on the caller's
+            // own active endpoint. Refuse and redirect (mirrors the send/join freeze).
+            if (await classifyBusRuntime(root) === "v1") {
+              throw new BusError("upgrade_required", "This checkout has a v1 Bus runtime. Run `storybloq bus setup` to drain and upgrade it.");
+            }
+            return initializeBus(root);
+          }, (result) => `Storybloq Bus is enabled. Instance: ${result.instanceId}.`);
         },
       )
       .command(
-        "join <role>",
-        "Bind this client task to one Bus role",
+        "setup",
+        "Connect this task to the Storybloq Bus (idempotent, resumable)",
         (y2) => formatOption(y2
-          .positional("role", { type: "string", choices: ["implementer", "reviewer"] as const, demandOption: true })
           .option("client", { type: "string", choices: ["claude", "codex"] as const })
           .option("task-id", { type: "string", describe: "Validated client task id" })
           .option("surface", {
@@ -196,20 +737,53 @@ export function registerBusCommand(yargs: Argv): Argv {
             choices: ["claude_cli", "codex_cli", "codex_desktop"] as const,
             describe: "Client surface when process ancestry cannot determine it",
           })
-          .option("replace", { type: "boolean", default: false, describe: "Replace a positively proven-offline endpoint" })),
+          .option("delivery", { type: "string", choices: ["live", "poll"] as const, default: "live" })
+          .option("force-archive", {
+            type: "boolean",
+            default: false,
+            describe: "Archive unread noncritical v1 mail read-only during upgrade (never bypasses ship-gate blockers)",
+          })),
         async (argv) => {
           const format = formatValue(argv.format);
+          await runBus(format, (root) => runBusSetup(root, {
+            client: argv.client as StorybloqClient | undefined,
+            taskId: argv["task-id"] as string | undefined,
+            surface: argv.surface as BusSurface | undefined,
+            delivery: (argv.delivery as "live" | "poll" | undefined) ?? "live",
+            forceArchive: argv["force-archive"] === true,
+          }), renderSetupMarkdown, (result) => result.setupState === "invalid");
+        },
+      )
+      .command(
+        "join [legacy-role]",
+        "Deprecated: connect this task to the Bus (use `storybloq bus setup`)",
+        (y2) => formatOption(y2
+          .positional("legacy-role", { type: "string", choices: ["implementer", "reviewer"] as const })
+          .option("client", { type: "string", choices: ["claude", "codex"] as const })
+          .option("task-id", { type: "string", describe: "Validated client task id" })
+          .option("surface", {
+            type: "string",
+            choices: ["claude_cli", "codex_cli", "codex_desktop"] as const,
+            describe: "Client surface when process ancestry cannot determine it",
+          })
+          .option("replace", { type: "string", describe: "Endpoint id of a proven-offline incumbent to replace" })),
+        async (argv) => {
+          const format = formatValue(argv.format);
+          const legacyRole = argv["legacy-role"] as string | undefined;
+          const deprecation = legacyRole
+            ? `Roles are now per-message; the '${legacyRole}' argument is ignored. Use \`storybloq bus setup\`.`
+            : "The `join` subcommand is deprecated; use `storybloq bus setup`.";
           await runBus(format, async (root) => {
             const client = resolveClient(argv.client as StorybloqClient | undefined);
-            return joinEndpoint(root, {
-              role: argv.role as BusRole,
+            const joined = await joinEndpoint(root, {
               client,
               clientTaskId: resolveTaskId(client, argv["task-id"] as string | undefined),
               surface: argv.surface as BusSurface | undefined,
-              replace: argv.replace as boolean,
+              replace: argv.replace as string | undefined,
             });
+            return { ...joined, deprecation };
           }, ({ endpoint, existing }) =>
-            `${existing ? "Using" : "Joined"} ${endpoint.role} endpoint ${endpoint.endpointId} (${endpoint.surface}).`);
+            `${deprecation}\n${existing ? "Using" : "Joined"} endpoint ${endpoint.endpointId} (${endpoint.surface}).`);
         },
       )
       .command(
@@ -220,8 +794,8 @@ export function registerBusCommand(yargs: Argv): Argv {
           const format = formatValue(argv.format);
           await runBus(format, async (root) => {
             const owned = await resolveOwnedEndpoint(root, identityFrom(argv as Record<string, unknown>));
-            return leaveEndpoint(root, owned.endpoint.endpointId, owned.taskId);
-          }, (endpoint) => `Left ${endpoint.role} endpoint ${endpoint.endpointId}.`);
+            return leaveEndpoint(root, owned.endpointId, owned.taskId);
+          }, (endpoint) => `Left endpoint ${endpoint.endpointId}.`);
         },
       )
       .command(
@@ -245,7 +819,7 @@ export function registerBusCommand(yargs: Argv): Argv {
               root,
               argv["endpoint-id"] as string,
               argv.reason as string,
-            ), (endpoint) => `Retired ${endpoint.role} endpoint ${endpoint.endpointId}: ${endpoint.retiredReason}`);
+            ), (endpoint) => `Retired endpoint ${endpoint.endpointId}: ${endpoint.retiredReason}`);
           },
         ).demandCommand(1, "Specify: retire"),
         () => {},
@@ -312,7 +886,7 @@ export function registerBusCommand(yargs: Argv): Argv {
           .option("thread", { type: "string", describe: "Existing thread id for a reply" })
           .option("thread-kind", { type: "string", choices: ["issue_notice", "question", "coordination", "patch_request"] as const })
           .option("predecessor-thread", { type: "string", describe: "Resolved predecessor thread id" })
-          .option("to", { type: "string", choices: ["implementer", "reviewer"] as const, demandOption: true })
+          .option("to", { type: "string", choices: ["implementer", "reviewer"] as const, describe: "Deprecated and ignored: routing is always to the sole peer" })
           .option("kind", { type: "string", choices: ["issue_notice", "question", "reply", "status", "patch_request", "claim", "release"] as const, demandOption: true })
           .option("severity", { type: "string", choices: ["critical", "high", "medium", "low", "info"] as const, default: "info" })
           .option("body", { type: "string", demandOption: true })
@@ -325,16 +899,22 @@ export function registerBusCommand(yargs: Argv): Argv {
           .option("file", { type: "string", array: true })),
         async (argv) => {
           const format = formatValue(argv.format);
+          const legacyTo = argv.to as string | undefined;
+          // Structured deprecation: routing is always to the sole peer, so a
+          // legacy `--to` role is accepted (choices reject unknown values) but
+          // carries no routing effect. Unknown values are rejected by yargs.
+          const deprecation = legacyTo
+            ? `Routing is always to the sole peer; the '--to ${legacyTo}' role is deprecated and ignored.`
+            : null;
           await runBus(format, async (root) => {
             const values = argv as Record<string, unknown>;
             const owned = await resolveOwnedEndpoint(root, identityFrom(values));
-            return sendBusMessage(root, {
-              endpointId: owned.endpoint.endpointId,
+            const sent = await sendBusMessage(root, {
+              endpointId: owned.endpointId,
               clientTaskId: owned.taskId,
               threadId: values.thread as string | undefined,
               threadKind: values["thread-kind"] as BusThreadKind | undefined,
               predecessorThreadId: values["predecessor-thread"] as string | undefined,
-              toRole: values.to as BusRole,
               messageKind: values.kind as BusMessageKind,
               severity: values.severity as BusSeverity,
               body: values.body as string,
@@ -342,9 +922,13 @@ export function registerBusCommand(yargs: Argv): Argv {
               inReplyTo: values["in-reply-to"] as string | undefined,
               idempotencyKey: values["idempotency-key"] as string,
             });
-          }, (result) => result.parked
-            ? `Thread ${result.threadId} parked at hop ${result.hopCount}.`
-            : `${result.replayed ? "Replayed" : "Sent"} message ${result.messageId} in thread ${result.threadId}.`);
+            return deprecation ? { ...sent, deprecation } : sent;
+          }, (result) => {
+            const summary = result.parked
+              ? `Thread ${result.threadId} parked at hop ${result.hopCount}.`
+              : `${result.replayed ? "Replayed" : "Sent"} message ${result.messageId} in thread ${result.threadId}.`;
+            return deprecation ? `${deprecation}\n${summary}` : summary;
+          });
         },
       )
       .command(
@@ -355,19 +939,10 @@ export function registerBusCommand(yargs: Argv): Argv {
           const format = formatValue(argv.format);
           await runBus(format, async (root) => {
             const owned = await resolveOwnedEndpoint(root, identityFrom(argv as Record<string, unknown>));
-            return pollBus(root, {
-              endpointId: owned.endpoint.endpointId,
-              clientTaskId: owned.taskId,
-              limit: argv.limit as number,
-            });
-          }, (result) => {
-            if (result.messages.length === 0) return "No pending Bus messages.";
-            return result.messages.map((envelope) => [
-              `[${envelope.mailboxSeq}] ${envelope.sender.role} ${envelope.message.severity} ${envelope.message.kind}`,
-              `Thread: ${envelope.threadId} | Message: ${envelope.message.messageId}`,
-              envelope.message.body,
-            ].join("\n")).join("\n\n");
-          });
+            const input = { endpointId: owned.endpointId, clientTaskId: owned.taskId, limit: argv.limit as number };
+            // D5 legacy-drain: a v1 runtime polls through legacy-v1.ts.
+            return owned.protocol === "v1" ? pollV1(root, input) : pollBus(root, input);
+          }, (result) => "legacy" in result ? renderV1Poll(result) : renderPoll(result));
         },
       )
       .command(
@@ -382,7 +957,7 @@ export function registerBusCommand(yargs: Argv): Argv {
           await runBus(format, async (root) => {
             const owned = await resolveOwnedEndpoint(root, identityFrom(argv as Record<string, unknown>));
             return acknowledgeBusMessage(root, {
-              endpointId: owned.endpoint.endpointId,
+              endpointId: owned.endpointId,
               clientTaskId: owned.taskId,
               messageId: argv["message-id"] as string,
               disposition: argv.disposition as "accepted" | "rejected" | "deferred",
@@ -404,7 +979,7 @@ export function registerBusCommand(yargs: Argv): Argv {
               await runBus(format, async (root) => {
                 const owned = await resolveOwnedEndpoint(root, identityFrom(argv as Record<string, unknown>));
                 return serializedThread(await getBusThread(root, {
-                  endpointId: owned.endpoint.endpointId,
+                  endpointId: owned.endpointId,
                   clientTaskId: owned.taskId,
                   threadId: argv["thread-id"] as string,
                 }));
@@ -432,16 +1007,22 @@ export function registerBusCommand(yargs: Argv): Argv {
                 const evidence = argv.commit || argv["ci-run"]
                   ? { ...(argv.commit ? { commit: argv.commit as string } : {}), ...(argv["ci-run"] ? { ciRun: argv["ci-run"] as string } : {}) }
                   : undefined;
-                return serializedThread(await updateBusThread(root, {
-                  endpointId: owned.endpoint.endpointId,
+                const update = {
+                  endpointId: owned.endpointId,
                   clientTaskId: owned.taskId,
                   threadId: argv["thread-id"] as string,
                   action: argv.action as "park" | "resolve" | "reopen",
                   reason: argv.reason as string | undefined,
                   resolution: argv.resolution as string | undefined,
                   evidence,
-                }));
-              }, (thread) => `Thread ${thread.thread.threadId} is ${thread.state}.`);
+                };
+                // D5 legacy-drain: a v1 runtime parks or resolves through legacy-v1.ts (no reopen).
+                return owned.protocol === "v1"
+                  ? await updateV1Thread(root, update)
+                  : serializedThread(await updateBusThread(root, update));
+              }, (thread) => "legacy" in thread
+                ? `Thread ${thread.threadId} is ${thread.state}.`
+                : `Thread ${thread.thread.threadId} is ${thread.state}.`);
             },
           )
           .demandCommand(1, "Specify: show or update"),
@@ -453,10 +1034,7 @@ export function registerBusCommand(yargs: Argv): Argv {
         (y2) => formatOption(y2),
         async (argv) => {
           const format = formatValue(argv.format);
-          await runBus(format, busSummary, (summary) =>
-            summary.initialized
-              ? `Bus: ${summary.endpoints} endpoints, ${summary.pendingMessages} pending, ${summary.openThreads} open, ${summary.parkedThreads} parked, ${summary.quarantined} quarantined. Hooks: Claude ${summary.hookDelivery.claude ? "on" : "off"}, Codex ${summary.hookDelivery.codex ? "on" : "off"}.`
-              : "Bus is enabled but not initialized in this checkout. Run `storybloq bus init` to participate.");
+          await runBus(format, (root) => busSummary(root), renderStatusMarkdown);
         },
       )
       .command(
@@ -465,12 +1043,33 @@ export function registerBusCommand(yargs: Argv): Argv {
         (y2) => formatOption(y2),
         async (argv) => {
           const format = formatValue(argv.format);
-          await runBus(format, busDoctor, (result) => result.healthy
-            ? result.summary.initialized
-              ? "Storybloq Bus is healthy."
-              : "Storybloq Bus is enabled but not initialized in this checkout. Run `storybloq bus init` to participate."
-            : `Storybloq Bus has ${result.findings.length} finding(s):\n${result.findings.map((finding) => `- ${finding}`).join("\n")}`,
-          (result) => !result.healthy);
+          const root = discoverProjectRoot();
+          if (!root) {
+            writeOutput(formatFailure(new BusError("not_found", "No .story/ project found."), format));
+            process.exitCode = ExitCode.USER_ERROR;
+            return;
+          }
+          try {
+            const result = await busDoctor(root);
+            // Build the set of known endpoint UUIDs so redaction relabels ONLY
+            // those, leaving thread/message ids intact. Sourced per runtime (v2
+            // registry, or the legacy v1 registry plus finding-extracted UUIDs)
+            // so a v1 runtime's endpoint UUIDs are redacted rather than leaked.
+            const endpointIds = await doctorEndpointRedactionSet(root, result);
+            writeOutput(formatData(result, format, (value) => renderDoctorMarkdown(value, endpointIds)));
+            process.exitCode = result.healthy ? ExitCode.OK : ExitCode.VALIDATION_ERROR;
+          } catch (err) {
+            // A disabled project still deserves readiness guidance, not a bare error.
+            if (err instanceof BusError && err.code === "bus_disabled") {
+              writeOutput(formatData(disabledDoctorResult(), format, renderDoctorDisabledMarkdown));
+              process.exitCode = ExitCode.OK;
+              return;
+            }
+            writeOutput(formatFailure(err, format));
+            process.exitCode = err instanceof BusError && err.code === "corrupt"
+              ? ExitCode.VALIDATION_ERROR
+              : ExitCode.USER_ERROR;
+          }
         },
       )
       .command(
@@ -484,7 +1083,25 @@ export function registerBusCommand(yargs: Argv): Argv {
             process.exitCode = ExitCode.USER_ERROR;
             return;
           }
-          await runBus(format, checkBusShip, (result) => result.clear
+          await runBus(format, async (root) => {
+            // Gate on features.bus BEFORE classifying the runtime so both the v1 and
+            // v2 ship-gate paths share the disabled contract: a disabled project with
+            // residual v1 files must return `bus_disabled`, not a ship result. The v2
+            // checkBusShip path already asserts this internally; the v1 branch did not.
+            assertBusEnabled((await loadProject(root)).state.config);
+            // A v1 runtime has no v2 ship gate, but the legacy-drain surface retains
+            // the authoritative ship-gate evaluation so release-gating (and autonomous
+            // FINALIZE) can see and clear v1 blockers BEFORE upgrading. Return the same
+            // {clear, blockers} shape derived from evaluateV1Drain's shipBlockers rather
+            // than refusing; corrupt v1 records still fail closed (evaluateV1Drain throws
+            // corrupt on unreadable/quarantined-registry state).
+            if (await classifyBusRuntime(root) === "v1") {
+              const paths = await resolveBusPaths(root, false);
+              const drain = await evaluateV1Drain(v1PathsFrom(paths.busRoot));
+              return { clear: drain.shipBlockers.length === 0, blockers: drain.shipBlockers };
+            }
+            return checkBusShip(root);
+          }, (result) => result.clear
             ? "Bus ship gate is clear."
             : `Bus ship gate blocked:\n${result.blockers.map((blocker) => `- ${blocker}`).join("\n")}`,
           (result) => !result.clear);

@@ -395,13 +395,20 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus init",
-    description: "Enable the local Storybloq Bus",
+    description: "Low-level initializer: enable the local Storybloq Bus v2 for this project (prefer `storybloq bus setup`). Initializes a fresh v2 runtime only; if a v1 runtime is present it refuses with `upgrade_required` and directs you to `storybloq bus setup`, which resolves this task's identity and runs the guided drain/upgrade.",
     usage: "storybloq bus init [--format json|md]",
+    flags: [],
+  },
+  {
+    name: "bus setup",
+    description: "Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when live) enables this client's hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).",
+    usage: "storybloq bus setup [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--delivery live|poll] [--force-archive] [--format json|md]",
+    flags: ["--client", "--task-id", "--surface", "--delivery", "--force-archive"],
   },
   {
     name: "bus join",
-    description: "Bind the current client task to one exclusive Bus role",
-    usage: "storybloq bus join implementer|reviewer [--client claude|codex] [--task-id <id>] [--surface <surface>] [--replace] [--format json|md]",
+    description: "Deprecated: roles are now per-message, so the legacy role argument is ignored. Use `storybloq bus setup`.",
+    usage: "storybloq bus join [legacy-role] [--client claude|codex] [--task-id <id>] [--surface <surface>] [--replace <endpoint-id>] [--format json|md]",
     flags: ["--client", "--task-id", "--surface", "--replace"],
   },
   {
@@ -417,9 +424,9 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus send",
-    description: "Create a Bus thread or send a reply",
-    usage: "storybloq bus send --to <role> --kind <kind> --body <text> --idempotency-key <key> [--thread <id>] [--thread-kind <kind>] [--issue <id>] [--ticket <id>] [--commit <sha>] [--ci-run <id>] [--file <path>] [--format json|md]",
-    flags: ["--to", "--kind", "--body", "--idempotency-key", "--thread", "--thread-kind", "--issue", "--ticket", "--commit", "--ci-run", "--file"],
+    description: "Create a Bus thread or send a reply. Routing always targets the sole peer; `--to` is deprecated and ignored.",
+    usage: "storybloq bus send --kind <kind> --body <text> --idempotency-key <key> [--to <role>] [--thread <id>] [--thread-kind <kind>] [--issue <id>] [--ticket <id>] [--commit <sha>] [--ci-run <id>] [--file <path>] [--format json|md]",
+    flags: ["--kind", "--body", "--idempotency-key", "--to", "--thread", "--thread-kind", "--issue", "--ticket", "--commit", "--ci-run", "--file"],
   },
   {
     name: "bus poll",
@@ -533,7 +540,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_session_report", description: "Structured analysis of an autonomous session (works even if project state is corrupted)", params: ["sessionId"] },
   { name: "storybloq_register_subprocess", description: "Register a running subprocess so monitors can tell slow builds from hung agents", params: ["pid", "cmd", "category?", "sessionId?"] },
   { name: "storybloq_unregister_subprocess", description: "Unregister a subprocess after it completes (idempotent)", params: ["pid", "sessionId?"] },
-  { name: "storybloq_bus_send", description: "Send a task-bound advisory peer message", params: ["endpointId", "clientTaskId", "threadId?", "threadKind?", "predecessorThreadId?", "toRole", "messageKind", "severity", "body", "refs?", "inReplyTo?", "idempotencyKey"] },
+  { name: "storybloq_bus_send", description: "Send a task-bound advisory peer message; routes to the sole peer (toRole is deprecated, optional, and ignored)", params: ["endpointId", "clientTaskId", "threadId?", "threadKind?", "predecessorThreadId?", "toRole?", "messageKind", "severity", "body", "refs?", "inReplyTo?", "idempotencyKey"] },
   { name: "storybloq_bus_poll", description: "Poll a task-bound endpoint mailbox with peer-authority envelopes", params: ["endpointId", "clientTaskId", "limit?"] },
   { name: "storybloq_bus_ack", description: "Record delivery disposition without resolving canonical work", params: ["endpointId", "clientTaskId", "messageId", "disposition", "reason?"] },
   { name: "storybloq_bus_thread_get", description: "Read a participant thread's verified prefix and folded state", params: ["endpointId", "clientTaskId", "threadId"] },

@@ -1,15 +1,22 @@
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readdir, rm } from "node:fs/promises";
+import { access, lstat, mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { loadProject } from "../core/project-loader.js";
 import { displayIdOf } from "../core/resolver.js";
 import type { ProjectState } from "../core/project-state.js";
-import { assertBusEnabled } from "./config.js";
+import { assertBusEnabled, isBusEnabled } from "./config.js";
 import { canonicalHash, hashWithoutKey } from "./canonical.js";
 import { listEndpoints, withEndpointCaller } from "./endpoints.js";
 import { BusError } from "./errors.js";
 import { ensureDerivedThread, foldBusThread, writeDerivedThread } from "./fold.js";
+import {
+  BusReceiptSchema,
+  readReceipt,
+  removeReceipt,
+  writeReceipt,
+  type BusReceipt,
+} from "./idempotency.js";
 import {
   durableCreate,
   durableRename,
@@ -21,13 +28,14 @@ import {
 } from "./io.js";
 import { withHardenedLock } from "./lock.js";
 import { readBusHookPolicy } from "./hooks.js";
-import { readBusInstance, resolveInitializedBusPaths } from "./admin.js";
+import { classifyBusRuntime, readBusInstance, resolveInitializedBusPaths } from "./admin.js";
+import { ackV1, doctorV1, exportV1Thread, summarizeV1 } from "./legacy-v1.js";
 import {
   assertBusLayout,
   busLayoutFindings,
   busRuntimeExists,
+  endpointMailboxPath,
   resolveBusPaths,
-  roleMailboxPath,
   type BusPaths,
 } from "./paths.js";
 import {
@@ -38,11 +46,14 @@ import {
   BusMailboxPointerSchema,
   BusMessageKindSchema,
   BusMessageRefsSchema,
-  BusRoleSchema,
   BusSeveritySchema,
   BusSuccessionSchema,
   BusThreadKindSchema,
+  BusThreadRecordSchema,
+  derivedRole,
   type BusAckPayload,
+  type BusClient,
+  type BusDeliveryMode,
   type BusEndpoint,
   type BusEntry,
   type BusEvidenceRef,
@@ -50,7 +61,9 @@ import {
   type BusMessageKind,
   type BusMessagePayload,
   type BusMessageRefs,
+  type BusParticipantSummary,
   type BusRole,
+  type BusSetupState,
   type BusSeverity,
   type BusStatePayload,
   type BusSummary,
@@ -72,6 +85,7 @@ const ThreadIdSchema = z.string().uuid();
 const EndpointIdSchema = z.string().uuid();
 const MessageIdSchema = z.string().uuid();
 const POINTER_FILENAME = /^(\d{12})-([0-9a-f-]{36})\.json$/;
+const RECEIPT_FILENAME = /^([a-f0-9]{64})\.json$/;
 const ACTIONABLE_KINDS = new Set<BusMessageKind>(["issue_notice", "question", "reply", "patch_request"]);
 
 export interface BusSendInput {
@@ -79,7 +93,6 @@ export interface BusSendInput {
   readonly clientTaskId: string;
   readonly threadId?: string;
   readonly threadKind?: BusThreadKind;
-  readonly toRole: BusRole;
   readonly messageKind: BusMessageKind;
   readonly severity: BusSeverity;
   readonly body: string;
@@ -92,6 +105,7 @@ export interface BusSendInput {
 export interface BusSendResult {
   readonly threadId: string;
   readonly messageId: string | null;
+  readonly toEndpoint: string;
   readonly state: "open" | "parked" | "resolved";
   readonly hopCount: number;
   readonly replayed: boolean;
@@ -102,7 +116,7 @@ export interface BusPollEnvelope {
   readonly source: "storybloq_bus";
   readonly authority: "peer_agent";
   readonly integrity: "verified" | "quarantined";
-  readonly sender: { readonly role: BusRole; readonly client: "claude" | "codex" };
+  readonly sender: { readonly endpointId: string; readonly client: BusClient; readonly role: BusRole | null };
   readonly threadId: string;
   readonly mailboxSeq: number;
   readonly message: BusMessagePayload;
@@ -110,14 +124,13 @@ export interface BusPollEnvelope {
 
 export interface BusPollResult {
   readonly endpointId: string;
-  readonly role: BusRole;
   readonly cursor: number;
   readonly messages: readonly BusPollEnvelope[];
   readonly findings: readonly string[];
 }
 
 interface NormalizedSend {
-  readonly toRole: BusRole;
+  readonly toEndpointId: string;
   readonly messageKind: BusMessageKind;
   readonly severity: BusSeverity;
   readonly body: string;
@@ -143,6 +156,10 @@ function pointerFilename(pointer: BusMailboxPointer): string {
   return `${padSeq(pointer.mailboxSeq, 12)}-${pointer.messageId}.json`;
 }
 
+function participantsInclude(thread: BusThreadRecord, endpointId: string): boolean {
+  return thread.participants[0] === endpointId || thread.participants[1] === endpointId;
+}
+
 function makeEntry<T extends BusEntry["type"]>(input: {
   type: T;
   threadId: string;
@@ -151,7 +168,7 @@ function makeEntry<T extends BusEntry["type"]>(input: {
   payload: Extract<BusEntry, { type: T }>["payload"];
 }): Extract<BusEntry, { type: T }> {
   const unsigned = {
-    schema: "storybloq-bus-entry/v1" as const,
+    schema: "storybloq-bus-entry/v2" as const,
     entryId: randomUUID(),
     threadId: input.threadId,
     seq: input.seq,
@@ -173,16 +190,20 @@ async function listThreadIds(paths: BusPaths): Promise<string[]> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw new BusError("io_error", "Cannot enumerate Bus threads", err);
   }
+  // A dot-prefixed name is not excluded here as a special case: the ThreadIdSchema
+  // filter below already drops any name that is not a valid UUID (including a
+  // dot-prefixed one). A dot-renamed thread directory is surfaced as an "invalid
+  // thread directory" finding by the doctor's separate threads enumeration.
   return entries
-    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.startsWith("."))
+    .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
     .map((entry) => entry.name)
     .filter((name) => ThreadIdSchema.safeParse(name).success)
     .sort();
 }
 
-async function allocateMailboxSeq(paths: BusPaths, role: BusRole): Promise<number> {
-  const mailbox = roleMailboxPath(paths, role);
-  return withHardenedLock(join(paths.locks, `mailbox-${role}.lock`), async () => {
+async function allocateMailboxSeq(paths: BusPaths, endpointId: string): Promise<number> {
+  const mailbox = endpointMailboxPath(paths, endpointId);
+  return withHardenedLock(join(paths.locks, `mailbox-${endpointId}.lock`), async () => {
     const counterPath = join(mailbox, "counter.json");
     let nextSeq = 1;
     try {
@@ -207,10 +228,10 @@ async function allocateMailboxSeq(paths: BusPaths, role: BusRole): Promise<numbe
   });
 }
 
-function makePointer(role: BusRole, mailboxSeq: number, entry: Extract<BusEntry, { type: "message" }>): BusMailboxPointer {
+function makePointer(endpointId: string, mailboxSeq: number, entry: Extract<BusEntry, { type: "message" }>): BusMailboxPointer {
   return BusMailboxPointerSchema.parse({
-    schema: "storybloq-bus-mailbox/v1",
-    role,
+    schema: "storybloq-bus-mailbox/v2",
+    endpointId,
     mailboxSeq,
     messageId: entry.payload.messageId,
     threadId: entry.threadId,
@@ -221,7 +242,7 @@ function makePointer(role: BusRole, mailboxSeq: number, entry: Extract<BusEntry,
 }
 
 async function publishPointerIntent(paths: BusPaths, pointer: BusMailboxPointer): Promise<{ pending: string; active: string }> {
-  const mailbox = roleMailboxPath(paths, pointer.role);
+  const mailbox = endpointMailboxPath(paths, pointer.endpointId);
   const filename = pointerFilename(pointer);
   const pending = join(mailbox, "pending", filename);
   const active = join(mailbox, filename);
@@ -282,10 +303,9 @@ function normalizeSend(
   maxBodyBytes: number,
   requireIssueForCritical: boolean,
   endpoint: BusEndpoint,
+  toEndpointId: string,
   input: BusSendInput,
 ): NormalizedSend {
-  const toRole = BusRoleSchema.parse(input.toRole);
-  if (toRole === endpoint.role) throw new BusError("invalid_input", "An endpoint cannot address its own role");
   const messageKind = BusMessageKindSchema.parse(input.messageKind);
   const severity = BusSeveritySchema.parse(input.severity);
   const body = normalizeMessageBody(input.body, maxBodyBytes);
@@ -295,11 +315,13 @@ function normalizeSend(
   const inReplyTo = input.inReplyTo ?? null;
   if (inReplyTo && !MessageIdSchema.safeParse(inReplyTo).success) throw new BusError("invalid_input", "Invalid reply message id");
   const keyHash = idempotencyKeyHash(endpoint.endpointId, input.idempotencyKey);
+  // payloadHash binds the resolved operation, including the recipient (D3), so a
+  // reused key after the peer was replaced recomputes a different hash and fails
+  // idempotency_conflict instead of silently replaying to the retired endpoint.
   const payloadHash = canonicalHash({
     fromEndpoint: endpoint.endpointId,
-    fromRole: endpoint.role,
-    toRole,
-    messageKind,
+    toEndpoint: toEndpointId,
+    kind: messageKind,
     severity,
     body,
     refs,
@@ -308,7 +330,7 @@ function normalizeSend(
     targetThreadId: input.threadId ?? null,
     predecessorThreadId: input.predecessorThreadId ?? null,
   });
-  return { toRole, messageKind, severity, body, refs, inReplyTo, keyHash, payloadHash };
+  return { toEndpointId, messageKind, severity, body, refs, inReplyTo, keyHash, payloadHash };
 }
 
 function topicRefFrom(refs: BusMessageRefs): Record<string, string> {
@@ -331,51 +353,57 @@ function validateInitialKinds(threadKind: BusThreadKind, messageKind: BusMessage
   if (!valid) throw new BusError("invalid_input", `Initial ${messageKind} message does not match ${threadKind} thread`);
 }
 
-function replayForKey(folded: FoldedBusThread, endpointId: string, keyHash: string, payloadHash: string): BusSendResult | null {
-  const match = folded.messages.find((message) =>
-    message.from.endpointId === endpointId && message.idempotencyKeyHash === keyHash,
-  );
-  if (!match) return null;
-  if (match.payloadHash !== payloadHash) {
-    throw new BusError("idempotency_conflict", "Idempotency key was already used with a different payload");
-  }
+function replayFromFold(folded: FoldedBusThread, receipt: BusReceipt): BusSendResult {
   return {
-    threadId: folded.thread.threadId,
-    messageId: match.messageId,
+    threadId: receipt.threadId,
+    messageId: receipt.messageId ?? null,
+    toEndpoint: receipt.toEndpoint,
     state: folded.state,
     hopCount: folded.hopCount,
     replayed: true,
-    parked: folded.state === "parked",
+    // `parked` reports whether THIS operation was an automatic park, taken solely
+    // from the receipt outcome. The thread's current state (which a later park could
+    // flip) is conveyed separately by `state`, so replaying a delivered message after
+    // the thread was later parked still returns parked:false with its real messageId.
+    parked: receipt.outcome === "parked",
   };
 }
 
-async function findReplayAcrossThreads(
-  paths: BusPaths,
-  endpointId: string,
-  keyHash: string,
-  payloadHash: string,
-): Promise<BusSendResult | null> {
-  for (const threadId of await listThreadIds(paths)) {
-    const folded = await foldBusThread(paths.projectRoot, threadId);
-    if (folded.integrity !== "verified") {
-      throw new BusError("corrupt", `Cannot establish idempotency while ${threadId} is quarantined`);
-    }
-    const replay = replayForKey(folded, endpointId, keyHash, payloadHash);
-    if (replay) return replay;
+// Resolves the sole active (non-retired) peer for the caller. Self-send is
+// structurally impossible: the caller is never returned as its own peer.
+async function resolveActivePeer(paths: BusPaths, selfEndpointId: string): Promise<BusEndpoint | null> {
+  const { endpoints, findings } = await listEndpoints(paths.projectRoot);
+  if (findings.length > 0) {
+    throw new BusError("corrupt", `Endpoint registry is corrupt: ${findings[0]}`);
   }
-  return null;
+  const peers = endpoints.filter((endpoint) => !endpoint.retiredAt && endpoint.endpointId !== selfEndpointId);
+  if (peers.length === 0) return null;
+  if (peers.length > 1) {
+    throw new BusError("conflict", "Two-endpoint invariant violated: multiple active peers");
+  }
+  return peers[0] ?? null;
 }
 
-function messagePayload(endpoint: BusEndpoint, normalized: NormalizedSend): BusMessagePayload {
+async function readThreadParticipants(paths: BusPaths, threadId: string): Promise<[string, string]> {
+  const thread = await readJsonNoFollow(join(paths.threads, threadId, "thread.json"), BusThreadRecordSchema);
+  if (thread.threadId !== threadId) throw new BusError("corrupt", "Thread id does not match its directory");
+  return thread.participants as [string, string];
+}
+
+function messagePayload(
+  endpoint: BusEndpoint,
+  toEndpointId: string,
+  normalized: NormalizedSend,
+  messageId: string,
+): BusMessagePayload {
   return {
-    messageId: randomUUID(),
+    messageId,
     from: {
       endpointId: endpoint.endpointId,
-      role: endpoint.role,
       client: endpoint.client,
       authority: "peer_agent",
     },
-    toRole: normalized.toRole,
+    to: toEndpointId,
     kind: normalized.messageKind,
     severity: normalized.severity,
     body: normalized.body,
@@ -386,9 +414,56 @@ function messagePayload(endpoint: BusEndpoint, normalized: NormalizedSend): BusM
   };
 }
 
+function pendingReceiptFor(
+  endpoint: BusEndpoint,
+  normalized: NormalizedSend,
+  publication: { threadId: string; messageId: string; mailboxSeq: number },
+): BusReceipt {
+  return BusReceiptSchema.parse({
+    schema: "storybloq-bus-receipt/v1",
+    endpointId: endpoint.endpointId,
+    keyHash: normalized.keyHash,
+    payloadHash: normalized.payloadHash,
+    threadId: publication.threadId,
+    toEndpoint: normalized.toEndpointId,
+    messageId: publication.messageId,
+    mailboxSeq: publication.mailboxSeq,
+    state: "pending",
+    createdAt: new Date().toISOString(),
+  });
+}
+
+// An automatic park has no message and no mailbox pointer, so the receipt carries
+// no messageId/mailboxSeq (permitted by the schema only when outcome is "parked").
+// It is bound to the park state entry by `stateEntryHash`: the pending form is
+// written BEFORE the park entry and finalized after, and recovery locates that
+// exact entry in the chain regardless of the thread's later state (D3/#4/#R6-A).
+function parkedReceiptFor(
+  endpoint: BusEndpoint,
+  normalized: NormalizedSend,
+  threadId: string,
+  toEndpointId: string,
+  state: "pending" | "final",
+  stateEntryHash: string,
+): BusReceipt {
+  return BusReceiptSchema.parse({
+    schema: "storybloq-bus-receipt/v1",
+    endpointId: endpoint.endpointId,
+    keyHash: normalized.keyHash,
+    payloadHash: normalized.payloadHash,
+    threadId,
+    toEndpoint: toEndpointId,
+    state,
+    outcome: "parked",
+    stateEntryHash,
+    createdAt: new Date().toISOString(),
+  });
+}
+
 async function createThread(
   paths: BusPaths,
   endpoint: BusEndpoint,
+  toEndpointId: string,
   normalized: NormalizedSend,
   input: BusSendInput,
   maxHops: number,
@@ -404,20 +479,21 @@ async function createThread(
       if (predecessor.integrity !== "verified" || predecessor.state !== "resolved") {
         throw new BusError("conflict", "A predecessor thread must be integrity-verified and resolved");
       }
-      if (!predecessor.thread.participantRoles.includes(endpoint.role) ||
-          !predecessor.thread.participantRoles.includes(normalized.toRole)) {
+      if (!participantsInclude(predecessor.thread, endpoint.endpointId) ||
+          !participantsInclude(predecessor.thread, toEndpointId)) {
         throw new BusError("unauthorized", "A successor must retain the predecessor participants");
       }
     }
 
     const threadId = randomUUID();
-    const message = messagePayload(endpoint, normalized);
+    const messageId = randomUUID();
+    const message = messagePayload(endpoint, toEndpointId, normalized, messageId);
     const unsignedThread = {
-      schema: "storybloq-bus-thread/v1" as const,
+      schema: "storybloq-bus-thread/v2" as const,
       threadId,
       kind: threadKind,
       topicRef: topicRefFrom(normalized.refs),
-      participantRoles: [endpoint.role, normalized.toRole] as [BusRole, BusRole],
+      participants: [endpoint.endpointId, toEndpointId] as [string, string],
       maxHops,
       createdByEndpoint: endpoint.endpointId,
       createdAt: new Date().toISOString(),
@@ -432,8 +508,11 @@ async function createThread(
     if (Buffer.byteLength(serialize(entry), "utf-8") > BUS_MAX_ENTRY_BYTES) {
       throw new BusError("invalid_input", `Message entry exceeds ${BUS_MAX_ENTRY_BYTES} bytes`);
     }
-    const mailboxSeq = await allocateMailboxSeq(paths, normalized.toRole);
-    const pointer = makePointer(normalized.toRole, mailboxSeq, entry);
+    const mailboxSeq = await allocateMailboxSeq(paths, toEndpointId);
+    // The pending receipt carries full publication identity BEFORE any entry
+    // exists, so recovery can address the exact pointer without a mailbox scan.
+    await writeReceipt(paths, pendingReceiptFor(endpoint, normalized, { threadId, messageId, mailboxSeq }));
+    const pointer = makePointer(toEndpointId, mailboxSeq, entry);
     const intent = await publishPointerIntent(paths, pointer);
     const tempDir = join(paths.threads, `.tmp-${threadId}-${randomUUID()}`);
     const finalDir = join(paths.threads, threadId);
@@ -451,15 +530,62 @@ async function createThread(
     await activatePointer(intent);
     const folded = await foldBusThread(paths.projectRoot, threadId);
     await writeDerivedThread(paths.projectRoot, folded).catch(() => undefined);
-    return { threadId, messageId: message.messageId, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: false };
+    await finalizeReceipt(paths, endpoint.endpointId, normalized.keyHash, {
+      payloadHash: normalized.payloadHash,
+      threadId,
+      toEndpoint: toEndpointId,
+      messageId,
+      mailboxSeq,
+    });
+    return { threadId, messageId: message.messageId, toEndpoint: toEndpointId, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: false };
   });
 }
 
-function duplicateActionable(folded: FoldedBusThread, endpoint: BusEndpoint, normalized: NormalizedSend): boolean {
+// Exported for direct unit testing of the delivered-finalization identity guard
+// (the already-final ordering + the parked/endpointId/keyHash rejections), which
+// is otherwise a defense-in-depth branch not reachable in a single locked scope.
+export async function finalizeReceipt(
+  paths: BusPaths,
+  endpointId: string,
+  keyHash: string,
+  expected: { payloadHash: string; threadId: string; toEndpoint: string; messageId: string; mailboxSeq: number },
+): Promise<void> {
+  const current = await readReceipt(paths, endpointId, keyHash);
+  if (!current) {
+    // The pending receipt was published earlier in this same endpoint-locked
+    // scope; its absence means external corruption. Fail closed rather than
+    // reporting success without a durable final receipt (which would let a
+    // retry republish a duplicate).
+    throw new BusError("corrupt", "Cannot finalize idempotency receipt; the pending receipt is missing");
+  }
+  // Verify identity BEFORE honoring an already-final receipt, so a mismatched
+  // or externally corrupted receipt is never silently accepted. This is the
+  // DELIVERED finalization path only: a receipt bearing `outcome: "parked"`
+  // (which the schema lets omit messageId/mailboxSeq) must never be finalized
+  // for a published message, or a retry would treat it as a terminal park and
+  // skip indexed-message verification. The internal endpointId/keyHash are also
+  // checked against the path arguments so a misfiled receipt cannot be honored.
+  if (
+    current.outcome === "parked" ||
+    current.endpointId !== endpointId ||
+    current.keyHash !== keyHash ||
+    current.payloadHash !== expected.payloadHash ||
+    current.threadId !== expected.threadId ||
+    current.toEndpoint !== expected.toEndpoint ||
+    current.messageId !== expected.messageId ||
+    current.mailboxSeq !== expected.mailboxSeq
+  ) {
+    throw new BusError("corrupt", "The pending receipt does not match the published operation");
+  }
+  if (current.state === "final") return;
+  await writeReceipt(paths, { ...current, state: "final" });
+}
+
+function duplicateActionable(folded: FoldedBusThread, fromEndpointId: string, toEndpointId: string, normalized: NormalizedSend): boolean {
   if (!ACTIONABLE_KINDS.has(normalized.messageKind)) return false;
   const candidate = actionableFingerprint({
-    fromRole: endpoint.role,
-    toRole: normalized.toRole,
+    fromEndpointId,
+    toEndpointId,
     kind: normalized.messageKind,
     body: normalized.body,
     refs: normalized.refs,
@@ -467,8 +593,8 @@ function duplicateActionable(folded: FoldedBusThread, endpoint: BusEndpoint, nor
   return folded.messages.some((message) =>
     ACTIONABLE_KINDS.has(message.kind) &&
     actionableFingerprint({
-      fromRole: message.from.role,
-      toRole: message.toRole,
+      fromEndpointId: message.from.endpointId,
+      toEndpointId: message.to,
       kind: message.kind,
       body: message.body,
       refs: message.refs,
@@ -497,6 +623,7 @@ async function appendStateEntry(
 async function replyToThread(
   paths: BusPaths,
   endpoint: BusEndpoint,
+  toEndpointId: string,
   normalized: NormalizedSend,
   threadId: string,
 ): Promise<BusSendResult> {
@@ -505,7 +632,7 @@ async function replyToThread(
     let folded = await foldBusThread(paths.projectRoot, threadId);
     if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
     if (folded.state !== "open") throw new BusError("thread_parked", `Thread is ${folded.state}`);
-    if (!folded.thread.participantRoles.includes(endpoint.role) || !folded.thread.participantRoles.includes(normalized.toRole)) {
+    if (!participantsInclude(folded.thread, endpoint.endpointId) || !participantsInclude(folded.thread, toEndpointId)) {
       throw new BusError("unauthorized", "Endpoint is not a participant in this thread");
     }
     if (normalized.inReplyTo && !folded.messages.some((message) => message.messageId === normalized.inReplyTo)) {
@@ -513,19 +640,44 @@ async function replyToThread(
     }
 
     const overHopCap = ACTIONABLE_KINDS.has(normalized.messageKind) && folded.hopCount >= folded.thread.maxHops;
-    const duplicate = duplicateActionable(folded, endpoint, normalized);
+    const duplicate = duplicateActionable(folded, endpoint.endpointId, toEndpointId, normalized);
     if (overHopCap || duplicate) {
-      folded = await appendStateEntry(paths, folded, {
-        action: "park",
-        byEndpoint: endpoint.endpointId,
-        reason: overHopCap ? `Maximum hop count ${folded.thread.maxHops} reached` : "Duplicate actionable fingerprint",
-        automatic: true,
-        trigger: overHopCap ? "hop_cap" : "duplicate_fingerprint",
+      // Crash-safe park (D3/#4/#R6-A): PREALLOCATE the park state entry so the
+      // pending receipt can bind to its exact identity (`entryHash`) BEFORE the
+      // entry lands. Write the pending parked receipt, durably create that exact
+      // entry, then finalize the receipt. Recovery locates the entry by its hash
+      // in the folded chain regardless of the thread's current state, so a later
+      // resolve/reopen cannot lose the committed parked outcome and an unrelated
+      // park cannot be misattributed to this receipt.
+      const parkEntry = makeEntry({
+        type: "state",
+        threadId,
+        seq: folded.validThroughSeq + 1,
+        prevHash: folded.lastHash,
+        payload: {
+          action: "park",
+          byEndpoint: endpoint.endpointId,
+          reason: overHopCap ? `Maximum hop count ${folded.thread.maxHops} reached` : "Duplicate actionable fingerprint",
+          automatic: true,
+          trigger: overHopCap ? "hop_cap" : "duplicate_fingerprint",
+          // Bind this automatic park to the exact idempotent send that triggered it.
+          // committedAutomaticPark requires both to equal the replaying receipt's
+          // keyHash/payloadHash, so a tampered receipt whose stateEntryHash names a
+          // DIFFERENT same-endpoint automatic park is rejected, not misattributed.
+          idempotencyKeyHash: normalized.keyHash,
+          payloadHash: normalized.payloadHash,
+        },
       });
-      return { threadId, messageId: null, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: true };
+      await writeReceipt(paths, parkedReceiptFor(endpoint, normalized, threadId, toEndpointId, "pending", parkEntry.entryHash));
+      await durableCreate(join(paths.threads, threadId, "entries", entryFilename(parkEntry)), serialize(parkEntry));
+      folded = await foldBusThread(paths.projectRoot, threadId);
+      await writeDerivedThread(paths.projectRoot, folded).catch(() => undefined);
+      await writeReceipt(paths, parkedReceiptFor(endpoint, normalized, threadId, toEndpointId, "final", parkEntry.entryHash));
+      return { threadId, messageId: null, toEndpoint: toEndpointId, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: true };
     }
 
-    const message = messagePayload(endpoint, normalized);
+    const messageId = randomUUID();
+    const message = messagePayload(endpoint, toEndpointId, normalized, messageId);
     const entry = makeEntry({
       type: "message",
       threadId,
@@ -536,14 +688,218 @@ async function replyToThread(
     if (Buffer.byteLength(serialize(entry), "utf-8") > BUS_MAX_ENTRY_BYTES) {
       throw new BusError("invalid_input", `Message entry exceeds ${BUS_MAX_ENTRY_BYTES} bytes`);
     }
-    const mailboxSeq = await allocateMailboxSeq(paths, normalized.toRole);
-    const intent = await publishPointerIntent(paths, makePointer(normalized.toRole, mailboxSeq, entry));
+    const mailboxSeq = await allocateMailboxSeq(paths, toEndpointId);
+    await writeReceipt(paths, pendingReceiptFor(endpoint, normalized, { threadId, messageId, mailboxSeq }));
+    const intent = await publishPointerIntent(paths, makePointer(toEndpointId, mailboxSeq, entry));
     await durableCreate(join(paths.threads, threadId, "entries", entryFilename(entry)), serialize(entry));
     await activatePointer(intent);
     folded = await foldBusThread(paths.projectRoot, threadId);
     await writeDerivedThread(paths.projectRoot, folded).catch(() => undefined);
-    return { threadId, messageId: message.messageId, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: false };
+    await finalizeReceipt(paths, endpoint.endpointId, normalized.keyHash, {
+      payloadHash: normalized.payloadHash,
+      threadId,
+      toEndpoint: toEndpointId,
+      messageId,
+      mailboxSeq,
+    });
+    return { threadId, messageId: message.messageId, toEndpoint: toEndpointId, state: folded.state, hopCount: folded.hopCount, replayed: false, parked: false };
   });
+}
+
+// True only when the pointer file at `path` parses and canonically equals the
+// reconstructed pointer. Absent, truncated, or unreadable all return false, so
+// the caller (re)creates it from the authoritative thread entry; any real IO
+// error then surfaces from the subsequent durableCreate, never here.
+async function pointerFileDelivered(path: string, expectedBytes: string): Promise<boolean> {
+  try {
+    const pointer = await readJsonNoFollow(path, BusMailboxPointerSchema);
+    return serialize(pointer) === expectedBytes;
+  } catch {
+    return false;
+  }
+}
+
+// Read a mailbox pointer without following symlinks, returning null ONLY when the
+// path is provably absent. A present-but-corrupt/symlinked/unreadable pointer
+// propagates its BusError (corrupt/io_error) so the caller fails closed rather than
+// treating an unverifiable file as "nothing here".
+async function readPointerOrNull(path: string): Promise<BusMailboxPointer | null> {
+  try {
+    return await readJsonNoFollow(path, BusMailboxPointerSchema);
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") return null;
+    throw err;
+  }
+}
+
+// Recover a crashed prior attempt (D3 rule 2). Returns a replay result when the
+// message is durably present, or null when it is provably absent (so the caller
+// proceeds with a fresh publication). Fails closed on any fold/IO error.
+// A parked receipt is bound to the exact AUTOMATIC park state entry it committed
+// (parkedReceiptFor sets stateEntryHash to that entry's entryHash). Recovery and
+// replay match by entryHash AND park semantics: a corrupted or misfiled receipt
+// whose stateEntryHash happens to name a resolve, reopen, or manual park entry must
+// not be replayed as this operation's automatic parked outcome. entryHash is a
+// content hash (unique per entry), so a match is exact identity; this layers the
+// semantic guard on top. The park entry ALSO carries the triggering send's
+// idempotencyKeyHash/payloadHash (both covered by entryHash), and the match requires
+// them to equal the replaying receipt's keyHash/payloadHash: a tampered or misfiled
+// receipt whose stateEntryHash names a DIFFERENT same-endpoint automatic park is
+// rejected rather than misattributed, since that other park binds a different send.
+// Returns the entry when present with matching automatic-park semantics AND operation
+// binding; null when NO entry carries that hash (the park never committed); throws
+// `corrupt` when an entry with that hash exists but is not this endpoint's automatic
+// park for this exact send. The schema requires stateEntryHash on parked receipts, so
+// a missing hash is external corruption and also fails closed here.
+function committedAutomaticPark(
+  folded: FoldedBusThread,
+  receipt: BusReceipt,
+): Extract<BusEntry, { type: "state" }> | null {
+  if (receipt.stateEntryHash == null) {
+    throw new BusError("corrupt", "A parked receipt must carry the hash of the park entry it commits");
+  }
+  const match = folded.entries.find((candidate) => candidate.entryHash === receipt.stateEntryHash);
+  if (!match) return null;
+  if (
+    match.type !== "state" ||
+    match.payload.action !== "park" ||
+    match.payload.automatic !== true ||
+    match.payload.trigger == null ||
+    match.payload.byEndpoint !== receipt.endpointId ||
+    match.payload.idempotencyKeyHash !== receipt.keyHash ||
+    match.payload.payloadHash !== receipt.payloadHash
+  ) {
+    throw new BusError("corrupt", "The recorded park entry is not this endpoint's automatic park");
+  }
+  return match;
+}
+
+async function recoverPendingReceipt(
+  paths: BusPaths,
+  endpoint: BusEndpoint,
+  receipt: BusReceipt,
+  expectedPayloadHash: string,
+): Promise<BusSendResult | null> {
+  let folded: FoldedBusThread | null = null;
+  try {
+    folded = await foldBusThread(paths.projectRoot, receipt.threadId);
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") {
+      folded = null; // thread never landed; the message is provably absent
+    } else {
+      throw err instanceof BusError ? err : new BusError("io_error", "Cannot recover pending receipt", err);
+    }
+  }
+  if (folded && folded.integrity !== "verified") {
+    throw new BusError("corrupt", "Cannot recover idempotency; the recorded thread is quarantined");
+  }
+  // Pending parked receipt (D3/#4/#R6-A): an automatic park crashed between its
+  // pending receipt and its finalization. The receipt is bound to the park state
+  // entry by `stateEntryHash`, so we prove the park committed by locating THAT
+  // exact entry (identity + automatic-park semantics) in the folded chain, NOT by
+  // the thread's current state: a later resolve/reopen must still replay the
+  // committed park, and an unrelated or non-automatic park must not be misattributed
+  // here. Present -> finalize and replay parked; absent -> the park never committed,
+  // so remove the receipt and retry; wrong semantics -> committedAutomaticPark throws.
+  if (receipt.outcome === "parked") {
+    const parked = folded != null ? committedAutomaticPark(folded, receipt) : null;
+    if (parked) {
+      if (receipt.payloadHash !== expectedPayloadHash) {
+        throw new BusError("idempotency_conflict", "Idempotency key was already used with a different payload");
+      }
+      await writeReceipt(paths, { ...receipt, state: "final" });
+      return replayFromFold(folded!, { ...receipt, state: "final" });
+    }
+    await removeReceipt(paths, endpoint.endpointId, receipt.keyHash);
+    return null;
+  }
+  const entry = folded && receipt.messageId
+    ? folded.entries.find((candidate) => candidate.type === "message" && candidate.payload.messageId === receipt.messageId)
+    : undefined;
+  if (folded && entry && entry.type === "message") {
+    // A reused idempotency key that resolves to a different payload is a conflict,
+    // detected BEFORE any mailbox mutation. The recorded in-flight message stays
+    // recoverable on a retry with its original payload (#3).
+    if (receipt.payloadHash !== expectedPayloadHash) {
+      throw new BusError("idempotency_conflict", "Idempotency key was already used with a different payload");
+    }
+    // Verify the located entry actually matches the recorded receipt before any
+    // mailbox mutation. A stale or externally corrupted receipt must never
+    // finalize a different message as delivered.
+    if (
+      entry.threadId !== receipt.threadId ||
+      entry.payload.from.endpointId !== endpoint.endpointId ||
+      entry.payload.to !== receipt.toEndpoint ||
+      entry.payload.idempotencyKeyHash !== receipt.keyHash ||
+      entry.payload.payloadHash !== receipt.payloadHash
+    ) {
+      throw new BusError("corrupt", "The recovered message does not match the pending receipt");
+    }
+    // Ensure the recipient pointer reaches its active destination, validating
+    // contents (not just the pathname) and re-verifying after activation. Run
+    // under the recipient reconcile lock so a concurrent poll cannot race the
+    // recreate/activate.
+    const pointer = makePointer(receipt.toEndpoint, receipt.mailboxSeq ?? entry.seq, entry);
+    const mailbox = endpointMailboxPath(paths, receipt.toEndpoint);
+    const filename = pointerFilename(pointer);
+    const active = join(mailbox, filename);
+    const pending = join(mailbox, "pending", filename);
+    const expectedBytes = serialize(pointer);
+    await withHardenedLock(join(paths.locks, `mailbox-reconcile-${receipt.toEndpoint}.lock`), async () => {
+      if (await pointerFileDelivered(active, expectedBytes)) return;
+      if (!(await pointerFileDelivered(pending, expectedBytes))) {
+        // The pending pointer is absent OR present-but-invalid (truncated /
+        // envelope-corrupt). durableCreate is exclusive (it links onto the
+        // target), so it would throw `conflict` on an existing invalid file.
+        // Durably remove any such file first, then recreate it from the
+        // authoritative entry. durableUnlink no-ops on ENOENT and propagates
+        // any real IO error, so a failed removal is never silently ignored.
+        await durableUnlink(pending);
+        await durableCreate(pending, expectedBytes);
+      }
+      await activatePointer({ pending, active });
+      if (!(await pointerFileDelivered(active, expectedBytes))) {
+        throw new BusError("io_error", "Could not durably deliver the recovered mailbox pointer");
+      }
+    });
+    await finalizeReceipt(paths, endpoint.endpointId, receipt.keyHash, {
+      payloadHash: receipt.payloadHash,
+      threadId: receipt.threadId,
+      toEndpoint: receipt.toEndpoint,
+      messageId: entry.payload.messageId,
+      mailboxSeq: receipt.mailboxSeq ?? entry.seq,
+    });
+    return replayFromFold(folded, { ...receipt, state: "final" });
+  }
+  // Message provably absent: the only pointer this crashed attempt could have left is
+  // its OWN pending intent. Remove it ONLY when the on-disk pointer envelope proves it
+  // belongs to THIS receipt (endpointId/mailboxSeq/messageId/threadId all match). A
+  // schema-valid but externally corrupted receipt for this key could otherwise name an
+  // UNRELATED delivery's pointer, and a blind unlink would delete that live message. A
+  // foreign pending pointer, or ANY active pointer at the recorded path (activation
+  // follows the entry durableCreate, so an absent message cannot have a live pointer),
+  // is anomalous: fail closed and leave it intact, never blind-unlink another delivery.
+  if (receipt.messageId && receipt.mailboxSeq) {
+    const mailbox = endpointMailboxPath(paths, receipt.toEndpoint);
+    const filename = `${padSeq(receipt.mailboxSeq, 12)}-${receipt.messageId}.json`;
+    const ownsPointer = (pointer: BusMailboxPointer): boolean =>
+      pointer.endpointId === receipt.toEndpoint &&
+      pointer.mailboxSeq === receipt.mailboxSeq &&
+      pointer.messageId === receipt.messageId &&
+      pointer.threadId === receipt.threadId;
+    const pendingPointer = await readPointerOrNull(join(mailbox, "pending", filename));
+    if (pendingPointer) {
+      if (!ownsPointer(pendingPointer)) {
+        throw new BusError("corrupt", "The pending mailbox pointer at the recorded path does not belong to this receipt");
+      }
+      await durableUnlink(join(mailbox, "pending", filename));
+    }
+    if (await readPointerOrNull(join(mailbox, filename))) {
+      throw new BusError("corrupt", "An active mailbox pointer occupies the recorded path for a message with no committed entry");
+    }
+  }
+  await removeReceipt(paths, endpoint.endpointId, receipt.keyHash);
+  return null;
 }
 
 export async function sendBusMessage(root: string, input: BusSendInput): Promise<BusSendResult> {
@@ -558,39 +914,155 @@ export async function sendBusMessage(root: string, input: BusSendInput): Promise
   const config = assertBusEnabled(loaded.state.config);
   const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) => {
+    // Resolve the recipient. For a reply, the recipient is the thread's other
+    // participant (which fails closed if retired); for a new thread it is the
+    // sole active peer.
+    let toEndpointId: string;
+    // A reply into a thread whose peer has retired is only refused for a genuinely
+    // NEW publication. A reply's recipient is the thread's fixed participant, so the
+    // keyHash/payloadHash are stable regardless of the peer's liveness; a committed
+    // reply must therefore still replay/recover after the peer retires (idempotent
+    // replay cannot depend on current peer liveness, or a crash + retry after the
+    // peer's task ends would be permanently unreplayable). Defer the throw until
+    // after the receipt-replay path below.
+    let replyPeerRetired = false;
+    // A new-thread send resolves its recipient from the sole active peer. If that
+    // peer has retired, a COMMITTED send must still replay its receipt (idempotent
+    // replay must not depend on current peer liveness -- the same principle as the
+    // reply path), so defer the no_peer refusal past the receipt-replay block.
+    let newThreadNoPeer = false;
+    if (input.threadId) {
+      if (!ThreadIdSchema.safeParse(input.threadId).success) throw new BusError("invalid_input", "Invalid Bus thread id");
+      const participants = await readThreadParticipants(paths, input.threadId);
+      if (!participants.includes(endpoint.endpointId)) {
+        throw new BusError("unauthorized", "Endpoint is not a participant in this thread");
+      }
+      toEndpointId = participants[0] === endpoint.endpointId ? participants[1] : participants[0];
+      const { endpoints, findings } = await listEndpoints(paths.projectRoot);
+      if (findings.length > 0) {
+        throw new BusError("corrupt", `Endpoint registry is corrupt: ${findings[0]}`);
+      }
+      const other = endpoints.find((candidate) => candidate.endpointId === toEndpointId);
+      replyPeerRetired = !other || !!other.retiredAt;
+    } else {
+      const peer = await resolveActivePeer(paths, endpoint.endpointId);
+      if (peer) {
+        toEndpointId = peer.endpointId;
+      } else {
+        // No active peer. The idempotency key (and thus the receipt path) does NOT
+        // depend on the recipient, so read the prior receipt directly: a committed
+        // send replays against its recorded toEndpoint even after the peer retires.
+        // A genuinely fresh send (no prior receipt) still fails closed with no_peer,
+        // deferred to after the replay path so a committed send is never masked.
+        const priorKeyHash = idempotencyKeyHash(endpoint.endpointId, input.idempotencyKey);
+        const prior = await readReceipt(paths, endpoint.endpointId, priorKeyHash);
+        if (!prior) {
+          throw new BusError("no_peer", "The Bus has no active peer endpoint (waiting_for_peer). Run `storybloq bus setup` in the other task.");
+        }
+        toEndpointId = prior.toEndpoint;
+        newThreadNoPeer = true;
+      }
+    }
+
     const normalized = normalizeSend(
       loaded.state,
       config.maxBodyBytes,
       config.requireIssueForCritical,
       endpoint,
+      toEndpointId,
       input,
     );
-    // Endpoint ownership stays locked from this global replay check through
-    // publication, so create/reply paths do not need a second full fold.
-    const replay = await findReplayAcrossThreads(
-      paths,
-      endpoint.endpointId,
-      normalized.keyHash,
-      normalized.payloadHash,
-    );
-    if (replay) return replay;
+
+    // Durable idempotency index (D3): O(1) replay, no full-runtime fold.
+    const receipt = await readReceipt(paths, endpoint.endpointId, normalized.keyHash);
+    if (receipt) {
+      // The receipt is loaded by (endpointId, keyHash) PATH, so a receipt whose
+      // INTERNAL endpointId/keyHash disagrees with the path is misfiled or
+      // corrupted. Reject before either the final-replay or recovery branch, since
+      // a final parked receipt skips entry verification entirely and a delivered
+      // replay never re-checks endpointId; a misfiled receipt must never replay.
+      if (receipt.endpointId !== endpoint.endpointId || receipt.keyHash !== normalized.keyHash) {
+        throw new BusError("corrupt", "The recorded receipt does not match the requesting endpoint or key");
+      }
+      if (receipt.state === "final") {
+        if (receipt.payloadHash !== normalized.payloadHash) {
+          throw new BusError("idempotency_conflict", "Idempotency key was already used with a different payload");
+        }
+        const folded = await foldBusThread(paths.projectRoot, receipt.threadId);
+        if (folded.integrity !== "verified") {
+          throw new BusError("corrupt", "Cannot replay; the recorded thread is quarantined");
+        }
+        // A delivered receipt must still index its message entry before we replay;
+        // a parked receipt must still index its bound automatic-park state entry (by
+        // stateEntryHash AND park semantics), so a final parked receipt is verified
+        // against the chain exactly like the pending recovery path rather than trusted
+        // blindly. A final parked receipt whose park entry is absent or carries wrong
+        // semantics is corruption (the park was finalized, so the entry must exist).
+        if (receipt.outcome !== "parked") {
+          const indexed = receipt.messageId
+            ? folded.entries.find((candidate) => candidate.type === "message" && candidate.payload.messageId === receipt.messageId)
+            : undefined;
+          if (
+            !indexed || indexed.type !== "message" ||
+            indexed.threadId !== receipt.threadId ||
+            indexed.payload.from.endpointId !== endpoint.endpointId ||
+            indexed.payload.to !== receipt.toEndpoint ||
+            indexed.payload.idempotencyKeyHash !== receipt.keyHash ||
+            indexed.payload.payloadHash !== receipt.payloadHash
+          ) {
+            throw new BusError("corrupt", "Cannot replay; the recorded message is missing or does not match its receipt");
+          }
+        } else if (committedAutomaticPark(folded, receipt) == null) {
+          throw new BusError("corrupt", "Cannot replay; the recorded park entry is missing or does not match its receipt");
+        }
+        return replayFromFold(folded, receipt);
+      }
+      // Recovery detects an idempotency_conflict (reused key, different payload)
+      // before any mailbox mutation and returns a replay only when the payload
+      // matches; a null return means the crashed attempt never committed and was
+      // superseded, so we continue with a fresh send.
+      const recovered = await recoverPendingReceipt(paths, endpoint, receipt, normalized.payloadHash);
+      if (recovered) return recovered;
+    }
+
+    // No committed operation to replay: this is a fresh publication. A fresh reply
+    // into a thread whose peer has retired is refused here (the deferred check above),
+    // AFTER the replay path so a committed reply still replays post-retirement.
+    if (input.threadId && replyPeerRetired) {
+      throw new BusError("participant_retired", "The thread's peer participant is retired; resolve the thread");
+    }
+    // A committed new-thread send already replayed above. Reaching here with
+    // newThreadNoPeer means the prior receipt was pending-but-never-committed
+    // (recovery returned null), so refuse rather than createThread to a retired peer.
+    if (!input.threadId && newThreadNoPeer) {
+      throw new BusError("no_peer", "The Bus has no active peer endpoint (waiting_for_peer). Run `storybloq bus setup` in the other task.");
+    }
+
     return input.threadId
-      ? replyToThread(paths, endpoint, normalized, input.threadId)
-      : createThread(paths, endpoint, normalized, input, config.maxHops);
+      ? replyToThread(paths, endpoint, toEndpointId, normalized, input.threadId)
+      : createThread(paths, endpoint, toEndpointId, normalized, input, config.maxHops);
   });
 }
 
-async function mailboxPointers(paths: BusPaths, role: BusRole): Promise<{ pointers: BusMailboxPointer[]; findings: string[] }> {
-  const mailbox = roleMailboxPath(paths, role);
+async function mailboxPointers(paths: BusPaths, endpointId: string): Promise<{ pointers: BusMailboxPointer[]; findings: string[] }> {
+  const mailbox = endpointMailboxPath(paths, endpointId);
   const pointers: BusMailboxPointer[] = [];
   const findings: string[] = [];
   for (const directory of [mailbox, join(mailbox, "pending")]) {
     for (const filename of await listRegularJsonFiles(directory)) {
+      // A dot-prefixed `.json` entry is unexpected where only pointers (and
+      // counter.json) belong: durable-write temp files are never dot-prefixed, so a
+      // pointer renamed `<pointer>.json` -> `.<pointer>.json` would otherwise be
+      // silently dropped by the POINTER_FILENAME skip and hidden from delivery.
+      if (filename.startsWith(".")) {
+        findings.push(`${filename}: unexpected dot-prefixed entry`);
+        continue;
+      }
       if (!POINTER_FILENAME.test(filename)) continue;
       try {
         const pointer = await readJsonNoFollow(join(directory, filename), BusMailboxPointerSchema);
-        if (pointer.role !== role || pointerFilename(pointer) !== filename) {
-          throw new BusError("corrupt", "Mailbox pointer envelope does not match its role or filename");
+        if (pointer.endpointId !== endpointId || pointerFilename(pointer) !== filename) {
+          throw new BusError("corrupt", "Mailbox pointer envelope does not match its endpoint or filename");
         }
         pointers.push(pointer);
       } catch (err) {
@@ -616,7 +1088,7 @@ async function recoverPendingIntent(
   paths: BusPaths,
   pointer: BusMailboxPointer,
 ): Promise<string | null> {
-  const mailbox = roleMailboxPath(paths, pointer.role);
+  const mailbox = endpointMailboxPath(paths, pointer.endpointId);
   const filename = pointerFilename(pointer);
   const pending = join(mailbox, "pending", filename);
   const lockPath = await pathExists(join(paths.threads, pointer.threadId, "thread.json"))
@@ -636,7 +1108,7 @@ async function recoverPendingIntent(
     }
     const entry = folded.entries[pointer.entrySeq - 1];
     if (entry?.type === "message" && entry.entryHash === pointer.entryHash &&
-        entry.payload.messageId === pointer.messageId && entry.payload.toRole === pointer.role) {
+        entry.payload.messageId === pointer.messageId && entry.payload.to === pointer.endpointId) {
       await activatePointer({ pending, active: join(mailbox, filename) });
       return null;
     }
@@ -648,19 +1120,25 @@ async function recoverPendingIntent(
   });
 }
 
-async function reconcileRoleMailbox(
+async function reconcileEndpointMailbox(
   paths: BusPaths,
-  role: BusRole,
+  endpointId: string,
 ): Promise<{ pointers: BusMailboxPointer[]; findings: string[] }> {
-  return withHardenedLock(join(paths.locks, `mailbox-reconcile-${role}.lock`), async () => {
-    const mailbox = roleMailboxPath(paths, role);
+  return withHardenedLock(join(paths.locks, `mailbox-reconcile-${endpointId}.lock`), async () => {
+    const mailbox = endpointMailboxPath(paths, endpointId);
     const findings: string[] = [];
     for (const filename of await listRegularJsonFiles(join(mailbox, "pending"))) {
+      // A dot-prefixed pending intent is unexpected (temp files are never
+      // dot-prefixed); report it rather than let the POINTER_FILENAME skip hide it.
+      if (filename.startsWith(".")) {
+        findings.push(`${filename}: unexpected dot-prefixed entry`);
+        continue;
+      }
       if (!POINTER_FILENAME.test(filename)) continue;
       try {
         const pointer = await readJsonNoFollow(join(mailbox, "pending", filename), BusMailboxPointerSchema);
-        if (pointer.role !== role || pointerFilename(pointer) !== filename) {
-          throw new BusError("corrupt", "Mailbox pointer envelope does not match its role or filename");
+        if (pointer.endpointId !== endpointId || pointerFilename(pointer) !== filename) {
+          throw new BusError("corrupt", "Mailbox pointer envelope does not match its endpoint or filename");
         }
         const finding = await recoverPendingIntent(paths, pointer);
         if (finding) findings.push(finding);
@@ -669,7 +1147,7 @@ async function reconcileRoleMailbox(
       }
     }
 
-    let current = await mailboxPointers(paths, role);
+    let current = await mailboxPointers(paths, endpointId);
     findings.push(...current.findings);
     const known = new Set(current.pointers.map((pointer) => pointer.messageId));
     for (const threadId of await listThreadIds(paths)) {
@@ -681,16 +1159,16 @@ async function reconcileRoleMailbox(
         continue;
       }
       for (const entry of folded.entries) {
-        if (entry.type !== "message" || entry.payload.toRole !== role ||
+        if (entry.type !== "message" || entry.payload.to !== endpointId ||
             folded.acknowledgments.has(entry.payload.messageId) || known.has(entry.payload.messageId)) continue;
-        const latest = await mailboxPointers(paths, role);
+        const latest = await mailboxPointers(paths, endpointId);
         findings.push(...latest.findings);
         if (latest.pointers.some((pointer) => pointer.messageId === entry.payload.messageId)) {
           known.add(entry.payload.messageId);
           continue;
         }
-        const mailboxSeq = await allocateMailboxSeq(paths, role);
-        const pointer = makePointer(role, mailboxSeq, entry);
+        const mailboxSeq = await allocateMailboxSeq(paths, endpointId);
+        const pointer = makePointer(endpointId, mailboxSeq, entry);
         try {
           await durableCreate(join(mailbox, pointerFilename(pointer)), serialize(pointer));
           known.add(entry.payload.messageId);
@@ -699,13 +1177,13 @@ async function reconcileRoleMailbox(
         }
       }
     }
-    current = await mailboxPointers(paths, role);
+    current = await mailboxPointers(paths, endpointId);
     return { pointers: current.pointers, findings: [...new Set([...findings, ...current.findings])] };
   });
 }
 
 async function pointerPaths(paths: BusPaths, pointer: BusMailboxPointer): Promise<string[]> {
-  const mailbox = roleMailboxPath(paths, pointer.role);
+  const mailbox = endpointMailboxPath(paths, pointer.endpointId);
   const filename = pointerFilename(pointer);
   return [join(mailbox, filename), join(mailbox, "pending", filename)];
 }
@@ -725,7 +1203,7 @@ export async function pollBus(root: string, input: {
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint, persist) => {
     const requestedLimit = Number.isFinite(input.limit) ? Math.floor(input.limit!) : 20;
     const limit = Math.max(1, Math.min(100, requestedLimit));
-    const mailbox = await reconcileRoleMailbox(paths, endpoint.role);
+    const mailbox = await reconcileEndpointMailbox(paths, endpoint.endpointId);
     const messages: BusPollEnvelope[] = [];
     let cursor = endpoint.lastPolledMailboxSeq;
 
@@ -740,7 +1218,7 @@ export async function pollBus(root: string, input: {
       }
       const entry = folded.entries[pointer.entrySeq - 1];
       if (!entry || entry.type !== "message" || entry.entryHash !== pointer.entryHash ||
-          entry.payload.messageId !== pointer.messageId || entry.payload.toRole !== endpoint.role) {
+          entry.payload.messageId !== pointer.messageId || entry.payload.to !== endpoint.endpointId) {
         mailbox.findings.push(`${pointer.messageId}: mailbox pointer does not match the valid thread prefix`);
         continue;
       }
@@ -753,7 +1231,11 @@ export async function pollBus(root: string, input: {
         source: "storybloq_bus",
         authority: "peer_agent",
         integrity: folded.integrity,
-        sender: { role: entry.payload.from.role, client: entry.payload.from.client },
+        sender: {
+          endpointId: entry.payload.from.endpointId,
+          client: entry.payload.from.client,
+          role: derivedRole(entry.payload.kind),
+        },
         threadId: pointer.threadId,
         mailboxSeq: pointer.mailboxSeq,
         message: entry.payload,
@@ -768,12 +1250,12 @@ export async function pollBus(root: string, input: {
         lastSeenAt: new Date().toISOString(),
       }));
     }
-    return { endpointId: endpoint.endpointId, role: endpoint.role, cursor, messages, findings: mailbox.findings };
+    return { endpointId: endpoint.endpointId, cursor, messages, findings: mailbox.findings };
   });
 }
 
-async function findMessageThread(paths: BusPaths, role: BusRole, messageId: string): Promise<string | null> {
-  const mailbox = await mailboxPointers(paths, role);
+async function findMessageThread(paths: BusPaths, endpointId: string, messageId: string): Promise<string | null> {
+  const mailbox = await mailboxPointers(paths, endpointId);
   const pointer = mailbox.pointers.find((candidate) => candidate.messageId === messageId);
   if (pointer) return pointer.threadId;
   for (const threadId of await listThreadIds(paths)) {
@@ -800,15 +1282,17 @@ export async function acknowledgeBusMessage(root: string, input: {
   if (!MessageIdSchema.safeParse(input.messageId).success) throw new BusError("invalid_input", "Invalid message id");
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
+  // D5 legacy-drain: ack a pending v1 message so the migration drain gate can clear.
+  if (await classifyBusRuntime(root) === "v1") return ackV1(root, input);
   const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) => {
-    const threadId = await findMessageThread(paths, endpoint.role, input.messageId);
+    const threadId = await findMessageThread(paths, endpoint.endpointId, input.messageId);
     if (!threadId) throw new BusError("not_found", "Bus message not found");
     return withHardenedLock(join(paths.locks, `thread-${threadId}.lock`), async () => {
       let folded = await foldBusThread(paths.projectRoot, threadId);
       if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
       const message = folded.messages.find((candidate) => candidate.messageId === input.messageId);
-      if (!message || message.toRole !== endpoint.role) throw new BusError("unauthorized", "Message is not addressed to this endpoint");
+      if (!message || message.to !== endpoint.endpointId) throw new BusError("unauthorized", "Message is not addressed to this endpoint");
       const reasonText = input.reason?.trim();
       if ((input.disposition === "rejected" || input.disposition === "deferred") && !reasonText) {
         throw new BusError("invalid_input", `A reason is required for ${input.disposition} acknowledgment`);
@@ -832,7 +1316,7 @@ export async function acknowledgeBusMessage(root: string, input: {
         payload,
       });
       await durableCreate(join(paths.threads, threadId, "entries", entryFilename(entry)), serialize(entry));
-      const pointers = await mailboxPointers(paths, endpoint.role);
+      const pointers = await mailboxPointers(paths, endpoint.endpointId);
       for (const pointer of pointers.pointers.filter((candidate) => candidate.messageId === input.messageId)) {
         await removePointer(paths, pointer);
       }
@@ -852,7 +1336,7 @@ export async function getBusThread(root: string, input: {
   assertBusEnabled(loaded.state.config);
   return withEndpointCaller(root, input.endpointId, input.clientTaskId, async (endpoint) => {
     const folded = await foldBusThread(root, input.threadId);
-    if (!folded.thread.participantRoles.includes(endpoint.role)) {
+    if (!participantsInclude(folded.thread, endpoint.endpointId)) {
       throw new BusError("unauthorized", "Endpoint is not a participant in this thread");
     }
     return folded;
@@ -886,7 +1370,7 @@ export async function updateBusThread(root: string, input: {
     withHardenedLock(join(paths.locks, `thread-${input.threadId}.lock`), async () => {
     let folded = await foldBusThread(paths.projectRoot, input.threadId);
     if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
-    if (!folded.thread.participantRoles.includes(endpoint.role)) throw new BusError("unauthorized", "Endpoint is not a thread participant");
+    if (!participantsInclude(folded.thread, endpoint.endpointId)) throw new BusError("unauthorized", "Endpoint is not a thread participant");
     const reason = input.reason?.trim()
       ? normalizeBusText(input.reason, "Thread-state reason", 4096)
       : undefined;
@@ -947,11 +1431,15 @@ export interface BusDoctorResult {
   readonly findings: readonly string[];
 }
 
-function emptyBusSummary(): BusSummary {
+function emptyBusSummary(setupState: BusSetupState = "not_initialized"): BusSummary {
   return {
-    enabled: true,
+    enabled: setupState !== "disabled",
     initialized: false,
     daemonState: "stopped",
+    setupState,
+    deliveryMode: "poll",
+    participants: [],
+    nextActions: ["run: storybloq bus setup"],
     endpoints: 0,
     pendingMessages: 0,
     unacknowledgedCritical: 0,
@@ -963,16 +1451,41 @@ function emptyBusSummary(): BusSummary {
   };
 }
 
+async function receiptEndpointDirs(paths: BusPaths): Promise<{ dirs: string[]; findings: string[] }> {
+  let entries;
+  try {
+    entries = await readdir(paths.idempotency, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { dirs: [], findings: [] };
+    // A non-ENOENT enumeration failure (EACCES, EIO, ...) must be reported as a doctor
+    // finding rather than thrown: busDoctor calls this outside a catch, so throwing here
+    // aborts the whole health report instead of returning healthy:false with a reason.
+    return { dirs: [], findings: [`idempotency: cannot enumerate: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  const dirs: string[] = [];
+  const findings: string[] = [];
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.isSymbolicLink() && EndpointIdSchema.safeParse(entry.name).success) {
+      dirs.push(entry.name);
+    } else {
+      findings.push(`idempotency: unexpected entry ${entry.name}`);
+    }
+  }
+  return { dirs, findings };
+}
+
 export async function busDoctor(root: string): Promise<BusDoctorResult> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
+  // D5 legacy-drain: report v1 content read-only, without migrating.
+  if (await classifyBusRuntime(root) === "v1") return doctorV1(root);
   const paths = await resolveBusPaths(root, false);
   if (!await busRuntimeExists(paths.busRoot)) {
     return { healthy: true, summary: emptyBusSummary(), findings: [] };
   }
   const findings = await busLayoutFindings(paths);
   if (findings.length > 0) {
-    return { healthy: false, summary: emptyBusSummary(), findings };
+    return { healthy: false, summary: emptyBusSummary("invalid"), findings };
   }
   try {
     await readBusInstance(paths.projectRoot);
@@ -990,13 +1503,11 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   }
   const endpoints = await listEndpoints(paths.projectRoot);
   findings.push(...endpoints.findings.map((finding) => `endpoint: ${finding}`));
-  const activeRoles = new Map<BusRole, number>();
-  for (const endpoint of endpoints.endpoints.filter((candidate) => !candidate.retiredAt)) {
-    activeRoles.set(endpoint.role, (activeRoles.get(endpoint.role) ?? 0) + 1);
+  const activeEndpoints = endpoints.endpoints.filter((candidate) => !candidate.retiredAt);
+  if (activeEndpoints.length > 2) {
+    findings.push(`two-endpoint invariant violated: ${activeEndpoints.length} active endpoints`);
   }
-  for (const [role, count] of activeRoles) {
-    if (count > 1) findings.push(`role ${role} has ${count} active endpoints`);
-  }
+  const retiredIds = new Set(endpoints.endpoints.filter((candidate) => candidate.retiredAt).map((candidate) => candidate.endpointId));
 
   const folds: FoldedBusThread[] = [];
   try {
@@ -1009,7 +1520,9 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   } catch (err) {
     findings.push(`threads: ${err instanceof Error ? err.message : String(err)}`);
   }
+  const liveThreadIds = new Set<string>();
   for (const threadId of await listThreadIds(paths)) {
+    liveThreadIds.add(threadId);
     try {
       const folded = await foldBusThread(paths.projectRoot, threadId);
       folds.push(folded);
@@ -1018,22 +1531,121 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
       findings.push(`thread ${threadId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  for (const role of BusRoleSchema.options) {
-    const mailbox = await mailboxPointers(paths, role);
-    findings.push(...mailbox.findings.map((finding) => `${role} mailbox: ${finding}`));
-    const pendingCount = (await listRegularJsonFiles(join(roleMailboxPath(paths, role), "pending")))
+  for (const endpoint of endpoints.endpoints) {
+    const mailbox = await mailboxPointers(paths, endpoint.endpointId);
+    findings.push(...mailbox.findings.map((finding) => `${endpoint.endpointId} mailbox: ${finding}`));
+    if (retiredIds.has(endpoint.endpointId) && mailbox.pointers.length > 0) {
+      findings.push(`${endpoint.endpointId} mailbox: ${mailbox.pointers.length} unacked pointer(s) addressed to a retired endpoint`);
+    }
+    const pendingCount = (await listRegularJsonFiles(join(endpointMailboxPath(paths, endpoint.endpointId), "pending")))
       .filter((filename) => POINTER_FILENAME.test(filename)).length;
-    if (pendingCount > 0) findings.push(`${role} mailbox: ${pendingCount} pending intent(s) require poll recovery`);
+    if (pendingCount > 0) findings.push(`${endpoint.endpointId} mailbox: ${pendingCount} pending intent(s) require poll recovery`);
     const maxSeq = mailbox.pointers.reduce((maximum, pointer) => Math.max(maximum, pointer.mailboxSeq), 0);
     try {
       const counter = await readJsonNoFollow(
-        join(roleMailboxPath(paths, role), "counter.json"),
+        join(endpointMailboxPath(paths, endpoint.endpointId), "counter.json"),
         BusMailboxCounterSchema,
       );
-      if (counter.nextSeq <= maxSeq) findings.push(`${role} mailbox counter is behind sequence ${maxSeq}`);
+      if (counter.nextSeq <= maxSeq) findings.push(`${endpoint.endpointId} mailbox counter is behind sequence ${maxSeq}`);
     } catch (err) {
       if (!(err instanceof BusError) || err.code !== "not_found" || maxSeq > 0) {
-        findings.push(`${role} mailbox counter: ${err instanceof Error ? err.message : String(err)}`);
+        findings.push(`${endpoint.endpointId} mailbox counter: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+  // Orphan mailboxes: a UUID-named mailbox dir left after its endpoint record was
+  // deleted is never reached by the per-endpoint loop above, so it (and any unread
+  // pointers it still holds) would go unseen. Enumerate the mailboxes dir and report
+  // any UUID-named directory with no matching endpoint record as an orphan finding.
+  const registeredEndpointIds = new Set(endpoints.endpoints.map((endpoint) => endpoint.endpointId));
+  try {
+    for (const entry of await readdir(paths.mailboxes, { withFileTypes: true })) {
+      if (entry.name === "." || entry.name === "..") continue;
+      // A dot-prefixed entry is unexpected where only `<uuid>` mailbox dirs belong
+      // (temp files are never dot-prefixed): report it rather than silently skip a
+      // mailbox renamed `<uuid>` -> `.<uuid>` to hide it from the orphan scan.
+      if (entry.name.startsWith(".")) {
+        findings.push(`mailboxes: unexpected dot-prefixed entry ${entry.name}`);
+        continue;
+      }
+      if (registeredEndpointIds.has(entry.name)) continue;
+      // A non-directory, symlink, or non-UUID entry where only `<uuid>` mailbox dirs
+      // belong is unexpected: report it rather than silently skip a file or symlink
+      // named like an endpoint. Registered endpoints are skipped first because
+      // busLayoutFindings already enforced their directory shape and short-circuits
+      // doctor before this scan (mirrors the top-level idempotency scan's else-branch).
+      if (!entry.isDirectory() || entry.isSymbolicLink() ||
+          !EndpointIdSchema.safeParse(entry.name).success) {
+        findings.push(`mailboxes: unexpected entry ${entry.name} is not a regular <uuid> mailbox directory`);
+        continue;
+      }
+      const orphanDir = join(paths.mailboxes, entry.name);
+      const pointerCount = (await listRegularJsonFiles(orphanDir)).filter((name) => POINTER_FILENAME.test(name)).length;
+      // The orphan ROOT was validated above as a real non-symlink directory, but its
+      // `pending` CHILD was not. A preserved orphan whose `pending` is a symlink would
+      // otherwise make listRegularJsonFiles follow it and enumerate an arbitrary external
+      // directory. lstat it (no-follow) and report a finding instead of traversing; a
+      // missing pending is a benign zero, any other stat error is surfaced fail-closed.
+      const pendingDir = join(orphanDir, "pending");
+      let pendingDescription: string;
+      try {
+        const pendingStat = await lstat(pendingDir);
+        if (pendingStat.isSymbolicLink() || !pendingStat.isDirectory()) {
+          pendingDescription = "pending is not a regular directory";
+        } else {
+          const pendingCount = (await listRegularJsonFiles(pendingDir)).filter((name) => POINTER_FILENAME.test(name)).length;
+          pendingDescription = `${pendingCount} pending intent(s)`;
+        }
+      } catch (err) {
+        pendingDescription = (err as NodeJS.ErrnoException).code === "ENOENT"
+          ? "0 pending intent(s)"
+          : `pending unreadable: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      findings.push(`orphan mailbox ${entry.name}: ${pointerCount} pointer(s), ${pendingDescription} with no endpoint record`);
+    }
+  } catch (err) {
+    findings.push(`mailboxes: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Orphaned receipts (thread gone) + receipt integrity.
+  const receiptDirs = await receiptEndpointDirs(paths);
+  findings.push(...receiptDirs.findings);
+  for (const endpointId of receiptDirs.dirs) {
+    const receiptDir = join(paths.idempotency, endpointId);
+    let receiptEntries;
+    try {
+      receiptEntries = await readdir(receiptDir, { withFileTypes: true });
+    } catch (err) {
+      findings.push(`receipt ${endpointId}: cannot enumerate: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    for (const dirent of receiptEntries.sort((a, b) => a.name.localeCompare(b.name))) {
+      // A dot-prefixed name is NOT skipped: temp files are never dot-prefixed, so a
+      // receipt renamed `<keyHash>.json` -> `.<keyHash>.json` is unexpected and falls
+      // through to the finding below rather than being silently hidden, which would
+      // otherwise let a retry republish a duplicate.
+      if (dirent.name === "." || dirent.name === "..") continue;
+      const filename = dirent.name;
+      // A symlink, a non-regular file, or a name that is not `<keyHash>.json` is an
+      // unexpected entry where only receipts belong. Enumerating (rather than
+      // listRegularJsonFiles, which silently drops these) makes a receipt renamed
+      // away from `.json` visible; otherwise a retry republishes a duplicate silently.
+      if (!dirent.isFile() || dirent.isSymbolicLink() || !RECEIPT_FILENAME.test(filename)) {
+        findings.push(`receipt ${endpointId}/${filename}: not a regular <keyHash>.json file`);
+        continue;
+      }
+      try {
+        const receipt = await readJsonNoFollow(join(receiptDir, filename), BusReceiptSchema);
+        if (receipt.endpointId !== endpointId) {
+          findings.push(`receipt ${endpointId}/${filename}: endpointId ${receipt.endpointId} does not match its directory`);
+        }
+        if (filename !== `${receipt.keyHash}.json`) {
+          findings.push(`receipt ${endpointId}/${filename}: does not match its key hash`);
+        }
+        if (!liveThreadIds.has(receipt.threadId)) {
+          findings.push(`receipt ${endpointId}/${filename}: references missing thread ${receipt.threadId}`);
+        }
+      } catch (err) {
+        findings.push(`receipt ${endpointId}/${filename}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
@@ -1052,14 +1664,44 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   } catch (err) {
     findings.push(`hook policy: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const summary = await summarizeFrom(paths, loaded.state, endpoints.endpoints, folds);
+  const summary = await summarizeFrom(paths, loaded.state, endpoints.endpoints, endpoints.findings, folds);
   return { healthy: findings.length === 0, summary, findings };
+}
+
+function deriveSetupState(activeCount: number): BusSetupState {
+  if (activeCount > 2) return "invalid";
+  if (activeCount === 2) return "ready";
+  if (activeCount === 1) return "waiting_for_peer";
+  return "disconnected";
+}
+
+function deriveDeliveryMode(
+  participants: readonly BusParticipantSummary[],
+  hookDelivery: { claude: boolean; codex: boolean },
+): BusDeliveryMode {
+  const clients = [...new Set(participants.map((participant) => participant.client))];
+  if (clients.length === 0) return "poll";
+  const on = clients.filter((client) => hookDelivery[client]);
+  if (on.length === clients.length) return "live";
+  if (on.length === 0) return "poll";
+  return "partial";
+}
+
+function deriveNextActions(setupState: BusSetupState, deliveryMode: BusDeliveryMode): string[] {
+  if (setupState === "disconnected" || setupState === "not_initialized" || setupState === "disabled") {
+    return ["run: storybloq bus setup"];
+  }
+  if (setupState === "invalid") return ["run: storybloq bus doctor"];
+  if (setupState === "waiting_for_peer") return ["run: storybloq bus setup (in the peer task)"];
+  if (deliveryMode !== "live") return ["run: storybloq bus setup --delivery live (in each task)"];
+  return [];
 }
 
 async function summarizeFrom(
   paths: BusPaths,
   state: ProjectState,
   endpoints: readonly BusEndpoint[],
+  registryFindings: readonly string[],
   suppliedFolds?: readonly FoldedBusThread[],
 ): Promise<BusSummary> {
   const folds = suppliedFolds ? [...suppliedFolds] : await Promise.all(
@@ -1082,11 +1724,27 @@ async function summarizeFrom(
   } catch {
     // Doctor reports policy corruption; status remains available.
   }
+  const active = endpoints.filter((endpoint) => !endpoint.retiredAt);
+  const participants: BusParticipantSummary[] = active.map((endpoint) => ({
+    client: endpoint.client,
+    surface: endpoint.surface,
+    state: endpoint.state,
+  }));
+  // A corrupt endpoint registry (a malformed record dropped from the parsed set)
+  // makes readiness `invalid`, matching the v1 summary and the send path, which
+  // fails closed on registry findings. Reporting `ready` off only the count of
+  // successfully parsed endpoints would mask that corruption.
+  const setupState = registryFindings.length > 0 ? "invalid" : deriveSetupState(active.length);
+  const deliveryMode = deriveDeliveryMode(participants, hookDelivery);
   return {
     enabled: true,
     initialized: true,
     daemonState: "stopped",
-    endpoints: endpoints.filter((endpoint) => !endpoint.retiredAt).length,
+    setupState,
+    deliveryMode,
+    participants,
+    nextActions: deriveNextActions(setupState, deliveryMode),
+    endpoints: active.length,
     pendingMessages: pendingIds.size,
     unacknowledgedCritical,
     openThreads: folds.filter((folded) => folded.state === "open").length,
@@ -1099,12 +1757,15 @@ async function summarizeFrom(
 
 export async function busSummary(root: string, state?: ProjectState): Promise<BusSummary> {
   const loadedState = state ?? (await loadProject(root)).state;
-  assertBusEnabled(loadedState.config);
+  if (!isBusEnabled(loadedState.config)) return emptyBusSummary("disabled");
+  // D5 legacy-drain: surface v1 status read-only, without migrating.
+  if (await classifyBusRuntime(root) === "v1") return summarizeV1(root);
   const paths = await resolveBusPaths(root, false);
   if (!await busRuntimeExists(paths.busRoot)) return emptyBusSummary();
   await assertBusLayout(paths);
   await readBusInstance(paths.projectRoot);
-  return summarizeFrom(paths, loadedState, (await listEndpoints(paths.projectRoot)).endpoints);
+  const scan = await listEndpoints(paths.projectRoot);
+  return summarizeFrom(paths, loadedState, scan.endpoints, scan.findings);
 }
 
 export interface BusShipCheck {
@@ -1129,7 +1790,15 @@ export async function checkBusShip(root: string): Promise<BusShipCheck> {
     if (!critical) continue;
     const label = issue ? displayIdOf(issue) : `Bus thread ${threadId}`;
     if (folded.integrity !== "verified") blockers.push(`${label}: quarantined Bus thread ${threadId}`);
-    if (folded.messages.some((message) => message.severity === "critical" && !folded.acknowledgments.has(message.messageId))) {
+    // A resolved thread has concluded through the state machine's `resolve` action,
+    // which requires resolution text AND evidence (commit/CI ref) from a participant.
+    // That evidenced terminal state supersedes a per-message ack, so it clears the
+    // unacked-critical blocker. This is also the ONLY recovery for a critical message
+    // whose addressed recipient has retired: that endpoint can never ack it, so
+    // without this exemption the blocker would be permanent. A quarantined thread is
+    // NOT exempted above (a tampered thread cannot be trusted to be "resolved").
+    if (folded.state !== "resolved" &&
+        folded.messages.some((message) => message.severity === "critical" && !folded.acknowledgments.has(message.messageId))) {
       blockers.push(`${label}: unacknowledged critical Bus message`);
     }
     if (folded.state === "parked" && (!issue || issue.status !== "resolved")) {
@@ -1140,7 +1809,18 @@ export async function checkBusShip(root: string): Promise<BusShipCheck> {
 }
 
 export async function exportBusThread(root: string, threadId: string, format: "json" | "md"): Promise<string> {
-  const folded = await foldBusThread(root, threadId);
+  // D5 legacy-drain: read a live v1 thread pre-migration; post-migration a v2 fold
+  // that misses falls back to the archived v1 tree (archive/v1/threads).
+  if (await classifyBusRuntime(root) === "v1") return exportV1Thread(root, threadId, format);
+  let folded: FoldedBusThread;
+  try {
+    folded = await foldBusThread(root, threadId);
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") {
+      return exportV1Thread(root, threadId, format, "archive");
+    }
+    throw err;
+  }
   if (format === "json") {
     return JSON.stringify({
       thread: folded.thread,
@@ -1160,7 +1840,9 @@ export async function exportBusThread(root: string, threadId: string, format: "j
   ];
   for (const entry of folded.entries) {
     if (entry.type === "message") {
-      lines.push(`## ${entry.seq}. ${entry.payload.from.role} to ${entry.payload.toRole}`, "", entry.payload.body, "");
+      const role = derivedRole(entry.payload.kind);
+      const label = role ? `${role} (${entry.payload.kind})` : entry.payload.kind;
+      lines.push(`## ${entry.seq}. ${label}`, "", entry.payload.body, "");
     } else {
       lines.push(`## ${entry.seq}. ${entry.type}`, "", "```json", JSON.stringify(entry.payload, null, 2), "```", "");
     }
@@ -1168,23 +1850,31 @@ export async function exportBusThread(root: string, threadId: string, format: "j
   return lines.join("\n").trimEnd();
 }
 
-export async function pendingMailboxCursor(root: string, role: BusRole): Promise<{ cursor: number; count: number }> {
+export async function pendingMailboxCursor(
+  root: string,
+  endpointId: string,
+  clientTaskId: string,
+): Promise<{ cursor: number; count: number }> {
   const paths = await resolveBusPaths(root, false);
-  const mailbox = await mailboxPointers(paths, role);
-  let cursor = 0;
-  let count = 0;
-  for (const pointer of mailbox.pointers) {
-    try {
-      const folded = await foldBusThread(paths.projectRoot, pointer.threadId);
-      const entry = folded.entries[pointer.entrySeq - 1];
-      if (entry?.type === "message" && entry.payload.messageId === pointer.messageId &&
-          !folded.acknowledgments.has(pointer.messageId)) {
-        cursor = Math.max(cursor, pointer.mailboxSeq);
-        count += 1;
+  // Endpoint-scoped read: prove caller ownership under the endpoint lock (D2),
+  // so a forged endpoint hint cannot inspect another endpoint's pending cursor.
+  return withEndpointCaller(paths.projectRoot, endpointId, clientTaskId, async () => {
+    const mailbox = await mailboxPointers(paths, endpointId);
+    let cursor = 0;
+    let count = 0;
+    for (const pointer of mailbox.pointers) {
+      try {
+        const folded = await foldBusThread(paths.projectRoot, pointer.threadId);
+        const entry = folded.entries[pointer.entrySeq - 1];
+        if (entry?.type === "message" && entry.payload.messageId === pointer.messageId &&
+            !folded.acknowledgments.has(pointer.messageId)) {
+          cursor = Math.max(cursor, pointer.mailboxSeq);
+          count += 1;
+        }
+      } catch {
+        // Hook delivery fails open; doctor provides the durable diagnostic.
       }
-    } catch {
-      // Hook delivery fails open; doctor provides the durable diagnostic.
     }
-  }
-  return { cursor, count };
+    return { cursor, count };
+  });
 }
