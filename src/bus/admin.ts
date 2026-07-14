@@ -7,7 +7,16 @@ import { withProjectLock, writeConfigUnlocked } from "../core/project-loader.js"
 import { compareVersionStrings, currentCliVersion } from "../core/team-capabilities.js";
 import { canonicalHash } from "./canonical.js";
 import { BusError } from "./errors.js";
-import { durableCreate, durableRename, readJsonNoFollow, syncDirectory } from "./io.js";
+import { durableCreate, durableRename, readJsonNoFollow, syncDirectory, syncFile } from "./io.js";
+import {
+  appendTombstone,
+  buildEvidence,
+  buildTombstone,
+  BUS_EVIDENCE_GITIGNORE_ENTRY,
+  readBusEvidence,
+  writeBusEvidence,
+  type BusEvidenceRead,
+} from "./runtime-evidence.js";
 import {
   evaluateV1Drain,
   listV1Endpoints,
@@ -17,6 +26,7 @@ import {
 } from "./legacy-v1.js";
 import { acquireHardenedLock, releaseHardenedLock, withHardenedLock, type HardenedLockHandle } from "./lock.js";
 import {
+  assertBaseBusLayout,
   assertBusLayout,
   assertBusIgnoreFileSafe,
   assertBusRuntimeIgnored,
@@ -193,14 +203,14 @@ export async function classifyBusRuntime(root: string): Promise<BusRuntimeProtoc
   return protocol;
 }
 
-export async function resolveInitializedBusPaths(root: string): Promise<BusPaths> {
-  const paths = await resolveBusPaths(root);
-  if (!await busRuntimeExists(paths.busRoot)) {
-    throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus setup` first.");
-  }
-  // Detect a v1 runtime before asserting the v2 layout so it fails with a clear
-  // upgrade message rather than a layout mismatch. The future / unknown / minCli
-  // refusals are centralized in the shared reader below.
+// T-428: instance-level validation of a PRESENT v2 runtime, extracted from the
+// resolver body. Returns the validated instance; deliberately does NOT assert the
+// full layout so the assessment can share one code path with the join resolver
+// (which heals a missing per-endpoint mailbox child). The strict resolver runs
+// assertBusLayout afterward; the join resolver runs a base-directory check.
+// v1 -> upgrade_required; missing/garbage instance.json -> corrupt; future / minCli
+// -> upgrade_required; foreign projectRootHash -> conflict. Every throw propagates.
+export async function validatePresentV2Runtime(paths: BusPaths): Promise<BusInstance> {
   let raw: z.infer<typeof AnyInstanceSchema>;
   try {
     raw = await readInstanceRaw(paths);
@@ -213,9 +223,95 @@ export async function resolveInitializedBusPaths(root: string): Promise<BusPaths
   if (protocolOf(raw) === "v1") {
     throw new BusError("upgrade_required", "This checkout has a v1 Bus runtime. Run `storybloq bus setup` to drain and upgrade it.");
   }
-  await assertBusLayout(paths);
   // Shared reader enforces the version fence (future / minCli) + projectRootHash.
-  await readBusInstanceAtPaths(paths);
+  return readBusInstanceAtPaths(paths);
+}
+
+// T-428: the layered runtime/evidence classification (round-3 precedence). A
+// PRESENT runtime's validation OUTRANKS evidence interpretation: its
+// upgrade_required / conflict / corrupt throws propagate before any evidence is
+// read as loss. `lost` REQUIRES an evidence id (the single L-031 guard: no
+// evidence -> never lost -> a fresh clone can never false-positive).
+export type BusRuntimeAssessment =
+  | { readonly kind: "fresh" }
+  | { readonly kind: "ok"; readonly instance: BusInstance }
+  | { readonly kind: "legacy_unmirrored"; readonly instance: BusInstance }
+  | {
+      readonly kind: "lost";
+      readonly expectedInstanceId: string;
+      readonly expectedCreatedAt?: string;
+      readonly reason: "absent" | "mismatch";
+      readonly foundInstanceId?: string;
+      readonly instance?: BusInstance;
+    }
+  | { readonly kind: "evidence_corrupt"; readonly detail: string };
+
+export async function assessBusRuntimeAtPaths(paths: BusPaths): Promise<BusRuntimeAssessment> {
+  const evidence = await readBusEvidence(paths);
+  // A present evidence file always carries an instanceId (the schema requires it;
+  // an id-less file failed the parse and reads back `corrupt`), so no id guard is
+  // needed below.
+  if (!(await busRuntimeExists(paths.busRoot))) {
+    if (evidence.kind === "corrupt") return { kind: "evidence_corrupt", detail: evidence.detail };
+    if (evidence.kind === "present") {
+      return {
+        kind: "lost",
+        expectedInstanceId: evidence.evidence.instanceId,
+        ...(evidence.evidence.instanceCreatedAt ? { expectedCreatedAt: evidence.evidence.instanceCreatedAt } : {}),
+        reason: "absent",
+      };
+    }
+    return { kind: "fresh" };
+  }
+  // Runtime present: validate it FIRST; its throws win over evidence_corrupt.
+  const instance = await validatePresentV2Runtime(paths);
+  if (evidence.kind === "corrupt") return { kind: "evidence_corrupt", detail: evidence.detail };
+  if (evidence.kind === "none") {
+    return { kind: "legacy_unmirrored", instance };
+  }
+  if (evidence.evidence.instanceId === instance.instanceId) return { kind: "ok", instance };
+  return {
+    kind: "lost",
+    expectedInstanceId: evidence.evidence.instanceId,
+    ...(evidence.evidence.instanceCreatedAt ? { expectedCreatedAt: evidence.evidence.instanceCreatedAt } : {}),
+    reason: "mismatch",
+    foundInstanceId: instance.instanceId,
+    instance,
+  };
+}
+
+export async function assessBusRuntime(root: string): Promise<BusRuntimeAssessment> {
+  return assessBusRuntimeAtPaths(await resolveBusPaths(root, false));
+}
+
+export function runtimeLostError(assessment: Extract<BusRuntimeAssessment, { kind: "lost" }>): BusError {
+  const detail = assessment.reason === "absent"
+    ? `the runtime for instance ${assessment.expectedInstanceId} is gone from this checkout`
+    : `the runtime was replaced (expected instance ${assessment.expectedInstanceId}, found ${assessment.foundInstanceId})`;
+  return new BusError(
+    "runtime_lost",
+    `Storybloq Bus runtime was lost: ${detail}. Prior peer coordination in \`.story/bus/\` cannot be recovered. Run \`storybloq bus setup\` to re-establish the Bus.`,
+  );
+}
+
+function evidenceCorruptError(detail: string): BusError {
+  return new BusError("corrupt", `Bus deletion-evidence is unreadable (${detail}). Run \`storybloq bus doctor\`.`);
+}
+
+const busNotInitializedError = () =>
+  new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus setup` first.");
+
+export async function resolveInitializedBusPaths(root: string): Promise<BusPaths> {
+  const paths = await resolveBusPaths(root);
+  // T-428: classify loss/evidence FIRST. A present runtime's validation throws
+  // (v1 -> upgrade_required, garbage -> corrupt, foreign -> conflict) propagate
+  // out of assessBusRuntimeAtPaths, preserving the prior resolver contract.
+  const assessment = await assessBusRuntimeAtPaths(paths);
+  if (assessment.kind === "lost") throw runtimeLostError(assessment);
+  if (assessment.kind === "evidence_corrupt") throw evidenceCorruptError(assessment.detail);
+  if (assessment.kind === "fresh") throw busNotInitializedError();
+  // ok | legacy_unmirrored: the instance is already validated; assert the full layout.
+  await assertBusLayout(paths);
   return paths;
 }
 
@@ -229,36 +325,18 @@ export async function resolveInitializedBusPaths(root: string): Promise<BusPaths
 // callers run full assertBusLayout after healing.
 export async function resolveInitializedBusPathsForJoin(root: string): Promise<BusPaths> {
   const paths = await resolveBusPaths(root);
-  if (!await busRuntimeExists(paths.busRoot)) {
-    throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus setup` first.");
-  }
-  let raw: z.infer<typeof AnyInstanceSchema>;
-  try {
-    raw = await readInstanceRaw(paths);
-  } catch (err) {
-    if (err instanceof BusError && err.code === "not_found") {
-      throw new BusError("corrupt", "Bus runtime is missing instance.json. Run `storybloq bus doctor` for details.", err);
-    }
-    throw err;
-  }
-  if (protocolOf(raw) === "v1") {
-    throw new BusError("upgrade_required", "This checkout has a v1 Bus runtime. Run `storybloq bus setup` to drain and upgrade it.");
-  }
+  // T-428: same loss/evidence classification as the strict resolver; a present
+  // runtime's validation throws (v1 / future / minCli / foreign / garbage)
+  // propagate identically.
+  const assessment = await assessBusRuntimeAtPaths(paths);
+  if (assessment.kind === "lost") throw runtimeLostError(assessment);
+  if (assessment.kind === "evidence_corrupt") throw evidenceCorruptError(assessment.detail);
+  if (assessment.kind === "fresh") throw busNotInitializedError();
   // Base directories only; per-endpoint mailbox children are intentionally not
   // required here so a rejoin can recreate a missing one.
-  for (const directory of requiredBusDirectories(paths)) {
-    let entryStat;
-    try {
-      entryStat = await lstat(directory);
-    } catch (err) {
-      throw new BusError("corrupt", `Bus runtime layout is incomplete: ${directory}`, err);
-    }
-    if (!entryStat.isDirectory() || entryStat.isSymbolicLink()) {
-      throw new BusError("corrupt", `Bus runtime layout is corrupt: ${directory} is not a regular directory`);
-    }
-  }
-  // Shared reader enforces the version fence (future / minCli) + projectRootHash.
-  await readBusInstanceAtPaths(paths);
+  await assertBaseBusLayout(paths);
+  // The instance fence (version + projectRootHash) already ran inside
+  // assessBusRuntimeAtPaths for the ok / legacy_unmirrored branches above.
   return paths;
 }
 
@@ -709,7 +787,14 @@ export async function initializeBus(root: string, options: InitializeBusOptions 
     // acquisition is still refused with zero mutation. This is the authoritative
     // decision that drives the migrate step below.
     existingProtocol = await fenceExistingRuntime(paths);
-    await ensureGitignoreEntries(join(storyRoot, ".gitignore"), ["bus/", "bus-migration/"]);
+    // T-428: install the deletion-evidence ignore glob alongside bus/ BEFORE any
+    // evidence write (ignore-rule-before-evidence invariant). The glob covers the
+    // evidence file and every atomic-write temp sibling, so a crash mid-write can
+    // never leak an un-ignored file into tracked `.story/`.
+    await ensureGitignoreEntries(join(storyRoot, ".gitignore"), ["bus/", "bus-migration/", BUS_EVIDENCE_GITIGNORE_ENTRY]);
+    // Durably flush the ignore rule so a power loss cannot preserve a
+    // durably-written evidence file while losing the rule that hides it.
+    await syncFile(join(storyRoot, ".gitignore"));
     await assertBusRuntimeIgnored(storyRoot);
     if (state.config.features.bus !== true) {
       await writeConfigUnlocked({
@@ -738,16 +823,101 @@ export async function initializeBus(root: string, options: InitializeBusOptions 
     await migrateV1Runtime(paths, options);
   }
 
-  const created = await createBusPathsForInitialization(root);
-  const instancePath = join(created.busRoot, "instance.json");
-  try {
-    const existing = await readBusInstance(created.projectRoot);
-    return { enabled: true, existing: true, instanceId: existing.instanceId, migrated, archivedUnread };
-  } catch (err) {
-    if (!(err instanceof BusError) || err.code !== "not_found") throw err;
+  // T-428: mint-or-reuse the instance AND reconcile deletion-evidence under a
+  // FRESH project lock. Migration above ran with its own locks (the project lock
+  // was NOT held), so this re-acquisition cannot deadlock. The .gitignore evidence
+  // glob was installed (and fsynced) under the earlier lock block BEFORE any
+  // evidence write, so the file (and its atomic-write temp) is ignored the instant
+  // it lands. All mint/adopt/tombstone decisions are made from UNDER-LOCK state.
+  let result: InitializeBusResult | null = null;
+  await withProjectLock(root, { strict: true }, async () => {
+    const paths2 = await resolveBusPaths(root);
+    // Read evidence FIRST, before touching the runtime. Corrupt evidence is an
+    // integrity failure (ops/doctor/ship all treat it as `corrupt`); setup must
+    // NOT silently overwrite it (which would erase loss history). Fail closed and
+    // leave both runtime and evidence untouched so the owner can inspect it.
+    const priorEvidence = await readBusEvidence(paths2);
+    if (priorEvidence.kind === "corrupt") {
+      throw new BusError(
+        "corrupt",
+        `Bus deletion-evidence is unreadable (${priorEvidence.detail}). Inspect or remove \`.story/.bus-evidence.json\`, then run \`storybloq bus setup\`.`,
+      );
+    }
+    // A PRESENT runtime must validate as a genuine v2 AND carry its full base
+    // layout. A missing/garbage instance.json or a missing base directory over an
+    // existing busRoot is a PARTIAL runtime (an L-031 integrity failure), never a
+    // mint opportunity: minting there would silently re-identify a corrupt runtime.
+    // Mint ONLY for a proven-absent runtime.
+    const runtimePresent = await busRuntimeExists(paths2.busRoot);
+
+    let instance: BusInstance;
+    let minted: boolean;
+    if (runtimePresent) {
+      // Do NOT call createBusPathsForInitialization here: its recursive mkdir would
+      // SILENTLY re-create a base directory that was deleted, masking the very
+      // partial-deletion loss this ticket surfaces. Validate the instance and
+      // assert the base layout instead; a missing base dir throws `corrupt`.
+      instance = await validatePresentV2Runtime(paths2);
+      await assertBaseBusLayout(paths2);
+      minted = false;
+    } else {
+      // Proven-absent runtime: create the base layout and mint a fresh instance.
+      const created = await createBusPathsForInitialization(root);
+      const instancePath = join(created.busRoot, "instance.json");
+      await durableCreate(instancePath, JSON.stringify(v2Instance(created.projectRoot), null, 2) + "\n");
+      // Re-read the published instance under the lock before writing evidence, so
+      // the evidence id reflects what actually landed on disk (crash-recovery
+      // design): a torn or divergent write surfaces here rather than in evidence.
+      instance = await readBusInstanceAtPaths(created);
+      minted = true;
+    }
+
+    await reconcileEvidenceOnInit(paths2, instance, priorEvidence, minted);
+    result = { enabled: true, existing: !minted, instanceId: instance.instanceId, migrated, archivedUnread };
+  });
+  // The handler always assigns `result` before returning (or throws, which
+  // propagates); the guard keeps the type non-null for the caller.
+  if (!result) throw new BusError("io_error", "Bus initialization did not complete.");
+  return result;
+}
+
+// T-428: after mint-or-reuse under the project lock, persist evidence naming the
+// live instance. When the prior evidence named a DIFFERENT instance, record a
+// tombstone before overwriting so a genuine loss is never silently erased.
+// FAIL-CLOSED: a failure to persist evidence throws, aborting setup; evidence
+// shares the writable `.story/` domain the runtime already needs, so "cannot write
+// evidence" implies "cannot write runtime". Corrupt prior evidence is rejected by
+// the caller BEFORE any mutation, so `priorEvidence` here is only none | present.
+async function reconcileEvidenceOnInit(
+  paths: BusPaths,
+  instance: BusInstance,
+  priorEvidence: BusEvidenceRead,
+  minted: boolean,
+): Promise<void> {
+  const priorInstanceId = priorEvidence.kind === "present" ? priorEvidence.evidence.instanceId : undefined;
+  const priorCreatedAt = priorEvidence.kind === "present" ? priorEvidence.evidence.instanceCreatedAt : undefined;
+  let tombstones = priorEvidence.kind === "present" ? [...priorEvidence.evidence.tombstones] : [];
+
+  if (priorInstanceId && priorInstanceId !== instance.instanceId) {
+    tombstones = appendTombstone(tombstones, buildTombstone({
+      lostInstanceId: priorInstanceId,
+      ...(priorCreatedAt ? { lostCreatedAt: priorCreatedAt } : {}),
+      // A freshly minted instance means the prior runtime was ABSENT; a different
+      // present instance means it was REPLACED (crash-before-evidence recovery).
+      reason: minted ? "absent" : "mismatch",
+      ...(minted ? {} : { foundInstanceId: instance.instanceId }),
+      replacedByInstanceId: instance.instanceId,
+    }));
   }
 
-  const instance = v2Instance(created.projectRoot);
-  await durableCreate(instancePath, JSON.stringify(instance, null, 2) + "\n");
-  return { enabled: true, existing: false, instanceId: instance.instanceId, migrated, archivedUnread };
+  try {
+    await writeBusEvidence(paths, buildEvidence({
+      instanceId: instance.instanceId,
+      instanceCreatedAt: instance.createdAt,
+      tombstones,
+    }));
+  } catch (err) {
+    if (err instanceof BusError) throw err;
+    throw new BusError("io_error", `Failed to persist Bus deletion-evidence: ${err instanceof Error ? err.message : String(err)}`, err);
+  }
 }

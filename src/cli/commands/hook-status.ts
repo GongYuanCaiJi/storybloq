@@ -13,6 +13,7 @@ import { readSubprocessSummaries } from "../../autonomous/subprocess-registry.js
 import { writeStatusFile } from "../../autonomous/status-writer.js";
 import { collectProbes, reduceHealthState } from "../../autonomous/health-model.js";
 import {
+  busRuntimeLostAdvisory,
   findEndpointForTask,
   isBusHookDeliveryEnabled,
   pendingMailboxCursor,
@@ -278,6 +279,17 @@ export async function handleHookStatus(options: { client?: BusClient } = {}): Pr
     // T-424: turns are evidence a limit stop cleared; also the waker respawn hook.
     const hookTaskId = typeof input!.session_id === "string" ? normalizeClientTaskId(input!.session_id) : null;
     await markLimitEvidenceAndRespawn(hookTaskId);
+
+    // T-428: advise (STDERR only, never bare stdout) when this checkout's Bus
+    // runtime was deleted. The delivery claim's own gate closes after a wipe (the
+    // hook-policy file lived under the deleted `.story/bus/`), so this runs first.
+    // Fail-open + cheap: the advisory returns null for a healthy or never-set-up Bus.
+    try {
+      const advisory = await busRuntimeLostAdvisory(root);
+      if (advisory) process.stderr.write(advisory + "\n");
+    } catch {
+      // Best-effort; the Stop hook must never fail on the advisory.
+    }
 
     const decision = await claimBusStopDelivery(root, input, options.client ?? "claude");
     if (decision) process.stdout.write(JSON.stringify(decision) + "\n");

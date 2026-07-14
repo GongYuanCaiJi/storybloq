@@ -28,12 +28,20 @@ import {
 } from "./io.js";
 import { withHardenedLock } from "./lock.js";
 import { readBusHookPolicy } from "./hooks.js";
-import { classifyBusRuntime, readBusInstance, resolveInitializedBusPaths } from "./admin.js";
+import {
+  assessBusRuntime,
+  assessBusRuntimeAtPaths,
+  classifyBusRuntime,
+  readBusInstance,
+  resolveInitializedBusPaths,
+  runtimeLostError,
+  type BusRuntimeAssessment,
+} from "./admin.js";
+import { readBusEvidence } from "./runtime-evidence.js";
 import { ackV1, doctorV1, exportV1Thread, summarizeV1 } from "./legacy-v1.js";
 import {
   assertBusLayout,
   busLayoutFindings,
-  busRuntimeExists,
   endpointMailboxPath,
   resolveBusPaths,
   type BusPaths,
@@ -1432,6 +1440,9 @@ export interface BusDoctorResult {
 }
 
 function emptyBusSummary(setupState: BusSetupState = "not_initialized"): BusSummary {
+  const nextActions = setupState === "runtime_lost"
+    ? ["The Bus runtime is absent or no longer matches this checkout's deletion-evidence; run: storybloq bus setup to re-establish it"]
+    : ["run: storybloq bus setup"];
   return {
     enabled: setupState !== "disabled",
     initialized: false,
@@ -1439,7 +1450,7 @@ function emptyBusSummary(setupState: BusSetupState = "not_initialized"): BusSumm
     setupState,
     deliveryMode: "poll",
     participants: [],
-    nextActions: ["run: storybloq bus setup"],
+    nextActions,
     endpoints: 0,
     pendingMessages: 0,
     unacknowledgedCritical: 0,
@@ -1480,7 +1491,23 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
   // D5 legacy-drain: report v1 content read-only, without migrating.
   if (await classifyBusRuntime(root) === "v1") return doctorV1(root);
   const paths = await resolveBusPaths(root, false);
-  if (!await busRuntimeExists(paths.busRoot)) {
+  // T-428: loss/evidence classification. A present runtime's validation throw is
+  // surfaced as a finding (today's behavior), never downgraded.
+  let assessment: BusRuntimeAssessment;
+  try {
+    assessment = await assessBusRuntimeAtPaths(paths);
+  } catch (err) {
+    return { healthy: false, summary: emptyBusSummary("invalid"), findings: [`instance: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  if (assessment.kind === "lost") {
+    return { healthy: false, summary: emptyBusSummary("runtime_lost"), findings: [runtimeLostError(assessment).message] };
+  }
+  if (assessment.kind === "evidence_corrupt") {
+    // `bus setup` fails CLOSED on corrupt evidence (it refuses to overwrite loss
+    // history), so the guidance must match: inspect or remove the file first.
+    return { healthy: false, summary: emptyBusSummary("invalid"), findings: [`deletion-evidence: unreadable (${assessment.detail}); inspect or remove \`.story/.bus-evidence.json\`, then run \`storybloq bus setup\``] };
+  }
+  if (assessment.kind === "fresh") {
     return { healthy: true, summary: emptyBusSummary(), findings: [] };
   }
   const findings = await busLayoutFindings(paths);
@@ -1755,17 +1782,76 @@ async function summarizeFrom(
   };
 }
 
+// T-428: the config-revert diagnostic (doctor / status only). When features.bus
+// is off but this checkout carries evidence of an instance it stood up, the
+// config was likely reverted; surface it loudly. Ops still fail closed with
+// bus_disabled unchanged.
+export async function busConfigRevertNote(root: string, paths?: BusPaths): Promise<string | null> {
+  const p = paths ?? await resolveBusPaths(root, false).catch(() => null);
+  if (!p) return null;
+  const ev = await readBusEvidence(p);
+  if (ev.kind === "present" && ev.evidence.instanceId) {
+    return `This checkout initialized Bus instance ${ev.evidence.instanceId} but config.features.bus is no longer set (config may have been reverted); run \`storybloq bus setup\`.`;
+  }
+  return null;
+}
+
+// Advisory for a pre-T-428 runtime that has no deletion-evidence yet. Setup adopts
+// it (writes evidence); until then a deletion cannot be detected.
+const BUS_LEGACY_UNMIRRORED_ADVISORY =
+  "run: storybloq bus setup (to enable deletion-evidence for this pre-existing runtime)";
+
+// T-428: a one-line advisory for the guarded hooks (SessionStart / Stop) when this
+// checkout's Bus runtime was deleted (evidence names an instance but the runtime is
+// gone or was swapped). Returns null when the runtime is fine, never set up, or on
+// ANY error -- hooks are fail-open and this must never throw. Callers emit it via a
+// structured context field or STDERR only, never bare stdout.
+export async function busRuntimeLostAdvisory(root: string): Promise<string | null> {
+  try {
+    // Gate on features.bus: a checkout that never enabled the Bus (or deliberately
+    // disabled it) must not receive a runtime-lost advisory from these fail-open
+    // hooks. The disabled-but-evidence-present case is surfaced by
+    // busConfigRevertNote in status/doctor instead.
+    const { state } = await loadProject(root);
+    if (!isBusEnabled(state.config)) return null;
+    const assessment = await assessBusRuntime(root);
+    if (assessment.kind !== "lost") return null;
+    // `lost` covers both an ABSENT runtime and a PRESENT runtime whose instance no
+    // longer matches this checkout's evidence (a swap); diagnose each accurately.
+    const detail = assessment.reason === "absent"
+      ? `the .story/bus/ runtime (instance ${assessment.expectedInstanceId}) was deleted from this checkout`
+      : `the .story/bus/ runtime no longer matches this checkout (expected instance ${assessment.expectedInstanceId}, found ${assessment.foundInstanceId})`;
+    return `[storybloq-bus] runtime lost: ${detail}. Prior peer coordination is gone; run \`storybloq bus setup\` to re-establish the Bus.`;
+  } catch {
+    return null;
+  }
+}
+
 export async function busSummary(root: string, state?: ProjectState): Promise<BusSummary> {
   const loadedState = state ?? (await loadProject(root)).state;
-  if (!isBusEnabled(loadedState.config)) return emptyBusSummary("disabled");
+  if (!isBusEnabled(loadedState.config)) {
+    // A disabled project must not depend on resolving the (possibly absent or
+    // tampered) bus paths; busConfigRevertNote resolves them defensively (catch->
+    // null), so a symlinked `.story/bus` yields no note instead of throwing here.
+    const summary = emptyBusSummary("disabled");
+    const note = await busConfigRevertNote(root);
+    return note ? { ...summary, nextActions: [note, ...summary.nextActions] } : summary;
+  }
+  const paths = await resolveBusPaths(root, false);
   // D5 legacy-drain: surface v1 status read-only, without migrating.
   if (await classifyBusRuntime(root) === "v1") return summarizeV1(root);
-  const paths = await resolveBusPaths(root, false);
-  if (!await busRuntimeExists(paths.busRoot)) return emptyBusSummary();
+  // T-428: classify loss/evidence before the happy path.
+  const assessment = await assessBusRuntimeAtPaths(paths);
+  if (assessment.kind === "lost") return emptyBusSummary("runtime_lost");
+  if (assessment.kind === "evidence_corrupt") return emptyBusSummary("invalid");
+  if (assessment.kind === "fresh") return emptyBusSummary();
   await assertBusLayout(paths);
-  await readBusInstance(paths.projectRoot);
   const scan = await listEndpoints(paths.projectRoot);
-  return summarizeFrom(paths, loadedState, scan.endpoints, scan.findings);
+  const summary = await summarizeFrom(paths, loadedState, scan.endpoints, scan.findings);
+  if (assessment.kind === "legacy_unmirrored") {
+    return { ...summary, nextActions: [BUS_LEGACY_UNMIRRORED_ADVISORY, ...summary.nextActions] };
+  }
+  return summary;
 }
 
 export interface BusShipCheck {
@@ -1777,7 +1863,13 @@ export async function checkBusShip(root: string): Promise<BusShipCheck> {
   const loaded = await loadProject(root);
   assertBusEnabled(loaded.state.config);
   const paths = await resolveBusPaths(root, false);
-  if (!await busRuntimeExists(paths.busRoot)) return { clear: true, blockers: [] };
+  // T-428: a lost or evidence-corrupt runtime blocks the ship gate.
+  const assessment = await assessBusRuntimeAtPaths(paths);
+  if (assessment.kind === "lost") return { clear: false, blockers: [runtimeLostError(assessment).message] };
+  if (assessment.kind === "evidence_corrupt") {
+    return { clear: false, blockers: [`Bus deletion-evidence is unreadable (${assessment.detail}); run \`storybloq bus doctor\``] };
+  }
+  if (assessment.kind === "fresh") return { clear: true, blockers: [] };
   await assertBusLayout(paths);
   await readBusInstance(paths.projectRoot);
   const blockers: string[] = [];
@@ -1812,6 +1904,23 @@ export async function exportBusThread(root: string, threadId: string, format: "j
   // D5 legacy-drain: read a live v1 thread pre-migration; post-migration a v2 fold
   // that misses falls back to the archived v1 tree (archive/v1/threads).
   if (await classifyBusRuntime(root) === "v1") return exportV1Thread(root, threadId, format);
+  // T-428: classify exhaustively BEFORE folding so the v1-archive fallback is
+  // reserved for a valid present v2 genuine thread miss. A lost / evidence-corrupt
+  // / fresh runtime must surface its own error, never be masked by the archive.
+  const paths = await resolveBusPaths(root, false);
+  const assessment = await assessBusRuntimeAtPaths(paths);
+  if (assessment.kind === "lost") throw runtimeLostError(assessment);
+  if (assessment.kind === "evidence_corrupt") {
+    throw new BusError("corrupt", `Bus deletion-evidence is unreadable (${assessment.detail}). Run \`storybloq bus doctor\`.`);
+  }
+  if (assessment.kind === "fresh") {
+    throw new BusError("not_found", "Bus is not initialized in this checkout. Run `storybloq bus setup` first.");
+  }
+  // ok | legacy_unmirrored: assert the full v2 layout BEFORE folding so a PARTIAL or
+  // corrupt runtime surfaces as `corrupt` here, matching busSummary/checkBusShip. A
+  // genuine thread miss on a valid layout is the only case that reaches the archive
+  // fallback below; a missing structural dir must never be masked by it.
+  await assertBusLayout(paths);
   let folded: FoldedBusThread;
   try {
     folded = await foldBusThread(root, threadId);

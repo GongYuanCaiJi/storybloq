@@ -513,6 +513,10 @@ describe("Storybloq Bus store", () => {
     const value = await fixture();
     const busRoot = join(value.root, ".story", "bus");
     await rm(busRoot, { recursive: true });
+    // T-428: model a genuinely fresh checkout (no runtime AND no deletion-evidence,
+    // as a clone would have). An evidenced runtime that is deleted is `runtime_lost`,
+    // not ship-clear -- that N-083 case is covered by deletion-evidence.test.ts.
+    await rm(join(value.root, ".story", ".bus-evidence.json"), { force: true });
 
     await expect(busDoctor(value.root)).resolves.toEqual({
       healthy: true,

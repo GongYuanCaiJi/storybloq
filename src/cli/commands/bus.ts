@@ -2,8 +2,11 @@ import type { Argv } from "yargs";
 import {
   acknowledgeBusMessage,
   assertEndpointCaller,
+  assessBusRuntime,
+  busConfigRevertNote,
   busDoctor,
   busSummary,
+  BUS_EVIDENCE_GITIGNORE_ENTRY,
   checkBusShip,
   classifyBusRuntime,
   detectClientSurface,
@@ -21,6 +24,7 @@ import {
   pollV1,
   refreshEndpointForSessionStart,
   retireEndpoint,
+  runtimeLostError,
   sendBusMessage,
   setBusHookPolicy,
   updateBusThread,
@@ -93,7 +97,9 @@ async function runBus<T>(
     process.exitCode = unhealthy?.(result) ? ExitCode.VALIDATION_ERROR : ExitCode.OK;
   } catch (err) {
     writeOutput(formatFailure(err, format));
-    process.exitCode = err instanceof BusError && err.code === "corrupt"
+    // T-428: runtime_lost is a validation-class failure (like corrupt): the
+    // runtime was deleted from this checkout, not a plain user/usage error.
+    process.exitCode = err instanceof BusError && (err.code === "corrupt" || err.code === "runtime_lost")
       ? ExitCode.VALIDATION_ERROR
       : ExitCode.USER_ERROR;
   }
@@ -133,6 +139,15 @@ async function resolveOwnedEndpoint(root: string, args: IdentityArgs): Promise<{
       throw new BusError("not_found", "This task has no Bus endpoint. Run `storybloq bus setup` first.");
     }
     return { endpointId, taskId, protocol };
+  }
+  // T-428: the SECOND op chokepoint. Classify loss/evidence BEFORE endpoint
+  // lookup so a deleted runtime surfaces `runtime_lost`, not a confusing endpoint
+  // `not_found` (which reads as "you never joined" rather than "your runtime was
+  // deleted"). Runs after the v1 branch so a v1 runtime is never assessed as v2.
+  const assessment = await assessBusRuntime(root);
+  if (assessment.kind === "lost") throw runtimeLostError(assessment);
+  if (assessment.kind === "evidence_corrupt") {
+    throw new BusError("corrupt", `Bus deletion-evidence is unreadable (${assessment.detail}). Run \`storybloq bus doctor\`.`);
   }
   if (args.endpoint) {
     const endpoint = await assertEndpointCaller(root, args.endpoint, taskId);
@@ -237,6 +252,7 @@ function renderReadiness(setupState: BusSummary["setupState"]): string {
     case "waiting_for_peer": return "setup waiting for a peer.";
     case "disconnected": return "no endpoints connected. Run `storybloq bus setup`.";
     case "invalid": return "setup invalid; run `storybloq bus doctor`.";
+    case "runtime_lost": return "the Bus runtime is absent or no longer matches this checkout's deletion-evidence; run `storybloq bus setup` to re-establish it.";
     case "disabled": return "the Bus is disabled. Run `storybloq bus setup`.";
     default: return "the Bus is not set up. Run `storybloq bus setup`.";
   }
@@ -342,20 +358,40 @@ interface DisabledDoctorResult {
   readonly enabled: false;
   readonly healthy: false;
   readonly readiness: string;
+  // T-428: set when features.bus is off but deletion-evidence names an instance
+  // this checkout stood up (a likely config revert).
+  readonly configRevert?: string;
 }
 
-function disabledDoctorResult(): DisabledDoctorResult {
-  return { enabled: false, healthy: false, readiness: renderReadiness("disabled") };
+function disabledDoctorResult(configRevert?: string | null): DisabledDoctorResult {
+  return {
+    enabled: false,
+    healthy: false,
+    readiness: renderReadiness("disabled"),
+    ...(configRevert ? { configRevert } : {}),
+  };
 }
 
 function renderDoctorDisabledMarkdown(result: DisabledDoctorResult): string {
-  return `Bus: disabled. Run \`storybloq bus setup\` to enable.\nReadiness: ${result.readiness}`;
+  const lines = [`Bus: disabled. Run \`storybloq bus setup\` to enable.`];
+  if (result.configRevert) lines.push(result.configRevert);
+  lines.push(`Readiness: ${result.readiness}`);
+  return lines.join("\n");
 }
 
 // D7: action-oriented Markdown; no endpoint UUIDs (JSON keeps them).
 function renderStatusMarkdown(summary: BusSummary): string {
-  if (summary.setupState === "disabled" || summary.setupState === "not_initialized") {
+  if (summary.setupState === "disabled") {
+    // T-428: surface the config-revert diagnostic (carried in nextActions) rather
+    // than the generic disabled line when this checkout has evidence of an instance.
+    const revert = summary.nextActions.find((action) => action.includes("config.features.bus"));
+    return revert ? `Bus: disabled. ${revert}` : "Bus: not set up. Run `storybloq bus setup` to participate.";
+  }
+  if (summary.setupState === "not_initialized") {
     return "Bus: not set up. Run `storybloq bus setup` to participate.";
+  }
+  if (summary.setupState === "runtime_lost") {
+    return "Bus: runtime lost; the `.story/bus/` runtime is absent or no longer matches this checkout's deletion-evidence. Run `storybloq bus setup` to re-establish it.";
   }
   if (summary.setupState === "invalid") {
     return "Bus: invalid; run `storybloq bus doctor`.";
@@ -546,7 +582,7 @@ async function busGitignoreCompleteBefore(root: string): Promise<boolean> {
   try {
     const raw = await readFile(join(root, ".story", ".gitignore"), "utf-8");
     const lines = new Set(raw.split("\n").map((line) => line.trim()));
-    return lines.has("bus/") && lines.has("bus-migration/");
+    return lines.has("bus/") && lines.has("bus-migration/") && lines.has(BUS_EVIDENCE_GITIGNORE_ENTRY);
   } catch {
     return false;
   }
@@ -1061,7 +1097,10 @@ export function registerBusCommand(yargs: Argv): Argv {
           } catch (err) {
             // A disabled project still deserves readiness guidance, not a bare error.
             if (err instanceof BusError && err.code === "bus_disabled") {
-              writeOutput(formatData(disabledDoctorResult(), format, renderDoctorDisabledMarkdown));
+              // T-428: surface the config-revert diagnostic when this checkout
+              // carries evidence of an instance it stood up but the feature is off.
+              const note = await busConfigRevertNote(root).catch(() => null);
+              writeOutput(formatData(disabledDoctorResult(note), format, renderDoctorDisabledMarkdown));
               process.exitCode = ExitCode.OK;
               return;
             }

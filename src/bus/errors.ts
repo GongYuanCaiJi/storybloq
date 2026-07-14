@@ -12,6 +12,7 @@ export type BusErrorCode =
   | "no_peer"
   | "participant_retired"
   | "upgrade_required"
+  | "runtime_lost"
   | "io_error";
 
 export class BusError extends Error {

@@ -211,6 +211,25 @@ export async function assertBusLayout(paths: BusPaths): Promise<void> {
   if (findings.length > 0) throw new BusError("corrupt", findings.join("; "));
 }
 
+// Assert ONLY the structural base directories exist as regular directories, not
+// each endpoint's per-mailbox children. A missing base directory over an existing
+// busRoot is a PARTIAL runtime (an L-031 integrity failure) and must fail closed as
+// `corrupt` -- never be silently re-created. Per-endpoint mailbox children are
+// healed separately by the join resolver, so they are intentionally not required.
+export async function assertBaseBusLayout(paths: BusPaths): Promise<void> {
+  for (const directory of requiredBusDirectories(paths)) {
+    let entryStat;
+    try {
+      entryStat = await lstat(directory);
+    } catch (err) {
+      throw new BusError("corrupt", `Bus runtime layout is incomplete: ${directory}`, err);
+    }
+    if (!entryStat.isDirectory() || entryStat.isSymbolicLink()) {
+      throw new BusError("corrupt", `Bus runtime layout is corrupt: ${directory} is not a regular directory`);
+    }
+  }
+}
+
 export function assertContainedPath(root: string, target: string): void {
   const rel = relative(resolve(root), resolve(target));
   if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {

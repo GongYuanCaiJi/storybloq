@@ -204,6 +204,10 @@ describe("always-registered Storybloq Bus MCP tools", () => {
     const fixture = await createBusFixture("mcp-bus-uninit");
     roots.push(fixture.root);
     await rm(join(fixture.root, ".story", "bus"), { recursive: true, force: true });
+    // T-428: model a GENUINELY uninitialized checkout by also removing the gitignored
+    // deletion-evidence (a clone never receives it). Deleting only the runtime while
+    // evidence remains is `runtime_lost`, not `not_found`.
+    await rm(join(fixture.root, ".story", ".bus-evidence.json"), { force: true });
     const poll = captureTools(fixture.root).get("storybloq_bus_poll")!;
     const result = await poll.handler(parsedArgs(poll, {
       endpointId: fixture.implementer.endpointId,

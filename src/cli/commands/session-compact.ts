@@ -73,6 +73,7 @@ import { findLatestHandover } from "../../federation/handover-utils.js";
 import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import {
+  busRuntimeLostAdvisory,
   consumeCompactionSuccession,
   detectClientSurface,
   findEndpointForTask,
@@ -685,6 +686,18 @@ export async function handleSessionResumePrompt(
         }
       } catch {
         // Session continuity must not depend on Bus endpoint refresh.
+      }
+      // T-428: if this checkout's Bus runtime was deleted (evidence names an
+      // instance but the runtime is gone), advise the returning session via STDERR
+      // only -- never bare stdout, which would corrupt the SessionStart protocol.
+      // Fail-open: any error is swallowed, and a healthy/never-set-up Bus is silent.
+      if (!busMarker) {
+        try {
+          const advisory = await busRuntimeLostAdvisory(root);
+          if (advisory) process.stderr.write(advisory + "\n");
+        } catch {
+          // Advisory is best-effort; it must never affect session continuity.
+        }
       }
     }
     if (options.codexHookJson && !codexSurface) {

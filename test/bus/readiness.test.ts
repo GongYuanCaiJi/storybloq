@@ -215,6 +215,12 @@ describe("Storybloq Bus readiness (D7)", () => {
   it("reports setupState not_initialized when enabled but no runtime exists", async () => {
     const value = await fx();
     await rm(join(value.root, ".story", "bus"), { recursive: true, force: true });
+    // T-428: a genuinely fresh checkout (bus enabled in committed config, but never
+    // set up here) has neither a runtime NOR deletion-evidence -- evidence is
+    // gitignored, so a clone never receives it. Removing both models that L-031
+    // fresh state. Deleting an EVIDENCED runtime is `runtime_lost` instead, which
+    // deletion-evidence.test.ts covers.
+    await rm(join(value.root, ".story", ".bus-evidence.json"), { force: true });
     expect((await busSummary(value.root)).setupState).toBe("not_initialized");
   });
 

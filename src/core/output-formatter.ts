@@ -18,6 +18,46 @@ import type { DoctorResult } from "./team-doctor.js";
 import type { ActiveSessionSummary } from "./session-scan.js";
 import type { SelftestResult } from "../cli/commands/selftest.js";
 import type { BusSummary } from "../bus/schemas.js";
+
+type BusStatusInput =
+  | BusSummary
+  | { readonly enabled: true; readonly error: { readonly code: string; readonly message: string } }
+  | undefined;
+
+// Bus line(s) for the Markdown status views. D7: stays quiet until the Bus is
+// enabled. T-428 adds the runtime_lost line and, for a disabled-but-evidenced
+// checkout, surfaces the config-revert diagnostic (carried in nextActions) instead
+// of staying silent, so a reverted `features.bus` is visible outside JSON.
+function busStatusLines(bus: BusStatusInput): string[] {
+  if (!bus) return [];
+  if ("error" in bus) {
+    return [`Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`];
+  }
+  if (bus.setupState === "disabled") {
+    const revert = bus.nextActions.find((action) => action.includes("config.features.bus"));
+    return revert ? [`Bus: ${revert}`] : [];
+  }
+  if (bus.setupState === "ready") {
+    return [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`];
+  }
+  if (bus.setupState === "waiting_for_peer") {
+    return ["Bus: waiting for peer; run `storybloq bus setup` in the other task"];
+  }
+  if (bus.setupState === "runtime_lost") {
+    // Neutral wording: runtime_lost covers both an absent runtime and one whose
+    // instance no longer matches this checkout's evidence. BusSummary does not carry
+    // the loss reason, so avoid asserting "deleted" for the mismatch case.
+    return ["Bus: runtime lost; `.story/bus/` is absent or no longer matches this checkout's deletion-evidence; run `storybloq bus setup` to re-establish it"];
+  }
+  if (bus.setupState === "invalid") {
+    // A present-but-broken runtime: corrupt layout or unreadable deletion-evidence.
+    // Never fall through to the "not set up" line, which would misdescribe it.
+    return ["Bus: invalid; the runtime or its deletion-evidence is corrupt; run `storybloq bus doctor`"];
+  }
+  return bus.initialized
+    ? [`Bus: ${bus.setupState}`]
+    : ["Bus: enabled, not set up in this checkout; run `storybloq bus setup`"];
+}
 import type { LimitStopSummary } from "./limit-ledger.js";
 import { phasesWithStatus, isBlockerCleared } from "./queries.js";
 
@@ -250,20 +290,7 @@ export function formatStatus(
     `Notes: ${state.activeNoteCount} active, ${state.archivedNoteCount} archived`,
     `Lessons: ${state.activeLessonCount} active, ${state.deprecatedLessonCount} deprecated`,
     `Handovers: ${state.handoverFilenames.length}`,
-    ...(bus
-      ? "error" in bus
-          ? [`Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`]
-          // D7: Markdown stays quiet until the Bus is enabled.
-          : bus.setupState === "disabled"
-            ? []
-            : bus.setupState === "ready"
-              ? [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`]
-              : bus.setupState === "waiting_for_peer"
-                ? ["Bus: waiting for peer; run `storybloq bus setup` in the other task"]
-                : bus.initialized
-                  ? [`Bus: ${bus.setupState}`]
-                  : ["Bus: enabled, not set up in this checkout; run `storybloq bus setup`"]
-      : []),
+    ...busStatusLines(bus),
     "",
     ...formatConfigHints(state),
     "## Phases",
@@ -350,20 +377,7 @@ export function formatFederatedStatus(
     "",
     `Federation: ${fedState.nodeCount} nodes (${fedState.reachableCount} reachable${fedState.unreachableCount > 0 ? `, ${fedState.unreachableCount} unreachable` : ""})`,
     `Tickets: ${fedState.totalCompleteTickets}/${fedState.totalTickets} across all nodes | Issues: ${fedState.totalOpenIssues} open`,
-    ...(bus
-      ? "error" in bus
-          ? [`Bus: unavailable [${bus.error.code}] ${escapeMarkdownInline(bus.error.message)}`]
-          // D7: Markdown stays quiet until the Bus is enabled.
-          : bus.setupState === "disabled"
-            ? []
-            : bus.setupState === "ready"
-              ? [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`]
-              : bus.setupState === "waiting_for_peer"
-                ? ["Bus: waiting for peer; run `storybloq bus setup` in the other task"]
-                : bus.initialized
-                  ? [`Bus: ${bus.setupState}`]
-                  : ["Bus: enabled, not set up in this checkout; run `storybloq bus setup`"]
-      : []),
+    ...busStatusLines(bus),
     "",
   ];
 

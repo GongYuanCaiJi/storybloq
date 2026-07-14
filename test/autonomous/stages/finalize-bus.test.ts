@@ -67,6 +67,12 @@ describe("FINALIZE Storybloq Bus gate", () => {
     const fixture = await createBusFixture("finalize-bus-fresh-checkout");
     fixtures.push(fixture);
     await rm(join(fixture.root, ".story", "bus"), { recursive: true });
+    // T-428: a genuinely fresh checkout (bus enabled in committed config, never set
+    // up here) has neither a runtime NOR deletion-evidence -- evidence is gitignored,
+    // so a clone never receives it. Removing both models that L-031 fresh state.
+    // Deleting an EVIDENCED runtime is `runtime_lost` (covered by the partial-runtime
+    // case below and deletion-evidence.test.ts), which correctly blocks finalize.
+    await rm(join(fixture.root, ".story", ".bus-evidence.json"), { force: true });
     const sessionDir = join(fixture.root, ".story", "sessions", state().sessionId);
     await mkdir(sessionDir, { recursive: true });
 

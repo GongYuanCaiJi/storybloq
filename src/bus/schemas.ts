@@ -264,6 +264,7 @@ export type BusSetupState =
   | "disabled"
   | "not_initialized"
   | "invalid"
+  | "runtime_lost"
   | "disconnected"
   | "waiting_for_peer"
   | "ready";
