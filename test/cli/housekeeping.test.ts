@@ -172,6 +172,11 @@ describe("shouldSkipHousekeeping (ISS-777)", () => {
     expect(shouldSkipHousekeeping(["hook-status"])).toBe(true);
   });
 
+  it("skips the hook-bus-tool PostToolUse hook (T-427)", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["hook-bus-tool"])).toBe(true);
+  });
+
   it("skips session compact-prepare (PreCompact hook)", async () => {
     const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
     expect(shouldSkipHousekeeping(["session", "compact-prepare"])).toBe(true);

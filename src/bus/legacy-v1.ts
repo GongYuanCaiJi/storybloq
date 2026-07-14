@@ -1314,6 +1314,8 @@ export async function summarizeV1(root: string): Promise<BusSummary> {
     undeliverable: 0,
     quarantined: folds.filter((folded) => folded.integrity !== "verified").length,
     hookDelivery: { claude: false, codex: false },
+    // A v1 runtime predates guarded hook delivery entirely; no channel is active.
+    deliveryCapabilities: { onStop: "none", onTool: "none" },
   };
 }
 

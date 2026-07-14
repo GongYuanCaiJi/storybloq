@@ -33,6 +33,11 @@ export interface HardenedLockHandle {
 export interface HardenedLockOptions {
   readonly timeoutMs?: number;
   readonly pollMs?: number;
+  // When false, NEVER mkdir the lock's parent directory. If the parent is absent the
+  // acquisition fails closed (`not_found`) instead of re-creating it. Used by cleanup
+  // paths that must never resurrect a deleted runtime (T-428): a guard acquired to remove
+  // a waiter must not re-materialize `.story/bus/locks` after the runtime was deleted.
+  readonly create?: boolean;
 }
 
 function delay(ms: number): Promise<void> {
@@ -177,7 +182,26 @@ export async function acquireHardenedLock(
 ): Promise<HardenedLockHandle> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollMs = options.pollMs ?? DEFAULT_POLL_MS;
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  if (options.create === false) {
+    // Non-creating mode: refuse if the parent directory is absent, so a cleanup racing a
+    // runtime deletion cannot re-materialize it (the check-to-open window is closed by
+    // relying on this refusal, not the caller's existsSync precheck). lstat is no-follow.
+    const parent = dirname(lockPath);
+    let pstat;
+    try {
+      pstat = await lstat(parent);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new BusError("not_found", `Lock parent ${basename(parent)} is absent; refusing to create it.`, err);
+      }
+      throw err;
+    }
+    if (pstat.isSymbolicLink() || !pstat.isDirectory()) {
+      throw new BusError("corrupt", `Lock parent ${basename(parent)} is a symlink or not a directory.`);
+    }
+  } else {
+    await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  }
   const token = randomBytes(32).toString("hex");
   const body: LockBody = {
     pid: process.pid,

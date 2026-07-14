@@ -48,6 +48,7 @@ import {
 } from "./paths.js";
 import {
   BUS_MAX_ENTRY_BYTES,
+  BusEndpointSchema,
   BusEntrySchema,
   BusEvidenceRefSchema,
   BusMailboxCounterSchema,
@@ -61,6 +62,7 @@ import {
   derivedRole,
   type BusAckPayload,
   type BusClient,
+  type BusDeliveryCapabilities,
   type BusDeliveryMode,
   type BusEndpoint,
   type BusEntry,
@@ -93,6 +95,11 @@ const ThreadIdSchema = z.string().uuid();
 const EndpointIdSchema = z.string().uuid();
 const MessageIdSchema = z.string().uuid();
 const POINTER_FILENAME = /^(\d{12})-([0-9a-f-]{36})\.json$/;
+
+// Test-only seam: fires inside mailboxHasPointerCandidate AFTER a directory's initial
+// lstat succeeds and BEFORE its readdir, so a test can delete/swap the directory mid-scan
+// and prove the probe escalates (throws) rather than reporting a false "empty".
+let afterMailboxLstatHook: ((dir: string) => Promise<void>) | null = null;
 const RECEIPT_FILENAME = /^([a-f0-9]{64})\.json$/;
 const ACTIONABLE_KINDS = new Set<BusMessageKind>(["issue_notice", "question", "reply", "patch_request"]);
 
@@ -209,6 +216,27 @@ async function listThreadIds(paths: BusPaths): Promise<string[]> {
     .sort();
 }
 
+// Highest mailbox seq the recipient endpoint has already surfaced (blocked on either
+// channel) or polled. Durable evidence used as a RECOVERY floor when reallocating a
+// mailbox seq after counter.json is lost while the mailbox is empty: without it, neither
+// the absent counter nor the empty pointer scan remembers already-delivered sequences,
+// so a reallocated seq could land at or below lastPolled/lastBlocked and be suppressed
+// forever by both hook gates. A missing endpoint record yields 0 (no evidence, no floor);
+// the counter and pointer floors still apply. A corrupt/symlinked record fails closed.
+async function endpointCursorFloor(paths: BusPaths, endpointId: string): Promise<number> {
+  try {
+    const endpoint = await readJsonNoFollow(join(paths.endpoints, `${endpointId}.json`), BusEndpointSchema);
+    return Math.max(
+      endpoint.lastPolledMailboxSeq,
+      endpoint.lastBlockedMailboxSeq,
+      endpoint.lastToolBlockedMailboxSeq ?? 0,
+    );
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") return 0;
+    throw err;
+  }
+}
+
 async function allocateMailboxSeq(paths: BusPaths, endpointId: string): Promise<number> {
   const mailbox = endpointMailboxPath(paths, endpointId);
   return withHardenedLock(join(paths.locks, `mailbox-${endpointId}.lock`), async () => {
@@ -226,7 +254,10 @@ async function allocateMailboxSeq(paths: BusPaths, endpointId: string): Promise<
         if (match) pointerFloor = Math.max(pointerFloor, Number(match[1]) + 1);
       }
     }
-    nextSeq = Math.max(nextSeq, pointerFloor);
+    // Fold in the endpoint's delivered-cursor floor so a lost counter (empty mailbox)
+    // cannot regress the sequence below what the recipient already saw.
+    const cursorFloor = await endpointCursorFloor(paths, endpointId);
+    nextSeq = Math.max(nextSeq, pointerFloor, cursorFloor + 1);
     await durableWrite(counterPath, serialize({
       schema: "storybloq-bus-mailbox-counter/v1",
       nextSeq: nextSeq + 1,
@@ -1083,6 +1114,131 @@ async function mailboxPointers(paths: BusPaths, endpointId: string): Promise<{ p
   return { pointers: [...unique.values()].sort((a, b) => a.mailboxSeq - b.mailboxSeq), findings };
 }
 
+// T-427 cheap tool-hook gate. Lock-free, fold-free discriminated high-water read:
+// counter.json's `nextSeq` is the NEXT seq to hand out, so the highest seq already
+// allocated to this mailbox is `nextSeq - 1`. A mailbox that never allocated has no
+// counter.json (readJsonNoFollow -> BusError "not_found") -> `known: false`. Any
+// OTHER failure (corrupt/symlinked/unreadable counter) propagates so an unreadable
+// counter is never silently treated as "unknown". Lock-free is sound: a concurrent
+// allocateMailboxSeq only ever RAISES nextSeq, so a torn read under-reports by at
+// most one and never over-reports, and the tool gate treats "unknown" as "escalate".
+export type MailboxHighwater =
+  | { readonly known: true; readonly highwater: number }
+  | { readonly known: false };
+
+export async function readMailboxHighwater(paths: BusPaths, endpointId: string): Promise<MailboxHighwater> {
+  const counterPath = join(endpointMailboxPath(paths, endpointId), "counter.json");
+  try {
+    const counter = await readJsonNoFollow(counterPath, BusMailboxCounterSchema);
+    return { known: true, highwater: counter.nextSeq - 1 };
+  } catch (err) {
+    if (err instanceof BusError && err.code === "not_found") return { known: false };
+    throw err;
+  }
+}
+
+// T-427 hot-path seed. A never-messaged endpoint has no counter.json, so its PostToolUse
+// gate would fall to the mailboxHasPointerCandidate directory scan on EVERY tool call
+// (readMailboxHighwater returns `known:false` until the first send allocates a seq).
+// After the gate confirms the mailbox is present-and-empty AND the endpoint has no
+// surfaced history (all delivery cursors zero -- the caller's precondition), it seeds
+// counter.json with `nextSeq:1`, so subsequent tool calls take the single-read
+// known-highwater fast path (highwater 0, not newer -> skip) instead of re-scanning.
+//
+// The seed runs under the SAME per-mailbox lock allocateMailboxSeq uses and re-reads the
+// counter while holding it, seeding only if still absent. This serializes with a racing
+// first send: durableCreate exposes the final pathname before its write completes, so
+// seeding OUTSIDE the lock could hand a concurrent allocateMailboxSeq a partially-written
+// counter (a transient corrupt read). Under the lock, either the send already allocated
+// (counter present -> skip) or it has not (counter absent -> we write nextSeq:1, which is
+// exactly the send's own starting floor). One-time per never-messaged endpoint.
+export async function seedMailboxCounterIfAbsent(paths: BusPaths, endpointId: string): Promise<void> {
+  const mailbox = endpointMailboxPath(paths, endpointId);
+  const counterPath = join(mailbox, "counter.json");
+  await withHardenedLock(join(paths.locks, `mailbox-${endpointId}.lock`), async () => {
+    try {
+      await readJsonNoFollow(counterPath, BusMailboxCounterSchema);
+      return; // already allocated/seeded by a racing send -> nothing to do
+    } catch (err) {
+      if (!(err instanceof BusError) || err.code !== "not_found") throw err;
+    }
+    await durableCreate(counterPath, serialize({
+      schema: "storybloq-bus-mailbox-counter/v1",
+      nextSeq: 1,
+      updatedAt: new Date().toISOString(),
+    }));
+  });
+}
+
+// T-427 fold-free existence probe used by the rendezvous long-poll interval tick:
+// does the endpoint's mailbox hold ANY pointer-shaped file (active or pending)?
+// Mirrors mailboxPointers' directory walk + POINTER_FILENAME filter but never
+// reads, schema-validates, dedups, or folds a thread. counter.json never matches
+// POINTER_FILENAME so it is ignored.
+//
+// This is a fail-toward-escalation detector, NOT a silent emptiness oracle: a
+// present-and-readable mailbox with no pointer-named entry is the only "definitely
+// nothing" answer (returns false). A MISSING, symlinked, or unreadable mailbox
+// directory is corruption/deletion, not emptiness, so it THROWS -- the wait loop's
+// interval tick catches the throw and escalates to the authoritative pollBus, which
+// surfaces the real runtime_lost/corrupt cause instead of waiting to the deadline. A
+// pointer-NAMED entry that is not a plain regular file (a symlink swap, FIFO, or dir)
+// is also treated as a candidate so the authoritative poll inspects/quarantines it.
+export async function mailboxHasPointerCandidate(paths: BusPaths, endpointId: string): Promise<boolean> {
+  const mailbox = endpointMailboxPath(paths, endpointId);
+  // The mailbox is required; its `pending` child is created lazily, so only its absence
+  // is benign. Each directory is lstat'd no-follow BEFORE and AFTER enumeration: a
+  // symlinked directory (an attack that would redirect the scan outside the runtime) is
+  // rejected, and a swap to a different inode during readdir is caught by the dev/ino
+  // revalidation -- both escalate to the authoritative poll rather than trusting a
+  // possibly-redirected listing.
+  const targets: ReadonlyArray<{ readonly dir: string; readonly optional: boolean }> = [
+    { dir: mailbox, optional: false },
+    { dir: join(mailbox, "pending"), optional: true },
+  ];
+  for (const { dir, optional } of targets) {
+    let before;
+    try {
+      before = await lstat(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        // ONLY absence at this INITIAL lstat is benign, and only for the optional pending
+        // child (lazily created). The required mailbox being absent is deletion.
+        if (optional) continue;
+        throw new BusError("corrupt", `Mailbox directory is missing for endpoint ${endpointId}`, err);
+      }
+      throw new BusError("corrupt", `Mailbox directory is unreadable for endpoint ${endpointId}`, err);
+    }
+    if (before.isSymbolicLink() || !before.isDirectory()) {
+      throw new BusError("corrupt", `Mailbox path for endpoint ${endpointId} is a symlink or not a directory`);
+    }
+    // The directory PROVABLY existed as of `before`. Any ENOENT from here on is a mid-scan
+    // DELETION, not lazy absence, so it escalates regardless of `optional` -- otherwise a
+    // pending dir removed after readdir could discard already-enumerated pointer entries
+    // and report a false "empty".
+    if (afterMailboxLstatHook) await afterMailboxLstatHook(dir); // test seam: mutate mid-scan
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      throw new BusError("corrupt", `Mailbox directory vanished or became unreadable mid-scan for endpoint ${endpointId}`, err);
+    }
+    let after;
+    try {
+      after = await lstat(dir);
+    } catch (err) {
+      throw new BusError("corrupt", `Mailbox directory vanished during scan for endpoint ${endpointId}`, err);
+    }
+    if (after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino) {
+      throw new BusError("corrupt", `Mailbox directory identity changed during scan for endpoint ${endpointId}`);
+    }
+    for (const entry of entries) {
+      if (POINTER_FILENAME.test(entry.name)) return true;
+    }
+  }
+  return false;
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -1459,6 +1615,7 @@ function emptyBusSummary(setupState: BusSetupState = "not_initialized"): BusSumm
     undeliverable: 0,
     quarantined: 0,
     hookDelivery: { claude: false, codex: false },
+    deliveryCapabilities: { onStop: "none", onTool: "none" },
   };
 }
 
@@ -1714,6 +1871,54 @@ function deriveDeliveryMode(
   return "partial";
 }
 
+// T-427: an active claude endpoint is on-tool active only when its project opted
+// its client into hook delivery AND the PostToolUse hook has proven it fired in
+// this endpoint's CURRENTLY-BOUND session (activation identity match). A session
+// rebind leaves a stale activation whose taskId no longer matches, so it correctly
+// reverts to inactive until the new session's hook fires.
+function endpointToolActive(
+  endpoint: BusEndpoint,
+  hookDelivery: { claude: boolean; codex: boolean },
+): boolean {
+  if (endpoint.client !== "claude" || !hookDelivery.claude) return false;
+  const activation = endpoint.toolHookActivation;
+  return activation != null && activation.taskId === endpoint.clientTaskId;
+}
+
+// T-427 honest, structured coverage over the ACTIVE endpoints. onStop is the
+// reliable turn-boundary channel (both clients have a Stop hook), so it is a
+// tri-state over the distinct participant clients keyed on hook policy. onTool is
+// the mid-turn PostToolUse channel, which is Claude-only, and is computed per ACTIVE
+// ENDPOINT (never per distinct client) so it cannot overstate coverage: with two
+// active Claude sessions, one fired hook does NOT read as "all". This never asserts
+// guaranteed mid-turn ingestion; it reports only that the hook is enabled (policy)
+// and proven firing (activation).
+function deriveDeliveryCapabilities(
+  active: readonly BusEndpoint[],
+  hookDelivery: { claude: boolean; codex: boolean },
+): BusDeliveryCapabilities {
+  const clients = [...new Set(active.map((endpoint) => endpoint.client))];
+  if (clients.length === 0) return { onStop: "none", onTool: "none" };
+  const stopOn = clients.filter((client) => hookDelivery[client]);
+  const onStop = stopOn.length === 0 ? "none" : stopOn.length === clients.length ? "all" : "partial";
+  const claudeEndpoints = active.filter((endpoint) => endpoint.client === "claude");
+  const hasCodex = active.some((endpoint) => endpoint.client === "codex");
+  const claudeToolActive = claudeEndpoints.filter((endpoint) => endpointToolActive(endpoint, hookDelivery)).length;
+  let onTool: BusDeliveryCapabilities["onTool"];
+  if (claudeToolActive === 0) {
+    onTool = "none";
+  } else if (claudeToolActive < claudeEndpoints.length) {
+    // Some but not all active Claude sessions have fired the hook.
+    onTool = "partial";
+  } else if (hasCodex) {
+    // Every active Claude session is tool-active, but a Codex peer has no PostToolUse.
+    onTool = "claude_only";
+  } else {
+    onTool = "all";
+  }
+  return { onStop, onTool };
+}
+
 function deriveNextActions(setupState: BusSetupState, deliveryMode: BusDeliveryMode): string[] {
   if (setupState === "disconnected" || setupState === "not_initialized" || setupState === "disabled") {
     return ["run: storybloq bus setup"];
@@ -1779,6 +1984,7 @@ async function summarizeFrom(
     undeliverable: 0,
     quarantined: folds.filter((folded) => folded.integrity !== "verified").length,
     hookDelivery,
+    deliveryCapabilities: deriveDeliveryCapabilities(active, hookDelivery),
   };
 }
 
@@ -1987,3 +2193,7 @@ export async function pendingMailboxCursor(
     return { cursor, count };
   });
 }
+
+export const __storeTesting = {
+  setAfterMailboxLstatHook: (fn: ((dir: string) => Promise<void>) | null) => { afterMailboxLstatHook = fn; },
+};

@@ -5,12 +5,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initProject } from "../../src/core/init.js";
 import { canonicalHash } from "../../src/bus/canonical.js";
-import { busSummary, classifyBusRuntime, initializeBus, joinEndpoint } from "../../src/bus/index.js";
+import { busSummary, classifyBusRuntime, initializeBus, joinEndpoint, setBusHookPolicy } from "../../src/bus/index.js";
+import { __testing as projectSettingsTesting, hasBusToolHook, installProjectBusToolHook, readProjectSettingsNoFollow } from "../../src/core/project-settings.js";
 import { runBusCli } from "./cli-harness.js";
 
 // D4 guided setup: idempotent, resumable, one command per task. All setup tests
 // use --delivery poll: the live path mutates the real ~/.claude and ~/.codex hook
-// files, which a test must never touch. Poll delivery skips hook mutation.
+// files, which a test must never touch. Poll delivery skips GLOBAL client hook
+// mutation (it only clears the project-local hook policy + on-tool hook in the temp
+// root; T-427).
 
 const roots: string[] = [];
 
@@ -130,7 +133,7 @@ describe("Storybloq Bus guided setup (D4)", () => {
     });
     expect(parsed.data.handoff).toContain('Connect this task to Storybloq Bus.');
     expect(parsed.data.completedSteps).toContain("join-endpoint");
-    expect(parsed.data.completedSteps).toContain("poll-delivery (hooks skipped)");
+    expect(parsed.data.completedSteps).toContain("poll-delivery (hooks disabled)");
     expect(parsed.data.trackedChanges).toEqual(
       expect.arrayContaining([".story/config.json", ".story/.gitignore"]),
     );
@@ -187,6 +190,47 @@ describe("Storybloq Bus guided setup (D4)", () => {
     const summary = await busSummary(root);
     expect(summary.deliveryMode).toBe("poll");
     expect(summary.hookDelivery).toEqual({ claude: false, codex: false });
+  });
+
+  it("disables an already-enabled on-tool tier when re-run with --delivery poll", async () => {
+    const root = await project("bus-setup-poll-disable");
+    await setup(root, ["--task-id", "claude-solo"]); // join endpoint, enable bus (poll)
+    // Simulate a prior live setup: hook policy on + project-local on-tool hook installed.
+    await setBusHookPolicy(root, ["claude"], true);
+    await installProjectBusToolHook(root, "/x/storybloq");
+    expect(hasBusToolHook(await readProjectSettingsNoFollow(root), "/x/storybloq hook-bus-tool")).toBe(true);
+
+    // Re-running setup with --delivery poll must turn the tier back off end-to-end.
+    await setup(root, ["--task-id", "claude-solo"]);
+    const summary = await busSummary(root);
+    expect(summary.hookDelivery.claude).toBe(false);
+    expect(summary.deliveryCapabilities.onTool).toBe("none");
+    expect(hasBusToolHook(await readProjectSettingsNoFollow(root), "/x/storybloq hook-bus-tool")).toBe(false);
+  });
+
+  it("surfaces a remaining cleanup step when the on-tool hook file cannot be removed under --delivery poll", async () => {
+    const root = await project("bus-setup-poll-disable-fail");
+    await setup(root, ["--task-id", "claude-solo"]);
+    await setBusHookPolicy(root, ["claude"], true);
+    await installProjectBusToolHook(root, "/x/storybloq");
+
+    // Make the on-tool hook REMOVAL write fail (a simulated fsync/write error) so the inert
+    // hook file survives. The policy is still disabled first, so delivery IS off; the
+    // leftover file must surface as a `remove-on-tool-hook` remaining step rather than the
+    // disable being reported as fully clean.
+    projectSettingsTesting.setAfterTempOpenHook(async () => { throw new Error("simulated removal write failure"); });
+    let parsed: Awaited<ReturnType<typeof setup>>;
+    try {
+      parsed = await setup(root, ["--task-id", "claude-solo"]);
+    } finally {
+      projectSettingsTesting.setAfterTempOpenHook(null);
+    }
+
+    expect((await busSummary(root)).hookDelivery.claude).toBe(false); // policy disabled -> delivery off
+    const remaining = (parsed.data.remainingSteps as string[]) ?? [];
+    expect(remaining.some((step) => step.startsWith("remove-on-tool-hook"))).toBe(true);
+    // The inert hook file is still present (removal failed), consistent with the warning.
+    expect(hasBusToolHook(await readProjectSettingsNoFollow(root), "/x/storybloq hook-bus-tool")).toBe(true);
   });
 
   it("fails preflight and mutates nothing when identity is missing", async () => {

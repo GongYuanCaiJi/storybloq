@@ -209,6 +209,22 @@ export const BusProcessRefSchema = z.object({
 }).passthrough();
 export type BusProcessRef = z.infer<typeof BusProcessRefSchema>;
 
+// T-427 on-tool activation: proof the PostToolUse hook actually FIRED for this
+// endpoint's currently-bound session. Recorded (once per session) by the tool-hook
+// handler. Validity is by IDENTITY match, no TTL: the on-tool channel is "active"
+// only while this record's taskId still equals the endpoint's bound clientTaskId,
+// so a session rebind reverts the channel to inactive until the new session's hook
+// fires. The realistic disable paths (`bus hooks disable`, `bus setup --delivery
+// poll`) flip the hook policy, which is gated separately, so a stale activation can
+// never keep the label on after delivery is turned off. `hookCommand` records the
+// command that fired (observability); `updatedAt` is informational only.
+export const BusHookActivationSchema = z.object({
+  taskId: z.string().regex(CLIENT_TASK_ID_PATTERN),
+  hookCommand: z.string().min(1).max(4096),
+  updatedAt: IsoTimestampSchema,
+}).passthrough();
+export type BusHookActivation = z.infer<typeof BusHookActivationSchema>;
+
 export const BusEndpointSchema = z.object({
   schema: z.literal("storybloq-bus-endpoint/v2"),
   endpointId: UuidSchema,
@@ -226,6 +242,18 @@ export const BusEndpointSchema = z.object({
   wakePolicy: z.enum(["never", "offline_only"]),
   lastPolledMailboxSeq: z.number().int().nonnegative(),
   lastBlockedMailboxSeq: z.number().int().nonnegative(),
+  // T-427: PostToolUse (on-tool) delivery keeps its OWN block high-water so the
+  // best-effort mid-turn channel never suppresses the reliable Stop channel at
+  // turn end. A real poll advances lastPolledMailboxSeq, which clears BOTH gates.
+  // Optional (not defaulted) so the parsed OUTPUT type stays equal to the INPUT
+  // type -- a `.default()` here would diverge them and break the generic
+  // readJsonNoFollow inference. Consumers treat an absent value as 0.
+  lastToolBlockedMailboxSeq: z.number().int().nonnegative().optional(),
+  // T-427: on-tool activation proof (see BusHookActivationSchema). Additive,
+  // passthrough-safe; an older endpoint record simply parses this as undefined and
+  // gains it on the next durable write. Consumers treat undefined/null the same
+  // ("not activated"). on-stop coverage derives from hook policy, not activation.
+  toolHookActivation: BusHookActivationSchema.nullable().optional(),
   retiredAt: IsoTimestampSchema.nullable(),
   retiredReason: z.string().min(1).max(1024).nullable(),
 }).passthrough();
@@ -271,6 +299,41 @@ export type BusSetupState =
 
 export type BusDeliveryMode = "live" | "partial" | "poll";
 
+// T-427 honest delivery labels. Structured, per-channel coverage that never
+// oversells the model: `onStop` is the turn-boundary channel (both clients have a
+// Stop hook, so it is tri-state over participants); `onTool` is the mid-turn
+// PostToolUse channel, which is Claude-only (Codex has no PostToolUse). onTool is
+// computed per ACTIVE ENDPOINT, not per distinct client, so it can never overstate
+// coverage: `all` only when every active endpoint is a tool-active Claude, `partial`
+// when some (but not all) active Claude endpoints are tool-active, `claude_only` when
+// every active Claude endpoint is tool-active but a Codex peer (no PostToolUse) is
+// also present, and `none` otherwise. A channel counts an endpoint only when its hook
+// is enabled by policy AND activation evidence proves the hook fired in that
+// endpoint's currently-bound session.
+export interface BusDeliveryCapabilities {
+  readonly onStop: "none" | "partial" | "all";
+  readonly onTool: "none" | "partial" | "claude_only" | "all";
+}
+
+// T-427 honest label (single source of truth; reused by both the core status
+// formatter and the `bus` CLI so the wording never drifts). Describes the actual
+// enabled delivery TIERS and deliberately never emits the word "live": the on-tool
+// tier notifies at the next tool boundary and the on-stop tier at turn end, and
+// neither is a real-time push. A `partial`/`claude_only` channel is annotated so a
+// two-client Bus where only one side is wired does not read as fully covered.
+export function describeDeliveryTiers(caps: BusDeliveryCapabilities): string {
+  const tiers: string[] = [];
+  if (caps.onStop !== "none") tiers.push(caps.onStop === "partial" ? "on-stop (partial)" : "on-stop");
+  if (caps.onTool !== "none") {
+    tiers.push(
+      caps.onTool === "claude_only" ? "on-tool (Claude only)"
+        : caps.onTool === "partial" ? "on-tool (partial)"
+          : "on-tool",
+    );
+  }
+  return tiers.length === 0 ? "poll" : tiers.join(" + ");
+}
+
 export interface BusParticipantSummary {
   readonly client: BusClient;
   readonly surface: BusSurface;
@@ -296,4 +359,5 @@ export interface BusSummary {
     readonly claude: boolean;
     readonly codex: boolean;
   };
+  readonly deliveryCapabilities: BusDeliveryCapabilities;
 }

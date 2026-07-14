@@ -18,6 +18,7 @@ import type { DoctorResult } from "./team-doctor.js";
 import type { ActiveSessionSummary } from "./session-scan.js";
 import type { SelftestResult } from "../cli/commands/selftest.js";
 import type { BusSummary } from "../bus/schemas.js";
+import { describeDeliveryTiers } from "../bus/schemas.js";
 
 type BusStatusInput =
   | BusSummary
@@ -38,7 +39,9 @@ function busStatusLines(bus: BusStatusInput): string[] {
     return revert ? [`Bus: ${revert}`] : [];
   }
   if (bus.setupState === "ready") {
-    return [`Bus: ready; ${bus.endpoints} connected; ${bus.deliveryMode} delivery`];
+    // T-427: honest per-tier wording; never the raw `deliveryMode` enum (which can
+    // read "live delivery" and oversell a notify-on-boundary channel as push).
+    return [`Bus: ready; ${bus.endpoints} connected; delivery: ${describeDeliveryTiers(bus.deliveryCapabilities)}`];
   }
   if (bus.setupState === "waiting_for_peer") {
     return ["Bus: waiting for peer; run `storybloq bus setup` in the other task"];
@@ -87,6 +90,13 @@ export const ExitCode = {
   USER_ERROR: 1,
   VALIDATION_ERROR: 2,
   PARTIAL: 3,
+  // T-427 rendezvous long-poll: distinct codes so a background `bus poll --wait`
+  // consumer can tell a timeout (nothing arrived) and a contended waiter (another
+  // --wait already owns this endpoint) apart from a delivered message (OK) or a
+  // usage/validation error. Signals (SIGINT=130, SIGTERM=143) are set directly by
+  // the wait runner and are intentionally not enum members.
+  TIMEOUT: 4,
+  WAITER_ACTIVE: 5,
 } as const;
 
 export type ExitCodeValue = (typeof ExitCode)[keyof typeof ExitCode];

@@ -3741,6 +3741,22 @@ export function registerHookStatusCommand(yargs: Argv): Argv {
 }
 
 // ---------------------------------------------------------------------------
+// hook-bus-tool (T-427: tool-boundary Bus delivery)
+// ---------------------------------------------------------------------------
+
+export function registerHookBusToolCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "hook-bus-tool",
+    false as unknown as string, // hidden -- machine-facing PostToolUse hook
+    (y) => y,
+    async () => {
+      const { handleBusToolHook } = await import("./commands/hook-status.js");
+      await handleBusToolHook();
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // limit-status (T-424: pending limit auto-resumes)
 // ---------------------------------------------------------------------------
 

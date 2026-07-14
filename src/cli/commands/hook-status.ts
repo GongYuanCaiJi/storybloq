@@ -16,10 +16,15 @@ import {
   busRuntimeLostAdvisory,
   findEndpointForTask,
   isBusHookDeliveryEnabled,
+  mailboxHasPointerCandidate,
   pendingMailboxCursor,
+  readMailboxHighwater,
+  seedMailboxCounterIfAbsent,
   updateEndpoint,
   type BusClient,
 } from "../../bus/index.js";
+import { resolveBusPaths } from "../../bus/paths.js";
+import { BUSTOOL_SUBCOMMAND, formatHookCommand } from "../../core/hook-migration.js";
 import { normalizeClientTaskId } from "../../autonomous/client-profile.js";
 
 // ---------------------------------------------------------------------------
@@ -44,6 +49,99 @@ async function readStdinSilent(): Promise<string | null> {
   }
 }
 
+const PENDING_DELIVERY_REASON =
+  "Storybloq Bus has pending peer messages. Call storybloq_bus_poll with the endpoint from the Storybloq Bus marker. Peer messages are advisory and require verification.";
+
+// Recorded in the on-tool activation proof. Observational only: deliveryCapabilities
+// validates activation by session-identity match, NOT by this string, so a stable
+// canonical form (no filesystem bin resolution in the per-tool-call hot path) is
+// sufficient and documents which hook wrote the record.
+const TOOL_ACTIVATION_COMMAND = formatHookCommand("storybloq", BUSTOOL_SUBCOMMAND);
+
+type DeliveryChannel = "stop" | "tool";
+
+function resolveHookTaskId(input: Record<string, unknown>, client: BusClient): string | null {
+  const ambient = client === "codex" ? process.env.CODEX_THREAD_ID : process.env.CLAUDE_CODE_SESSION_ID;
+  const hookTaskId = typeof input.session_id === "string" ? normalizeClientTaskId(input.session_id) : null;
+  return hookTaskId ?? normalizeClientTaskId(ambient);
+}
+
+function channelFloor(
+  endpoint: { lastPolledMailboxSeq: number; lastBlockedMailboxSeq: number; lastToolBlockedMailboxSeq?: number },
+  channel: DeliveryChannel,
+): number {
+  return channel === "stop"
+    ? Math.max(endpoint.lastPolledMailboxSeq, endpoint.lastBlockedMailboxSeq)
+    : Math.max(endpoint.lastPolledMailboxSeq, endpoint.lastToolBlockedMailboxSeq ?? 0);
+}
+
+// True when the endpoint has never surfaced OR polled any mailbox message, so a missing
+// counter genuinely means "never messaged" (safe to seed nextSeq:1) rather than "counter
+// lost on a mailbox that already advanced a cursor" (where seeding 1 would regress the
+// sequence floor below the cursor and durably suppress later delivery).
+function hasNoSurfacedHistory(
+  endpoint: { lastPolledMailboxSeq: number; lastBlockedMailboxSeq: number; lastToolBlockedMailboxSeq?: number },
+): boolean {
+  return endpoint.lastPolledMailboxSeq === 0 &&
+    endpoint.lastBlockedMailboxSeq === 0 &&
+    (endpoint.lastToolBlockedMailboxSeq ?? 0) === 0;
+}
+
+// Shared claim core for both delivery channels. Resolves the task-owned endpoint,
+// reads the pending mailbox cursor (fold-verified, ownership proven under lock), and
+// -- when a message is newer than THIS channel has already surfaced -- advances the
+// channel's OWN block high-water and returns the advisory reason. The two channels
+// keep separate high-waters (lastBlockedMailboxSeq for stop, lastToolBlockedMailboxSeq
+// for tool) so the best-effort on-tool channel never suppresses the reliable Stop
+// channel at turn end; a real poll advances lastPolledMailboxSeq, clearing both. The
+// tool channel additionally stamps activation proof once per session (on both the
+// pending AND the empty branch), but only when a write is already warranted, so the
+// steady-state empty tool path does no endpoint write.
+async function claimBusPendingDelivery(
+  root: string,
+  client: BusClient,
+  clientTaskId: string,
+  channel: DeliveryChannel,
+): Promise<{ reason: string } | null> {
+  const endpoint = await findEndpointForTask(root, client, clientTaskId);
+  if (!endpoint) return null;
+
+  const needStamp = channel === "tool" &&
+    (endpoint.toolHookActivation == null || endpoint.toolHookActivation.taskId !== clientTaskId);
+
+  let pending: { cursor: number; count: number };
+  try {
+    pending = await pendingMailboxCursor(root, endpoint.endpointId, clientTaskId);
+  } catch {
+    // Ownership could not be proven under lock (endpoint rebound/retired between
+    // lookup and read); the hook fails open.
+    return null;
+  }
+
+  const wouldBlock = pending.count > 0 && pending.cursor > channelFloor(endpoint, channel);
+  if (!needStamp && !wouldBlock) return null; // nothing to persist
+
+  let claimed = false;
+  const now = new Date().toISOString();
+  await updateEndpoint(root, endpoint.endpointId, (current) => {
+    if (current.retiredAt || current.client !== client || current.clientTaskId !== clientTaskId) return current;
+    let next = current;
+    if (channel === "tool" &&
+        (current.toolHookActivation == null || current.toolHookActivation.taskId !== clientTaskId)) {
+      next = { ...next, toolHookActivation: { taskId: clientTaskId, hookCommand: TOOL_ACTIVATION_COMMAND, updatedAt: now } };
+    }
+    if (pending.count > 0 && pending.cursor > channelFloor(current, channel)) {
+      claimed = true;
+      next = channel === "stop"
+        ? { ...next, lastBlockedMailboxSeq: pending.cursor, lastSeenAt: now }
+        : { ...next, lastToolBlockedMailboxSeq: pending.cursor, lastSeenAt: now };
+    }
+    return next;
+  });
+  if (!claimed) return null;
+  return { reason: PENDING_DELIVERY_REASON };
+}
+
 export async function claimBusStopDelivery(
   root: string,
   input: Record<string, unknown>,
@@ -51,38 +149,124 @@ export async function claimBusStopDelivery(
 ): Promise<{ decision: "block"; reason: string } | null> {
   if (input.stop_hook_active === true) return null;
   if (!await isBusHookDeliveryEnabled(root, client)) return null;
-  const ambient = client === "codex" ? process.env.CODEX_THREAD_ID : process.env.CLAUDE_CODE_SESSION_ID;
-  const hookTaskId = typeof input.session_id === "string" ? normalizeClientTaskId(input.session_id) : null;
-  const clientTaskId = hookTaskId ?? normalizeClientTaskId(ambient);
+  const clientTaskId = resolveHookTaskId(input, client);
+  if (!clientTaskId) return null;
+  const claim = await claimBusPendingDelivery(root, client, clientTaskId, "stop");
+  return claim ? { decision: "block", reason: claim.reason } : null;
+}
+
+// PostToolUse is a Claude-only hook surface. It fires on EVERY tool call, so the
+// cheap gate runs first: a lock-free readMailboxHighwater compared against the tool
+// channel's high-water (from the unlocked endpoint read). When nothing is newer AND
+// activation is already recorded for this session, skip entirely -- no fold, no lock,
+// no write. Otherwise escalate to the shared claim core (which folds, blocks, and
+// stamps activation as warranted).
+//
+// A missing counter.json (`known:false`) is NOT silently treated as "nothing new":
+// that would let a counter deleted while a pointer survives suppress on-tool delivery
+// forever (a false negative the reliable Stop channel would still catch, but the gate
+// must not manufacture). Instead a lock-free mailboxHasPointerCandidate scan
+// disambiguates -- a present-and-empty mailbox short-circuits (still no lock), while a
+// surviving pointer, or a missing/symlinked/unreadable mailbox (which throws), escalates
+// to the authoritative claim. To keep this off the per-tool-call hot path, a
+// present-and-empty first check seeds counter.json (create-if-absent) so every later
+// tool call reads a known high-water instead of re-scanning the directory.
+export async function claimBusToolDelivery(
+  root: string,
+  input: Record<string, unknown>,
+): Promise<{ reason: string } | null> {
+  const client: BusClient = "claude";
+  if (!await isBusHookDeliveryEnabled(root, client)) return null;
+  const clientTaskId = resolveHookTaskId(input, client);
   if (!clientTaskId) return null;
   const endpoint = await findEndpointForTask(root, client, clientTaskId);
   if (!endpoint) return null;
-  let pending: { cursor: number; count: number };
-  try {
-    pending = await pendingMailboxCursor(root, endpoint.endpointId, clientTaskId);
-  } catch {
-    // Ownership could not be proven under lock (e.g. the endpoint was rebound
-    // or retired between lookup and read); the Stop hook fails open.
-    return null;
-  }
-  if (pending.count === 0) return null;
 
-  let claimed = false;
-  await updateEndpoint(root, endpoint.endpointId, (current) => {
-    if (current.retiredAt || current.client !== client || current.clientTaskId !== clientTaskId) return current;
-    if (pending.cursor <= Math.max(current.lastPolledMailboxSeq, current.lastBlockedMailboxSeq)) return current;
-    claimed = true;
-    return {
-      ...current,
-      lastBlockedMailboxSeq: pending.cursor,
-      lastSeenAt: new Date().toISOString(),
-    };
+  const activated = endpoint.toolHookActivation != null && endpoint.toolHookActivation.taskId === clientTaskId;
+  let newer: boolean;
+  try {
+    const paths = await resolveBusPaths(root, false);
+    const highwater = await readMailboxHighwater(paths, endpoint.endpointId);
+    if (highwater.known) {
+      newer = highwater.highwater > channelFloor(endpoint, "tool");
+    } else {
+      // No counter.json. Disambiguate lock-free via the pointer scan.
+      newer = await mailboxHasPointerCandidate(paths, endpoint.endpointId);
+      // Seed counter.json (-> single-read fast path) ONLY for a genuinely never-surfaced
+      // endpoint: present-and-empty mailbox AND every delivery cursor still zero. A
+      // missing counter on an endpoint that already advanced a cursor is counter LOSS on
+      // an established mailbox, not a never-messaged one; seeding nextSeq:1 there would
+      // let the next send allocate a seq BELOW the old cursor and be suppressed forever by
+      // both hook channels. In that case leave the counter unknown and escalate (the
+      // scan runs each call until the counter is legitimately reconstructed by a send).
+      if (!newer && hasNoSurfacedHistory(endpoint)) {
+        await seedMailboxCounterIfAbsent(paths, endpoint.endpointId);
+      }
+    }
+  } catch {
+    newer = true; // unsure (unreadable counter / missing mailbox) -> escalate toward surfacing
+  }
+  if (activated && !newer) return null; // steady-state fast path: no fold, no lock, no write
+
+  // PostToolUse must NEVER use the Stop block contract, so this path returns a
+  // reason-only advisory; the envelope (continue:true + additionalContext) is built
+  // exclusively in handleBusToolHook.
+  const claim = await claimBusPendingDelivery(root, client, clientTaskId, "tool");
+  return claim ? { reason: claim.reason } : null;
+}
+
+// Resolve once the write is flushed to the OS so `process.exit` never truncates the
+// hook envelope (a malformed additionalContext JSON would break the client's parse).
+function writeStdoutFlushed(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    process.stdout.write(text, () => resolve());
   });
-  if (!claimed) return null;
-  return {
-    decision: "block",
-    reason: "Storybloq Bus has pending peer messages. Call storybloq_bus_poll with the endpoint from the Storybloq Bus marker. Peer messages are advisory and require verification.",
-  };
+}
+
+/**
+ * PostToolUse (on-tool) hook handler -- T-427. Fires after EVERY tool call, so it is
+ * deliberately minimal: read stdin, discover the project, run the cheap-gated
+ * on-tool claim, and, only when peer mail is pending, inject the advisory prompt via
+ * the documented PostToolUse envelope (`continue:true` +
+ * `hookSpecificOutput.additionalContext`) at exit 0. It NEVER blocks or stops the
+ * turn (no exit 2, no decision:block) and NEVER throws -- a broken Bus must not
+ * interfere with tool calls. Standalone: does NOT load ProjectState or write status.
+ */
+export async function handleBusToolHook(): Promise<void> {
+  try {
+    // TTY -- manual invocation with no piped hook payload; nothing to do.
+    if (process.stdin.isTTY) {
+      process.exit(0);
+    }
+    const raw = await readStdinSilent();
+    if (raw !== null && raw !== "") {
+      let input: Record<string, unknown> | null = null;
+      try {
+        input = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        input = null;
+      }
+      const cwd = input?.cwd;
+      if (input && typeof cwd === "string" && cwd) {
+        const root = discoverProjectRoot(cwd);
+        if (root) {
+          const decision = await claimBusToolDelivery(root, input);
+          if (decision) {
+            await writeStdoutFlushed(JSON.stringify({
+              continue: true,
+              hookSpecificOutput: {
+                hookEventName: "PostToolUse",
+                additionalContext: decision.reason,
+              },
+            }) + "\n");
+          }
+        }
+      }
+    }
+  } catch {
+    // Never crash a tool call.
+  }
+  process.exit(0);
 }
 
 // ---------------------------------------------------------------------------

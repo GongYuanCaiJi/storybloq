@@ -37,6 +37,11 @@ function defaultSettingsPath(): string {
 export const PRECOMPACT_SUBCOMMAND = "session compact-prepare";
 export const SESSIONSTART_SUBCOMMAND = "session resume-prompt";
 export const STOP_SUBCOMMAND = "hook-status";
+// T-427 tool-boundary delivery: guarded PostToolUse hook. Fires after every tool
+// call, so its handler (`storybloq hook-bus-tool`) does only a cheap mailbox
+// high-water check and, when peer mail is pending, injects the same advisory
+// prompt the Stop hook uses. Claude-only surface (Codex has no PostToolUse).
+export const BUSTOOL_SUBCOMMAND = "hook-bus-tool";
 // T-424: usage-limit stop detection (StopFailure hook, matcher "rate_limit").
 export const LIMITSTOP_SUBCOMMAND = "session limit-stop";
 export const STOPFAILURE_MATCHER = "rate_limit";

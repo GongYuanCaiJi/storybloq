@@ -59,6 +59,7 @@ async function runCli(): Promise<void> {
     registerSetupCommand,
     registerSetupSkillCommand,
     registerHookStatusCommand,
+    registerHookBusToolCommand,
     registerWakerRunCommand,
     registerLimitStatusCommand,
     registerConfigCommand,
@@ -155,6 +156,7 @@ async function runCli(): Promise<void> {
   cli = registerSetupCommand(cli);
   cli = registerSetupSkillCommand(cli);
   cli = registerHookStatusCommand(cli);
+  cli = registerHookBusToolCommand(cli);
   cli = registerWakerRunCommand(cli);
   cli = registerLimitStatusCommand(cli);
   cli = registerConfigCommand(cli);

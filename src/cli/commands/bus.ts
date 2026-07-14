@@ -25,15 +25,23 @@ import {
   refreshEndpointForSessionStart,
   retireEndpoint,
   runtimeLostError,
+  describeDeliveryTiers,
   sendBusMessage,
   setBusHookPolicy,
   updateBusThread,
   updateV1Thread,
   v1EndpointLiveness,
   v1PathsFrom,
+  waitForBusMessage,
+  WaiterActiveError,
+  WAIT_DEFAULT_TIMEOUT_SECONDS,
+  WAIT_TIMEOUT_MAX_SECONDS,
+  WAIT_TIMEOUT_MIN_SECONDS,
   type BusClient,
+  type BusDeliveryCapabilities,
   type BusDoctorResult,
   type BusEndpoint,
+  type BusHookPolicy,
   type BusMessageKind,
   type BusMessageRefs,
   type BusRuntimeProtocol,
@@ -102,6 +110,89 @@ async function runBus<T>(
     process.exitCode = err instanceof BusError && (err.code === "corrupt" || err.code === "runtime_lost")
       ? ExitCode.VALIDATION_ERROR
       : ExitCode.USER_ERROR;
+  }
+}
+
+// T-427 rendezvous long-poll runner. Kept separate from runBus because it owns its
+// own exit-code vocabulary (TIMEOUT=4, WAITER_ACTIVE=5, signals 130/143) that runBus
+// -- which only knows OK/USER/VALIDATION -- would flatten. A timeout is a SUCCESS
+// envelope (an empty poll) distinguished purely by the exit code, so a background
+// `bus poll --wait` consumer can tell "nothing arrived" from "a message arrived"
+// without parsing prose.
+async function runBusWait(format: BusFormat, timeoutSeconds: number, limit: number, args: IdentityArgs): Promise<void> {
+  const root = discoverProjectRoot();
+  if (!root) {
+    writeOutput(formatFailure(new BusError("not_found", "No .story/ project found."), format));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  // Validate --timeout BEFORE resolving identity or creating a waiter: a bad bound is
+  // a usage error, not a wait that then fails.
+  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < WAIT_TIMEOUT_MIN_SECONDS || timeoutSeconds > WAIT_TIMEOUT_MAX_SECONDS) {
+    writeOutput(formatFailure(
+      new BusError("invalid_input", `--timeout must be an integer between ${WAIT_TIMEOUT_MIN_SECONDS} and ${WAIT_TIMEOUT_MAX_SECONDS} seconds.`),
+      format,
+    ));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  let owned: Awaited<ReturnType<typeof resolveOwnedEndpoint>>;
+  try {
+    owned = await resolveOwnedEndpoint(root, args);
+  } catch (err) {
+    writeOutput(formatFailure(err, format));
+    process.exitCode = err instanceof BusError && (err.code === "corrupt" || err.code === "runtime_lost")
+      ? ExitCode.VALIDATION_ERROR
+      : ExitCode.USER_ERROR;
+    return;
+  }
+  if (owned.protocol === "v1") {
+    writeOutput(formatFailure(
+      new BusError("invalid_input", "`bus poll --wait` requires a v2 Bus runtime. Run `storybloq bus setup` to migrate, then retry."),
+      format,
+    ));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  let outcome;
+  try {
+    outcome = await waitForBusMessage({
+      root,
+      endpointId: owned.endpointId,
+      clientTaskId: owned.taskId,
+      timeoutMs: timeoutSeconds * 1000,
+      limit,
+    });
+  } catch (err) {
+    if (err instanceof WaiterActiveError) {
+      writeOutput(formatFailure(new BusError("conflict", err.message), format));
+      process.exitCode = ExitCode.WAITER_ACTIVE;
+      return;
+    }
+    writeOutput(formatFailure(err, format));
+    process.exitCode = err instanceof BusError && (err.code === "corrupt" || err.code === "runtime_lost")
+      ? ExitCode.VALIDATION_ERROR
+      : ExitCode.USER_ERROR;
+    return;
+  }
+  switch (outcome.kind) {
+    case "message":
+      writeOutput(formatData(outcome.result, format, renderPoll));
+      process.exitCode = ExitCode.OK;
+      return;
+    case "timeout":
+      // SUCCESS-shaped empty envelope carrying the final authoritative poll's REAL
+      // endpointId/cursor (not a fabricated 0); the exit code (4) is the timeout signal.
+      writeOutput(formatData(outcome.result, format, renderPoll));
+      process.exitCode = ExitCode.TIMEOUT;
+      return;
+    case "error":
+      writeOutput(formatFailure(outcome.err, format));
+      process.exitCode = outcome.errorClass === "validation" ? ExitCode.VALIDATION_ERROR : ExitCode.USER_ERROR;
+      return;
+    case "signal":
+      process.exitCode = outcome.code;
+      return;
   }
 }
 
@@ -242,8 +333,12 @@ function joinLabels(labels: string[]): string {
   return `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
 }
 
-function deliveryLabel(mode: BusSummary["deliveryMode"]): string {
-  return mode === "live" ? "live delivery on" : mode === "partial" ? "partial delivery" : "poll delivery";
+// T-427: honest delivery label driven by the VERIFIED per-tier capabilities, not
+// the policy-only `deliveryMode` enum. Never emits "live" (the word oversells a
+// notify-on-boundary channel as real-time push); `describeDeliveryTiers` is the
+// single source of tier wording, shared with the core status formatter.
+function deliveryLabel(caps: BusDeliveryCapabilities): string {
+  return `delivery: ${describeDeliveryTiers(caps)}`;
 }
 
 function renderReadiness(setupState: BusSummary["setupState"]): string {
@@ -402,7 +497,7 @@ function renderStatusMarkdown(summary: BusSummary): string {
   const connected = summary.participants.length > 0
     ? `${joinLabels(summary.participants.map((participant) => clientLabel(participant.surface)))} connected`
     : "no clients connected";
-  return `Bus: ${state}; ${connected}; ${deliveryLabel(summary.deliveryMode)}.`;
+  return `Bus: ${state}; ${connected}; ${deliveryLabel(summary.deliveryCapabilities)}.`;
 }
 
 interface BusSetupArgs {
@@ -450,6 +545,7 @@ function formatArchivedUnread(entry: ArchivedUnreadEntry): string {
 interface BusSetupResult {
   readonly setupState: BusSummary["setupState"];
   readonly deliveryMode: BusSummary["deliveryMode"];
+  readonly deliveryCapabilities: BusSummary["deliveryCapabilities"];
   readonly endpoints: number;
   readonly endpointId: string;
   readonly surface: BusSurface;
@@ -469,6 +565,19 @@ async function enableHooksForClient(root: string, client: BusClient): Promise<vo
     if (migrated.skipped) {
       throw new BusError("io_error", "Claude hooks could not be upgraded. Run `storybloq setup --client claude` first.");
     }
+    // T-427: install the project-local on-tool (PostToolUse) hook. Best-effort: the
+    // reliable Stop tier and the policy write below must not be blocked if the local
+    // settings file is tracked/unignorable. The honest label simply keeps on-tool
+    // inactive until the hook installs and fires. Codex has no PostToolUse surface.
+    try {
+      const bin = setup.resolveStorybloqBin();
+      if (bin) {
+        const { installProjectBusToolHook } = await import("../../core/project-settings.js");
+        await installProjectBusToolHook(root, bin);
+      }
+    } catch (err) {
+      process.stderr.write(`Storybloq Bus on-tool hook not installed: ${err instanceof Error ? err.message : String(err)}\n`);
+    }
   } else {
     const refreshed = await setup.refreshExistingCodexHooks();
     const counts = await setup.countCodexStorybloqHooks();
@@ -477,6 +586,37 @@ async function enableHooksForClient(root: string, client: BusClient): Promise<vo
     }
   }
   await setBusHookPolicy(root, [client], true);
+}
+
+// The disabled policy fields stay at the TOP level (matching the enable path's response
+// shape, so `data.claude`/`data.codex` structured consumers do not break); the optional
+// removal warning is added additively. Non-null `removalWarning` means the policy was
+// disabled (delivery IS off / the hook is inert) but the best-effort on-tool hook FILE
+// could not be removed, so the caller surfaces a remaining cleanup step.
+type DisableHooksResult = BusHookPolicy & { readonly removalWarning: string | null };
+
+// T-427: turning delivery OFF for a client clears its hook policy AND removes the
+// project-local on-tool hook (Claude only). Used by `bus hooks disable` and
+// `bus setup --delivery poll`. Policy is disabled FIRST: the policy is what gates the
+// hook handler (isBusHookDeliveryEnabled) and the on-tool capability label
+// (endpointToolActive), so once it is false a residual hook is inert. If the best-effort
+// on-tool removal then fails, the leftover file is harmless (policy-gated inert), but it
+// is returned as a `removalWarning` so callers can report a resumable cleanup step rather
+// than claiming the disable fully completed. The removal matches by subcommand, so it
+// clears a hook even after a Node switch changed the bin.
+async function disableHooksForClient(root: string, clients: readonly BusClient[]): Promise<DisableHooksResult> {
+  const policy = await setBusHookPolicy(root, clients, false);
+  let removalWarning: string | null = null;
+  if (clients.includes("claude")) {
+    try {
+      const { removeProjectBusToolHook } = await import("../../core/project-settings.js");
+      await removeProjectBusToolHook(root);
+    } catch (err) {
+      removalWarning = `on-tool hook file not removed (policy is disabled, so it is inert): ${err instanceof Error ? err.message : String(err)}. Remove .claude/settings.local.json's storybloq hook-bus-tool entry manually if desired.`;
+      process.stderr.write(`Storybloq Bus ${removalWarning}\n`);
+    }
+  }
+  return { ...policy, removalWarning };
 }
 
 // D4 preflight: evaluate the D5 drain gate read-only over a v1 runtime so a
@@ -682,7 +822,9 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
     completedSteps.push("join-endpoint");
   }
 
-  // Enable hooks for THIS client only when live; skip entirely when poll.
+  // Enable hooks for THIS client when live; when poll, actively turn delivery OFF
+  // (clear the hook policy and remove the project-local on-tool hook) so switching a
+  // project to poll converges from any prior live state.
   if (args.delivery === "live") {
     try {
       await enableHooksForClient(root, client);
@@ -691,7 +833,16 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
       remainingSteps.push(`enable-hooks: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else {
-    completedSteps.push("poll-delivery (hooks skipped)");
+    try {
+      const disabled = await disableHooksForClient(root, [client]);
+      completedSteps.push("poll-delivery (hooks disabled)");
+      // The policy is disabled (delivery IS off), but if the inert on-tool hook FILE
+      // could not be removed, surface it as a remaining cleanup step instead of implying
+      // a fully clean poll conversion.
+      if (disabled.removalWarning) remainingSteps.push(`remove-on-tool-hook: ${disabled.removalWarning}`);
+    } catch (err) {
+      remainingSteps.push(`disable-hooks: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   const summary = await busSummary(root);
@@ -701,6 +852,7 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
   return {
     setupState: summary.setupState,
     deliveryMode: summary.deliveryMode,
+    deliveryCapabilities: summary.deliveryCapabilities,
     endpoints: summary.endpoints,
     endpointId: endpoint.endpointId,
     surface: endpoint.surface,
@@ -716,7 +868,7 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
 
 function renderSetupMarkdown(result: BusSetupResult): string {
   const lines = [
-    `Setup: ${result.setupState}; ${deliveryLabel(result.deliveryMode)}.`,
+    `Setup: ${result.setupState}; ${deliveryLabel(result.deliveryCapabilities)}.`,
   ];
   if (result.migrated) {
     lines.push("Upgraded and archived the previous v1 runtime.");
@@ -862,7 +1014,7 @@ export function registerBusCommand(yargs: Argv): Argv {
       )
       .command(
         "hooks",
-        "Enable or disable guarded live Bus delivery",
+        "Enable or disable guarded on-boundary Bus delivery",
         (y2) => y2
           .command(
             "enable",
@@ -897,7 +1049,7 @@ export function registerBusCommand(yargs: Argv): Argv {
           )
           .command(
             "disable",
-            "Disable live Bus delivery for this project",
+            "Disable guarded Bus hook delivery for this project",
             (y3) => formatOption(y3.option("client", {
               type: "string",
               choices: ["claude", "codex", "all"] as const,
@@ -908,8 +1060,8 @@ export function registerBusCommand(yargs: Argv): Argv {
               await runBus(format, (root) => {
                 const selected = argv.client as "claude" | "codex" | "all";
                 const clients: BusClient[] = selected === "all" ? ["claude", "codex"] : [selected];
-                return setBusHookPolicy(root, clients, false);
-              }, (policy) => `Bus hook delivery disabled. Claude: ${policy.claude ? "on" : "off"}; Codex: ${policy.codex ? "on" : "off"}.`);
+                return disableHooksForClient(root, clients);
+              }, (result) => `Bus hook delivery disabled. Claude: ${result.claude ? "on" : "off"}; Codex: ${result.codex ? "on" : "off"}.${result.removalWarning ? ` Remaining: ${result.removalWarning}` : ""}`);
             },
           )
           .demandCommand(1, "Specify: enable or disable"),
@@ -970,9 +1122,24 @@ export function registerBusCommand(yargs: Argv): Argv {
       .command(
         "poll",
         "Read unacknowledged messages addressed to this role",
-        (y2) => formatOption(identityOptions(y2).option("limit", { type: "number", default: 20 })),
+        (y2) => formatOption(identityOptions(y2)
+          .option("limit", { type: "number", default: 20 })
+          .option("wait", {
+            type: "boolean",
+            default: false,
+            describe: "Block until a message arrives or --timeout elapses, then exit (v2 only). Exit 0 = message, 4 = timeout, 5 = another waiter already owns this endpoint.",
+          })
+          .option("timeout", {
+            type: "number",
+            default: WAIT_DEFAULT_TIMEOUT_SECONDS,
+            describe: "Max seconds to block when --wait is set (integer 1-3600)",
+          })),
         async (argv) => {
           const format = formatValue(argv.format);
+          if (argv.wait) {
+            await runBusWait(format, argv.timeout as number, argv.limit as number, identityFrom(argv as Record<string, unknown>));
+            return;
+          }
           await runBus(format, async (root) => {
             const owned = await resolveOwnedEndpoint(root, identityFrom(argv as Record<string, unknown>));
             const input = { endpointId: owned.endpointId, clientTaskId: owned.taskId, limit: argv.limit as number };

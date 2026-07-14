@@ -22,6 +22,7 @@
  * phone the npm registry per invocation:
  *   - merge-driver: git spawns it once per merged .story file (ISS-736).
  *   - hook-status: the Claude Code Stop hook, fires on every response.
+ *   - hook-bus-tool: the PostToolUse (on-tool) Bus hook, fires on every tool call.
  *   - session compact-prepare / resume-prompt: the PreCompact + SessionStart
  *     hooks (see core/hook-migration.ts).
  * Interactive `session` subcommands (list/show/stop/...) keep housekeeping.
@@ -34,6 +35,9 @@ export function shouldSkipHousekeeping(argv: string[]): boolean {
   const command = argv[0];
   if (command === "merge-driver") return true;
   if (command === "hook-status") return true;
+  // T-427: the PostToolUse (on-tool) Bus hook fires after every tool call and must
+  // start instantly and never phone the npm registry.
+  if (command === "hook-bus-tool") return true;
   // T-424: waker-run is the detached background waker; limit-stop is the
   // StopFailure hook. Both must start instantly and never phone the registry.
   if (command === "waker-run") return true;

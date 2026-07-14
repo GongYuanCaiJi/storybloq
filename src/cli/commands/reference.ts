@@ -401,7 +401,7 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus setup",
-    description: "Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when live) enables this client's hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).",
+    description: "Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when hook delivery is enabled) enables this client's guarded on-boundary hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).",
     usage: "storybloq bus setup [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--delivery live|poll] [--force-archive] [--format json|md]",
     flags: ["--client", "--task-id", "--surface", "--delivery", "--force-archive"],
   },
@@ -430,8 +430,9 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus poll",
-    description: "Poll unacknowledged messages for the task-bound endpoint",
-    usage: "storybloq bus poll [--endpoint <id>] [--client claude|codex] [--task-id <id>] [--limit N] [--format json|md]",
+    description: "Poll unacknowledged messages for the task-bound endpoint. --limit bounds how many messages are returned (applies to the wait drain too). With --wait, block until a message arrives or --timeout elapses (v2 only), then exit: 0 = message delivered, 4 = timed out, 5 = another --wait already owns this endpoint.",
+    usage: "storybloq bus poll [--endpoint <id>] [--client claude|codex] [--task-id <id>] [--limit N] [--wait] [--timeout <seconds>] [--format json|md]",
+    flags: ["--wait", "--timeout"],
   },
   {
     name: "bus ack",
@@ -446,7 +447,7 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus hooks",
-    description: "Enable or disable guarded live Bus delivery for this project",
+    description: "Enable or disable guarded on-boundary Bus delivery for this project",
     usage: "storybloq bus hooks enable|disable [--client claude|codex|all] [--format json|md]",
     flags: ["--client"],
   },
