@@ -359,7 +359,7 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
     if (activeAfterReplace.length >= 2) {
       throw new BusError(
         "conflict",
-        "The Bus already has two active endpoints. Pass --replace <endpoint-id> with a proven-offline incumbent to take its place.",
+        "The Bus already has two active endpoints. Run `storybloq bus setup --replace <endpoint-id>` with a proven-offline incumbent to take its place.",
       );
     }
 
@@ -406,6 +406,12 @@ export async function joinEndpoint(root: string, input: JoinEndpointInput): Prom
       wakePolicy: "never",
       lastPolledMailboxSeq: 0,
       lastBlockedMailboxSeq: 0,
+      // ISS-872: annotate the successor with the incumbent it replaced so the
+      // read/ack/administer seams redeliver the incumbent's undelivered mail and
+      // accept this successor's authority over its inherited threads. Only one
+      // hop is recorded here; the incumbent's own predecessor is never copied
+      // (the transitive chain is walked at read time by endpointAddressees).
+      ...(replaceIncumbent ? { predecessorEndpointId: replaceIncumbent.endpointId } : {}),
       retiredAt: null,
       retiredReason: null,
     });

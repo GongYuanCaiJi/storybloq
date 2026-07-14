@@ -401,9 +401,9 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "bus setup",
-    description: "Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when hook delivery is enabled) enables this client's guarded on-boundary hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).",
-    usage: "storybloq bus setup [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--delivery live|poll] [--force-archive] [--format json|md]",
-    flags: ["--client", "--task-id", "--surface", "--delivery", "--force-archive"],
+    description: "Connect this task to the Storybloq Bus in one idempotent, resumable command. Initializes or upgrades the runtime, joins this task's endpoint, and (when hook delivery is enabled) enables this client's guarded on-boundary hooks. With one endpoint it ends with a handoff line inviting the other task to connect. --replace <endpoint-id> retires a proven-offline incumbent and takes its place, redelivering that endpoint's undelivered mail to this successor. --force-archive overrides unread noncritical v1 delivery only during a v1->v2 upgrade; it never bypasses ship-gate blockers (unacknowledged critical messages, parked unresolved critical threads, quarantined threads).",
+    usage: "storybloq bus setup [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--delivery live|poll] [--replace <endpoint-id>] [--force-archive] [--format json|md]",
+    flags: ["--client", "--task-id", "--surface", "--delivery", "--replace", "--force-archive"],
   },
   {
     name: "bus join",

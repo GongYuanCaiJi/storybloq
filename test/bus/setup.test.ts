@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { initProject } from "../../src/core/init.js";
 import { canonicalHash } from "../../src/bus/canonical.js";
-import { busSummary, classifyBusRuntime, initializeBus, joinEndpoint, setBusHookPolicy } from "../../src/bus/index.js";
+import { busSummary, classifyBusRuntime, initializeBus, joinEndpoint, mailboxHasPointerCandidate, readMailboxHighwater, sendBusMessage, setBusHookPolicy, __storeTesting } from "../../src/bus/index.js";
+import { resolveBusPaths } from "../../src/bus/paths.js";
 import { __testing as projectSettingsTesting, hasBusToolHook, installProjectBusToolHook, readProjectSettingsNoFollow } from "../../src/core/project-settings.js";
 import { runBusCli } from "./cli-harness.js";
 
@@ -457,5 +458,365 @@ describe("Storybloq Bus guided setup (D4)", () => {
     expect(parsed.error).toBeUndefined();
     expect(parsed.data).toMatchObject({ migrated: true });
     expect(await classifyBusRuntime(root)).toBe("v2");
+  });
+
+  // ISS-871/ISS-872: `bus setup --replace` end to end.
+  async function endpointIdForTask(root: string, taskId: string): Promise<string> {
+    const dir = join(root, ".story", "bus", "endpoints");
+    for (const name of await readdir(dir)) {
+      const record = JSON.parse(await readFile(join(dir, name), "utf-8"));
+      if (record.clientTaskId === taskId && !record.retiredAt) return record.endpointId;
+    }
+    throw new Error(`No active endpoint for task ${taskId}`);
+  }
+
+  async function forgeOffline(root: string, endpointId: string): Promise<void> {
+    const path = join(root, ".story", "bus", "endpoints", `${endpointId}.json`);
+    const record = JSON.parse(await readFile(path, "utf-8"));
+    await writeFile(path, JSON.stringify({
+      ...record,
+      state: "attached",
+      processRef: { pid: 999999999, signature: "darwin:deadbeef", capturedAt: new Date().toISOString() },
+    }, null, 2) + "\n", "utf-8");
+  }
+
+  async function activeEndpointCount(root: string): Promise<number> {
+    const dir = join(root, ".story", "bus", "endpoints");
+    let count = 0;
+    for (const name of await readdir(dir)) {
+      const record = JSON.parse(await readFile(join(dir, name), "utf-8"));
+      if (!record.retiredAt) count += 1;
+    }
+    return count;
+  }
+
+  it("replaces a proven-offline incumbent and reports succession (setup --replace)", async () => {
+    const root = await project("bus-setup-replace");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    // Second sends an undelivered message to first, then first goes offline.
+    await sendBusMessage(root, {
+      endpointId: await endpointIdForTask(root, "claude-second"),
+      clientTaskId: "claude-second",
+      threadKind: "question",
+      messageKind: "question",
+      severity: "medium",
+      body: "Undelivered before the incumbent went offline",
+      refs: { ciRun: "ci-replace-1" },
+      idempotencyKey: "replace-undelivered-1",
+    });
+    await forgeOffline(root, firstId);
+
+    const replaced = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(replaced.error).toBeUndefined();
+    expect(replaced.data).toMatchObject({
+      setupState: "ready",
+      endpoints: 2,
+      newlyReplaced: true,
+      replaced: { endpointId: firstId, undeliveredMessages: 1 },
+    });
+    expect(replaced.data.completedSteps).toContain("replace-endpoint");
+  });
+
+  it("refuses --replace without positive offline proof and mutates nothing", async () => {
+    const root = await project("bus-setup-replace-liveness");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    // No forge: the incumbent's liveness is unknown (no detectable process), not offline.
+    const treeBefore = await walkTree(join(root, ".story", "bus"));
+
+    const rejected = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(rejected.error?.code).toBe("conflict");
+    expect(await walkTree(join(root, ".story", "bus"))).toEqual(treeBefore);
+  });
+
+  it("fails --replace validation pre-mutation for a bad uuid and an unknown id", async () => {
+    const root = await project("bus-setup-replace-validate");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const treeBefore = await walkTree(join(root, ".story", "bus"));
+
+    const badUuid = await setup(root, ["--task-id", "claude-third", "--replace", "not-a-uuid"]);
+    expect(badUuid.error?.code).toBe("invalid_input");
+    const unknown = await setup(root, ["--task-id", "claude-third", "--replace", randomUUID()]);
+    expect(unknown.error?.code).toBe("not_found");
+    expect(await walkTree(join(root, ".story", "bus"))).toEqual(treeBefore);
+  });
+
+  it("fails --replace on an uninitialized checkout before any mutation", async () => {
+    const root = await project("bus-setup-replace-fresh");
+    const parsed = await setup(root, ["--task-id", "claude-first", "--replace", randomUUID()]);
+    expect(parsed.error?.code).toBe("not_found");
+    expect(await busEnabled(root)).toBe(false);
+    expect(await pathExists(join(root, ".story", "bus"))).toBe(false);
+  });
+
+  it("is resumable: an identical --replace rerun after a full success stays idempotent", async () => {
+    const root = await project("bus-setup-replace-resume");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await forgeOffline(root, firstId);
+    const firstRun = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(firstRun.data).toMatchObject({ newlyReplaced: true });
+    const activeAfterFirst = await activeEndpointCount(root);
+
+    const rerun = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(rerun.error).toBeUndefined();
+    expect(rerun.data).toMatchObject({
+      setupState: "ready",
+      newlyReplaced: false,
+      replaced: { endpointId: firstId },
+    });
+    expect(await activeEndpointCount(root)).toBe(activeAfterFirst);
+  });
+
+  it("fails --replace at a retired endpoint with no same-task successor before any mutation", async () => {
+    const root = await project("bus-setup-replace-retired");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await forgeOffline(root, firstId);
+    await setup(root, ["--task-id", "claude-third", "--replace", firstId]); // first -> third
+    const treeBefore = await walkTree(join(root, ".story", "bus"));
+
+    // A DIFFERENT task cannot --replace the already-retired incumbent.
+    const rejected = await setup(root, ["--task-id", "claude-fourth", "--replace", firstId]);
+    expect(rejected.error?.code).toBe("not_found");
+    expect(rejected.error?.message).toMatch(/without --replace/);
+    // Zero mutation: the full runtime tree is byte-identical (no fourth endpoint minted).
+    expect(await walkTree(join(root, ".story", "bus"))).toEqual(treeBefore);
+  });
+
+  it("names `storybloq bus setup --replace` in the two-endpoint capacity conflict (F8)", async () => {
+    const root = await project("bus-setup-replace-f8");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const third = await setup(root, ["--task-id", "claude-third"]);
+    expect(third.error?.code).toBe("conflict");
+    expect(third.error?.message).toMatch(/storybloq bus setup --replace/);
+  });
+
+  it("surfaces a poll step when eager materialization fails but setup still succeeds", async () => {
+    const root = await project("bus-setup-replace-degraded");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    // Deliverable mail exists on the incumbent, so a poll instruction is legitimate.
+    await sendBusMessage(root, {
+      endpointId: await endpointIdForTask(root, "claude-second"),
+      clientTaskId: "claude-second",
+      threadKind: "question",
+      messageKind: "question",
+      severity: "medium",
+      body: "Undelivered before the incumbent went offline",
+      refs: { ciRun: "ci-degraded-1" },
+      idempotencyKey: "degraded-undelivered-1",
+    });
+    await forgeOffline(root, firstId);
+
+    __storeTesting.setMaterializeFailureHook(async () => { throw new Error("transient unreadable mailbox"); });
+    try {
+      const parsed = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.data).toMatchObject({ setupState: "ready", newlyReplaced: true });
+      expect((parsed.data.remainingSteps as string[]).join("\n")).toMatch(/storybloq bus poll/);
+      // Materialization failed, so the deliverable mail still sits on the predecessor: the
+      // count must be UNKNOWN (null), never a misleading zero from the empty successor.
+      expect(parsed.data.replaced).toMatchObject({ materialized: false, undeliveredMessages: null });
+
+      // The degraded poll instruction must also render in Markdown, and it must NOT also
+      // claim "no deliverable mail" (the contradictory summary the empty-successor count
+      // would otherwise produce).
+      const { stdout } = await runBusCli(root, [
+        "bus", "setup", "--format", "md", "--client", "claude", "--delivery", "poll",
+        "--task-id", "claude-third", "--replace", firstId,
+      ]);
+      expect(stdout).toMatch(/storybloq bus poll/);
+      expect(stdout).not.toMatch(/no deliverable mail/);
+      expect(stdout).toMatch(/not yet surfaced/);
+    } finally {
+      __storeTesting.setMaterializeFailureHook(null);
+    }
+  });
+
+  it("returns a resumable result (never throws) when the post-replacement count read fails", async () => {
+    const root = await project("bus-setup-replace-count-fail");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await sendBusMessage(root, {
+      endpointId: await endpointIdForTask(root, "claude-second"),
+      clientTaskId: "claude-second",
+      threadKind: "question",
+      messageKind: "question",
+      severity: "medium",
+      body: "Undelivered before the incumbent went offline",
+      refs: { ciRun: "ci-count-fail-1" },
+      idempotencyKey: "count-fail-undelivered-1",
+    });
+    await forgeOffline(root, firstId);
+
+    // joinEndpoint has already retired + created irreversibly by the time the count runs, so
+    // a transient count-read fault must NOT abort setup as a plain error. Materialization
+    // succeeds; only the follow-up count read fails.
+    __storeTesting.setCountFailureHook(async () => { throw new Error("transient count read fault"); });
+    try {
+      const parsed = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.data).toMatchObject({ setupState: "ready", newlyReplaced: true });
+      expect(parsed.data.replaced).toMatchObject({ materialized: true, undeliveredMessages: null });
+      expect((parsed.data.remainingSteps as string[]).join("\n")).toMatch(/confirm the inherited mail count/);
+
+      // The materialized-true + count-null Markdown branch must say the mail IS surfaced and
+      // point at the count-confirmation step, never "no deliverable mail" or "not yet
+      // surfaced" (a same-task rerun with the hook still active re-materializes idempotently).
+      const { stdout } = await runBusCli(root, [
+        "bus", "setup", "--format", "md", "--client", "claude", "--delivery", "poll",
+        "--task-id", "claude-third", "--replace", firstId,
+      ]);
+      expect(stdout).toMatch(/inherited mail is surfaced/);
+      expect(stdout).toMatch(/confirm the count/);
+      expect(stdout).not.toMatch(/no deliverable mail/);
+      expect(stdout).not.toMatch(/not yet surfaced/);
+    } finally {
+      __storeTesting.setCountFailureHook(null);
+    }
+  });
+
+  it("always runs materialization after replacement, even with no pre-existing mail", async () => {
+    const root = await project("bus-setup-replace-always-materialize");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await forgeOffline(root, firstId);
+
+    // Regression guard for the stale-zero skip: a peer can send to the still-active incumbent
+    // AFTER any pre-mutation count but BEFORE the retire, so materialization must ALWAYS run
+    // rather than being gated on a count that could be a stale zero. With no pre-existing mail
+    // the old code skipped materialization; forcing it to fail proves it now executes
+    // regardless (the failure surfaces a poll step). A skip would leave no poll step.
+    __storeTesting.setMaterializeFailureHook(async () => { throw new Error("materialization ran"); });
+    try {
+      const parsed = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+      expect(parsed.error).toBeUndefined();
+      expect(parsed.data).toMatchObject({ setupState: "ready", newlyReplaced: true });
+      expect((parsed.data.remainingSteps as string[]).join("\n")).toMatch(/storybloq bus poll/);
+    } finally {
+      __storeTesting.setMaterializeFailureHook(null);
+    }
+  });
+
+  it("reports no deliverable mail and emits no poll step when the incumbent has none", async () => {
+    const root = await project("bus-setup-replace-zero");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await forgeOffline(root, firstId);
+
+    // Materialization runs (a no-op with nothing to inherit) and succeeds, so the summary
+    // honestly reports no deliverable mail and no poll instruction.
+    const { stdout } = await runBusCli(root, [
+      "bus", "setup", "--format", "md", "--client", "claude", "--delivery", "poll",
+      "--task-id", "claude-third", "--replace", firstId,
+    ]);
+    expect(stdout).toMatch(/no deliverable mail/);
+    expect(stdout).not.toMatch(/storybloq bus poll/);
+  });
+
+  it("materializes replacement-window mail into the successor's physical mailbox before any poll", async () => {
+    const root = await project("bus-setup-replace-window");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    // Mail present on the still-active incumbent at replacement time (the replacement-window
+    // arrival the stale-zero skip used to strand on the retired mailbox).
+    await sendBusMessage(root, {
+      endpointId: await endpointIdForTask(root, "claude-second"),
+      clientTaskId: "claude-second",
+      threadKind: "question",
+      messageKind: "question",
+      severity: "medium",
+      body: "Arrived at the incumbent just before replacement",
+      refs: { ciRun: "ci-window-1" },
+      idempotencyKey: "replace-window-1",
+    });
+    await forgeOffline(root, firstId);
+
+    const replaced = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(replaced.error).toBeUndefined();
+    expect(replaced.data).toMatchObject({
+      setupState: "ready",
+      replaced: { endpointId: firstId, undeliveredMessages: 1, materialized: true },
+    });
+    const successorId = replaced.data.endpointId as string;
+
+    // The successor's PHYSICAL mailbox holds the inherited pointer BEFORE any explicit poll,
+    // and the live delivery hooks (which gate on the physical mailbox) can detect it.
+    const paths = await resolveBusPaths(root, false);
+    expect(await mailboxHasPointerCandidate(paths, successorId)).toBe(true);
+    expect(await readMailboxHighwater(paths, successorId)).toMatchObject({ known: true });
+  });
+
+  // Corrupt the incumbent's own predecessor link so the SUCCESSOR's chain is corrupt
+  // (successor -> incumbent -> <missing>), forcing materializeSuccessorMailbox to RETURN
+  // a succession-chain finding (not throw).
+  async function corruptIncumbentChain(root: string, incumbentId: string): Promise<void> {
+    const path = join(root, ".story", "bus", "endpoints", `${incumbentId}.json`);
+    const record = JSON.parse(await readFile(path, "utf-8"));
+    await writeFile(path, JSON.stringify({
+      ...record,
+      predecessorEndpointId: randomUUID(),
+    }, null, 2) + "\n", "utf-8");
+  }
+
+  it("surfaces a doctor step (not a completed materialization) on a succession-chain finding", async () => {
+    const root = await project("bus-setup-chain-finding");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    // Deliverable mail so materialization runs (and surfaces the chain finding).
+    await sendBusMessage(root, {
+      endpointId: await endpointIdForTask(root, "claude-second"),
+      clientTaskId: "claude-second",
+      threadKind: "question",
+      messageKind: "question",
+      severity: "medium",
+      body: "Undelivered before the chain was corrupted",
+      refs: { ciRun: "ci-chain-1" },
+      idempotencyKey: "chain-undelivered-1",
+    });
+    await corruptIncumbentChain(root, firstId);
+    await forgeOffline(root, firstId);
+
+    const parsed = await setup(root, ["--task-id", "claude-third", "--replace", firstId]);
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.data).toMatchObject({ setupState: "ready", newlyReplaced: true });
+    expect((parsed.data.remainingSteps as string[]).join("\n")).toMatch(/storybloq bus doctor/);
+    expect(parsed.data.completedSteps as string[]).not.toContain("materialize-succession");
+
+    // The doctor step also renders in Markdown.
+    const { stdout } = await runBusCli(root, [
+      "bus", "setup", "--format", "md", "--client", "claude", "--delivery", "poll",
+      "--task-id", "claude-third", "--replace", firstId,
+    ]);
+    expect(stdout).toMatch(/storybloq bus doctor/);
+  });
+
+  it("surfaces a materialization warning on the deprecated join --replace path", async () => {
+    const root = await project("bus-join-chain-finding");
+    await setup(root, ["--task-id", "claude-first"]);
+    await setup(root, ["--task-id", "claude-second"]);
+    const firstId = await endpointIdForTask(root, "claude-first");
+    await corruptIncumbentChain(root, firstId);
+    await forgeOffline(root, firstId);
+
+    const { stdout } = await runBusCli(root, [
+      "bus", "join", "--client", "claude", "--surface", "claude_cli",
+      "--task-id", "claude-third", "--replace", firstId,
+    ]);
+    expect(stdout).toMatch(/storybloq bus doctor/);
   });
 });

@@ -9,7 +9,10 @@ import {
   BUS_EVIDENCE_GITIGNORE_ENTRY,
   checkBusShip,
   classifyBusRuntime,
+  countUndeliveredMessages,
   detectClientSurface,
+  endpointLiveness,
+  materializeSuccessorMailbox,
   evaluateV1Drain,
   exportBusThread,
   findEndpointForTask,
@@ -500,12 +503,18 @@ function renderStatusMarkdown(summary: BusSummary): string {
   return `Bus: ${state}; ${connected}; ${deliveryLabel(summary.deliveryCapabilities)}.`;
 }
 
+// ISS-871: canonical UUID shape for the pre-mutation --replace preflight (joinEndpoint
+// under lock remains the authority; this only fails fast before any mutation).
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface BusSetupArgs {
   readonly client?: StorybloqClient;
   readonly taskId?: string;
   readonly surface?: BusSurface;
   readonly delivery: "live" | "poll";
   readonly forceArchive: boolean;
+  // ISS-871: endpoint id of a proven-offline incumbent to replace with this task's endpoint.
+  readonly replace?: string;
 }
 
 // D5: exact per-message record of what a --force-archive upgrade archived. The
@@ -556,6 +565,18 @@ interface BusSetupResult {
   readonly remainingSteps: string[];
   readonly handoff: string | null;
   readonly nextActions: string[];
+  // ISS-871/ISS-872: succession outcome. `replaced` is derived from the returned
+  // endpoint's predecessor link, so an idempotent same-task rerun still reports it;
+  // `newlyReplaced` is true only when THIS invocation performed the retire+create.
+  // `materialized` reflects solely whether eager materialization completed.
+  // `undeliveredMessages` counts canonically-deliverable inherited mail from the
+  // SUCCESSOR's mailbox and is meaningful only after a successful materialization. It is
+  // `null` (unknown) in EITHER of two cases: (a) materialization did not complete, so the
+  // inherited mail still sits on the predecessor and a zero would falsely read as "no mail";
+  // or (b) the post-mutation count read failed AFTER a successful materialization, so the
+  // mail IS surfaced and only the count is unknown.
+  readonly replaced: { readonly endpointId: string; readonly undeliveredMessages: number | null; readonly materialized: boolean } | null;
+  readonly newlyReplaced: boolean;
 }
 
 async function enableHooksForClient(root: string, client: BusClient): Promise<void> {
@@ -761,11 +782,21 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
     throw new BusError("invalid_input", "Cannot determine the client surface safely; pass --surface explicitly");
   }
 
-  if (await classifyBusRuntime(root) === "v1") {
+  const runtimeKind = await classifyBusRuntime(root);
+  if (runtimeKind === "v1") {
     await preflightV1Drain(root, taskId, args.forceArchive);
   }
   if (args.delivery === "live") {
     await preflightLiveHooks(client);
+  }
+  // ISS-871: `--replace` targets an existing v2 incumbent. On any non-v2 runtime
+  // (fresh checkout, or a v1 runtime being upgraded) there is nothing to replace, so
+  // fail HERE, before initializeBus, to keep the zero-mutation contract intact.
+  if (args.replace && runtimeKind !== "v2") {
+    throw new BusError(
+      "not_found",
+      "Cannot --replace: this checkout has no active v2 Bus endpoint to replace. Run `storybloq bus setup` without --replace to connect.",
+    );
   }
   // v2 capacity/joinability preflight. initializeBus mutates features.bus,
   // .story/.gitignore, and the runtime BEFORE joinEndpoint runs, so a capacity
@@ -773,7 +804,7 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
   // preflight contract. Replicate joinEndpoint's registry + two-endpoint rule here
   // so a full runtime with no endpoint owned by this task fails BEFORE any mutation.
   // A same-task rejoin is still allowed (joinEndpoint returns the existing endpoint).
-  if (await classifyBusRuntime(root) === "v2") {
+  if (runtimeKind === "v2") {
     const listed = await listEndpoints(root);
     if (listed.findings.length > 0) {
       throw new BusError("corrupt", `Endpoint registry is corrupt: ${listed.findings[0]}`);
@@ -781,11 +812,39 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
     const sameTask = listed.endpoints.find((endpoint) =>
       !endpoint.retiredAt && endpoint.client === client && endpoint.clientTaskId === taskId,
     );
+    // ISS-871: validate --replace in joinEndpoint's exact order (uuid -> active
+    // incumbent -> proven offline). UX-only: joinEndpoint under lock stays the
+    // authority. Skip ALL replace validation when a same-task endpoint already
+    // exists -- a rerun after a fully-successful replace hits joinEndpoint's same-task
+    // early return (which ignores --replace), so the rerun stays idempotent.
+    if (args.replace && !sameTask) {
+      if (!UUID_PATTERN.test(args.replace)) {
+        throw new BusError("invalid_input", "Invalid endpoint id for --replace");
+      }
+      const incumbent = listed.endpoints.find(
+        (endpoint) => !endpoint.retiredAt && endpoint.endpointId === args.replace,
+      );
+      if (!incumbent) {
+        throw new BusError(
+          "not_found",
+          "No active endpoint matches the --replace id. If it was already replaced, rerun `storybloq bus setup` without --replace.",
+        );
+      }
+      const liveness = await endpointLiveness(incumbent);
+      if (liveness !== "offline") {
+        throw new BusError(
+          "conflict",
+          `Endpoint ${incumbent.endpointId} is ${liveness}. Replacement requires positive offline proof.`,
+        );
+      }
+    }
     const active = listed.endpoints.filter((endpoint) => !endpoint.retiredAt);
-    if (!sameTask && active.length >= 2) {
+    // The replace target is about to be retired, so it never counts toward capacity.
+    const activeAfterReplace = active.filter((endpoint) => endpoint.endpointId !== args.replace);
+    if (!sameTask && activeAfterReplace.length >= 2) {
       throw new BusError(
         "conflict",
-        "The Bus already has two active endpoints. Pass --replace <endpoint-id> with a proven-offline incumbent to take its place.",
+        "The Bus already has two active endpoints. Run `storybloq bus setup --replace <endpoint-id>` with a proven-offline incumbent to take its place.",
       );
     }
   }
@@ -812,7 +871,7 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
   // existing endpoint. Setup is the primary resumable recovery command, so it
   // must be able to repair that layout. Refresh the session-start fields
   // afterward only when the endpoint already existed.
-  const joined = await joinEndpoint(root, { client, clientTaskId: taskId, surface });
+  const joined = await joinEndpoint(root, { client, clientTaskId: taskId, surface, replace: args.replace });
   let endpoint: BusEndpoint;
   if (joined.existing) {
     endpoint = await refreshEndpointForSessionStart(root, joined.endpoint.endpointId, taskId);
@@ -820,6 +879,61 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
   } else {
     endpoint = joined.endpoint;
     completedSteps.push("join-endpoint");
+  }
+
+  // ISS-871/ISS-872: succession outcome + eager materialization. `replaced` is derived
+  // from the returned endpoint's predecessor link (so an idempotent same-task rerun still
+  // reports it); `newlyReplaced` is true only when THIS call performed the retire+create.
+  let replaced: BusSetupResult["replaced"] = null;
+  let newlyReplaced = false;
+  if (args.replace && joined.endpoint.predecessorEndpointId === args.replace) {
+    newlyReplaced = !joined.existing;
+    if (newlyReplaced) completedSteps.push("replace-endpoint");
+    // Surface the inherited mail into the successor's PHYSICAL mailbox now, so the live
+    // hooks fire without an explicit poll. ALWAYS run, regardless of any count: a peer can
+    // send to the still-active incumbent between the preflight and joinEndpoint's retire,
+    // so a stale pre-mutation zero must never be authority to skip delivery work (an
+    // arrived-during-replacement message would otherwise sit only in the retired mailbox,
+    // invisible to the successor's live hooks until an explicit poll). Materialization is a
+    // no-op when there is genuinely nothing to inherit. Best-effort: on a thrown I/O failure
+    // setup still succeeds and a degraded step tells the user to poll (the next poll
+    // materializes idempotently, so mail is deferred, never lost). A NON-thrown
+    // succession-chain finding is surfaced as a doctor step; an `endpoint_inactive` result
+    // (a concurrent retire/replace) is NOT reported as a completed materialization.
+    let materialized = false;
+    try {
+      const result = await materializeSuccessorMailbox(root, joined.endpoint);
+      const chainFinding = result.findings.find((finding) => finding.includes("succession chain"));
+      if (chainFinding) {
+        remainingSteps.push(`run \`storybloq bus doctor\` to inspect a succession-chain problem blocking inherited mail (${chainFinding})`);
+      } else if (result.status === "endpoint_inactive") {
+        remainingSteps.push("run `storybloq bus doctor`: the endpoint was retired or replaced before its inherited mail could be surfaced");
+      } else {
+        completedSteps.push("materialize-succession");
+        materialized = true;
+      }
+    } catch (err) {
+      remainingSteps.push(`run \`storybloq bus poll\` to surface the previous endpoint's undelivered mail (materialization deferred: ${err instanceof Error ? err.message : String(err)})`);
+    }
+    // Count ONLY once materialization completed, reading the SUCCESSOR's mailbox: the sweep
+    // moved the inherited pointers off the retired predecessor and onto the successor, and
+    // the count is chain-aware, so this reflects any mail that arrived at the still-active
+    // incumbent during the replacement window rather than a pre-mutation snapshot. When
+    // materialization did NOT complete, the inherited mail still sits on the predecessor, so
+    // counting the empty successor would misreport zero -- leave the count unknown (null) and
+    // let the "not yet surfaced" wording drive the user to the remaining step. joinEndpoint
+    // has already mutated irreversibly, so a transient count-read error must NEVER throw
+    // here (that would abort setup as a plain error and drop the resumable report); catch it,
+    // leave the count unknown, and add a doctor step.
+    let undeliveredMessages: number | null = null;
+    if (materialized) {
+      try {
+        undeliveredMessages = await countUndeliveredMessages(root, joined.endpoint.endpointId);
+      } catch (err) {
+        remainingSteps.push(`run \`storybloq bus doctor\` to confirm the inherited mail count (count read failed: ${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+    replaced = { endpointId: args.replace, undeliveredMessages, materialized };
   }
 
   // Enable hooks for THIS client when live; when poll, actively turn delivery OFF
@@ -863,6 +977,8 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
     remainingSteps,
     handoff,
     nextActions: [...summary.nextActions],
+    replaced,
+    newlyReplaced,
   };
 }
 
@@ -878,6 +994,23 @@ function renderSetupMarkdown(result: BusSetupResult): string {
         lines.push(`- ${formatArchivedUnread(entry)}`);
       }
     }
+  }
+  if (result.replaced) {
+    const verb = result.newlyReplaced ? "Replaced" : "Already replaced";
+    const mail = result.replaced.undeliveredMessages;
+    // Order matters: only claim "no deliverable mail" after a SUCCESSFUL materialization
+    // (mail === 0 with the mail actually surfaced). When materialization did not complete
+    // the successor is empty/partial, so the "not yet surfaced" wording must win over a
+    // misleading zero. A null count after a successful materialization means the follow-up
+    // count read failed -- surface a doctor step, never a false zero.
+    const tail = !result.replaced.materialized
+      ? "Inherited mail is not yet surfaced; complete the remaining step(s) below."
+      : mail === 0
+        ? "It had no deliverable mail."
+        : mail === null
+          ? "Its inherited mail is surfaced; run `storybloq bus doctor` to confirm the count."
+          : `${mail} undelivered message(s) from it will surface on your next poll.`;
+    lines.push(`${verb} proven-offline endpoint ${result.replaced.endpointId}. ${tail}`);
   }
   if (result.trackedChanges.length > 0) {
     lines.push(`Tracked changes: ${result.trackedChanges.join(", ")}. Review and commit them; setup never auto-commits.`);
@@ -926,6 +1059,10 @@ export function registerBusCommand(yargs: Argv): Argv {
             describe: "Client surface when process ancestry cannot determine it",
           })
           .option("delivery", { type: "string", choices: ["live", "poll"] as const, default: "live" })
+          .option("replace", {
+            type: "string",
+            describe: "Endpoint id of a proven-offline incumbent to replace with this task's endpoint",
+          })
           .option("force-archive", {
             type: "boolean",
             default: false,
@@ -938,6 +1075,7 @@ export function registerBusCommand(yargs: Argv): Argv {
             taskId: argv["task-id"] as string | undefined,
             surface: argv.surface as BusSurface | undefined,
             delivery: (argv.delivery as "live" | "poll" | undefined) ?? "live",
+            replace: argv.replace as string | undefined,
             forceArchive: argv["force-archive"] === true,
           }), renderSetupMarkdown, (result) => result.setupState === "invalid");
         },
@@ -969,9 +1107,24 @@ export function registerBusCommand(yargs: Argv): Argv {
               surface: argv.surface as BusSurface | undefined,
               replace: argv.replace as string | undefined,
             });
-            return { ...joined, deprecation };
-          }, ({ endpoint, existing }) =>
-            `${deprecation}\n${existing ? "Using" : "Joined"} endpoint ${endpoint.endpointId} (${endpoint.surface}).`);
+            // ISS-872: eager materialization so a replace via the deprecated path still
+            // surfaces the incumbent's inherited mail to the live hooks. Best-effort, but
+            // never silent: a thrown failure or a succession-chain finding is reported so
+            // the user knows to run `storybloq bus poll` / `bus doctor`.
+            let materializeNote: string | null = null;
+            if (joined.endpoint.predecessorEndpointId) {
+              try {
+                const materialized = await materializeSuccessorMailbox(root, joined.endpoint);
+                const chainFinding = materialized.findings.find((finding) => finding.includes("succession chain"));
+                if (chainFinding) materializeNote = `Inherited mail is blocked by a succession-chain problem (${chainFinding}); run \`storybloq bus doctor\`.`;
+                else if (materialized.status === "endpoint_inactive") materializeNote = "The endpoint was retired or replaced before its inherited mail could be surfaced; run `storybloq bus doctor`.";
+              } catch (err) {
+                materializeNote = `Inherited mail was not surfaced eagerly (${err instanceof Error ? err.message : String(err)}); run \`storybloq bus poll\`.`;
+              }
+            }
+            return { ...joined, deprecation, materializeNote };
+          }, ({ endpoint, existing, materializeNote }) =>
+            `${deprecation}\n${existing ? "Using" : "Joined"} endpoint ${endpoint.endpointId} (${endpoint.surface}).${materializeNote ? `\n${materializeNote}` : ""}`);
         },
       )
       .command(

@@ -315,13 +315,16 @@ describe("Storybloq Bus readiness (D7)", () => {
     expect(waitingDoctor.stdout).toContain("Storage healthy; setup waiting for a peer.");
   });
 
-  it("reports unacked pointers addressed to a retired endpoint", async () => {
+  it("reports an undelivered thread to a retired recipient while the other participant is active", async () => {
     const value = await fx();
-    await reviewSend(value); // unacked, addressed to implementer
+    await reviewSend(value); // unacked, addressed to implementer; reviewer stays active
     await leaveEndpoint(value.root, value.implementer.endpointId, value.implementerTaskId);
     const doctor = await busDoctor(value.root);
     expect(doctor.healthy).toBe(false);
-    expect(doctor.findings.join("\n")).toContain("addressed to a retired endpoint");
+    // The reviewer is still active and can resolve the thread, so it is recoverable,
+    // never falsely reported as all-participants-retired stranded.
+    expect(doctor.findings.join("\n")).toContain("to a retired recipient");
+    expect(doctor.findings.join("\n")).not.toContain("stranded");
   });
 
   it("keeps endpoint UUIDs out of the doctor Markdown even on an endpoint-specific finding", async () => {
@@ -332,14 +335,14 @@ describe("Storybloq Bus readiness (D7)", () => {
     // JSON retains the raw endpoint UUID for correlation.
     const doctor = await busDoctor(value.root);
     expect(doctor.healthy).toBe(false);
-    expect(doctor.findings.join("\n")).toContain("addressed to a retired endpoint");
+    expect(doctor.findings.join("\n")).toContain("to a retired recipient");
     expect(doctor.findings.join("\n")).toContain(value.implementer.endpointId);
 
     // The Markdown render redacts every raw UUID even when a finding names an
     // endpoint (D7): the endpoint-specific finding is present but no 8-4-4-4-12
     // UUID leaks.
     const { stdout } = await runBusCli(value.root, ["bus", "doctor", "--format", "md"]);
-    expect(stdout).toContain("addressed to a retired endpoint");
+    expect(stdout).toContain("to a retired recipient");
     expect(containsUuid(stdout)).toBe(false);
     expect(stdout).not.toContain(value.implementer.endpointId);
   });

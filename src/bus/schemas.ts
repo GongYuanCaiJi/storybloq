@@ -254,6 +254,14 @@ export const BusEndpointSchema = z.object({
   // gains it on the next durable write. Consumers treat undefined/null the same
   // ("not activated"). on-stop coverage derives from hook policy, not activation.
   toolHookActivation: BusHookActivationSchema.nullable().optional(),
+  // ISS-872: succession back-link. When this endpoint was minted to replace a
+  // proven-offline incumbent, it carries that incumbent's id so the read/ack/
+  // administer seams can redeliver the predecessor's undelivered mail to this
+  // successor and accept its authority over the inherited threads. Walked as a
+  // bounded predecessor CHAIN (see endpointAddressees) so authority propagates
+  // transitively across repeated replacement. Additive, undefaulted, passthrough-
+  // safe: an older endpoint record parses this as undefined (no predecessor).
+  predecessorEndpointId: UuidSchema.optional(),
   retiredAt: IsoTimestampSchema.nullable(),
   retiredReason: z.string().min(1).max(1024).nullable(),
 }).passthrough();

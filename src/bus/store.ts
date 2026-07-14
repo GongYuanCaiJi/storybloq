@@ -100,6 +100,8 @@ const POINTER_FILENAME = /^(\d{12})-([0-9a-f-]{36})\.json$/;
 // lstat succeeds and BEFORE its readdir, so a test can delete/swap the directory mid-scan
 // and prove the probe escalates (throws) rather than reporting a false "empty".
 let afterMailboxLstatHook: ((dir: string) => Promise<void>) | null = null;
+let materializeFailureHook: (() => Promise<void>) | null = null;
+let countFailureHook: (() => Promise<void>) | null = null;
 const RECEIPT_FILENAME = /^([a-f0-9]{64})\.json$/;
 const ACTIONABLE_KINDS = new Set<BusMessageKind>(["issue_notice", "question", "reply", "patch_request"]);
 
@@ -173,6 +175,78 @@ function pointerFilename(pointer: BusMailboxPointer): string {
 
 function participantsInclude(thread: BusThreadRecord, endpointId: string): boolean {
   return thread.participants[0] === endpointId || thread.participants[1] === endpointId;
+}
+
+// ISS-872: a successor's bounded predecessor-chain walk is capped so a corrupt
+// on-disk record can never make the read seams loop or trust an unbounded lineage.
+// Unreachable in practice: every hop requires a proven-offline replace.
+const MAX_SUCCESSION_DEPTH = 64;
+
+// ISS-872: the set of recipient ids whose mail this endpoint may read/ack/administer
+// -- its own id plus its bounded predecessor CHAIN (the endpoint it replaced, that
+// endpoint's predecessor, ...). Authority propagates transitively across repeated
+// replacement (B->S->T) so a second replacement does not re-strand the original
+// recipient's mail (T must inherit B, not just S). A successor LEAVING without a
+// replacement is out of scope here (the deferred all-participants-retired case, ISS-873).
+// Pure over the already-loaded endpoint list (no I/O); every caller already has the
+// list. Security-sensitive:
+// a corrupt chain (cycle, missing ancestor, or over-depth) must NEVER grant
+// authority, so it fails CLOSED to self-only and reports `corrupt` for the caller
+// (doctor) to surface. Used ONLY by the read/ack/administer seams, never send/reply.
+function endpointAddressees(
+  endpoint: BusEndpoint,
+  allEndpoints: readonly BusEndpoint[],
+): { ids: string[]; corrupt: string | null } {
+  const byId = new Map(allEndpoints.map((candidate) => [candidate.endpointId, candidate]));
+  const ids: string[] = [endpoint.endpointId];
+  const visited = new Set<string>([endpoint.endpointId]);
+  let current: BusEndpoint = endpoint;
+  let depth = 0;
+  while (current.predecessorEndpointId) {
+    const predecessorId = current.predecessorEndpointId;
+    if (visited.has(predecessorId)) {
+      return { ids: [endpoint.endpointId], corrupt: `predecessor chain cycles at ${predecessorId}` };
+    }
+    if (++depth > MAX_SUCCESSION_DEPTH) {
+      return { ids: [endpoint.endpointId], corrupt: `predecessor chain exceeds max depth ${MAX_SUCCESSION_DEPTH}` };
+    }
+    const ancestor = byId.get(predecessorId);
+    // A retired ancestor keeps its record (retire only sets retiredAt), so a MISSING
+    // ancestor means a deleted/tampered endpoint file -- corruption, not a normal end
+    // of chain. Fail closed rather than silently truncate the inherited authority.
+    if (!ancestor) {
+      return { ids: [endpoint.endpointId], corrupt: `predecessor chain references missing ancestor ${predecessorId}` };
+    }
+    // A legitimate predecessor was retired specifically BY replacement (joinEndpoint
+    // stamps retiredReason "replaced"). A link to an ACTIVE endpoint, or to one retired
+    // by `leave` or forced retirement, is NOT a real succession and must never grant
+    // authority over that endpoint's mail/threads -- fail closed to self-only. This is a
+    // security boundary: UUID existence alone cannot establish inherited authority.
+    if (!ancestor.retiredAt || ancestor.retiredReason !== "replaced") {
+      return { ids: [endpoint.endpointId], corrupt: `predecessor ${predecessorId} was not retired by replacement` };
+    }
+    visited.add(predecessorId);
+    ids.push(predecessorId);
+    current = ancestor;
+  }
+  return { ids, corrupt: null };
+}
+
+// ISS-872: a pointer is canonically valid iff its thread folds verified and the entry
+// it names is a message whose hash, id, and recipient match the pointer (and the
+// recipient is one this endpoint may receive). Mirrors pollBus's delivery validation.
+// The succession sweep uses this so a corrupt pointer (valid envelope, wrong canonical
+// binding) never authorizes deleting an ancestor's only valid pointer, and a
+// canonically mismatched ancestor pointer is preserved as corruption evidence.
+function pointerMatchesCanonical(
+  folded: FoldedBusThread | null,
+  pointer: BusMailboxPointer,
+  addressees: readonly string[],
+): boolean {
+  if (!folded || folded.integrity !== "verified") return false;
+  const entry = folded.entries[pointer.entrySeq - 1];
+  return !!entry && entry.type === "message" && entry.entryHash === pointer.entryHash &&
+    entry.payload.messageId === pointer.messageId && addressees.includes(entry.payload.to);
 }
 
 function makeEntry<T extends BusEntry["type"]>(input: {
@@ -1286,11 +1360,18 @@ async function recoverPendingIntent(
 
 async function reconcileEndpointMailbox(
   paths: BusPaths,
-  endpointId: string,
+  endpoint: BusEndpoint,
+  allEndpoints: readonly BusEndpoint[],
 ): Promise<{ pointers: BusMailboxPointer[]; findings: string[] }> {
+  const endpointId = endpoint.endpointId;
   return withHardenedLock(join(paths.locks, `mailbox-reconcile-${endpointId}.lock`), async () => {
     const mailbox = endpointMailboxPath(paths, endpointId);
     const findings: string[] = [];
+    // ISS-872: this endpoint redelivers mail addressed to itself OR to any ancestor in
+    // its bounded predecessor chain (a successor inherits its lineage's undelivered
+    // mail). A corrupt chain fails closed to self-only and surfaces a finding.
+    const { ids: addressees, corrupt: chainCorrupt } = endpointAddressees(endpoint, allEndpoints);
+    if (chainCorrupt) findings.push(`succession chain: ${chainCorrupt}`);
     for (const filename of await listRegularJsonFiles(join(mailbox, "pending"))) {
       // A dot-prefixed pending intent is unexpected (temp files are never
       // dot-prefixed); report it rather than let the POINTER_FILENAME skip hide it.
@@ -1322,8 +1403,11 @@ async function reconcileEndpointMailbox(
         findings.push(`${threadId}: ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
+      // A resolved thread is terminal: its messages need no delivery (checkBusShip exempts
+      // them and the ship gate is already clear), so never recreate pointers for it.
+      if (folded.state === "resolved") continue;
       for (const entry of folded.entries) {
-        if (entry.type !== "message" || entry.payload.to !== endpointId ||
+        if (entry.type !== "message" || !addressees.includes(entry.payload.to) ||
             folded.acknowledgments.has(entry.payload.messageId) || known.has(entry.payload.messageId)) continue;
         const latest = await mailboxPointers(paths, endpointId);
         findings.push(...latest.findings);
@@ -1332,6 +1416,9 @@ async function reconcileEndpointMailbox(
           continue;
         }
         const mailboxSeq = await allocateMailboxSeq(paths, endpointId);
+        // The pointer is stamped with THIS endpoint's id (it lives in this mailbox) even
+        // when the thread entry's `to` is an ancestor; the read seams accept it because
+        // the ancestor's `to` is in this endpoint's addressee set.
         const pointer = makePointer(endpointId, mailboxSeq, entry);
         try {
           await durableCreate(join(mailbox, pointerFilename(pointer)), serialize(pointer));
@@ -1341,9 +1428,150 @@ async function reconcileEndpointMailbox(
         }
       }
     }
+
+    // ISS-872 succession sweep. After redelivery, reclaim retired ancestors' now-
+    // redundant pointer files so doctor stops flagging them -- but ONLY files that
+    // parse, match their own envelope+filename, AND whose message is already
+    // redelivered to this successor or already acked. Anything else (unparseable,
+    // mismatched, or not-yet-redelivered) is PRESERVED as corruption/loss evidence
+    // with a finding (mirrors mailboxPointers' fail-closed policy). Never unlink by
+    // filename alone. Runs LAST so every unacked message keeps >=1 pointer throughout.
+    const ancestors = addressees.filter((id) => id !== endpointId);
+    if (ancestors.length > 0) {
+      const foldCache = new Map<string, FoldedBusThread | null>();
+      const foldFor = async (threadId: string): Promise<FoldedBusThread | null> => {
+        if (!foldCache.has(threadId)) {
+          try {
+            foldCache.set(threadId, await foldBusThread(paths.projectRoot, threadId));
+          } catch {
+            foldCache.set(threadId, null);
+          }
+        }
+        return foldCache.get(threadId) ?? null;
+      };
+      // Canonically-verified redelivered ids: a corrupt successor pointer (valid
+      // envelope, wrong canonical binding) must NOT authorize deleting an ancestor's
+      // only valid pointer, so require each successor pointer to match its canonical entry.
+      const afterScan = await mailboxPointers(paths, endpointId);
+      const delivered = new Set<string>();
+      for (const pointer of afterScan.pointers) {
+        if (pointerMatchesCanonical(await foldFor(pointer.threadId), pointer, addressees)) {
+          delivered.add(pointer.messageId);
+        }
+      }
+      for (const ancestorId of ancestors) {
+        const ancestorMailbox = endpointMailboxPath(paths, ancestorId);
+        for (const directory of [ancestorMailbox, join(ancestorMailbox, "pending")]) {
+          for (const filename of await listRegularJsonFiles(directory)) {
+            if (filename.startsWith(".")) {
+              findings.push(`${ancestorId} mailbox: ${filename}: unexpected dot-prefixed entry`);
+              continue;
+            }
+            if (!POINTER_FILENAME.test(filename)) continue;
+            let pointer: BusMailboxPointer;
+            try {
+              pointer = await readJsonNoFollow(join(directory, filename), BusMailboxPointerSchema);
+            } catch (err) {
+              findings.push(`${ancestorId} mailbox: ${filename}: ${err instanceof Error ? err.message : String(err)}`);
+              continue;
+            }
+            if (pointer.endpointId !== ancestorId || pointerFilename(pointer) !== filename) {
+              findings.push(`${ancestorId} mailbox: ${filename}: pointer envelope does not match its endpoint or filename`);
+              continue;
+            }
+            // Never unlink a pointer that does not match a VERIFIED canonical entry
+            // (preserve corruption evidence, mirroring mailboxPointers' fail-closed policy).
+            const folded = await foldFor(pointer.threadId);
+            if (!pointerMatchesCanonical(folded, pointer, addressees)) {
+              findings.push(`${ancestorId} mailbox: ${filename}: retained; pointer does not match a verified thread entry`);
+              continue;
+            }
+            // Reclaimable when redelivered, already acked, or in a resolved (terminal)
+            // thread -- none of which need a live pointer.
+            const redundant = delivered.has(pointer.messageId) ||
+              (folded?.acknowledgments.has(pointer.messageId) ?? false) ||
+              folded?.state === "resolved";
+            if (redundant) {
+              await durableUnlink(join(directory, filename)).catch(() => undefined);
+            } else {
+              findings.push(`${ancestorId} mailbox: ${filename}: retained; message ${pointer.messageId} not yet redelivered to successor ${endpointId}`);
+            }
+          }
+        }
+      }
+    }
+
     current = await mailboxPointers(paths, endpointId);
     return { pointers: current.pointers, findings: [...new Set([...findings, ...current.findings])] };
   });
+}
+
+// ISS-872: eager successor materialization. Runs reconcile's pointer-creation pass
+// so a fresh successor's PHYSICAL mailbox holds its inherited pointers immediately
+// after `setup --replace`, before any explicit poll. The live delivery hooks gate on
+// the physical mailbox (readMailboxHighwater / mailboxHasPointerCandidate), so without
+// this the inherited mail would stay invisible to the on-stop/on-tool tiers until the
+// user happened to poll. reconcile advances NO delivery cursor (pollBus does that), so
+// this does not mark the inherited mail as surfaced. Best-effort by contract: the
+// caller treats a throw as a degraded-delivery signal and the next real poll's reconcile
+// materializes idempotently, so mail is never lost, only deferred.
+export type MaterializeStatus = "materialized" | "endpoint_inactive";
+
+export async function materializeSuccessorMailbox(
+  root: string,
+  endpoint: BusEndpoint,
+): Promise<{ status: MaterializeStatus; pointers: BusMailboxPointer[]; findings: string[] }> {
+  if (materializeFailureHook) await materializeFailureHook();
+  const paths = await resolveInitializedBusPaths(root);
+  const { endpoints } = await listEndpoints(paths.projectRoot);
+  // Trust the REGISTRY, not the caller-supplied object: a stale/forged record (or a
+  // concurrent retire/replace between join and materialization) must never supply a
+  // different predecessor chain than the current canonical endpoint. Look the endpoint up
+  // by id and reconcile against that record only. A missing or retired record means there
+  // is nothing to materialize for this endpoint -- reported as `endpoint_inactive` (not a
+  // silent success) so the caller does not claim materialization completed.
+  const canonical = endpoints.find((candidate) => candidate.endpointId === endpoint.endpointId);
+  if (!canonical || canonical.retiredAt) return { status: "endpoint_inactive", pointers: [], findings: [] };
+  const result = await reconcileEndpointMailbox(paths, canonical, endpoints);
+  return { status: "materialized", ...result };
+}
+
+// ISS-872: read-only count of the distinct DELIVERABLE messages physically present in an
+// endpoint's mailbox (canonically verified, unacknowledged, in an unresolved thread), so
+// `setup --replace` reports only mail the successor will actually surface -- never
+// acked/resolved/corrupt residue. Chain-aware: a message counts when its canonical
+// recipient is any endpoint in this endpoint's bounded predecessor chain, so inherited
+// mail (addressed to a retired predecessor) counts when read from the SUCCESSOR's mailbox
+// after materialization has swept it across. A peer's chain is just itself, so a
+// wrong-mailbox pointer addressed to someone outside the chain is still excluded. Counted
+// AFTER replacement + materialization, so a message that arrived at the incumbent during
+// the replacement window is included -- never a pre-mutation snapshot.
+export async function countUndeliveredMessages(root: string, endpointId: string): Promise<number> {
+  if (countFailureHook) await countFailureHook();
+  const paths = await resolveInitializedBusPaths(root);
+  const { endpoints } = await listEndpoints(paths.projectRoot);
+  const canonical = endpoints.find((candidate) => candidate.endpointId === endpointId);
+  const addressees = new Set(canonical ? endpointAddressees(canonical, endpoints).ids : [endpointId]);
+  const { pointers } = await mailboxPointers(paths, endpointId);
+  const foldCache = new Map<string, FoldedBusThread | null>();
+  const counted = new Set<string>();
+  for (const pointer of pointers) {
+    if (!foldCache.has(pointer.threadId)) {
+      try {
+        foldCache.set(pointer.threadId, await foldBusThread(paths.projectRoot, pointer.threadId));
+      } catch {
+        foldCache.set(pointer.threadId, null);
+      }
+    }
+    const folded = foldCache.get(pointer.threadId) ?? null;
+    const entry = folded?.entries[pointer.entrySeq - 1];
+    if (!folded || folded.integrity !== "verified" || folded.state === "resolved" ||
+        !entry || entry.type !== "message" || entry.entryHash !== pointer.entryHash ||
+        entry.payload.messageId !== pointer.messageId || !addressees.has(entry.payload.to) ||
+        folded.acknowledgments.has(pointer.messageId)) continue;
+    counted.add(entry.payload.messageId);
+  }
+  return counted.size;
 }
 
 async function pointerPaths(paths: BusPaths, pointer: BusMailboxPointer): Promise<string[]> {
@@ -1367,7 +1595,11 @@ export async function pollBus(root: string, input: {
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint, persist) => {
     const requestedLimit = Number.isFinite(input.limit) ? Math.floor(input.limit!) : 20;
     const limit = Math.max(1, Math.min(100, requestedLimit));
-    const mailbox = await reconcileEndpointMailbox(paths, endpoint.endpointId);
+    // ISS-872: load the endpoint list once so reconcile can redeliver inherited mail and
+    // entry validation can accept any addressee in this endpoint's predecessor chain.
+    const { endpoints: allEndpoints } = await listEndpoints(paths.projectRoot);
+    const addressees = endpointAddressees(endpoint, allEndpoints).ids;
+    const mailbox = await reconcileEndpointMailbox(paths, endpoint, allEndpoints);
     const messages: BusPollEnvelope[] = [];
     let cursor = endpoint.lastPolledMailboxSeq;
 
@@ -1382,12 +1614,14 @@ export async function pollBus(root: string, input: {
       }
       const entry = folded.entries[pointer.entrySeq - 1];
       if (!entry || entry.type !== "message" || entry.entryHash !== pointer.entryHash ||
-          entry.payload.messageId !== pointer.messageId || entry.payload.to !== endpoint.endpointId) {
+          entry.payload.messageId !== pointer.messageId || !addressees.includes(entry.payload.to)) {
         mailbox.findings.push(`${pointer.messageId}: mailbox pointer does not match the valid thread prefix`);
         continue;
       }
       await ensureDerivedThread(paths.projectRoot, folded).catch(() => undefined);
-      if (folded.acknowledgments.has(pointer.messageId)) {
+      // Terminal: an acked message, or ANY message in a resolved thread, is not surfaced.
+      // The pointer is reclaimed so it stops lingering (mirrors the reconcile sweep).
+      if (folded.acknowledgments.has(pointer.messageId) || folded.state === "resolved") {
         await removePointer(paths, pointer);
         continue;
       }
@@ -1450,13 +1684,16 @@ export async function acknowledgeBusMessage(root: string, input: {
   if (await classifyBusRuntime(root) === "v1") return ackV1(root, input);
   const paths = await resolveInitializedBusPaths(root);
   return withEndpointCaller(paths.projectRoot, input.endpointId, input.clientTaskId, async (endpoint) => {
+    // ISS-872: a successor may ack mail addressed to any ancestor in its predecessor chain.
+    const { endpoints: allEndpoints } = await listEndpoints(paths.projectRoot);
+    const addressees = endpointAddressees(endpoint, allEndpoints).ids;
     const threadId = await findMessageThread(paths, endpoint.endpointId, input.messageId);
     if (!threadId) throw new BusError("not_found", "Bus message not found");
     return withHardenedLock(join(paths.locks, `thread-${threadId}.lock`), async () => {
       let folded = await foldBusThread(paths.projectRoot, threadId);
       if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
       const message = folded.messages.find((candidate) => candidate.messageId === input.messageId);
-      if (!message || message.to !== endpoint.endpointId) throw new BusError("unauthorized", "Message is not addressed to this endpoint");
+      if (!message || !addressees.includes(message.to)) throw new BusError("unauthorized", "Message is not addressed to this endpoint");
       const reasonText = input.reason?.trim();
       if ((input.disposition === "rejected" || input.disposition === "deferred") && !reasonText) {
         throw new BusError("invalid_input", `A reason is required for ${input.disposition} acknowledgment`);
@@ -1500,7 +1737,10 @@ export async function getBusThread(root: string, input: {
   assertBusEnabled(loaded.state.config);
   return withEndpointCaller(root, input.endpointId, input.clientTaskId, async (endpoint) => {
     const folded = await foldBusThread(root, input.threadId);
-    if (!participantsInclude(folded.thread, endpoint.endpointId)) {
+    // ISS-872: a successor inherits participation in its predecessor chain's threads.
+    const { endpoints: allEndpoints } = await listEndpoints(root);
+    const addressees = endpointAddressees(endpoint, allEndpoints).ids;
+    if (!addressees.some((id) => participantsInclude(folded.thread, id))) {
       throw new BusError("unauthorized", "Endpoint is not a participant in this thread");
     }
     return folded;
@@ -1534,7 +1774,11 @@ export async function updateBusThread(root: string, input: {
     withHardenedLock(join(paths.locks, `thread-${input.threadId}.lock`), async () => {
     let folded = await foldBusThread(paths.projectRoot, input.threadId);
     if (folded.integrity !== "verified") throw new BusError("corrupt", folded.finding ?? "Thread is quarantined");
-    if (!participantsInclude(folded.thread, endpoint.endpointId)) throw new BusError("unauthorized", "Endpoint is not a thread participant");
+    // ISS-872: a successor inherits participation in its predecessor chain's threads.
+    const { endpoints: allEndpoints } = await listEndpoints(paths.projectRoot);
+    if (!endpointAddressees(endpoint, allEndpoints).ids.some((id) => participantsInclude(folded.thread, id))) {
+      throw new BusError("unauthorized", "Endpoint is not a thread participant");
+    }
     const reason = input.reason?.trim()
       ? normalizeBusText(input.reason, "Thread-state reason", 4096)
       : undefined;
@@ -1715,11 +1959,110 @@ export async function busDoctor(root: string): Promise<BusDoctorResult> {
       findings.push(`thread ${threadId}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  // ISS-872: threadId -> folded index so a retired mailbox's pointers can be validated
+  // and classified per-pointer against their canonical entry (a broken chain can leave
+  // one retired mailbox holding a mix of redeliverable, resolvable, and stranded pointers).
+  const foldByThread = new Map<string, FoldedBusThread>();
+  for (const folded of folds) foldByThread.set(folded.thread.threadId, folded);
   for (const endpoint of endpoints.endpoints) {
     const mailbox = await mailboxPointers(paths, endpoint.endpointId);
     findings.push(...mailbox.findings.map((finding) => `${endpoint.endpointId} mailbox: ${finding}`));
+    // ISS-872: a corrupt predecessor chain on an ACTIVE endpoint never grants authority
+    // (it fails closed to self-only at the read seams); surface it here deterministically.
+    if (!endpoint.retiredAt) {
+      const chainCorrupt = endpointAddressees(endpoint, endpoints.endpoints).corrupt;
+      if (chainCorrupt) findings.push(`${endpoint.endpointId} succession chain: ${chainCorrupt}`);
+    }
     if (retiredIds.has(endpoint.endpointId) && mailbox.pointers.length > 0) {
-      findings.push(`${endpoint.endpointId} mailbox: ${mailbox.pointers.length} unacked pointer(s) addressed to a retired endpoint`);
+      // Per-pointer, chain- and participant-aware classification (three tiers):
+      //  1. REDELIVERABLE -- an active endpoint whose chain covers BOTH this retired
+      //     mailbox owner (so it actually sweeps this mailbox) AND the pointer's canonical
+      //     recipient; it surfaces the mail on its next poll.
+      //  2. RESOLVABLE -- not redeliverable, but an active endpoint is authorized over the
+      //     thread (its addressees include a thread participant), so that participant can
+      //     resolve the thread with evidence to clear the ship gate.
+      //  3. STRANDED -- neither: every participant AND lineage successor has retired, the
+      //     pre-existing all-participants-retired defect (see ISS-873). Content is
+      //     recoverable read-only via `bus export`, but the gate cannot be cleared.
+      // A pointer that does not match a VERIFIED canonical entry (quarantined thread,
+      // wrong hash/id/entrySeq, or a missing message) is unclassifiable: reconcile and
+      // poll can neither validate nor deliver it, so it is counted as corruption, never
+      // given a false recovery instruction.
+      // A pointer's stale residue is reclaimed by an active chain-successor's reconcile
+      // sweep; when NO active endpoint's chain covers this retired mailbox, nothing sweeps
+      // it, so the wording must not promise a poll-based cleanup that can never run.
+      const hasActiveSuccessor = activeEndpoints.some((active) =>
+        endpointAddressees(active, endpoints.endpoints).ids.includes(endpoint.endpointId));
+      // Mail may legitimately sit in THIS retired mailbox only if it is addressed to the
+      // owner or one of the owner's own predecessors (mail the owner inherited). The set is
+      // constant per endpoint, so compute it once. A canonically valid pointer addressed
+      // OUTSIDE this set is misfiled -- no active successor's reconcile sweep will ever
+      // reclaim it (reconcile only accepts recipients in ITS chain), so it must be counted
+      // as corruption, never as routine stale state that falsely promises a poll cleanup.
+      const ownerAddressees = endpointAddressees(endpoint, endpoints.endpoints).ids;
+      let redeliverable = 0;
+      let corruptPointers = 0;
+      let stalePointers = 0;
+      const resolvableThreads = new Set<string>();
+      const strandedThreads = new Set<string>();
+      let successorId: string | undefined;
+      for (const pointer of mailbox.pointers) {
+        const folded = foldByThread.get(pointer.threadId);
+        const entry = folded?.entries[pointer.entrySeq - 1];
+        if (!folded || folded.integrity !== "verified" || !entry || entry.type !== "message" ||
+            entry.entryHash !== pointer.entryHash || entry.payload.messageId !== pointer.messageId) {
+          corruptPointers += 1;
+          continue;
+        }
+        // A canonically bound but MISFILED pointer (recipient outside the owner's own chain)
+        // is corruption regardless of acked/resolved state: no sweep reclaims it, so it must
+        // never be reported as routine stale cleanup with a false successor-poll promise.
+        if (!ownerAddressees.includes(entry.payload.to)) {
+          corruptPointers += 1;
+          continue;
+        }
+        // A pointer whose message is already acked, or whose thread is already resolved,
+        // needs NO recovery: the ship gate is already clear and the next reconcile sweep
+        // reclaims it. Classify as routine stale cleanup, never redeliverable/resolvable/
+        // stranded (which would imply an unnecessary or impossible action).
+        if (folded.acknowledgments.has(pointer.messageId) || folded.state === "resolved") {
+          stalePointers += 1;
+          continue;
+        }
+        const recipient = entry.payload.to;
+        const successor = activeEndpoints.find((active) => {
+          const ids = endpointAddressees(active, endpoints.endpoints).ids;
+          return ids.includes(endpoint.endpointId) && ids.includes(recipient);
+        });
+        if (successor) {
+          redeliverable += 1;
+          successorId = successor.endpointId;
+          continue;
+        }
+        // RESOLVABLE requires a VERIFIED thread (updateBusThread rejects every transition
+        // on a quarantined thread) with an active authorized participant.
+        const resolvable = activeEndpoints.some((active) =>
+          endpointAddressees(active, endpoints.endpoints).ids.some((id) => participantsInclude(folded.thread, id)));
+        if (resolvable) resolvableThreads.add(pointer.threadId);
+        else strandedThreads.add(pointer.threadId);
+      }
+      if (redeliverable > 0) {
+        findings.push(`${endpoint.endpointId} mailbox: ${redeliverable} undelivered pointer(s) pending redelivery to successor ${successorId}; poll that endpoint to surface them`);
+      }
+      if (resolvableThreads.size > 0) {
+        findings.push(`${endpoint.endpointId} mailbox: ${resolvableThreads.size} undelivered thread(s) to a retired recipient; the thread's active participant can resolve it with evidence to clear the ship gate`);
+      }
+      if (strandedThreads.size > 0) {
+        findings.push(`${endpoint.endpointId} mailbox: ${strandedThreads.size} stranded succession thread(s) with no active participant or successor; recover the content read-only with \`storybloq bus export <thread-id>\`; the thread cannot be acked or resolved until an active participant exists.`);
+      }
+      if (stalePointers > 0) {
+        findings.push(hasActiveSuccessor
+          ? `${endpoint.endpointId} mailbox: ${stalePointers} acknowledged/resolved pointer(s) pending routine sweep; no action needed (a poll of the owning successor reclaims them).`
+          : `${endpoint.endpointId} mailbox: ${stalePointers} acknowledged/resolved pointer(s) are non-blocking stale state with no active successor to reclaim them; the ship gate is already clear.`);
+      }
+      if (corruptPointers > 0) {
+        findings.push(`${endpoint.endpointId} mailbox: ${corruptPointers} pointer(s) that do not match a verified thread entry addressed to this mailbox; run \`storybloq bus doctor\` on the affected thread and recover content with \`storybloq bus export <thread-id>\`.`);
+      }
     }
     const pendingCount = (await listRegularJsonFiles(join(endpointMailboxPath(paths, endpoint.endpointId), "pending")))
       .filter((filename) => POINTER_FILENAME.test(filename)).length;
@@ -2196,4 +2539,10 @@ export async function pendingMailboxCursor(
 
 export const __storeTesting = {
   setAfterMailboxLstatHook: (fn: ((dir: string) => Promise<void>) | null) => { afterMailboxLstatHook = fn; },
+  // ISS-872: force the best-effort eager materialization to fail so tests can exercise
+  // the degraded-delivery (needs-explicit-poll) path without racing a real I/O fault.
+  setMaterializeFailureHook: (fn: (() => Promise<void>) | null) => { materializeFailureHook = fn; },
+  // ISS-872: force the post-mutation undelivered-count read to fail so tests can prove
+  // setup still returns a resumable result (never throws) after joinEndpoint has mutated.
+  setCountFailureHook: (fn: (() => Promise<void>) | null) => { countFailureHook = fn; },
 };
