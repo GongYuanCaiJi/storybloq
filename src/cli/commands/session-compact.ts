@@ -77,6 +77,7 @@ import {
   consumeCompactionSuccession,
   detectClientSurface,
   findEndpointForTask,
+  isBusAutoAttachEnabledFromDisk,
   isBusHookDeliveryEnabled,
   mintCompactionSuccession,
   pendingMailboxCursor,
@@ -84,6 +85,8 @@ import {
   type BusEndpoint,
   type BusSurface,
 } from "../../bus/index.js";
+import { spawnAutoAttachBestEffort } from "../../bus/auto-attach-spawn.js";
+import { autoAttachConvergenceNeeded } from "../../bus/auto-attach-gate.js";
 
 // ---------------------------------------------------------------------------
 // session-compact-prepare (PreCompact hook)
@@ -702,6 +705,31 @@ export async function handleSessionResumePrompt(
     }
     if (options.codexHookJson && !codexSurface) {
       codexSurface = await detectClientSurface("codex").catch(() => null);
+    }
+
+    // T-430: auto-attach this session's Bus endpoint OFF the critical path. Fires when the
+    // project has opted in, this is not a compaction continuation (a compact start resumes the
+    // same task's endpoint via the marker path), AND the session's delivery is not fully
+    // converged. The gate is the SHARED convergence predicate -- NOT `!busMarker` -- because a
+    // marker is emitted whenever an endpoint exists with delivery enabled, even for an endpoint
+    // carrying an unresolved materialization-degraded outcome. Using the marker would leave such
+    // an endpoint stuck (Codex has no Stop retry, so SessionStart is its only recovery). The
+    // predicate covers no-endpoint OR delivery-off OR degraded-matching-active-endpoint.
+    // Constant-time: a bounded no-follow config read + read-only endpoint/outcome reads + a
+    // read-only spawn-suppression hint, then a detached spawn that writes nothing to stdout.
+    // Fail-open: any error is swallowed and never blocks the resume prompt.
+    if (clientTaskId && options.source !== "compact") {
+      try {
+        if (await isBusAutoAttachEnabledFromDisk(root)
+          && await autoAttachConvergenceNeeded(root, client, clientTaskId)) {
+          const surface: BusSurface | null = client === "claude" ? "claude_cli" : codexSurface;
+          if (surface) {
+            await spawnAutoAttachBestEffort({ root, client, clientTaskId, surface, nowMs: Date.now() });
+          }
+        }
+      } catch {
+        // Auto-attach spawn is best-effort; it must never affect session continuity.
+      }
     }
 
     const writeResumeMessage = (message: string): void => {

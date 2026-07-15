@@ -57,6 +57,13 @@ import {
 } from "../../bus/index.js";
 import { BusError } from "../../bus/errors.js";
 import { assertBusEnabled } from "../../bus/config.js";
+import { attemptAutoAttach } from "../../bus/auto-attach.js";
+import {
+  clearAutoAttachOutcomes,
+  listAutoAttachOutcomes,
+  STATUS_FRESHNESS_MS,
+  type AutoAttachOutcome,
+} from "../../bus/auto-attach-outcome.js";
 import { resolveBusPaths } from "../../bus/paths.js";
 import { loadProject } from "../../core/project-loader.js";
 import {
@@ -478,6 +485,68 @@ function renderDoctorDisabledMarkdown(result: DisabledDoctorResult): string {
 }
 
 // D7: action-oriented Markdown; no endpoint UUIDs (JSON keeps them).
+// T-430: map a degraded/failed auto-attach outcome's bounded reason to a concrete recovery
+// instruction. `race_lost` is benign (another session won) and is never surfaced.
+function autoAttachInstruction(outcome: AutoAttachOutcome): string | null {
+  switch (outcome.reason) {
+    case "materialization_failed":
+      return "auto-attach: inherited mail not yet surfaced; run `storybloq bus poll`";
+    case "succession_chain_corrupt":
+    case "registry_corrupt":
+      return "auto-attach: run `storybloq bus doctor` to inspect a Bus data problem";
+    case "endpoint_inactive":
+      return "auto-attach: the endpoint was retired before its mail surfaced; run `storybloq bus doctor`";
+    case "delivery_policy_failed":
+      return "auto-attach: on-boundary delivery did not converge; re-run `storybloq bus auto-attach on`";
+    case "tool_hook_failed":
+      return "auto-attach: the on-tool hook did not install (Stop delivery still active); re-run `storybloq bus auto-attach on`";
+    case "capacity_full":
+      return "auto-attach: the Bus is full; `storybloq bus setup --replace <endpoint-id>` to take over a proven-dead peer";
+    case "runtime_absent":
+    case "runtime_incompatible":
+      return "auto-attach: run `storybloq bus auto-attach on` to (re-)bootstrap the Bus";
+    case "internal_failure":
+      return "auto-attach failed; run `storybloq bus doctor`";
+    case "race_lost":
+      return null;
+    default:
+      return null;
+  }
+}
+
+// Read-only: surface recent shortfall auto-attach attempts for `bus status`. NEVER mutates
+// (no GC here -- that is a write path). Endpoint-bound records show only while their endpoint
+// is still active; no-endpoint records (skipped_full / delivery-independent failed) show
+// within a freshness window so capacity/setup guidance is not lost when there is no endpoint
+// to hang it on. Fully defensive: any error yields no advisories.
+const ADVISORY_KINDS = new Set(["degraded", "failed", "skipped_full"]);
+async function collectAutoAttachAdvisories(root: string, nowMs: number): Promise<string[]> {
+  try {
+    let activeIds = new Set<string>();
+    try {
+      const { endpoints } = await listEndpoints(root);
+      activeIds = new Set(endpoints.filter((endpoint) => !endpoint.retiredAt).map((endpoint) => endpoint.endpointId));
+    } catch {
+      // no runtime / corrupt registry: endpoint-bound records simply will not match.
+    }
+    const advisories: string[] = [];
+    for (const { outcome } of await listAutoAttachOutcomes(root)) {
+      if (!ADVISORY_KINDS.has(outcome.kind)) continue;
+      const instruction = autoAttachInstruction(outcome);
+      if (!instruction) continue;
+      if (outcome.endpointId) {
+        if (activeIds.has(outcome.endpointId)) advisories.push(instruction);
+      } else {
+        const ageMs = nowMs - Date.parse(outcome.at);
+        if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= STATUS_FRESHNESS_MS) advisories.push(instruction);
+      }
+    }
+    return advisories;
+  } catch {
+    return [];
+  }
+}
+
 function renderStatusMarkdown(summary: BusSummary): string {
   if (summary.setupState === "disabled") {
     // T-428: surface the config-revert diagnostic (carried in nextActions) rather
@@ -581,23 +650,12 @@ interface BusSetupResult {
 
 async function enableHooksForClient(root: string, client: BusClient): Promise<void> {
   const setup = await import("./setup-skill.js");
+  // GLOBAL client-hook install (mutates ~/.claude / ~/.codex). Bootstrap-only: the
+  // SessionStart auto-attach child never runs this, only convergeProjectDelivery.
   if (client === "claude") {
     const migrated = await setup.enableClaudeBusHooks();
     if (migrated.skipped) {
       throw new BusError("io_error", "Claude hooks could not be upgraded. Run `storybloq setup --client claude` first.");
-    }
-    // T-427: install the project-local on-tool (PostToolUse) hook. Best-effort: the
-    // reliable Stop tier and the policy write below must not be blocked if the local
-    // settings file is tracked/unignorable. The honest label simply keeps on-tool
-    // inactive until the hook installs and fires. Codex has no PostToolUse surface.
-    try {
-      const bin = setup.resolveStorybloqBin();
-      if (bin) {
-        const { installProjectBusToolHook } = await import("../../core/project-settings.js");
-        await installProjectBusToolHook(root, bin);
-      }
-    } catch (err) {
-      process.stderr.write(`Storybloq Bus on-tool hook not installed: ${err instanceof Error ? err.message : String(err)}\n`);
     }
   } else {
     const refreshed = await setup.refreshExistingCodexHooks();
@@ -606,7 +664,17 @@ async function enableHooksForClient(root: string, client: BusClient): Promise<vo
       throw new BusError("io_error", "Codex hooks are incomplete. Run `storybloq setup --client codex`, review `/hooks`, then retry.");
     }
   }
-  await setBusHookPolicy(root, [client], true);
+  // PROJECT-LOCAL delivery convergence (Stop policy + Claude-only on-tool hook), shared with
+  // the auto-attach child. Preserve setup's existing semantics: re-raise on Stop-policy
+  // failure; keep the on-tool hook best-effort (warn to stderr, T-427).
+  const { convergeProjectDelivery } = await import("../../bus/delivery.js");
+  const converged = await convergeProjectDelivery(root, client);
+  if (!converged.policy.ok) {
+    throw new BusError("io_error", converged.policy.error ?? "Failed to set Bus hook delivery policy");
+  }
+  if (converged.toolHook.applicable && !converged.toolHook.ok) {
+    process.stderr.write(`Storybloq Bus on-tool hook not installed: ${converged.toolHook.error}\n`);
+  }
 }
 
 // The disabled policy fields stay at the TOP level (matching the enable path's response
@@ -751,6 +819,58 @@ async function busGitignoreCompleteBefore(root: string): Promise<boolean> {
 
 // D4: guided setup. Idempotent and resumable; every step is individually
 // idempotent, and rerunning converges from any partial state.
+// T-430: persist the per-project auto-attach opt-in flag under a project lock (structural
+// merge-safe, matching how team-setup mutates config.bus/config.team).
+async function setBusAutoAttachFlag(root: string, enabled: boolean): Promise<void> {
+  const { withProjectLock, writeConfigUnlocked } = await import("../../core/project-loader.js");
+  await withProjectLock(root, { strict: false }, async ({ state }) => {
+    const config = { ...state.config, bus: { ...(state.config.bus ?? {}), autoAttach: enabled } };
+    await writeConfigUnlocked(config, root);
+  });
+}
+
+// T-430: auto-attach may be armed ONLY when `bus auto-attach on`'s bootstrap produced a
+// genuinely USABLE runtime AND installed the global delivery hooks (the "enable-hooks" step
+// completed). Usable is an ALLOWLIST -- only `ready` or `waiting_for_peer` -- not "anything but
+// invalid": disabled / not_initialized / runtime_lost (e.g. the runtime deleted between hook
+// install and the final summary) are all unusable even if enable-hooks was recorded. The child
+// never installs the global hooks, so without them every future session would attach with no
+// Stop-delivery trigger.
+function autoAttachEnableSucceeded(result: BusSetupResult): boolean {
+  const usable = result.setupState === "ready" || result.setupState === "waiting_for_peer";
+  return usable && result.completedSteps.includes("enable-hooks");
+}
+
+// User-facing guidance for a failed `bus auto-attach on`, distinguishing the two failure modes
+// so the user is sent to the RIGHT repair: an unusable final runtime state points at
+// runtime repair; a usable state that simply never completed enable-hooks points at hook install.
+function autoAttachEnableFailureAdvice(result: BusSetupResult): string {
+  const usable = result.setupState === "ready" || result.setupState === "waiting_for_peer";
+  if (!usable) {
+    return `Auto-attach NOT enabled: setup ended in \`${result.setupState}\`. Run \`storybloq bus setup\` (or \`storybloq bus doctor\`) to repair the runtime, then rerun \`storybloq bus auto-attach on\`.`;
+  }
+  return "Auto-attach NOT enabled: global delivery hooks did not install. Run `storybloq setup --client all`, then rerun `storybloq bus auto-attach on`.";
+}
+
+// T-430: the `bus auto-attach on` enable orchestration, extracted so it is unit-testable with an
+// injected setup function (the real path installs GLOBAL client hooks, which tests must not
+// touch). FAIL-CLOSED: revoke any prior arming BEFORE running setup so a setup THROW (e.g. the
+// preflight detecting missing global hooks) or a failed final enable write cannot leave a
+// previously-true flag armed; re-arm ONLY on a proven-usable result.
+export async function enableBusAutoAttach(
+  root: string,
+  args: BusSetupArgs,
+  setup: (root: string, args: BusSetupArgs) => Promise<BusSetupResult> = runBusSetup,
+): Promise<BusSetupResult> {
+  await setBusAutoAttachFlag(root, false);
+  await clearAutoAttachOutcomes(root);
+  const setupResult = await setup(root, args);
+  if (autoAttachEnableSucceeded(setupResult)) {
+    await setBusAutoAttachFlag(root, true);
+  }
+  return setupResult;
+}
+
 async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupResult> {
   const completedSteps: string[] = [];
   const remainingSteps: string[] = [];
@@ -1081,6 +1201,80 @@ export function registerBusCommand(yargs: Argv): Argv {
         },
       )
       .command(
+        "auto-attach <state>",
+        "Turn per-session Bus auto-attach on or off for this project",
+        (y2) => formatOption(y2
+          .positional("state", { type: "string", choices: ["on", "off"] as const, demandOption: true })
+          .option("client", { type: "string", choices: ["claude", "codex"] as const })
+          .option("task-id", { type: "string", describe: "Validated client task id" })
+          .option("surface", {
+            type: "string",
+            choices: ["claude_cli", "codex_cli", "codex_desktop"] as const,
+            describe: "Client surface when process ancestry cannot determine it",
+          })
+          .option("force-archive", {
+            type: "boolean",
+            default: false,
+            describe: "Archive unread noncritical v1 mail read-only during upgrade (never bypasses ship-gate blockers)",
+          })),
+        async (argv) => {
+          const format = formatValue(argv.format);
+          const enable = argv.state === "on";
+          if (enable) {
+            // `on` runs the full, proven bus setup (bootstrap + this session's endpoint +
+            // GLOBAL client hooks) then persists the opt-in flag, so a single command makes
+            // every future session auto-attach.
+            await runBus(format, (root) => enableBusAutoAttach(root, {
+              client: argv.client as StorybloqClient | undefined,
+              taskId: argv["task-id"] as string | undefined,
+              surface: argv.surface as BusSurface | undefined,
+              delivery: "live",
+              replace: undefined,
+              forceArchive: argv["force-archive"] === true,
+            }),
+            (result) => autoAttachEnableSucceeded(result)
+              ? `Auto-attach is ON. ${renderSetupMarkdown(result)}`
+              : `${autoAttachEnableFailureAdvice(result)} ${renderSetupMarkdown(result)}`,
+            (result) => !autoAttachEnableSucceeded(result));
+          } else {
+            // `off` clears the flag and sweeps this project's now-moot outcome records; it
+            // leaves the runtime and this task's endpoint in place.
+            await runBus(format, async (root) => {
+              await setBusAutoAttachFlag(root, false);
+              await clearAutoAttachOutcomes(root);
+              return { autoAttach: false as const };
+            }, () => "Auto-attach is OFF. Existing endpoints remain; new sessions will not auto-attach.");
+          }
+        },
+      )
+      .command(
+        // Internal, hidden: the detached child spawned by the SessionStart / retry hooks.
+        // Always exits 0 (best-effort); never prints to stdout (stdio is ignored by the parent).
+        "__session-attach",
+        false,
+        (y2) => y2
+          .option("client", { type: "string", choices: ["claude", "codex"] as const, demandOption: true })
+          .option("task-id", { type: "string", demandOption: true })
+          .option("surface", {
+            type: "string",
+            choices: ["claude_cli", "codex_cli", "codex_desktop"] as const,
+            demandOption: true,
+          })
+          .option("root", { type: "string", demandOption: true }),
+        async (argv) => {
+          try {
+            await attemptAutoAttach({
+              root: argv.root as string,
+              client: argv.client as BusClient,
+              clientTaskId: argv["task-id"] as string,
+              surface: argv.surface as BusSurface,
+            });
+          } catch {
+            // Best-effort child: swallow everything and exit 0 so a failure never surfaces.
+          }
+        },
+      )
+      .command(
         "join [legacy-role]",
         "Deprecated: connect this task to the Bus (use `storybloq bus setup`)",
         (y2) => formatOption(y2
@@ -1390,7 +1584,17 @@ export function registerBusCommand(yargs: Argv): Argv {
         (y2) => formatOption(y2),
         async (argv) => {
           const format = formatValue(argv.format);
-          await runBus(format, (root) => busSummary(root), renderStatusMarkdown);
+          await runBus(format, async (root) => {
+            const summary = await busSummary(root);
+            // Additive field: existing BusSummary JSON keys stay at the top level unchanged.
+            const autoAttachAdvisories = await collectAutoAttachAdvisories(root, Date.now());
+            return { ...summary, autoAttachAdvisories };
+          }, (value) => {
+            const base = renderStatusMarkdown(value);
+            return value.autoAttachAdvisories.length > 0
+              ? `${base}\n${value.autoAttachAdvisories.map((advisory) => `- ${advisory}`).join("\n")}`
+              : base;
+          });
         },
       )
       .command(

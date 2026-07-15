@@ -13,6 +13,8 @@ export interface BusPaths {
   readonly mailboxes: string;
   readonly idempotency: string;
   readonly locks: string;
+  // T-430: per-task auto-attach outcome records (created at init, validated no-symlink).
+  readonly autoAttach: string;
 }
 
 const ENDPOINT_FILENAME = /^([0-9a-f-]{36})\.json$/i;
@@ -100,6 +102,7 @@ export async function resolveBusPaths(projectRoot: string, _create?: false): Pro
     mailboxes: join(busRoot, "mailboxes"),
     idempotency: join(busRoot, "idempotency"),
     locks: join(busRoot, "locks"),
+    autoAttach: join(busRoot, "auto-attach"),
   };
   for (const [path, label] of [
     [paths.threads, ".story/bus/threads"],
@@ -108,6 +111,7 @@ export async function resolveBusPaths(projectRoot: string, _create?: false): Pro
     [paths.mailboxes, ".story/bus/mailboxes"],
     [paths.idempotency, ".story/bus/idempotency"],
     [paths.locks, ".story/bus/locks"],
+    [paths.autoAttach, ".story/bus/auto-attach"],
   ] as const) {
     await rejectSymlink(path, label);
   }
@@ -136,6 +140,12 @@ export async function createBusPathsForInitialization(projectRoot: string): Prom
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await rejectSymlink(directory, relative(paths.projectRoot, directory));
   }
+  // T-430: the auto-attach outcome dir is provisioned at init but is deliberately NOT a
+  // layout-required directory -- an existing v2 runtime created before this feature simply
+  // lacks it, and its absence must not surface as a doctor/layout finding. The outcome writer
+  // (validatedAutoAttachDir) recreates the leaf under an already-validated busRoot on demand.
+  await mkdir(paths.autoAttach, { recursive: true, mode: 0o700 });
+  await rejectSymlink(paths.autoAttach, relative(paths.projectRoot, paths.autoAttach));
   return paths;
 }
 

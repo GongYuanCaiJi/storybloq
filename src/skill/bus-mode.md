@@ -16,6 +16,10 @@ storybloq bus setup
 
 Flags are optional: `--client claude|codex`, `--task-id <id>`, `--surface claude_cli|codex_cli|codex_desktop` (only needed when process ancestry cannot determine the surface), `--delivery live|poll`, `--replace <endpoint-id>` (take the place of a proven-offline incumbent, described below), and `--force-archive` (applies only to unread noncritical v1 delivery during a v1->v2 upgrade). `--delivery live` (the default) enables this client's guarded hook tiers; `--delivery poll` turns them off (clears the hook policy and removes the project-local on-tool hook) so you read the Bus by polling explicitly.
 
+### Always-on (auto-attach)
+
+Because a Claude Code task id changes every window, a brand-new session normally finds no endpoint and has to run `bus setup` again. To make the Bus always present, run `storybloq bus auto-attach on` once. It runs the full `bus setup` bootstrap (so the global client hooks are installed) and sets a per-project opt-in flag. From then on, every new session auto-attaches at SessionStart with its on-boundary delivery tiers enabled, no command: a free slot is joined automatically, and a slot held by a proven-dead peer is reclaimed with its undelivered mail inherited (via `--replace` succession). Two live peers are never disturbed; a third session simply stays unattached. The work runs off the SessionStart critical path, so the endpoint appears a moment after the session starts (the connection marker shows on the next start). Turn it off with `storybloq bus auto-attach off`, which clears the flag and leaves the runtime and existing endpoints in place. Default off, so a project only auto-attaches after you opt in.
+
 When only your task has connected, setup ends with this handoff line:
 
 ```text

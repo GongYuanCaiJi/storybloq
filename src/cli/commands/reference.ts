@@ -406,6 +406,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--client", "--task-id", "--surface", "--delivery", "--replace", "--force-archive"],
   },
   {
+    name: "bus auto-attach",
+    description: "Turn per-session Bus auto-attach on or off for this project (opt-in, default off). `on` runs the full `bus setup` bootstrap once (initializing the runtime, joining this task, and installing the global client hooks) and sets the opt-in flag; thereafter every new session auto-attaches at SessionStart with its on-boundary delivery tiers enabled, no command, and a session that finds a proven-dead peer reclaims its slot and inherits its undelivered mail. `off` clears the flag and leaves the runtime and existing endpoints in place.",
+    usage: "storybloq bus auto-attach <on|off> [--client claude|codex] [--task-id <id>] [--surface claude_cli|codex_cli|codex_desktop] [--force-archive] [--format json|md]",
+    flags: ["--client", "--task-id", "--surface", "--force-archive"],
+  },
+  {
     name: "bus join",
     description: "Deprecated: roles are now per-message, so the legacy role argument is ignored. Use `storybloq bus setup`.",
     usage: "storybloq bus join [legacy-role] [--client claude|codex] [--task-id <id>] [--surface <surface>] [--replace <endpoint-id>] [--format json|md]",

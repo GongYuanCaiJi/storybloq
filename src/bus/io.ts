@@ -181,6 +181,23 @@ async function openReadNoFollow(path: string, options: OpenReadNoFollowOptions =
   }
 }
 
+// Read at most maxBytes+1 bytes from an already-opened handle, rejecting if the file exceeds
+// maxBytes. Bounding the READ (not just a pre-read stat) is what actually caps allocation: a
+// file the stat saw as small can grow through the same inode before the read completes, so the
+// pre-read stat is only a fast-reject and this loop is the real ceiling.
+async function boundedReadAll(handle: FileHandle, maxBytes: number, path: string): Promise<string> {
+  const cap = maxBytes + 1;
+  const buf = Buffer.allocUnsafe(cap);
+  let total = 0;
+  while (total < cap) {
+    const { bytesRead } = await handle.read(buf, total, cap - total, total);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total > maxBytes) throw new BusError("corrupt", `${basename(path)} exceeds ${maxBytes} bytes`);
+  return buf.subarray(0, total).toString("utf-8");
+}
+
 export async function readJsonNoFollow<T>(
   path: string,
   schema: ZodType<T>,
@@ -197,7 +214,7 @@ export async function readJsonNoFollow<T>(
     if (stat.size < 0 || stat.size > maxBytes) {
       throw new BusError("corrupt", `${basename(path)} exceeds ${maxBytes} bytes`);
     }
-    const raw = await handle.readFile("utf-8");
+    const raw = await boundedReadAll(handle, maxBytes, path);
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -241,7 +258,7 @@ export async function readTextNoFollow(
     if (stat.size < 0 || stat.size > maxBytes) {
       throw new BusError("corrupt", `${basename(path)} exceeds ${maxBytes} bytes`);
     }
-    return await handle.readFile("utf-8");
+    return await boundedReadAll(handle, maxBytes, path);
   } catch (err) {
     if (err instanceof BusError) throw err;
     const code = (err as NodeJS.ErrnoException).code;

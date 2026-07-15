@@ -15,6 +15,7 @@ import { collectProbes, reduceHealthState } from "../../autonomous/health-model.
 import {
   busRuntimeLostAdvisory,
   findEndpointForTask,
+  isBusAutoAttachEnabledFromDisk,
   isBusHookDeliveryEnabled,
   mailboxHasPointerCandidate,
   pendingMailboxCursor,
@@ -24,6 +25,7 @@ import {
   type BusClient,
 } from "../../bus/index.js";
 import { resolveBusPaths } from "../../bus/paths.js";
+import { spawnAutoAttachBestEffort } from "../../bus/auto-attach-spawn.js";
 import { BUSTOOL_SUBCOMMAND, formatHookCommand } from "../../core/hook-migration.js";
 import { normalizeClientTaskId } from "../../autonomous/client-profile.js";
 
@@ -142,12 +144,51 @@ async function claimBusPendingDelivery(
   return { reason: PENDING_DELIVERY_REASON };
 }
 
+// T-430: per-turn in-session retry uses the shared convergence predicate (the same one the
+// SessionStart hook uses), re-exported here under its retry-facing name. A join can commit while
+// materialization or delivery convergence fails (endpoint present but session degraded), so
+// gating retry only on "no endpoint" would starve the session until the next SessionStart.
+// Best-effort, read-only, off the critical path; the child's try-lock is the sole concurrency
+// authority. Exported for direct unit testing.
+export { autoAttachConvergenceNeeded as autoAttachRetryNeeded } from "../../bus/auto-attach-gate.js";
+import { autoAttachConvergenceNeeded } from "../../bus/auto-attach-gate.js";
+
+// T-430 in-session retry -- deliberately Stop-only AND Claude-only:
+//  - Stop-only: it must never run on the PostToolUse path, which fires on EVERY tool call;
+//    adding a retry probe there would double that hook's per-call I/O. Only claimBusStopDelivery
+//    invokes it.
+//  - Claude-only: Claude's hook surface is always claude_cli, so no process-ancestry (ps) probe
+//    is ever needed. A Codex retry would have to run detectClientSurface (ps) on every Stop,
+//    blocking the hook; Codex instead heals at the next SessionStart, where the surface is
+//    resolved once from intact ancestry. This keeps the Stop path free of any subprocess.
+// Best-effort, read-only, off the critical path; never throws.
+async function maybeSpawnAutoAttachRetry(
+  root: string,
+  input: Record<string, unknown>,
+  client: BusClient,
+): Promise<void> {
+  if (client !== "claude") return;
+  try {
+    if (!await isBusAutoAttachEnabledFromDisk(root)) return;
+    const clientTaskId = resolveHookTaskId(input, client);
+    if (!clientTaskId) return;
+    if (!await autoAttachConvergenceNeeded(root, client, clientTaskId)) return;
+    await spawnAutoAttachBestEffort({ root, client, clientTaskId, surface: "claude_cli", nowMs: Date.now() });
+  } catch {
+    // Retry is best-effort; it must never affect the delivery hook's outcome.
+  }
+}
+
 export async function claimBusStopDelivery(
   root: string,
   input: Record<string, unknown>,
   client: BusClient,
 ): Promise<{ decision: "block"; reason: string } | null> {
+  // The Stop re-entrancy guard runs FIRST: when Claude re-fires the Stop hook with
+  // stop_hook_active, we must return immediately and do no retry work (a re-entrant Stop is
+  // not a fresh turn boundary).
   if (input.stop_hook_active === true) return null;
+  await maybeSpawnAutoAttachRetry(root, input, client);
   if (!await isBusHookDeliveryEnabled(root, client)) return null;
   const clientTaskId = resolveHookTaskId(input, client);
   if (!clientTaskId) return null;
@@ -176,6 +217,9 @@ export async function claimBusToolDelivery(
   input: Record<string, unknown>,
 ): Promise<{ reason: string } | null> {
   const client: BusClient = "claude";
+  // NOTE: the auto-attach retry is deliberately NOT invoked here. PostToolUse fires on every
+  // tool call; the retry lives only on the Stop path (see maybeSpawnAutoAttachRetry) so this
+  // hot path stays a single lock-free high-water compare.
   if (!await isBusHookDeliveryEnabled(root, client)) return null;
   const clientTaskId = resolveHookTaskId(input, client);
   if (!clientTaskId) return null;

@@ -19,6 +19,9 @@ export const BusConfigSchema = z.object({
   maxBodyBytes: z.number().int().min(1024).max(65536).optional(),
   maxHops: z.number().int().min(2).max(32).optional(),
   requireIssueForCritical: z.boolean().optional(),
+  // T-430: per-project opt-in. When true, every new session auto-attaches to the
+  // Bus with live delivery via the SessionStart hook (no per-session `bus setup`).
+  autoAttach: z.boolean().optional(),
 }).passthrough();
 
 export type BusConfig = z.infer<typeof BusConfigSchema>;
