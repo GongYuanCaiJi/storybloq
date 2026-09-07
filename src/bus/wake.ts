@@ -384,6 +384,37 @@ export function wakeWanted(endpoint: BusEndpoint): boolean {
   return endpoint.wakePolicy === "idle";
 }
 
+/**
+ * Refuse a wake policy the gates above can never honour, at the moment a user
+ * asks for it rather than silently at every send.
+ *
+ * This is a PREDICTION about gates 2 and 3 of `attemptWake`, which is exactly why
+ * it lives beside them: a refusal that drifts from the gate it mirrors is worse
+ * than no refusal, because it is then confidently wrong in both directions. The
+ * agreement table in `test/bus/wake-policy-refusal.test.ts` asserts this helper
+ * against the REAL `attemptWake` for every client/surface pair, so drift fails a
+ * test instead of reaching a user.
+ *
+ * Only `idle` can be refused. `never` is a legitimate choice on every client, and
+ * an omitted flag preserves whatever the endpoint already has, so neither is this
+ * function's business. `offline_only` is not reachable from the `--wake` flag and
+ * is left alone for the same reason.
+ */
+export function wakePolicyRefusal(
+  client: BusEndpoint["client"],
+  surface: BusEndpoint["surface"],
+  requested: BusEndpoint["wakePolicy"] | undefined,
+): string | null {
+  if (requested !== "idle") return null;
+  if (client !== "codex") {
+    return `The idle wake tier is Codex-only and this endpoint's client is ${client}, so gate 2 would record skipped:not-codex on every send. A Claude peer is reached by the native SendMessage path, or by arming \`bus poll --wait\` at its idle boundaries. Re-run without --wake, or with --wake never.`;
+  }
+  if (surface === "codex_desktop") {
+    return `The idle wake tier cannot reach the codex_desktop surface, so gate 3 would record skipped:surface-unreachable on every send: the desktop app-server is a child of ChatGPT.app started without --listen, so no external process can connect to it. Re-run on a codex_cli session, or without --wake.`;
+  }
+  return null;
+}
+
 export function resolveWakePolicyUpdate(
   current: BusEndpoint["wakePolicy"],
   requested: BusEndpoint["wakePolicy"] | undefined,

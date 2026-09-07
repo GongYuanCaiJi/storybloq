@@ -34,6 +34,7 @@ import {
   describeDeliveryTiers,
   describeWakeTier,
   resolveWakePolicyUpdate,
+  wakePolicyRefusal,
   sendBusMessageWithWake,
   setBusHookPolicy,
   updateBusThread,
@@ -950,6 +951,16 @@ async function runBusSetup(root: string, args: BusSetupArgs): Promise<BusSetupRe
     throw new BusError("invalid_input", "Cannot determine the client surface safely; pass --surface explicitly");
   }
 
+  // ISS-1132: a wake policy the gates can never honour is refused HERE, inside the
+  // zero-mutation preflight, rather than stored and then silently skipped on every
+  // send. Nothing else validates it: `resolveWakePolicyUpdate` only diffs values.
+  // Both `client` and `surface` are already resolved above, so this costs no
+  // lookup and a refused setup mutates nothing.
+  const wakeRefusal = wakePolicyRefusal(client, surface, args.wake);
+  if (wakeRefusal !== null) {
+    throw new BusError("invalid_input", wakeRefusal);
+  }
+
   const runtimeKind = await classifyBusRuntime(root);
   if (runtimeKind === "v1") {
     await preflightV1Drain(root, taskId, args.forceArchive);
@@ -1218,6 +1229,93 @@ function renderSetupMarkdown(result: BusSetupResult): string {
   return lines.join("\n");
 }
 
+/**
+ * ISS-1132: a per-endpoint view of the wake tier.
+ *
+ * `bus status` already reports the wake TIER per participant, which answers "is
+ * anyone wakeable" but not "why did MY wake not fire". The last outcome is read
+ * from the ENDPOINT rather than from the thread `wake` entries, because
+ * `wakeAfterSend` returns before appending an entry on every skip: the thread
+ * sink holds only `requested` and `failed:*`, and none of the nine skip reasons,
+ * which are precisely the diagnostic cases. The endpoint fields carry every
+ * outcome except `no-attempt`.
+ */
+interface BusEndpointListRow {
+  readonly endpointId: string;
+  readonly client: BusEndpoint["client"];
+  readonly surface: BusEndpoint["surface"];
+  readonly wakePolicy: BusEndpoint["wakePolicy"];
+  /**
+   * STATIC client and surface eligibility ONLY.
+   *
+   * True means the gates would not reject this endpoint on client or surface
+   * grounds. It says NOTHING about daemon version, socket reachability, thread
+   * ownership, or whether a wake would actually succeed, which is why it is named
+   * `wakeSupported` and not `wakeReady`. Computed from the LITERAL "idle": passing
+   * the stored policy would report every opted-out endpoint as supported, because
+   * the helper accepts `never` for any client.
+   */
+  readonly wakeSupported: boolean;
+  readonly clientSessionName: string | null;
+  readonly retiredAt: string | null;
+  readonly lastWakeAt: string | null;
+  readonly lastWakeResult: string | null;
+}
+
+interface BusEndpointListResult {
+  readonly endpoints: BusEndpointListRow[];
+  readonly findings: string[];
+}
+
+async function collectEndpointList(root: string): Promise<BusEndpointListResult> {
+  const listed = await listEndpoints(root);
+  return {
+    // Retired endpoints are INCLUDED. Every other caller filters them out, but a
+    // listing that inherited that filter would show an empty fleet to someone
+    // whose endpoint was retired, which is the absence-reading-as-a-zero shape
+    // this command exists to remove. They are listed and marked instead.
+    endpoints: listed.endpoints.map((endpoint) => ({
+      endpointId: endpoint.endpointId,
+      client: endpoint.client,
+      surface: endpoint.surface,
+      wakePolicy: endpoint.wakePolicy,
+      wakeSupported: wakePolicyRefusal(endpoint.client, endpoint.surface, "idle") === null,
+      clientSessionName: endpoint.clientSessionName ?? null,
+      retiredAt: endpoint.retiredAt ?? null,
+      lastWakeAt: endpoint.lastWakeAt ?? null,
+      lastWakeResult: endpoint.lastWakeResult ?? null,
+    })),
+    findings: listed.findings,
+  };
+}
+
+function renderEndpointList(result: BusEndpointListResult): string {
+  const lines: string[] = [];
+  if (result.findings.length > 0) {
+    // Surfaced BEFORE the rows: a corrupt record is dropped from the list, so a
+    // silent finding would render as a smaller fleet than the registry holds.
+    lines.push("Registry findings:");
+    for (const finding of result.findings) lines.push(`  ${finding}`);
+    lines.push("");
+  }
+  if (result.endpoints.length === 0) {
+    lines.push("No endpoints.");
+    return lines.join("\n");
+  }
+  for (const row of result.endpoints) {
+    const retired = row.retiredAt === null ? "" : ` (retired ${row.retiredAt})`;
+    // "last wake" says LAST-ONLY: this is one outcome, never a history.
+    const when = row.lastWakeAt === null ? "" : ` at ${row.lastWakeAt}`;
+    lines.push(`endpoint ${row.endpointId}${retired}`);
+    lines.push(`  client: ${row.client} (${row.surface})`);
+    lines.push(`  wake policy: ${row.wakePolicy}`);
+    lines.push(`  wake supported: ${row.wakeSupported ? "yes" : "no"} (client and surface only)`);
+    lines.push(`  session name: ${row.clientSessionName ?? "absent"}`);
+    lines.push(`  last wake: ${row.lastWakeResult === null ? "absent" : `${row.lastWakeResult}${when}`}`);
+  }
+  return lines.join("\n");
+}
+
 export function registerBusCommand(yargs: Argv): Argv {
   return yargs.command(
     "bus",
@@ -1452,7 +1550,15 @@ export function registerBusCommand(yargs: Argv): Argv {
               argv.reason as string,
             ), (endpoint) => `Retired endpoint ${endpoint.endpointId}: ${endpoint.retiredReason}`);
           },
-        ).demandCommand(1, "Specify: retire"),
+        ).command(
+          "list",
+          "List endpoints with their wake configuration and last wake outcome",
+          (y3) => formatOption(y3),
+          async (argv) => {
+            const format = formatValue(argv.format);
+            await runBus(format, collectEndpointList, renderEndpointList);
+          },
+        ).demandCommand(1, "Specify: list, retire"),
         () => {},
       )
       .command(

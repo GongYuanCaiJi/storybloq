@@ -31,8 +31,53 @@ const WAKE_SECTION_ANCHORS = {
     "the Stop hook path stays the only delivery during an active turn",
     "skipped:surface-unreachable",
   ],
-  absence: ["no equivalent exists for Codex", "not shipped"],
+  absence: [
+    "no equivalent exists for Codex",
+    "not shipped",
+    // ISS-1132. The delivery layer does NOT write `poll_observed`: nothing
+    // writes it anywhere. The claim is corrected in place and anchored here so
+    // it cannot drift back in.
+    "written later, by the delivery layer",
+  ],
 } as const;
+
+/**
+ * ISS-1132 anchors: the opted-out-not-broken paragraph, and the corrected
+ * telemetry sentence.
+ *
+ * Kept as a separate constant from the T-489 set so a future edit can tell which
+ * change each anchor belongs to, and so deleting one set cannot quietly take the
+ * other with it.
+ */
+const WAKE_ISS1132_ANCHORS = {
+  presence: [
+    // The paragraph: pre-1.14.0 endpoints are opted out, not broken.
+    "defaulted to `never` and remain opted out",
+    // The corrected telemetry sentence, and the issue that owns the gap.
+    "not yet written",
+    "ISS-1153",
+  ],
+} as const;
+
+/**
+ * Anchors scoped to the OPTING-IN PARAGRAPH, not to the whole section.
+ *
+ * `bus endpoint list` is named twice in this section: once by the corrected
+ * telemetry sentence and once by the opting-in paragraph. A section-scoped
+ * anchor is therefore satisfied by the telemetry sentence alone, so deleting the
+ * opting-in paragraph's instruction to CHECK the current policy would pass
+ * unnoticed. Same cross-location weakness that let a mutant through the
+ * endpoint-list assertions; scoped here so it cannot.
+ */
+const OPTING_IN_MARKER = "Opting in.";
+const OPTING_IN_ANCHORS = ["bus endpoint list", "bus setup --wake idle", "codex_desktop"] as const;
+
+/** The single blank-line-delimited paragraph containing `marker`. */
+export function extractParagraph(section: string, marker: string): string {
+  const paragraphs = section.split(/\n\s*\n/);
+  const hits = paragraphs.filter((p) => p.includes(marker));
+  return hits.length === 1 ? hits[0]! : "";
+}
 
 /**
  * Anchors scoped to the delivery TIER TABLE.
@@ -149,6 +194,8 @@ describe("T-489 skill doc: anchor sets are not empty", () => {
     expect(WAKE_SECTION_ANCHORS.presence.length).toBeGreaterThan(0);
     expect(WAKE_SECTION_ANCHORS.absence.length).toBeGreaterThan(0);
     expect(WAKE_TABLE_ANCHORS.presence.length).toBeGreaterThan(0);
+    expect(WAKE_ISS1132_ANCHORS.presence.length).toBeGreaterThan(0);
+    expect(OPTING_IN_ANCHORS.length).toBeGreaterThan(0);
   });
 });
 
@@ -184,6 +231,25 @@ describe("T-489 skill doc: bus-mode.md documents the wake tier", () => {
     expect(table.trim().length).toBeGreaterThan(0);
     for (const anchor of WAKE_TABLE_ANCHORS.presence) {
       expect(table).toContain(anchor);
+    }
+  });
+
+  it("ISS-1132: says pre-1.14.0 endpoints are opted out and where to check", async () => {
+    const { section } = extractSection(await skill(), WAKE_HEADING);
+    expect(section.length).toBeGreaterThan(0);
+    for (const anchor of WAKE_ISS1132_ANCHORS.presence) {
+      expect(section, `missing ISS-1132 anchor: ${anchor}`).toContain(anchor);
+    }
+  });
+
+  it("ISS-1132: the opting-in paragraph itself says where to check and what is refused", async () => {
+    const { section } = extractSection(await skill(), WAKE_HEADING);
+    const paragraph = extractParagraph(section, OPTING_IN_MARKER);
+    // Non-empty FIRST: an empty slice would make every anchor below vacuous,
+    // which is the failure this whole file exists to prevent.
+    expect(paragraph.trim().length).toBeGreaterThan(0);
+    for (const anchor of OPTING_IN_ANCHORS) {
+      expect(paragraph, `opting-in paragraph missing: ${anchor}`).toContain(anchor);
     }
   });
 
