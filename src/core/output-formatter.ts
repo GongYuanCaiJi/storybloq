@@ -1,4 +1,5 @@
 import { computeIssueFlow, formatIssueFlow, ISSUE_FLOW_SEMANTICS } from "./issue-flow.js";
+import type { DuetRoute, DuetView } from "./duet-coordination.js";
 import { displayIdOf } from "./resolver.js";
 import type { OutputFormat, ErrorCode } from "../models/types.js";
 import type { FederationState, FederationNodeEntry } from "../federation/state.js";
@@ -641,7 +642,7 @@ function arrangementsSection(arrangements: StatusArrangements): string[] {
   for (const a of arrangements.items) {
     const parties = a.parties.map((p) => `${p.role} (${p.client})`).join(", ");
     lines.push(
-      `- ${escapeMarkdownInline(a.id)} [${a.lifecycle}] -- bounds: ${escapeMarkdownInline(a.bounds.join(", "))}; parties: ${escapeMarkdownInline(parties)}`,
+      `- ${escapeMarkdownInline(a.id)} [${a.lifecycle}] -- bounds: ${escapeMarkdownInline(a.bounds.join(", "))}; parties: ${escapeMarkdownInline(parties)}${a.route ? `; communication: ${escapeMarkdownInline(a.route.status)}${a.route.mode ? ` (${escapeMarkdownInline(a.route.mode)})` : ""}` : ""}`,
     );
   }
   for (const w of arrangements.warnings) {
@@ -652,6 +653,7 @@ function arrangementsSection(arrangements: StatusArrangements): string[] {
 
 /** Active-only projection of an Arrangement for status display (T-473). */
 export interface StatusArrangementSummary {
+  readonly route?: DuetRoute;
   readonly id: string;
   readonly lifecycle: ArrangementLifecycle;
   readonly bounds: readonly string[];
@@ -1636,9 +1638,10 @@ export function formatArrangement(
   arrangement: Arrangement,
   format: OutputFormat,
   citedRulings: readonly CitationResolution[] = [],
+  coordination?: DuetView,
 ): string {
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ ...arrangement, citedRulings: citedRulingsForJson(citedRulings) }), null, 2);
+    return JSON.stringify(successEnvelope({ ...arrangement, citedRulings: citedRulingsForJson(citedRulings), ...(coordination && { state: coordination.state, route: coordination.route }) }), null, 2);
   }
   const parties = arrangement.parties.map((p) => `${p.role} (${p.client})`).join(", ");
   const lines: string[] = [
@@ -1648,7 +1651,27 @@ export function formatArrangement(
     `Parties: ${escapeMarkdownInline(parties)}`,
     `Unreachability (irreversible): ${arrangement.unreachability.onIrreversibleWork}`,
   ];
+  if (coordination) lines.push("", ...duetCoordinationLines(coordination));
   return lines.join("\n") + formatCitedRulingsSection(citedRulings);
+}
+
+function duetCoordinationLines(view: DuetView): string[] {
+  const safe = (text: string) => escapeMarkdownDocumentStrict(sanitizeDisplayText(text));
+  const lines = [`Communication: ${safe(view.route.status)}${view.route.mode ? ` (${safe(view.route.mode)})` : ""}`];
+  if (view.route.reason) lines.push(safe(view.route.reason));
+  if (view.state) {
+    lines.push(`Coordination session: ${safe(view.state.start.sessionId)}; revision: ${view.state.revision}`, `Handshake nonce: ${safe(view.state.nonce)}`);
+    for (const assignment of view.state.assignments.slice(0, 20)) {
+      lines.push(`- ${safe(assignment.input.id)}: ${safe(assignment.status)}; ${safe(assignment.input.scope.slice(0, 240))}`);
+    }
+    if (view.state.assignments.length > 20) lines.push(`(${view.state.assignments.length - 20} more assignments)`);
+    lines.push("Full runtime, events, obligations and cursors: arrangement get with format json. Route readiness does not grant write authority.");
+  }
+  return lines;
+}
+
+export function formatDuetCoordination(view: DuetView, format: OutputFormat): string {
+  return format === "json" ? JSON.stringify(successEnvelope(view), null, 2) : formatArrangement(view.arrangement, format, [], view);
 }
 
 export function formatArrangementList(

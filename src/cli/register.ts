@@ -100,6 +100,7 @@ import {
   handleArrangementUpdate,
 } from "./commands/arrangement.js";
 import { ARRANGEMENT_LIFECYCLE, ARRANGEMENT_ROLES, type ArrangementParty } from "../models/arrangement.js";
+import { handleDuetCoordinate, parseDuetOperation } from "./commands/duet.js";
 import {
   handleRulingList,
   handleRulingGet,
@@ -3036,6 +3037,30 @@ export function registerArrangementCommand(yargs: Argv): Argv {
     (y) =>
       y
         .command(
+          "coordinate <id>",
+          "Record a pen-owned duet coordination operation",
+          (y2) => addFormatOption(y2
+            .positional("id", { type: "string", demandOption: true })
+            .option("json", { type: "string", demandOption: true, describe: "Typed start/receipt/assign/update/recover operation including expectedSessionId and expectedRevision" })
+            .option("client-task-id", { type: "string", describe: "Explicit caller task identity" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            try {
+              const input = parseDuetOperation(argv.id as string, argv.json as string, argv["client-task-id"] as string | undefined);
+              const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+              if (!root) throw new CliValidationError("not_found", "No .story/ project found.");
+              const result = await handleDuetCoordinate(input, format, root);
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (error) {
+              const { ProjectLoaderError } = await import("../core/errors.js");
+              const code = error instanceof CliValidationError || error instanceof ProjectLoaderError ? error.code : "io_error";
+              writeOutput(formatError(code, error instanceof Error ? error.message : String(error), format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
           "list",
           "List arrangements",
           (y2) =>
@@ -3199,7 +3224,7 @@ export function registerArrangementCommand(yargs: Argv): Argv {
             }
           },
         )
-        .demandCommand(1, "Specify an arrangement subcommand: list, get, create, update")
+        .demandCommand(1, "Specify an arrangement subcommand: list, get, create, update, coordinate")
         .strict(),
     () => {},
   );

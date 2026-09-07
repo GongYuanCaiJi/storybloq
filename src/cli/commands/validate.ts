@@ -9,6 +9,7 @@ import { validateIssueSourceRefs } from "../../core/issue-source-ref.js";
 import { loadRulingsSafe } from "../../core/ruling-loader.js";
 import { INTEGRITY_WARNING_TYPES } from "../../core/errors.js";
 import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
+import { readDuetCoordination } from "../../core/duet-coordination.js";
 import { arrangementGateRiskWarnings } from "../../core/arrangement-bounds.js";
 import {
   loadReviewContract,
@@ -46,6 +47,15 @@ function arrangementFindings(root: string): ValidationFinding[] {
     entity: null,
   }));
   for (const arrangement of arrangements) {
+    if (arrangement.lifecycle === "active") {
+      const { route } = readDuetCoordination(root, arrangement);
+      if (route.status !== "current") findings.push({
+        level: "warning",
+        code: `arrangement_communication_${route.status.replace(/-/g, "_")}`,
+        message: `arrangement ${arrangement.id}: communication ${route.status}; verify the return route before dispatch`,
+        entity: null,
+      });
+    }
     for (const warning of arrangementGateRiskWarnings(arrangement.gates)) {
       findings.push({
         level: "warning",

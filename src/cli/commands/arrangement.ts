@@ -1,13 +1,13 @@
 import { withProjectLock, writeTicketUnlocked, writeIssueUnlocked, loadProject } from "../../core/project-loader.js";
 import { loadArrangementsSafe, writeArrangementUnlocked } from "../../core/arrangement-loader.js";
 import { isArrangementConflicted } from "../../core/arrangement-authority.js";
+import { handleDuetGet } from "./duet.js";
 import { earmarkMatchesArrangement } from "../../core/earmarks.js";
 import { generateCanonicalId } from "../../core/canonical-id.js";
 import { summarizeZodIssues, describeSchemaIssues } from "../../core/zod-issues.js";
 import { resolveNodeRoot } from "../../mcp/node-resolution.js";
 import { withOrchestratorAndItemLocks } from "../../core/orchestrator-item-lock.js";
 import {
-  formatArrangement,
   formatArrangementList,
   formatArrangementCreateResult,
   formatArrangementUpdateResult,
@@ -137,16 +137,7 @@ export function handleArrangementList(
 }
 
 export function handleArrangementGet(id: string, ctx: CommandContext): CommandResult {
-  const { arrangements } = loadArrangementsSafe(ctx.root);
-  const arrangement = arrangements.find((a) => a.id === id);
-  if (!arrangement) {
-    return {
-      output: formatError("not_found", `Arrangement ${id} not found`, ctx.format),
-      exitCode: ExitCode.USER_ERROR,
-      errorCode: "not_found",
-    };
-  }
-  return { output: formatArrangement(arrangement, ctx.format) };
+  return handleDuetGet(id, ctx);
 }
 
 // --- Write handlers ---

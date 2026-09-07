@@ -136,6 +136,8 @@ import {
   handleArrangementUpdate,
 } from "../cli/commands/arrangement.js";
 import { ARRANGEMENT_ROLES, ARRANGEMENT_LIFECYCLE, type ArrangementParty } from "../models/arrangement.js";
+import { DuetOperationSchema } from "../models/duet.js";
+import { handleDuetCoordinate } from "../cli/commands/duet.js";
 // T-476 section 11: unlike T-473/T-474, the ratified plan calls for all four
 // verbs on MCP (`storybloq_ruling_{create,get,list,supersede}`) -- citation
 // resolution is meant to be discoverable without shelling out to the CLI.
@@ -1064,6 +1066,10 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
   ));
 
   // --- Arrangement tools ---
+  server.registerTool("storybloq_arrangement_coordinate", {
+    description: "Persist pen-observed duet state. Requires current session/revision; only the bound pen may write. Receipt evidence is attributed, not authentication.",
+    inputSchema: { operation: DuetOperationSchema },
+  }, async (args) => ({ ...await runMcpWriteTool(pinnedRoot, (root, format) => handleDuetCoordinate(args.operation, format, root)) }));
   // No storybloq_arrangement_list (amendment A3): storybloq_status's
   // activeArrangements summary covers MCP-side discovery. CLI `arrangement
   // list` stays for scripting.
@@ -1072,8 +1078,9 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
     description: "Get a duet/wave arrangement by ID",
     inputSchema: {
       id: ArrangementIdSchema.describe("e.g. a-[canonical]"),
+      format: z.enum(["md", "json"]).optional().describe("JSON includes the full coordination runtime; Markdown is bounded"),
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleArrangementGet(args.id, ctx)));
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleArrangementGet(args.id, ctx), undefined, args.format ?? "md"));
 
   server.registerTool("storybloq_arrangement_create", {
     description: "Create a new arrangement (duet/wave party charter). Authentication is out of scope: identityAnchor is a name to match, not a credential.",

@@ -10,6 +10,7 @@ import {
   ConflictEntrySchema,
 } from "./types.js";
 import { CROSS_NODE_REF_REGEX } from "./ticket.js";
+import { CoordinationSessionIdSchema, CommunicationReceiptSchema, DuetCheckpointSchema } from "./duet.js";
 
 /**
  * ISS-1077: a node-qualified arrangement bound, e.g. `engine:t-<canonical>`
@@ -120,6 +121,9 @@ export const ArrangementSchema = z
     bounds: z.array(z.union([TicketRefSchema, IssueRefSchema, NodeQualifiedBoundRefSchema])).min(1),
     parties: z.array(ArrangementPartySchema).min(2),
     gates: z.array(ArrangementGateSchema),
+    currentCoordinationSessionId: CoordinationSessionIdSchema.optional(),
+    communicationReceipts: z.array(CommunicationReceiptSchema).optional(),
+    coordinationCheckpoint: DuetCheckpointSchema.optional(),
     treeProtocol: z
       .object({
         pathScopes: z.array(z.string()).optional(),

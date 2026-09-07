@@ -18,6 +18,30 @@ function baseArrangement(overrides: Record<string, unknown> = {}) {
 }
 
 describe("ArrangementSchema", () => {
+  describe("duet evidence", () => {
+    it("rejects malformed coordination session ids", () => {
+      expect(ArrangementSchema.safeParse(baseArrangement({ currentCoordinationSessionId: "../foreign" })).success).toBe(false);
+    });
+    it("rejects incomplete self-attested receipts", () => {
+      expect(ArrangementSchema.safeParse(baseArrangement({ communicationReceipts: [{ verified: true }] })).success).toBe(false);
+    });
+    it("rejects malformed receipt task identities", () => {
+      const receipt = {
+        id: "return-1", nonce: "49bffaeb-1c78-4bc9-b0a5-05d9bf14f0f4",
+        coordinationSessionId: "f98b2230-ac16-439b-a540-17e87088cf00",
+        direction: "worker-to-manager", mode: "native-return",
+        source: { client: "codex", id: "worker" },
+        destination: { client: "codex", id: "pen" },
+        recorder: { client: "codex", id: "pen" },
+        senderTool: "mcp__codex_app__send_message_to_thread", collectionTool: null,
+        observedAt: "2026-09-07T20:00:00.000Z",
+      };
+      expect(ArrangementSchema.safeParse(baseArrangement({ communicationReceipts: [receipt] })).success).toBe(true);
+      for (const field of ["source", "destination", "recorder"] as const) {
+        expect(ArrangementSchema.safeParse(baseArrangement({ communicationReceipts: [{ ...receipt, [field]: { client: "codex", id: "../display name" } }] })).success).toBe(false);
+      }
+    });
+  });
   describe("valid arrangements", () => {
     it("parses a well-formed two-party arrangement", () => {
       const result = ArrangementSchema.safeParse(baseArrangement());

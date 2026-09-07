@@ -33,6 +33,8 @@ interface ContractCue {
 }
 
 const CONTRACT_CUES: readonly ContractCue[] = [
+  { tool: "storybloq_arrangement_coordinate", kind: "constraint", cue: "only the bound pen may write" },
+  { tool: "storybloq_arrangement_coordinate", kind: "constraint", cue: "current session/revision" },
   { tool: "nodeParam (shared param, 8 tools)", kind: "constraint", cue: "(orchestrator only)" },
   { tool: "nodeParam (shared param, 8 tools)", kind: "selection", cue: "Operate on this node's .story/" },
   { tool: "storybloq_autonomous_guide", kind: "constraint", cue: "(severity 'suggestion' is exempt)" },
@@ -339,13 +341,17 @@ describe("tool description contract (T-460)", () => {
     // were cut to the sentence that is not already in review-lenses.md and
     // `storybloq reference`, giving back 208 bytes, and neither can go further
     // without losing which field to echo or when it stops being optional.
+    // ISS-1155 adds one typed coordination operation union and optional get
+    // format, measured below 61 KB. Most growth is required field surface
+    // (identities, fences, evidence and assignment events), not descriptions;
+    // its description was trimmed before raising this explicit budget.
     // This ceiling leaves ~500 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
     // above are what protect against over-trimming, and a floor would fail an
     // honest future trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(54_500);
+    expect(bytes).toBeLessThan(61_500);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -370,6 +376,7 @@ describe("tool description contract (T-460)", () => {
     // storybloq_session_milestone (74 -> 75); no _list tool, matching the
     // arrangement/gate-ack/earmark precedent -- a milestone is a field on
     // the caller's own presence record, not a standalone enumerable entity.
-    expect(result.tools.length).toBe(75);
+    // ISS-1155 adds one coordinated operation tool (75 -> 76).
+    expect(result.tools.length).toBe(76);
   });
 });

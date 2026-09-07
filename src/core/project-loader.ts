@@ -12,7 +12,7 @@ import {
   mkdir,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, constants as fsConstants } from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { join, resolve, relative, extname, dirname, basename, sep, isAbsolute } from "node:path";
 import { acquireProjectLockAsync, releaseProjectLock, verifyProjectLockOwnership, type ProjectLockHandle } from "./project-lock.js";
@@ -1030,7 +1030,7 @@ export async function runTransactionUnlocked(
     for (const op of operations) {
       if (op.op === "write") {
         const tempPath = `${op.target}.${process.pid}.tmp`;
-        await fsyncWrite(tempPath, op.content);
+        await fsyncWrite(tempPath, op.content, true);
       }
     }
 
@@ -1614,8 +1614,13 @@ export async function fencedLink(tempPath: string, targetPath: string): Promise<
 async function fsyncWrite(
   filePath: string,
   content: string,
+  exclusive = false,
 ): Promise<void> {
-  const fh = await open(filePath, "w");
+  // Transaction staging must never follow a preplanted link or truncate a
+  // preexisting file. Journal rewrites also reject links (ISS-1155 review).
+  const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_NOFOLLOW |
+    (exclusive ? fsConstants.O_EXCL : fsConstants.O_TRUNC);
+  const fh = await open(filePath, flags);
   try {
     await fh.writeFile(content, "utf-8");
     await fh.sync();
