@@ -166,6 +166,20 @@ export const ConfigSchema = z
       closedAt: z.string().nullable(),
       baselineHash: z.string(),
       roots: z.array(z.string()),
+      // T-495 reader: what the three divergence checks saw at close. Written in
+      // the same atomic replace as `closedAt`, because a closed window without
+      // them cannot support the VOID decision and `readContractWindow` refuses
+      // that combination. Nullable per field: an observation that could not be
+      // made must not read as a clean one.
+      closeObservations: z.object({
+        reReadHash: z.string().nullable(),
+        // A COUNT, so a nonnegative integer. `-1` is not an unreadable
+        // observation, it is a number that answers the verdict's "above zero"
+        // question wrongly, and unreadable must be `null`.
+        commitsTouchingReview: z.number().int().nonnegative().nullable(),
+        reviewDirty: z.boolean().nullable(),
+        notes: z.array(z.string()),
+      }).nullable().optional(),
     }).optional(),
   })
   .passthrough();

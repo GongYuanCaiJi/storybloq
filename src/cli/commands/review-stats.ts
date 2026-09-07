@@ -24,8 +24,16 @@ import {
   type SessionOverlap,
 } from "../../core/review-stats-scan.js";
 import type { Metric, ScanReport, ScanState } from "../../core/review-stats-types.js";
+import { computeP3, type P3Result } from "../../core/review-stats-p3.js";
 import { loadReviewContract } from "../../autonomous/review-contract.js";
-import { openContractWindow } from "../../core/review-stats-window.js";
+import {
+  closeContractWindow,
+  openContractWindow,
+  readContractWindow,
+  type CloseObservations,
+  type ContractWindow,
+} from "../../core/review-stats-window.js";
+import { gitLogTouchingPath, gitPathDirty } from "../../autonomous/git-inspector.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
 export interface ReviewStatsOptions {
@@ -37,6 +45,14 @@ export interface ReviewStatsOptions {
    * refuses when a window is already recorded.
    */
   readonly openWindow?: boolean;
+  /**
+   * T-495: close the measurement window, recording the three divergence
+   * observations. Refuses before day seven, refuses to re-close, and refuses
+   * below the population floor.
+   */
+  readonly closeWindow?: boolean;
+  /** T-495: print the review-contract population (P3) and its verdict. */
+  readonly contract?: boolean;
 }
 
 /**
@@ -259,6 +275,235 @@ function render(
   return lines.join("\n");
 }
 
+
+/**
+ * T-495: the review-contract printout.
+ *
+ * READS THE STRUCTURED RESULT. Every number, every PASS and the verdict itself
+ * are fields on `P3Result`; nothing here sums, derives or decides. That is what
+ * lets the honesty properties be tested on the result rather than on text,
+ * which can carry a disclosure while the claim behind it is unjustified.
+ */
+export function renderContract(p3: P3Result, scan: ScanReport): string {
+  const w = p3.window;
+  const lines: string[] = ["## Review contract (report-only, P3)", ""];
+  if (w === null) {
+    lines.push("No measurement window recorded.", "");
+  } else {
+    lines.push(
+      `Window opened ${w.openedAt}, ${w.closedAt === null ? "STILL OPEN" : `closed ${w.closedAt}`}`,
+      `Baseline ${w.baselineHash}`,
+      `Roots: ${w.roots.length} (${w.roots.join(", ")})`,
+    );
+    const c = p3.contractAtScan;
+    if (c !== null) {
+      lines.push(`Contract at scan: ${c.status}, ${c.principleCount} principles, invalid ${c.invalidCount}`);
+    }
+    const obs = w.closeObservations;
+    if (obs === null) {
+      lines.push("Close-time observations: NONE RECORDED (the window is open, or was not closed by this build).");
+    } else {
+      lines.push(
+        `Close-time contract re-read: ${obs.reReadHash === null
+          ? "NOT OBSERVED"
+          : obs.reReadHash === w.baselineHash ? "matches baseline" : "DIFFERS from baseline"}`,
+        `Commits touching REVIEW.md in window: ${obs.commitsTouchingReview ?? "NOT OBSERVED"}. `
+        + `Working tree at close: ${obs.reviewDirty === null
+          ? "NOT OBSERVED" : obs.reviewDirty ? "DIRTY" : "clean"}.`,
+      );
+      for (const n of obs.notes) lines.push(`  - observation note: ${n}`);
+    }
+    lines.push(`Scan: ${p3.scanState}`, "");
+  }
+
+  const table = (metrics: readonly Metric[]): string[] => [
+    "| Metric | Unit | N / D | Value | Coverage | Flags |",
+    "|---|---|---|---|---|---|",
+    ...metricRows(metrics),
+  ];
+
+  lines.push(
+    `### Headline, over the ${p3.population.verifiedRounds} rounds whose delivery is VERIFIED, `
+    + `${p3.headlineFindings} findings`,
+    "",
+    "CONDITIONAL ON VERIFIED DELIVERY. These rates describe the rounds where the contract",
+    `provably reached the reviewer. Round coverage is NOT representativeness: the `
+    + `${p3.population.unverifiedRounds} unverified rounds below hold ${p3.unverifiedFindings} `
+    + "findings, and nothing here establishes that they would have behaved the same way.",
+    "",
+    ...table(p3.headline),
+    "",
+    "### Delivery unverified, NOT part of the numbers above",
+    "",
+    ...table(p3.unverified),
+    "",
+    `Findings by backend on these rounds: packet ${p3.unverifiedFindingsByLeg.packet}, `
+    + `lens ${p3.unverifiedFindingsByLeg.lens}.`,
+    "",
+    "A reviewer who read the contract and named nothing, and a reviewer who never received it,",
+    "produce the same finding, and only the first is evidence about capping. Adding the line",
+    "above to the headline restores exactly that conflation.",
+    "",
+    `### Projection, over all ${p3.population.measuredRounds} measured rounds`,
+    "",
+    ...table(p3.projection),
+    "",
+    "The blocker check is a property of the projection, not of what reached the reviewer, so it",
+    "keeps every measured round, verified or not.",
+    "",
+    "### Delivery detail, selected on PRESENCE of a delivered contract",
+    "",
+    ...table(p3.deliveryDetail),
+    "",
+  );
+  for (const m of [...p3.headline, ...p3.unverified, ...p3.projection, ...p3.deliveryDetail]) {
+    if (m.note) lines.push(`> ${m.label}: ${m.note}`, "");
+  }
+
+  const p = p3.population;
+  lines.push(
+    "### Population",
+    "",
+    p.membershipDefined
+      ? `In-window identified accepted rounds: ${p.inWindow}. Floor 20: `
+        + `${p.inWindow >= 20 ? "met" : "NOT met"}.`
+      // NOT a zero and NOT "NOT met". With no usable window nothing was
+      // selected, so a measured-looking zero here would contradict the verdict
+      // below, which already says the floor cannot be evaluated.
+      : "Membership is undefined: no usable measurement window selects a population, so the "
+        + "population floor cannot be evaluated and the counts below are unselected rather "
+        + "than measured.",
+    `Out of window, before it opened: ${p.outOfWindowPast} artifacts. Not members.`,
+    `Out of window, after close or beyond the five-minute skew allowance: ${p.outOfWindowFuture}.`,
+    `Out-of-scope roots: ${p.outOfScopeRoots.length}`
+    + (p.outOfScopeRoots.length === 0
+      ? "."
+      : ` (${p.outOfScopeRoots.map((r) => `${r.root}: ${r.artifacts}`).join(", ")}).`),
+    `Window roots never scanned: ${p.windowRootsNotScanned.length}`
+    + (p.windowRootsNotScanned.length === 0 ? "." : ` (${p.windowRootsNotScanned.join(", ")}).`),
+    `Undated artifacts: ${p.undated}.`,
+    `Orphan records joining no artifact: ${p.orphanRecords}. Not members.`,
+    `Records joining an artifact outside the window: ${p.recordsOutsideWindow}. Not members, and `
+    + "not orphans either: they joined something, just not a member.",
+    `Records rejected for a disagreeing artifact hash: ${p.joinMismatchRecords}. The other `
+    + "records of their round joined a member artifact and are counted as joined, so every "
+    + "record is in exactly one bucket.",
+    `Reconciliation: ${p.inWindow} in-window accepted artifacts, ${p.joinedRecords} records joined, `
+    + `${p.measuredRounds} of them usable measurements and ${p.degradedRounds} degraded, `
+    + `${p.artifactsWithNoRecord} artifacts with no record at all `
+    + `(${p.unjoinableArtifacts} of them carrying no reviewAttemptId, so they could never be `
+    + `joined), and ${p.orphanRecords} orphan records.`,
+    "A degraded record JOINS its artifact and supplies no projection, so it is not an",
+    "artifact-with-no-record: collapsing the two loses the distinction between a reporter that",
+    "ran and failed, which names its `failedAt`, and one that left nothing behind.",
+    "",
+    "### Exclusions",
+    "",
+    `OUTCOME exclusions, which carry the 20 percent: ${p3.outcomeExclusions.excluded} of `
+    + `${p3.outcomeExclusions.of}, ${p3.outcomeExclusions.rate === null
+      ? "-" : `${(p3.outcomeExclusions.rate * 100).toFixed(1)}%`}`,
+    p3.outcomeExclusions.byClass
+      .map((c) => `${c.cls} ${c.count} (packet ${c.packet}, lens ${c.lens})`).join("; "),
+    "",
+    `DELIVERY-ONLY exclusions: ${p3.deliveryExclusions.excluded} of ${p3.deliveryExclusions.of}, `
+    + `${p3.deliveryExclusions.rate === null
+      ? "-" : `${(p3.deliveryExclusions.rate * 100).toFixed(1)}%`}`,
+    p3.deliveryExclusions.byClass
+      .map((c) => `${c.cls} ${c.count} (packet ${c.packet}, lens ${c.lens})`).join("; "),
+    "",
+    `Total delivery ineligibility: ${p3.totalDeliveryIneligible} of ${p3.pooled.of}. The `
+    + `${p3.outcomeExclusions.excluded} outcome-excluded rounds carry no usable delivery evidence `
+    + "either, so both print: they answer different questions.",
+    "",
+    `Pooled: ${p3.pooled.excluded} of ${p3.pooled.of}, ${p3.pooled.rate === null
+      ? "-" : `${(p3.pooled.rate * 100).toFixed(1)}%`}. INFORMATIONAL ONLY. Not a threshold.`,
+    "",
+  );
+  for (const c of [...p3.outcomeExclusions.byClass, ...p3.deliveryExclusions.byClass]) {
+    if (c.note) lines.push(`> ${c.cls}: ${c.note}`, "");
+  }
+
+  lines.push(
+    "### Verdict",
+    "",
+    p3.verdict.status.headline,
+    p3.verdict.status.reason,
+    "",
+  );
+  for (const r of p3.verdict.rows) {
+    const verdictWord = r.pass === null ? "CANNOT BE EVALUATED" : r.pass ? "PASS" : "FAIL";
+    lines.push(`${r.label.padEnd(26)} ${r.measured}   against ${r.against}   ${verdictWord}`);
+  }
+  lines.push(
+    "",
+    p3.verdict.notAnAuthorisation,
+    "",
+    p3.verdict.observationalLimit,
+  );
+  if (p3.policyForms.length > 1) {
+    lines.push(
+      "",
+      `Effective policy was not constant across the window: ${p3.policyForms.length} distinct `
+      + "forms were observed. A change BETWEEN rounds is not a conflicting evaluation, which is "
+      + "scoped to one attempt, so it is disclosed here instead.",
+      ...p3.policyForms.map((f) =>
+        `  - alwaysBlock ${JSON.stringify(f.alwaysBlock)}, neverBlock `
+        + `${JSON.stringify(f.neverBlock)}: ${f.rounds} round(s)`),
+    );
+  }
+  lines.push(...renderScan(scan));
+  return lines.join("\n");
+}
+
+/**
+ * The three divergence observations, made AT CLOSE.
+ *
+ * Each is independently nullable and a null is NOT a clean result. The reader
+ * refuses to certify a week where one of them did not run, because a check that
+ * did not happen and a check that found nothing print identically otherwise.
+ */
+export async function observeDivergence(
+  projectRoot: string,
+  window: ContractWindow,
+  closedAtMs: number,
+): Promise<CloseObservations> {
+  const notes: string[] = [];
+  const contract = loadReviewContract(projectRoot);
+  const reReadHash = contract.contentHash;
+  if (reReadHash === null) notes.push("REVIEW.md could not be read at close, so it was not re-hashed");
+
+  // The window filter is applied HERE and not by `--since`/`--until`. Those
+  // walk history with a heuristic that can stop early, and the dates would
+  // reach a git argv from a config file.
+  let commits: number | null = null;
+  const log = await gitLogTouchingPath(projectRoot, "REVIEW.md");
+  if (!log.ok) notes.push(`commits touching REVIEW.md not observed: ${log.message}`);
+  else {
+    const openedMs = Date.parse(window.openedAt);
+    if (Number.isNaN(openedMs)) notes.push("openedAt is not a readable instant, so no commit range could be built");
+    else {
+      commits = log.data.filter((c) => {
+        const t = Date.parse(c.committedAt);
+        return !Number.isNaN(t) && t >= openedMs && t <= closedAtMs;
+      }).length;
+      const undatedCommits = log.data.filter((c) => Number.isNaN(Date.parse(c.committedAt))).length;
+      if (undatedCommits > 0) {
+        // A commit whose date will not parse cannot be placed in or out of the
+        // window, so the COUNT is not a complete answer and says so.
+        commits = null;
+        notes.push(`${undatedCommits} commit(s) touching REVIEW.md carry an unreadable date, so the in-window count is not determinable`);
+      }
+    }
+  }
+
+  let reviewDirty: boolean | null = null;
+  const dirty = await gitPathDirty(projectRoot, "REVIEW.md");
+  if (!dirty.ok) notes.push(`dirty-tree check not observed: ${dirty.message}`);
+  else reviewDirty = dirty.data;
+
+  return { reReadHash, commitsTouchingReview: commits, reviewDirty, notes };
+}
+
 /**
  * T-495: `review-stats --open-window`.
  *
@@ -327,6 +572,118 @@ async function openWindow(ctx: CommandContext): Promise<CommandResult> {
   };
 }
 
+
+/**
+ * T-495: `review-stats --close-window`.
+ *
+ * The population is counted INSIDE the lock, against the window being closed,
+ * because the floor is a property of that window and a count taken before the
+ * wait describes a different moment. `--contract` is the reader; this command
+ * only fixes the upper bound and records what the divergence checks saw.
+ */
+async function closeWindow(ctx: CommandContext): Promise<CommandResult> {
+  const nowMs = Date.now();
+  const closed = await closeContractWindow(ctx.root, {
+    nowMs,
+    observe: (window) => observeDivergence(ctx.root, window, nowMs),
+    population: async (window) => {
+      const scan = await scanRoots(window.roots.length > 0 ? window.roots : [ctx.root]);
+      return computeP3({
+        records: scan.p3,
+        artifacts: scan.p1,
+        // COUNTED AGAINST THE WINDOW THAT WILL BE PERSISTED, not the open one.
+        // An open window admits artifacts up to `nowMs` plus the five-minute
+        // skew allowance; the closed window excludes everything after
+        // `closedAt`, which is `nowMs`. So 19 rounds plus one timestamped a
+        // minute ahead passed the floor while the closed week held 19, and a
+        // window cannot be re-opened. Codex found it.
+        window: { ...window, closedAt: new Date(nowMs).toISOString() },
+        scan: scan.report,
+        nowMs,
+      }).population.inWindow;
+    },
+  });
+  if (!closed.ok) {
+    return { output: `Refused to close the measurement window.\n\n${closed.reason}`, exitCode: 1 };
+  }
+  const w = closed.window;
+  const obs = w.closeObservations;
+  return {
+    output: [
+      "Review-contract measurement window CLOSED.",
+      "",
+      `  opened at    ${w.openedAt}`,
+      `  closed at    ${w.closedAt}`,
+      `  baseline     ${w.baselineHash}`,
+      "",
+      "Close-time divergence observations, recorded with the close:",
+      `  re-read      ${obs?.reReadHash === null || obs === null
+        ? "NOT OBSERVED"
+        : obs.reReadHash === w.baselineHash ? "matches baseline" : "DIFFERS from baseline"}`,
+      `  commits      ${obs?.commitsTouchingReview ?? "NOT OBSERVED"} touching REVIEW.md in window`,
+      `  working tree ${obs?.reviewDirty === null || obs === undefined || obs === null
+        ? "NOT OBSERVED" : obs.reviewDirty ? "DIRTY" : "clean"}`,
+      ...(obs === null || obs.notes.length === 0
+        ? []
+        : ["", "  notes:", ...obs.notes.map((n) => `    - ${n}`)]),
+      "",
+      "Read the week with `storybloq review-stats --contract`.",
+    ].join("\n"),
+  };
+}
+
+/** T-495: `review-stats --contract`. The reader. */
+async function contractReport(
+  options: ReviewStatsOptions,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const window = readContractWindow(ctx.root);
+  // Every root the WINDOW names is scanned, whether or not it is this project:
+  // a window root that was never scanned is a hole in the population, and the
+  // reader reports it as an incomplete scan rather than as a smaller week.
+  const discovery = options.fleet === undefined
+    ? { roots: [...new Set([ctx.root, ...(window?.roots ?? [])])], failures: [] }
+    : await discoverFleetRoots(options.fleet);
+  const scan = await scanRoots(discovery.roots);
+  const discoveryState: Record<string, ScanState> = {};
+  for (const f of discovery.failures) {
+    for (const population of f.affects) discoveryState[`${population}:${f.root}`] = "UNAVAILABLE";
+  }
+  const report: ScanReport = {
+    ...scan.report,
+    failures: [...discovery.failures, ...scan.report.failures],
+    readFailures: discovery.failures.length + scan.report.readFailures,
+    state: { ...discoveryState, ...scan.report.state },
+  };
+  const contract = loadReviewContract(ctx.root);
+  const p3 = computeP3({
+    records: scan.p3,
+    artifacts: scan.p1,
+    window,
+    scan: report,
+    nowMs: Date.now(),
+    contractAtScan: {
+      status: contract.status,
+      principleCount: contract.principles.length,
+      invalidCount: contract.invalid.length,
+    },
+  });
+  if (ctx.format === "json") {
+    return {
+      output: JSON.stringify({ p3, scan: report }, null, 2),
+      ...(report.readFailures > 0 && {
+        warnings: [`${report.readFailures} read failure(s); see scan.failures`],
+      }),
+    };
+  }
+  return {
+    output: renderContract(p3, report),
+    ...(report.readFailures > 0 && {
+      warnings: [`${report.readFailures} read failure(s); see the Scan section`],
+    }),
+  };
+}
+
 export async function handleReviewStats(
   options: ReviewStatsOptions,
   ctx: CommandContext,
@@ -335,6 +692,10 @@ export async function handleReviewStats(
   // reads no artifacts, and running the whole scan to reach it would report a
   // population the window does not yet select.
   if (options.openWindow === true) return openWindow(ctx);
+  if (options.closeWindow === true) return closeWindow(ctx);
+  // The reader runs its own scan and its own root selection, so it returns from
+  // here rather than sharing P1's: the window names the roots, not the flags.
+  if (options.contract === true) return contractReport(options, ctx);
 
   const discovery = options.fleet === undefined
     ? { roots: [ctx.root], failures: [] }

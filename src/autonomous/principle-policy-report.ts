@@ -730,6 +730,20 @@ export function readPolicyRecords(
     if (code === "ENOENT") return { records: [], readFailed: false, unreadableLines: 0 };
     return { records: [], readFailed: true, unreadableLines: 0 };
   }
+  const parsed = parsePolicyRecordLines(raw);
+  return { ...parsed, readFailed: false };
+}
+
+/**
+ * Parse the log's TEXT. Separate from the read so a caller that does its own
+ * I/O -- the review-stats scanner, which is async and classifies its own
+ * failures by scope -- validates through this exact function rather than
+ * through a second copy of the shape rules. Two validators drift, and the one
+ * that drifts looser admits a record the other refuses.
+ */
+export function parsePolicyRecordLines(
+  raw: string,
+): { records: readonly PolicyRecord[]; unreadableLines: number } {
   const records: PolicyRecord[] = [];
   let unreadableLines = 0;
   for (const line of raw.split("\n")) {
@@ -744,7 +758,7 @@ export function readPolicyRecords(
     if (isPolicyRecord(parsed)) records.push(parsed);
     else unreadableLines += 1;
   }
-  return { records, readFailed: false, unreadableLines };
+  return { records, unreadableLines };
 }
 
 /**

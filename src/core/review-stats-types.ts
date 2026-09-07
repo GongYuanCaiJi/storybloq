@@ -276,6 +276,20 @@ export interface P1Artifact {
   readonly contentHash: string | null;
   readonly originClasses: readonly unknown[];
   readonly diffLines: number | null;
+  /**
+   * T-495 D0: the identity spine, parsed from the envelope the artifact
+   * already carries (`identityFields`).
+   *
+   * THE JOIN IS ON `reviewAttemptId`, NEVER ON A NUMERIC TUPLE. A
+   * target/stage/round join collides across generations: round 1 of generation
+   * 2 is a different round from round 1 of generation 1, and treating them as
+   * one is the defect that dropped nine rounds of westworld session 08a52602.
+   * A NULL here means the artifact predates the field and can never be joined,
+   * which is a different statement from joining nothing.
+   */
+  readonly reviewAttemptId: string | null;
+  readonly itemAttemptId: string | null;
+  readonly generation: number | null;
 }
 
 /**

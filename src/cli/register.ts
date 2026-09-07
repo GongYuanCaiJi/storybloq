@@ -2537,6 +2537,17 @@ export function registerReviewStatsCommand(yargs: Argv): Argv {
             "T-495: open the review-contract measurement window. Records the current "
             + "REVIEW.md hash as the week's baseline. Refuses if a window is already "
             + "open; a window cannot be re-based once opened",
+        }).option("close-window", {
+          type: "boolean",
+          describe:
+            "T-495: close the measurement window, recording the three divergence "
+            + "observations. Refuses before seven days have elapsed, refuses to "
+            + "re-close, and refuses below the twenty-round population floor",
+        }).option("contract", {
+          type: "boolean",
+          describe:
+            "T-495: print the review-contract population and its verdict. The verdict "
+            + "is three threshold lines and is never an authorisation",
         }),
       ),
     async (argv) => {
@@ -2551,6 +2562,8 @@ export function registerReviewStatsCommand(yargs: Argv): Argv {
           {
             ...(argv.fleet === undefined ? {} : { fleet: String(argv.fleet) }),
             ...(argv["open-window"] === true ? { openWindow: true } : {}),
+            ...(argv["close-window"] === true ? { closeWindow: true } : {}),
+            ...(argv.contract === true ? { contract: true } : {}),
           },
           ctx,
         ),

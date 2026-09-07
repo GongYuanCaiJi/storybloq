@@ -27,6 +27,10 @@ import type {
   ScanReport,
   ScanState,
 } from "./review-stats-types.js";
+import {
+  parsePolicyRecordLines,
+  type PolicyRecord,
+} from "../autonomous/principle-policy-report.js";
 
 /**
  * How the `landingDecision` field presented itself.
@@ -49,10 +53,24 @@ export interface P2Record {
   readonly realizedRisk: string | null;
 }
 
+/**
+ * One T-495 measurement record, with the root it was read from.
+ *
+ * The record already carries its `sessionId`; the ROOT is added here because
+ * the join key is `(root, sessionId, reviewAttemptId)` and a fleet scan can
+ * hold the same session id under two roots. Deriving the root later from the
+ * session id would join a record to another checkout's artifact.
+ */
+export interface P3Record {
+  readonly root: string;
+  readonly record: PolicyRecord;
+}
+
 export interface ScanResult {
   readonly report: ScanReport;
   readonly p1: readonly P1Artifact[];
   readonly p2: readonly P2Record[];
+  readonly p3: readonly P3Record[];
   /** Session ids seen under more than one root. Reported, never deduplicated. */
   readonly overlaps: readonly SessionOverlap[];
 }
@@ -115,6 +133,9 @@ interface SessionFiles {
 }
 
 const SESSIONS_DIR = join(".story", "sessions");
+
+/** T-495: the per-session measurement log, beside `state.json`. */
+const POLICY_LOG = "principle-policy.jsonl";
 
 /** Read concurrency. A damaged root fails alone; it never aborts the scan. */
 const CONCURRENCY = 24;
@@ -182,6 +203,8 @@ export function classifyLandingReason(reason: string | null): string | null {
 interface RootScan {
   readonly root: string;
   readonly p1: P1Artifact[];
+  readonly p3: P3Record[];
+  readonly p3State: ScanState;
   readonly p2: P2Record[];
   readonly failures: ScanFailure[];
   readonly p1State: ScanState;
@@ -232,6 +255,13 @@ function parseArtifact(
     timestamp: parseTimestamp(d.timestamp),
     epochMs: parseEpoch(d.timestamp),
     contentHash: typeof d._contentHash === "string" ? d._contentHash : null,
+    // T-495 D0. Absent stays NULL rather than becoming a placeholder: an
+    // artifact with no `reviewAttemptId` cannot be joined at all, and the
+    // reader reports that as its own count instead of silently matching it to
+    // whichever record shares its session.
+    reviewAttemptId: typeof d.reviewAttemptId === "string" ? d.reviewAttemptId : null,
+    itemAttemptId: typeof d.itemAttemptId === "string" ? d.itemAttemptId : null,
+    generation: typeof d.generation === "number" ? d.generation : null,
     originClasses: findings.map((f) =>
       typeof f === "object" && f !== null ? (f as Record<string, unknown>).originClass : undefined,
     ),
@@ -254,6 +284,12 @@ function parseEpoch(v: unknown): number | null {
 async function scanRoot(root: string): Promise<RootScan> {
   const p1: P1Artifact[] = [];
   const p2: P2Record[] = [];
+  const p3: P3Record[] = [];
+  // Whether any policy log was successfully READ. Tracked apart from `p3`
+  // because a session that ran rounds before the reporter shipped has no log
+  // at all, and a root of those is EMPTY rather than COMPLETE: nothing was
+  // read, so there is nothing the state can be complete about.
+  let readAnyPolicyLog = false;
   const failures: ScanFailure[] = [];
   const held = new Map<string, SessionFiles>();
   // Whether any reviews directory was successfully enumerated. Tracked apart
@@ -270,12 +306,18 @@ async function scanRoot(root: string): Promise<RootScan> {
     if (isMissing(e)) {
       // Scanned, nothing present. Not a failure, and distinguishable from one:
       // EMPTY is a fact about the root, UNAVAILABLE is a fact about the scan.
-      return { root, p1, p2, failures, p1State: "EMPTY", p2State: "EMPTY", sessions: held };
+      return {
+        root, p1, p2, p3, failures,
+        p1State: "EMPTY", p2State: "EMPTY", p3State: "EMPTY", sessions: held,
+      };
     }
-    failures.push(fail(root, "root-discovery", sessionsPath, reasonOf(e), ["p1", "p2"]));
+    failures.push(fail(root, "root-discovery", sessionsPath, reasonOf(e), ["p1", "p2", "p3"]));
     // Nothing was read, so this is UNAVAILABLE rather than PARTIAL. The two are
     // not degrees of one thing: PARTIAL still has a usable numerator.
-    return { root, p1, p2, failures, p1State: "UNAVAILABLE", p2State: "UNAVAILABLE", sessions: held };
+    return {
+      root, p1, p2, p3, failures,
+      p1State: "UNAVAILABLE", p2State: "UNAVAILABLE", p3State: "UNAVAILABLE", sessions: held,
+    };
   }
 
   const sessions: string[] = [];
@@ -286,7 +328,7 @@ async function scanRoot(root: string): Promise<RootScan> {
     } catch (e) {
       // ROOT-DISCOVERY, not record: a failed stat leaves a NAME that may or may
       // not be a session, so whole sessions may be invisible.
-      failures.push(fail(root, "root-discovery", join(sessionsPath, name), reasonOf(e), ["p1", "p2"]));
+      failures.push(fail(root, "root-discovery", join(sessionsPath, name), reasonOf(e), ["p1", "p2", "p3"]));
     }
   }
 
@@ -390,6 +432,51 @@ async function scanRoot(root: string): Promise<RootScan> {
         failures.push(fail(root, "record", statePath, reasonOf(e), ["p2"], sessionId));
       }
     }
+
+    // T-495 D0: the measurement log. Read here rather than through
+    // `readPolicyRecords`, which is synchronous and cannot classify a failure
+    // by scope; the LINE VALIDATION is the same function either way.
+    const policyPath = join(sessionsPath, sessionId, POLICY_LOG);
+    try {
+      const parsed = parsePolicyRecordLines(await readFile(policyPath, "utf-8"));
+      readAnyPolicyLog = true;
+      // THE CONTAINING DIRECTORY IS PART OF THE IDENTITY. The reader joins on
+      // the record's OWN `sessionId`, so a log copied from session B into
+      // session A would supply measurements for B's artifacts, and would do so
+      // even when B's own log is missing. That is a misplaced file, not
+      // evidence, and it is reported as a read-scope failure rather than
+      // admitted. Codex found it.
+      let foreign = 0;
+      for (const record of parsed.records) {
+        if (record.sessionId !== sessionId) { foreign += 1; continue; }
+        p3.push({ root, record });
+      }
+      if (foreign > 0) {
+        failures.push(fail(
+          root, "record", policyPath,
+          `${foreign} record(s) name a session other than the directory holding them`,
+          ["p3"], sessionId,
+        ));
+      }
+      if (parsed.unreadableLines > 0) {
+        // An unreadable LINE is a record-scope failure and it is reported as
+        // one. Skipping it silently would shrink the population by exactly the
+        // records that were damaged, and the reader would then compute a rate
+        // over the survivors while claiming to describe the week.
+        failures.push(fail(
+          root, "record", policyPath,
+          `${parsed.unreadableLines} unreadable line(s) in ${POLICY_LOG}`,
+          ["p3"], sessionId,
+        ));
+      }
+    } catch (e) {
+      // ENOENT is confirmed absence: this session recorded no measurements,
+      // which the reader reports as artifacts with no record rather than as a
+      // scan problem.
+      if (!isMissing(e)) {
+        failures.push(fail(root, "record", policyPath, reasonOf(e), ["p3"], sessionId));
+      }
+    }
   });
 
   return {
@@ -397,8 +484,10 @@ async function scanRoot(root: string): Promise<RootScan> {
     p1,
     p2,
     failures,
+    p3,
     p1State: stateFor(failures, "p1", p1.length > 0 || listedAny),
     p2State: stateFor(failures, "p2", p2.length > 0),
+    p3State: stateFor(failures, "p3", readAnyPolicyLog),
     sessions: held,
   };
 }
@@ -493,12 +582,15 @@ export async function scanRoots(roots: readonly string[]): Promise<ScanResult> {
   const failures: ScanFailure[] = [];
   const p1: P1Artifact[] = [];
   const p2: P2Record[] = [];
+  const p3: P3Record[] = [];
   for (const s of scans) {
     state[`p1:${s.root}`] = s.p1State;
     state[`p2:${s.root}`] = s.p2State;
+    state[`p3:${s.root}`] = s.p3State;
     failures.push(...s.failures);
     p1.push(...s.p1);
     p2.push(...s.p2);
+    p3.push(...s.p3);
   }
   return {
     report: {
@@ -514,6 +606,7 @@ export async function scanRoots(roots: readonly string[]): Promise<ScanResult> {
     },
     p1,
     p2,
+    p3,
     overlaps: overlapsOf(scans),
   };
 }
@@ -538,7 +631,7 @@ export async function discoverFleetRoots(dir: string): Promise<{
   } catch (e) {
     return {
       roots: [],
-      failures: [fail(dir, "root-discovery", dir, reasonOf(e), ["p1", "p2"])],
+      failures: [fail(dir, "root-discovery", dir, reasonOf(e), ["p1", "p2", "p3"])],
     };
   }
   const roots: string[] = [];
@@ -558,7 +651,7 @@ export async function discoverFleetRoots(dir: string): Promise<{
       roots.push(candidate);
     } catch (e) {
       if (!isMissing(e)) {
-        failures.push(fail(candidate, "root-discovery", candidate, reasonOf(e), ["p1", "p2"]));
+        failures.push(fail(candidate, "root-discovery", candidate, reasonOf(e), ["p1", "p2", "p3"]));
       }
     }
   }
