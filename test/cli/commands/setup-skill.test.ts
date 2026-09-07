@@ -1061,6 +1061,10 @@ describe("setup-skill", () => {
     expect(tsContent).toContain('"orchestrator-mode.md"');
     expect(tsContent).toContain('"triage-mode.md"');
     expect(tsContent).toContain('"bus-mode.md"');
+    // T-487: setup-flow.md reads this template at emission time. Left out of
+    // the allow-list it would simply not be installed, and the setup flow would
+    // report a missing file instead of writing a review contract.
+    expect(tsContent).toContain('"review-contract-template.md"');
   });
 
   it("setup-skill.ts handles subdirectory skills with copyDirRecursive", async () => {

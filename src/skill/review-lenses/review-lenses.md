@@ -265,3 +265,7 @@ _Findings the pipeline dropped (below confidence floor, evidence unverified) or 
 - **REJECT** -- At least one blocking finding survived the pipeline (alwaysBlock categories, corroborated blocking severity).
 - **Pre-existing findings** are excluded from filing pressure but still appear in the verdict findings; they are auto-filed as issues by synthesize.
 - Severity vocabulary: the package uses `blocking | major | minor | suggestion`. Report `blocking` as `critical` in user-facing output.
+
+### The review contract (REVIEW.md)
+
+If the project has a REVIEW.md declaring principles, name the one a finding violates in the finding's optional `principle` field: `@storybloq/lenses@0.5.0` widened `LensFindingSchema` and `MergedFindingSchema` to carry it. The lens prompt receives only the FIRST 3000 CHARACTERS of REVIEW.md, head-truncated, so a project that pushed its principles below that line has asked you to name one from a list you were never shown -- say so in the finding rather than guessing a principle name. Naming none is a legitimate answer and the correct one when the contract did not reach you. Nothing consumes those names during a review yet: the contract evaluator has no production caller, computes nothing at review time and persists nothing, and wiring it up is workstream G. So a named principle changes no severity and no verdict today; it costs the finding nothing, and it is what makes the later measurement possible. Do not describe a review as measured against a contract on that basis.

@@ -170,6 +170,10 @@ Use `/story auto T-XXX` instead. A single-ticket targeted auto session is equiva
 - Use the same review process as auto mode (same backends, same adaptive depth)
 - Can be cancelled with `action: "cancel"` at any point
 
+### The review contract (REVIEW.md)
+
+A project may declare a review contract in REVIEW.md: named principles, each with a blocking class, plus an "Outside this contract" line naming what it does not cover. Contract PROJECTION and enforcement are not wired: the projection helpers exist and are covered by tests, but nothing in CODE_REVIEW or PLAN_REVIEW calls them, no projection is persisted, and no severity or verdict is changed by the contract. The file is not inert, though, and the difference matters. Lens prompts already receive REVIEW.md as raw text (head-truncated), so it already shapes what reviewers report. `storybloq validate` is the only production consumer of the PARSED contract, and it parses it to warn when review backends are configured and the file is absent or unparseable -- which is where a project learns its checklist-style REVIEW.md declares no classes at all. Wiring the evaluation and recording it is workstream G; until that lands, do not report a measured session, an observation week, or a contract projection, because none was produced. Do not write or repair a project's REVIEW.md mid-review either: report the warning and let the setup flow propose one.
+
 ### Code-review landing cap
 
 `recipeOverrides.stages.CODE_REVIEW.maxReviewRounds` defaults to 12. The effective cap is the larger of that value and the ticket risk's required review rounds; `0` explicitly disables the cap. `reject`, plan redirects, and unresolved critical findings remain blocking at any round. At the cap, `revise` or `request_changes` with zero unresolved critical findings advances to FINALIZE and converts unresolved major/minor findings into deduplicated follow-up issues. A `landingDecision.reason` of `max_review_rounds_no_blocking` is an instruction to land the ticket, not reopen implementation. PLAN_REVIEW convergence remains separate.

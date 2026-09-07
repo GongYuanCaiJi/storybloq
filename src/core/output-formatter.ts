@@ -2069,6 +2069,10 @@ export function formatInitResult(
   if (result.warnings.length > 0) {
     lines.push("", `Warning: ${result.warnings.length} corrupt file(s) found. Run \`storybloq validate\` to inspect.`);
   }
+  // T-487: REVIEW.md is deliberately NOT written here. A review contract nobody
+  // agreed to is worse than none, so the setup flow proposes it and the user
+  // edits or rejects it before it lands. Say so, or its absence reads as a bug.
+  lines.push("", "Note: REVIEW.md (the review contract) is not created here. Run the storybloq skill and it proposes one you can edit before it lands.");
   lines.push("", "Tip: Run `storybloq setup --client all` to install the Storybloq skill, MCP, and hooks.");
   return lines.join("\n");
 }
