@@ -119,10 +119,19 @@ export interface P3Population {
    * Records that joined a member artifact and AGREED with its stored hash.
    *
    * Includes the agreeing records of a round excluded for a sibling's
-   * disagreement: they joined, whatever the round turned out to be worth. A
-   * record is in exactly one of `joinedRecords`, `joinMismatchRecords`,
-   * `recordsOutsideWindow` and `orphanRecords`, which is what lets the
-   * reconciliation line be checked rather than believed.
+   * disagreement: they joined, whatever the round turned out to be worth.
+   *
+   * ASSUMING MEMBER ARTIFACTS HAVE UNIQUE JOIN KEYS, a record is in exactly one
+   * of `joinedRecords`, `joinMismatchRecords`, `recordsOutsideWindow` and
+   * `orphanRecords`, which is what lets the reconciliation line be checked
+   * rather than believed. That precondition is NOT enforced anywhere: the loop
+   * runs per artifact and looks up the same candidate list by
+   * `(root, sessionId, reviewAttemptId)`, so two member artifacts sharing a key
+   * with different content hashes each classify the same record, once as
+   * agreeing and once as disagreeing, and the buckets then exceed the input
+   * count. Stated rather than implied, because an unqualified invariant that
+   * rests on an unenforced precondition is a line that reads as checkable and
+   * is not. Codex found it in round 4.
    */
   readonly joinedRecords: number;
   /** Records joining an artifact that is not a member of the window. */

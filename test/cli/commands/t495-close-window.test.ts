@@ -690,4 +690,20 @@ describe("--contract prints the reader's report", () => {
     };
     expect(renderContract(forged, scan)).toMatch(/99 of 100 excluded, 99\.0%.*against 20%   PASS/);
   });
+
+  it("QUALIFIES the one-bucket claim, because it assumes unique artifact join keys", () => {
+    // Codex round 4. The unqualified sentence reads as a checkable invariant
+    // and rests on a precondition nothing enforces: two member artifacts
+    // sharing a join key put one record in two buckets. A line that reads as a
+    // guarantee while resting on an unstated assumption is this ticket's own
+    // failure class, so the sentence has to carry the assumption.
+    const scan = {
+      roots: ["/r"], startedAt: "x", finishedAt: "y", atomic: false as const,
+      failures: [], readFailures: 0, state: { "p3:/r": "COMPLETE" as const },
+    };
+    const real = computeP3({ records: [], artifacts: [], window: null, scan, nowMs: 0 });
+    const out = renderContract(real, scan);
+    expect(out).toContain("assuming member artifacts have unique join keys");
+    expect(out).not.toMatch(/so every\s+record is in exactly one bucket\.(?! Two)/);
+  });
 });

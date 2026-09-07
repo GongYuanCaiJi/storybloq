@@ -1049,6 +1049,63 @@ describe("a contradictory artifact hash disqualifies the round even when another
   });
 });
 
+describe("the four-bucket reconciliation holds only for UNIQUE artifact join keys", () => {
+  // Codex round 4. The round-3 fix added a doc comment and a printed sentence
+  // claiming every record is in exactly one of the four buckets. That is not
+  // unconditionally true: the loop runs PER ARTIFACT and looks up the same
+  // candidate list by `(root, sessionId, reviewAttemptId)`, so two member
+  // artifacts sharing that key with different content hashes each classify the
+  // SAME record, once as agreeing and once as disagreeing. Nothing in the
+  // scanner enforces key uniqueness.
+  //
+  // The counting is defensible; the CLAIM about it was too strong, which is the
+  // same defect the round-3 fix was addressing, one level up. These two tests
+  // pin the real precondition rather than the wish.
+
+  function dupKeyPopulation() {
+    const ts = "2026-09-10T12:00:00.000Z";
+    const row = canonicalRows()[0]!;
+    return computeP3({
+      artifacts: [
+        artifactFor(ROOT, "ra-dup", ts, "hash-A"),
+        artifactFor(ROOT, "ra-dup", ts, "hash-B"),
+      ],
+      records: [{ root: ROOT, record: recordFor(row, "ra-dup", 1, "hash-A") }],
+      window: closedWindow(),
+      scan: cleanScan(),
+      nowMs: Date.parse("2026-09-17T12:00:00.000Z"),
+      contractAtScan: { status: "active", principleCount: 6, invalidCount: 0 },
+    }).population;
+  }
+
+  it("counts ONE record in TWO buckets when two member artifacts share a key", () => {
+    const p = dupKeyPopulation();
+    expect(p.inWindow).toBe(2);
+    expect(p.joinedRecords).toBe(1);
+    expect(p.joinMismatchRecords).toBe(1);
+    // The sum EXCEEDS the one input record. Asserted, not tolerated: a reader
+    // who trusts the unqualified claim would read this as two records.
+    expect(
+      p.joinedRecords + p.joinMismatchRecords + p.recordsOutsideWindow + p.orphanRecords,
+    ).toBe(2);
+  });
+
+  it("and the same shape with a UNIQUE key reconciles exactly, which is the precondition", () => {
+    // The control. Without it the case above reads as "reconciliation is
+    // broken" rather than "reconciliation assumes unique keys".
+    const rows = [canonicalRows()[0]!];
+    const built = buildFromRows(rows);
+    const p = computeP3(inputFrom(rows, {
+      artifacts: built.artifacts,
+      records: built.records,
+    })).population;
+    expect(p.inWindow).toBe(1);
+    expect(
+      p.joinedRecords + p.joinMismatchRecords + p.recordsOutsideWindow + p.orphanRecords,
+    ).toBe(built.records.length);
+  });
+});
+
 describe("a record joining an artifact outside the window has its own count", () => {
   it("is neither an orphan nor a joined record, and is reported", () => {
     // It joined something, so it is not an orphan; the artifact is not a

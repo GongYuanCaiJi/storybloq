@@ -387,7 +387,9 @@ export function renderContract(p3: P3Result, scan: ScanReport): string {
     + "not orphans either: they joined something, just not a member.",
     `Records rejected for a disagreeing artifact hash: ${p.joinMismatchRecords}. The other `
     + "records of their round joined a member artifact and are counted as joined, so every "
-    + "record is in exactly one bucket.",
+    + "record is in exactly one bucket, assuming member artifacts have unique join keys. "
+    + "Two member artifacts sharing one key are each classified against the same records, "
+    + "so a record can be counted twice; nothing enforces that uniqueness.",
     `Reconciliation: ${p.inWindow} in-window accepted artifacts, ${p.joinedRecords} records joined, `
     + `${p.measuredRounds} of them usable measurements and ${p.degradedRounds} degraded, `
     + `${p.artifactsWithNoRecord} artifacts with no record at all `
