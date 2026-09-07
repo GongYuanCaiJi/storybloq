@@ -26,7 +26,7 @@ import {
   listV1Endpoints,
   pollBus,
   pollV1,
-  redeliverBusMessage,
+  redeliverBusMessageWithWake,
   refreshEndpointForSessionStart,
   updateEndpoint,
   retireEndpoint,
@@ -1589,7 +1589,10 @@ export function registerBusCommand(yargs: Argv): Argv {
           await runBus(format, async (root) => {
             const values = argv as Record<string, unknown>;
             const owned = await resolveOwnedEndpoint(root, identityFrom(values));
-            return redeliverBusMessage(root, {
+            // redeliverBusMessageWithWake, NOT redeliverBusMessage: a redelivery
+            // commits real mail, and the message it carries was PARKED, so
+            // nothing woke the peer for it the first time (ISS-1131).
+            return redeliverBusMessageWithWake(root, {
               endpointId: owned.endpointId,
               clientTaskId: owned.taskId,
               predecessorThreadId: values["predecessor-thread"] as string,
@@ -1601,7 +1604,11 @@ export function registerBusCommand(yargs: Argv): Argv {
               : result.replaySource === "receipt"
                 ? " (replayed from your own existing receipt)"
                 : "";
-            return `Redelivered onto thread ${result.threadId} as message ${result.messageId}${via}.`;
+            // APPENDED, never folded in, exactly as `bus send` does it: what the
+            // wake did and whether the mail committed are different facts, and a
+            // reader must not have to infer one from the other.
+            const wake = typeof result.wake === "string" ? `\nWake: ${result.wake}.` : "";
+            return `Redelivered onto thread ${result.threadId} as message ${result.messageId}${via}.${wake}`;
           });
         },
       )

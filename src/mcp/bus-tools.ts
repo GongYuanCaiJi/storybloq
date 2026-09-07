@@ -8,7 +8,7 @@ import {
   hopsRemainingFor,
   pollBus,
   pollV1,
-  redeliverBusMessage,
+  redeliverBusMessageWithWake,
   sendBusMessageWithWake,
   updateBusThread,
   updateV1Thread,
@@ -124,7 +124,10 @@ export function registerBusTools(server: McpServer, pinnedRoot: string, onCall?:
       predecessorThreadId: ThreadIdSchema.describe("The hop-capped thread"),
       refusedEntryHash: RefusedEntryHashSchema.describe("entryHash of the hop-cap automatic park entry on the predecessor thread"),
     },
-  }, (args) => invoke(() => redeliverBusMessage(pinnedRoot, {
+    // redeliverBusMessageWithWake, NOT redeliverBusMessage: a redelivery commits
+    // real mail, and the message it carries was parked, so nothing woke the peer
+    // for it the first time (ISS-1131).
+  }, (args) => invoke(() => redeliverBusMessageWithWake(pinnedRoot, {
     endpointId: args.endpointId,
     clientTaskId: args.clientTaskId,
     predecessorThreadId: args.predecessorThreadId,

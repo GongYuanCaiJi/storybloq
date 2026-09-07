@@ -8,12 +8,26 @@
  * is what makes it structural: `store.ts` has no import of the wake at all, so no
  * future edit inside the store transaction can reach it by accident.
  *
- * Both send surfaces (the `bus send` CLI command and the `storybloq_bus_send` MCP
- * tool) go through this one function, so the tier cannot be live on one and dead on
- * the other.
+ * THREE surfaces attach here, and all three go through the SAME `wakeForSend`, so
+ * the tier cannot be live on one and dead on another: the `bus send` CLI command
+ * and the `storybloq_bus_send` MCP tool, both via `sendBusMessageWithWake`, and
+ * `bus redeliver` plus `storybloq_bus_redeliver` via
+ * `redeliverBusMessageWithWake` (ISS-1131).
+ *
+ * Redelivery lives HERE rather than beside the store for the same reason sending
+ * does: `store.ts` must keep zero wake imports, or the isolation stops being
+ * structural. It is a sibling rather than one merged entry point because the two
+ * inputs are different types, and a union would push a discrimination onto every
+ * caller to save one function.
  */
 
-import { sendBusMessage, type BusSendInput, type BusSendResult } from "./store.js";
+import {
+  redeliverBusMessage,
+  sendBusMessage,
+  type BusRedeliverInput,
+  type BusSendInput,
+  type BusSendResult,
+} from "./store.js";
 import { wakeAfterSend } from "./wake-runner.js";
 import { BUS_WAKE_TEXT, wakeTelemetry, wakeWanted } from "./wake.js";
 import { listEndpoints } from "./endpoints.js";
@@ -34,6 +48,35 @@ export async function sendBusMessageWithWake(
   const sent = await sendBusMessage(root, input);
   // AFTER the send has resolved, never inside it. If this line is ever moved
   // above the await, or into `sendBusMessage`, the isolation is gone.
+  const wake = await wakeForSend(root, sent);
+  return wake === null ? sent : { ...sent, wake };
+}
+
+/**
+ * The redeliver path with the same wake tier attached.
+ *
+ * ISS-1131. `redeliverBusMessage` commits real mail through `sendBusMessage` and
+ * bypassed the seam entirely, so an idle peer was never woken for a redelivered
+ * message. That is the case the tier most needs to cover: the original send was
+ * PARKED at the hop cap, and a parked send wakes nobody by design, so this is the
+ * first and only chance to wake the peer about that content.
+ *
+ * NO REDELIVER-SPECIFIC REPLAY GUARD, deliberately. `redeliverBusMessage` has
+ * three exits and `wakeForSend`'s existing clause already refuses the two that
+ * commit nothing: a marker hit returns `replayed: true` with `replaySource:
+ * "marker"`, a receipt replay returns `replayed: true` with `"receipt"`, and only
+ * a genuinely fresh redelivery returns `false` with `"none"`. `replayed` is
+ * defined as `replaySource !== "none"` at every construction site in the store, so
+ * a replay cannot present here as fresh. A second copy of that rule would be a
+ * second thing to keep in step.
+ */
+export async function redeliverBusMessageWithWake(
+  root: string,
+  input: BusRedeliverInput,
+): Promise<BusSendWithWakeResult> {
+  const sent = await redeliverBusMessage(root, input);
+  // AFTER the redelivery has resolved, never inside it, and NOT inside a try that
+  // also covers the redelivery: a redeliver error must still reach the caller.
   const wake = await wakeForSend(root, sent);
   return wake === null ? sent : { ...sent, wake };
 }
