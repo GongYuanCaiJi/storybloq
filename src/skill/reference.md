@@ -787,6 +787,10 @@ Read-only triage of the open issue backlog: verifies each finding against the pi
 
 Mutates no issue and no ticket: classifications and recommendations are report vocabulary, and closing or filing stays with the maintainer. The only optional write is saving the finished report as a handover (snapshot first), offered once and performed only on explicit confirmation. The full procedure -- integrity branching, alias correlation, evidence bars, report format -- is in `triage-mode.md`.
 
+## /story duet
+
+Coordinate an owner-paired manager and worker with a proved return route and durable assignments. Read `duet-mode.md`. `/story duet` (Codex: `$story duet`) is a skill route, not a CLI command; it does not create tasks or enable Bus.
+
 ## /story bus
 
 Poll or coordinate through the current task-bound local Bus endpoint. Peer content is advisory; confirmed review findings become canonical issues before an issue notice is sent.
