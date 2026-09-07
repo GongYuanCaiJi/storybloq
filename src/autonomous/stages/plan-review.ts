@@ -13,7 +13,15 @@ import { REVIEW_VERDICTS, REVIEW_VERDICTS_PROSE } from "../session-types.js";
 import { normalizeRiskLevel, requiredRounds, nextReviewer } from "../review-depth.js";
 import { effectiveReviewEffort, effortDisclosureLine, effortMinRounds } from "../review-effort.js";
 import { accumulateVerificationCounters } from "../lens-harness/verification-log.js";
-import { buildTier1Verdict, classifyLensReviewPath, type ReviewVerdictArtifact } from "../review-verdict.js";
+import {
+  buildTier1Verdict,
+  classifyLensReviewPath,
+  computeContentHash,
+  verdictFilename,
+  type ReviewVerdictArtifact,
+} from "../review-verdict.js";
+import { reportRound } from "../principle-policy-report.js";
+import { readContractWindow } from "../../core/review-stats-window.js";
 import {
   eventIdentity,
   identityFields,
@@ -545,6 +553,9 @@ export class PlanReviewStage implements WorkflowStage {
       budget: PLAN_REVIEW_CONTEXT_PACKET_BUDGET,
       captureDirective: planCaptureDirective,
       planReviews: ctx.state.reviews.plan,
+      // T-495: see the code stage. The key is complete or it is not a key.
+      sessionId: ctx.state.sessionId,
+      itemAttemptId: ctx.state.itemAttempt?.id ?? null,
     });
 
     return {
@@ -982,6 +993,39 @@ export class PlanReviewStage implements WorkflowStage {
       timestamp: new Date().toISOString(),
       ...identityFields(identity),
       artifactStatus: artifactResult.artifactStatus,
+    });
+
+    // T-495: the report-only measurement, after the upsert and before any
+    // `writeState`. See the code stage for why the order is load-bearing.
+    //
+    // `stageNextAction` is NULL here and that is the truth at this site, not a
+    // gap: `nextAction` is computed further down (`plan-review.ts:1005`), after
+    // this write. Recording a landing this site cannot know would be a
+    // fabricated field, so no metric reads one.
+    reportRound({
+      sessionDir: ctx.dir,
+      projectRoot: ctx.root,
+      windowBaselineHash: readContractWindow(ctx.root)?.baselineHash ?? null,
+      sessionId: ctx.state.sessionId,
+      itemId: target,
+      target,
+      itemAttemptId: identity.itemAttemptId ?? null,
+      reviewAttemptId: identity.reviewAttemptId,
+      artifactFileName: verdictFilename(target, "plan", roundNum, identity.generation),
+      artifactContentHash: computeContentHash(artifactResult.artifact),
+      stage: "plan",
+      round: roundNum,
+      generation: identity.generation,
+      backend: reviewerBackend,
+      leg: reviewerBackend === "lenses" ? "lens" : "packet",
+      findings,
+      isRoundBlocker: isBlockingFinding,
+      baselineHasCriticalOrMajor: hasCriticalOrMajor,
+      // BOTH stages compute this, byte-identically. An earlier draft of the
+      // ruling had it absent at the plan stage and passed `false`, which would
+      // have reported every plan round as having no unresolved critical.
+      baselineHasUnresolvedCritical: unresolvedCriticalCount > 0,
+      stageNextAction: null,
     });
 
     // ISS-598/ISS-1031, Gate-1 ratified ordering: the landing check runs

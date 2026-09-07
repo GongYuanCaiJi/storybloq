@@ -429,6 +429,11 @@ export async function handleCodexReview(options: CodexReviewOptions): Promise<Gu
       ? `Read the plan at .story/sessions/${options.sessionId}/plan.md in full.`
       : `Read the diff at .story/sessions/${options.sessionId}/review/diff.patch in full.`,
     planReviews: state.reviews?.plan,
+    // T-495: see the stage call sites. This route builds the same packet, so it
+    // records the same delivery observation; omitting it here would make the
+    // native codex leg silently unmeasurable.
+    sessionId: options.sessionId,
+    itemAttemptId: state.itemAttempt?.id ?? null,
   });
   const prompt = options.kind === "plan"
     ? planPrompt(options.sessionId, packet.text)

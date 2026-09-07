@@ -419,6 +419,13 @@ export function handlePrepare(input: PrepareInput): PrepareOutput {
     ticketDescription,
     projectRoot: input.projectRoot,
     tokenBudgetPerLens: TOKEN_BUDGET_PER_LENS,
+    // T-495: threaded from what `PrepareInput` already carries as optionals.
+    // Where they are absent nothing is written, which is right: a call with no
+    // session has nowhere to record an observation and no round to record it
+    // against.
+    ...(input.sessionDir === undefined ? {} : { sessionDir: input.sessionDir }),
+    ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+    ...(input.reviewRound === undefined ? {} : { roundNum: input.reviewRound }),
   });
 
   const preambleConfig = PreambleConfigSchema.parse({});

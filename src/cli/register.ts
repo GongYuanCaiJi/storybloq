@@ -2531,13 +2531,27 @@ export function registerReviewStatsCommand(yargs: Argv): Argv {
             "Scan every .story/ root under this directory. Root-level results are "
             + "authoritative; the cross-root figure is a sum of root observations "
             + "that may include duplicates, not unique fleet activity",
+        }).option("open-window", {
+          type: "boolean",
+          describe:
+            "T-495: open the review-contract measurement window. Records the current "
+            + "REVIEW.md hash as the week's baseline. Refuses if a window is already "
+            + "open; a window cannot be re-based once opened",
         }),
       ),
     async (argv) => {
       const format = parseOutputFormat(argv.format);
+      // `--open-window` WRITES, but it writes `.story/config.json` under the
+      // project lock taken inside `openContractWindow`, not through the ledger
+      // mutation path (config is not a ledger item and has no merge driver).
+      // The read path is still correct for reaching the handler; the lock and
+      // the atomic replace are where the safety lives.
       await runReadCommand(format, (ctx) =>
         handleReviewStats(
-          argv.fleet === undefined ? {} : { fleet: String(argv.fleet) },
+          {
+            ...(argv.fleet === undefined ? {} : { fleet: String(argv.fleet) }),
+            ...(argv["open-window"] === true ? { openWindow: true } : {}),
+          },
           ctx,
         ),
       );

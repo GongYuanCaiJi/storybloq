@@ -37,8 +37,10 @@
  * rather than against a figure taken before anything dropped.
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { telemetryDirPath } from "./liveness.js";
+import { appendContractDelivery } from "./principle-policy-report.js";
 import { formatCitedRulingsSectionBounded } from "../core/output-formatter.js";
 import type { CitationResolution } from "../core/ruling.js";
 import {
@@ -97,6 +99,13 @@ export interface BuildPacketParams {
   readonly sessionDir: string;
   readonly projectRoot: string;
   readonly target: string;
+  /**
+   * T-495: the two fields that complete the delivery record's key. Without
+   * them the record cannot be bound to the round that asked for it, and a
+   * partial key matches by wildcard -- which binds another item's line.
+   */
+  readonly sessionId?: string;
+  readonly itemAttemptId?: string | null;
   readonly stage: string;
   readonly generation: number;
   /** The round about to run. Priors are rounds 1..roundNum-1. */
@@ -415,7 +424,27 @@ function renderHistoricalEntry(round: number, f: PacketFinding): string {
   ].join("\n");
 }
 
-function projectRulesBody(projectRoot: string): string | null {
+/**
+ * T-495: whether the REVIEW.md PART went into the section, reported separately
+ * from whether a section exists at all.
+ *
+ * This function builds ONE section from RULES.md AND REVIEW.md, so section
+ * presence is not contract presence: a project with RULES.md and no REVIEW.md
+ * still gets a `project-rules` section. A delivery record deriving one from the
+ * other would say a contract was delivered to a packet that carried only
+ * project rules, which is the false positive the whole measurement rests on
+ * not making.
+ */
+interface RulesBody {
+  readonly body: string | null;
+  readonly reviewMdIncluded: boolean;
+  /** The hash of the EXACT bytes that went into `body`, or null. */
+  readonly reviewContentHash: string | null;
+  readonly reviewChars: number | null;
+  readonly reviewBytes: number | null;
+}
+
+function projectRulesBody(projectRoot: string): RulesBody {
   const parts: string[] = [];
   const rulesPath = join(projectRoot, "RULES.md");
   if (existsSync(rulesPath)) {
@@ -427,13 +456,38 @@ function projectRulesBody(projectRoot: string): string | null {
   // here: a reviewer benefits from the project's review guidance whatever shape
   // that file is in, and a checklist that declares no structure at all is still
   // guidance.
+  //
+  // ONE READ, and its hash is taken HERE, from the same bytes that go into the
+  // packet. An earlier draft read the file here and called `loadReviewContract`
+  // again after the fit to get the hash: two reads, so a REVIEW.md edited in
+  // between made the record name contract A while the reviewer received B, and
+  // an exact binding then reported that round as VERIFIED delivery of a
+  // contract it never saw. That is precisely the reading this whole measurement
+  // exists to make impossible, reintroduced by the code that measures it.
+  // Codex found it.
   const reviewPath = join(projectRoot, "REVIEW.md");
+  let reviewMdIncluded = false;
+  let reviewContentHash: string | null = null;
+  let reviewChars: number | null = null;
+  let reviewBytes: number | null = null;
   if (existsSync(reviewPath)) {
     try {
-      parts.push(`## REVIEW.md\n\n${readFileSync(reviewPath, "utf-8")}`);
+      const bytes = readFileSync(reviewPath);
+      const text = bytes.toString("utf-8");
+      parts.push(`## REVIEW.md\n\n${text}`);
+      reviewMdIncluded = true;
+      reviewContentHash = createHash("sha256").update(bytes).digest("hex");
+      reviewChars = text.length;
+      reviewBytes = bytes.byteLength;
     } catch { /* unreadable guidance is absent guidance */ }
   }
-  return parts.length > 0 ? parts.join("\n\n") : null;
+  return {
+    body: parts.length > 0 ? parts.join("\n\n") : null,
+    reviewMdIncluded,
+    reviewContentHash,
+    reviewChars,
+    reviewBytes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -543,12 +597,12 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
     });
   }
 
-  const rulesBody = projectRulesBody(projectRoot);
-  if (rulesBody !== null) {
+  const rules = projectRulesBody(projectRoot);
+  if (rules.body !== null) {
     candidates.push({
       id: "project-rules",
       sheddable: false,
-      render: () => `# Project rules\n\n${rulesBody}`,
+      render: () => `# Project rules\n\n${rules.body}`,
     });
   }
 
@@ -625,6 +679,46 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
   // disclosure to respect a number produces exactly the quieter outcome this
   // item exists to prevent.
   const chosen = trials.find((t) => t.text.length <= budget) ?? trials[trials.length - 1]!;
+
+  // T-495: the delivery record, emitted AFTER the packet is chosen and never at
+  // the read.
+  //
+  // The fit removes WHOLE sections from the bottom, so the file can be read,
+  // hashed, and then dropped. Recording at the read reports a delivered
+  // contract for a packet that does not contain one, which is the reading this
+  // measurement exists to make impossible.
+  //
+  // Two conditions AND-ed: the REVIEW.md part went into the section, and the
+  // chosen trial kept that section. Either one alone is a false positive.
+  if (params.sessionId !== undefined) {
+    const kept = chosen.sections.some((sec) => sec.id === "project-rules");
+    const included = rules.reviewMdIncluded && kept;
+    appendContractDelivery(sessionDir, {
+      sessionId: params.sessionId,
+      target,
+      itemAttemptId: params.itemAttemptId ?? null,
+      stage,
+      generation,
+      roundNum,
+      leg: "packet",
+      reviewMdIncluded: included,
+      omissionReason: included
+        ? null
+        : rules.reviewMdIncluded
+          ? "dropped-by-budget-fit"
+          : "no-review-md",
+      contentHash: rules.reviewContentHash,
+      sourceChars: rules.reviewChars,
+      sourceBytes: rules.reviewBytes,
+      // This route never cuts INSIDE a section, so `deliveredChars` equals the
+      // source whenever the section survives. Truncation is the lens leg's
+      // signal and is reported as absent here rather than as a zero.
+      deliveredChars: included ? rules.reviewChars : null,
+      truncated: false,
+      truncatedAtChars: null,
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   return {
     captureDirective,

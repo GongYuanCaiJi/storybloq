@@ -38,6 +38,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { findingIsBlockedByOrigin } from "./review-identity.js";
 import { normalizeSeverity } from "./session-types.js";
 
@@ -92,6 +93,19 @@ export interface ReviewContract {
   readonly path: string;
   /** Raw file text, present whenever the file was readable. Fed to backends. */
   readonly text?: string;
+  /**
+   * T-495: sha256 over the SOURCE BYTES of the same read that produced `text`.
+   *
+   * One site, one read. A call site that hashed the file on its own could hash
+   * a version the reviewer never received -- the file can change between two
+   * reads -- and the delivery record would then name the wrong contract, which
+   * is worse than naming none.
+   *
+   * NULL exactly when `text` is absent, and never the hash of the empty string:
+   * that hash is a real, stable value, so two projects with no contract at all
+   * would agree on a baseline and read as having received the same one.
+   */
+  readonly contentHash: string | null;
 }
 
 export type ReviewContractWarningKind =
@@ -247,9 +261,16 @@ function parseContract(text: string): ParseResult {
 export function loadReviewContract(projectRoot: string): ReviewContract {
   const path = join(projectRoot, REVIEW_FILENAME);
 
-  let text: string;
+  // Read as BYTES, hash the bytes, and decode from the same buffer.
+  //
+  // `Buffer.from(readFileSync(path, "utf-8"), "utf-8")` re-encodes text that
+  // has ALREADY been decoded, and decoding replaces invalid UTF-8 sequences, so
+  // two different files can produce the same hash while the docblock above
+  // claims source-byte identity. Codex found it. One read, one buffer, and the
+  // hash names the bytes on disk.
+  let bytes: Buffer;
   try {
-    text = readFileSync(path, "utf-8");
+    bytes = readFileSync(path);
   } catch (err) {
     // ENOENT is the only error that means "no contract was offered". Anything
     // else -- a directory at that path, a permission error, an I/O fault --
@@ -263,16 +284,27 @@ export function loadReviewContract(projectRoot: string): ReviewContract {
       outsideSections: 0,
       invalid: [],
       path,
+      contentHash: null,
     };
   }
 
+  const text = bytes.toString("utf-8");
   const { principles, invalid, outside, outsideSections } = parseContract(text);
   // An unreadable declaration invalidates the WHOLE contract. Activating on the
   // survivors would apply a policy narrower than the one its owner wrote, and
   // the capping direction makes that silence rather than noise.
   const status: ReviewContractStatus =
     invalid.length > 0 ? "unparseable" : principles.length > 0 ? "active" : "unparseable";
-  return { status, principles, outside, outsideSections, invalid, path, text };
+  return {
+    status,
+    principles,
+    outside,
+    outsideSections,
+    invalid,
+    path,
+    text,
+    contentHash: createHash("sha256").update(bytes).digest("hex"),
+  };
 }
 
 /**
@@ -473,6 +505,19 @@ export interface ProjectDecisionInput {
  * config still wins, and an inactive contract still applies nothing.
  */
 const IMPLICIT_PRINCIPLES: ReadonlySet<string> = new Set(["correctness", "security"]);
+
+/**
+ * T-495: is this principle one the contract applies without declaring it?
+ *
+ * Exported so the measurement can tell a promotion by a DECLARED blocking-class
+ * principle from a promotion by an implicit one. Deriving that from the
+ * projection's `reason` prose instead would make the classification break on a
+ * wording change, and the two are different findings about the contract: one
+ * says the declaration is doing work, the other says the implicit set is.
+ */
+export function isImplicitPrinciple(name: string): boolean {
+  return IMPLICIT_PRINCIPLES.has(name.toLowerCase());
+}
 
 /** Severities that have somewhere to fall. Capping a suggestion is a no-op. */
 const CAPPABLE: ReadonlySet<string> = new Set(["major", "critical"]);

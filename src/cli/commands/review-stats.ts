@@ -24,11 +24,19 @@ import {
   type SessionOverlap,
 } from "../../core/review-stats-scan.js";
 import type { Metric, ScanReport, ScanState } from "../../core/review-stats-types.js";
+import { loadReviewContract } from "../../autonomous/review-contract.js";
+import { openContractWindow } from "../../core/review-stats-window.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
 export interface ReviewStatsOptions {
   /** Scan every `.story/` root under this directory instead of just the project. */
   readonly fleet?: string;
+  /**
+   * T-495: open the review-contract measurement window. Writes
+   * `contractMeasurement` to `.story/config.json` and prints nothing else; it
+   * refuses when a window is already recorded.
+   */
+  readonly openWindow?: boolean;
 }
 
 /**
@@ -251,10 +259,83 @@ function render(
   return lines.join("\n");
 }
 
+/**
+ * T-495: `review-stats --open-window`.
+ *
+ * The baseline is the hash the CONTRACT PARSER computed, from the same read
+ * that produced its text. Hashing the file again here would give this command
+ * its own answer about a file that can change between two reads, and every
+ * later comparison would be against a contract nobody was handed.
+ */
+async function openWindow(ctx: CommandContext): Promise<CommandResult> {
+  const opened = await openContractWindow(ctx.root, {
+    roots: [ctx.root],
+    // READ AND VALIDATED UNDER THE LOCK, not before it. See the callback's
+    // docblock in `review-stats-window.ts` for why the ordering is the whole
+    // point: a baseline captured before the wait can already be stale by the
+    // time the immutable record is written.
+    baseline: () => {
+      const contract = loadReviewContract(ctx.root);
+      // The baseline must be a contract the evaluator would actually USE. An
+      // empty or unparseable REVIEW.md is readable and hashable, so an earlier
+      // draft opened an immutable week against a file declaring no usable
+      // principle at all, and every delivered hash matching it would then read
+      // as VERIFIED delivery of a contract that decides nothing.
+      if (contract.status !== "active" || contract.invalid.length > 0) {
+        return {
+          ok: false,
+          reason: [
+            `REVIEW.md at ${contract.path} is ${contract.status}`
+            + `${contract.invalid.length > 0
+              ? ` with ${contract.invalid.length} invalid declaration(s): `
+                + `${JSON.stringify(contract.invalid)}`
+              : ""}.`,
+            "",
+            "The week's baseline has to be a contract the evaluator would apply. Opening against",
+            "one it would refuse makes every matching delivery read as verified delivery of a",
+            "contract that decides nothing, and the window cannot be re-based once opened.",
+          ].join("\n"),
+        };
+      }
+      if (contract.contentHash === null) {
+        return {
+          ok: false,
+          reason:
+            "No readable REVIEW.md to baseline against. A window opened on a null baseline makes "
+            + "every delivered contract unequal to it, so every round reports delivery-unverified "
+            + "for a reason about the window rather than about the round.",
+        };
+      }
+      return { ok: true, hash: contract.contentHash };
+    },
+  });
+  if (!opened.ok) {
+    return { output: `Refused to open the measurement window.\n\n${opened.reason}`, exitCode: 1 };
+  }
+  const w = opened.window;
+  return {
+    output: [
+      "Review-contract measurement window OPENED.",
+      "",
+      `  opened at    ${w.openedAt}`,
+      `  baseline     ${w.baselineHash}`,
+      `  roots        ${w.roots.join(", ")}`,
+      "",
+      "The window is immutable: it cannot be re-opened or re-based. Close it with",
+      "`storybloq review-stats --close-window`, no earlier than seven days from now.",
+    ].join("\n"),
+  };
+}
+
 export async function handleReviewStats(
   options: ReviewStatsOptions,
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  // T-495. Handled FIRST and returned from: opening a window is a write, it
+  // reads no artifacts, and running the whole scan to reach it would report a
+  // population the window does not yet select.
+  if (options.openWindow === true) return openWindow(ctx);
+
   const discovery = options.fleet === undefined
     ? { roots: [ctx.root], failures: [] }
     : await discoverFleetRoots(options.fleet);

@@ -12,7 +12,15 @@ import { effectiveReviewEffort, effortDisclosureLine, effortMinRounds } from "..
 import { codeReviewLandingFloor, dialCodeReviewMaxRounds } from "../session-diagnostics.js";
 import { clearCache } from "../lens-harness/cache.js";
 import { accumulateVerificationCounters } from "../lens-harness/verification-log.js";
-import { buildTier1Verdict, classifyLensReviewPath, type ReviewVerdictArtifact } from "../review-verdict.js";
+import {
+  buildTier1Verdict,
+  classifyLensReviewPath,
+  computeContentHash,
+  verdictFilename,
+  type ReviewVerdictArtifact,
+} from "../review-verdict.js";
+import { reportRound } from "../principle-policy-report.js";
+import { readContractWindow } from "../../core/review-stats-window.js";
 import { buildReviewContextPacket } from "../review-context-packet.js";
 import { evaluateProvenanceGate, roundBlockerPredicate } from "../review-identity.js";
 
@@ -380,6 +388,10 @@ export class CodeReviewStage implements WorkflowStage {
       budget: REVIEW_CONTEXT_PACKET_BUDGET,
       captureDirective,
       planReviews: ctx.state.reviews.plan,
+      // T-495: the two fields that complete the delivery record's key. Without
+      // them the record binds by wildcard, which can bind another item's line.
+      sessionId: ctx.state.sessionId,
+      itemAttemptId: ctx.state.itemAttempt?.id ?? null,
     });
 
     return {
@@ -964,6 +976,46 @@ export class CodeReviewStage implements WorkflowStage {
       artifactStatus: artifactResult.artifactStatus,
     };
     codeReviews = upsertReviewRecord(codeReviews, roundRecord);
+
+    // T-495: the report-only measurement, HERE -- after the upsert, before any
+    // `writeState`.
+    //
+    // Before `writeState` because the order that survives interruption is
+    // artifact, in-memory upsert, record, state: a record written after the
+    // state write is lost on exactly the crash the reconciliation path exists
+    // to survive, and the round then reads as accepted with no measurement.
+    // This site precedes EVERY `writeState` below, including the plan-redirect
+    // branch's early return, so a redirecting round is measured like any other.
+    //
+    // The call cannot throw and returns nothing this stage reads. That is not a
+    // convention, it is the contract: `evaluatePrinciplePolicy` throws by
+    // design on a caller bug, and a report-only feature that fails a live
+    // review round is the one outcome this must not produce.
+    reportRound({
+      sessionDir: ctx.dir,
+      projectRoot: ctx.root,
+      windowBaselineHash: readContractWindow(ctx.root)?.baselineHash ?? null,
+      sessionId: ctx.state.sessionId,
+      itemId: target,
+      target,
+      itemAttemptId: identity.itemAttemptId ?? null,
+      reviewAttemptId: identity.reviewAttemptId,
+      artifactFileName: verdictFilename(target, "code", roundNum, identity.generation),
+      artifactContentHash: computeContentHash(artifactResult.artifact),
+      stage: "code",
+      round: roundNum,
+      generation: identity.generation,
+      backend: reviewerBackend,
+      leg: reviewerBackend === "lenses" ? "lens" : "packet",
+      findings,
+      // The ROUND's predicate, not a fresh one. The baseline has to be the
+      // decision this stage actually made, and the gate's `unresolved` verdict
+      // is part of it.
+      isRoundBlocker: isBlockingFinding,
+      baselineHasCriticalOrMajor: hasCriticalOrMajor,
+      baselineHasUnresolvedCritical: unresolvedCriticalCount > 0,
+      stageNextAction: nextAction,
+    });
 
     // T-208: Issue-fix context
     const isIssueFix = !!ctx.state.currentIssue;
