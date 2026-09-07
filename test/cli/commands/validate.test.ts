@@ -319,3 +319,62 @@ describe("T-494: the validate command supplies the citing-entity completeness ha
     expect(result.output).not.toContain("unreachable_ruling");
   });
 });
+
+describe("handleValidate: T-487 review contract", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    for (const r of roots.splice(0)) await rm(r, { recursive: true, force: true });
+  });
+
+  async function projectRoot(files: Record<string, string> = {}): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "t487-validate-"));
+    roots.push(root);
+    await mkdir(join(root, ".story"), { recursive: true });
+    for (const [rel, body] of Object.entries(files)) {
+      await writeFile(join(root, rel), body);
+    }
+    return root;
+  }
+
+  it("surfaces the absent-contract warning on a project with NO reviewBackends override", async () => {
+    // The recorded defect: the raw override array is absent here, so a gate
+    // keyed on it stays silent, while the effective list is the coding recipe's
+    // codex + agent and this project IS being reviewed.
+    const root = await projectRoot();
+    const out = handleValidate(makeCtx({ root }));
+    expect(out.output).toContain("REVIEW.md");
+    expect(out.output).toMatch(/setup/i);
+    // A warning, not an error: the severity ladder is still in force.
+    expect(out.exitCode).toBe(ExitCode.OK);
+  });
+
+  it("says nothing when no review backend is effective", async () => {
+    const root = await projectRoot();
+    const ctx = makeCtx({
+      root,
+      state: makeState({ config: { recipeOverrides: { reviewBackends: [] } } as never }),
+    });
+    expect(handleValidate(ctx).output).not.toContain("REVIEW.md");
+  });
+
+  it("reports an unrecognised blocking class as an ERROR that fails validation", async () => {
+    const root = await projectRoot({
+      "REVIEW.md": "# R\n\n## Security\ns\nBlocking: nit\n",
+    });
+    const out = handleValidate(makeCtx({ root }));
+    expect(out.output).toContain("nit");
+    expect(out.exitCode).toBe(ExitCode.VALIDATION_ERROR);
+  });
+
+  it("names a neverBlock entry that silences an implicit principle", async () => {
+    const root = await projectRoot({
+      "REVIEW.md": "# R\n\n## Security\ns\nBlocking: blocking\n\n## Outside this contract\nperformance\n",
+      ".story/config.json": JSON.stringify({
+        recipeOverrides: { blockingPolicy: { neverBlock: ["correctness"] } },
+      }),
+    });
+    const out = handleValidate(makeCtx({ root }));
+    expect(out.output).toContain("correctness");
+    expect(out.exitCode).toBe(ExitCode.OK);
+  });
+});

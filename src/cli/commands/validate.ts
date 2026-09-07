@@ -10,8 +10,17 @@ import { loadRulingsSafe } from "../../core/ruling-loader.js";
 import { INTEGRITY_WARNING_TYPES } from "../../core/errors.js";
 import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
 import { arrangementGateRiskWarnings } from "../../core/arrangement-bounds.js";
+import {
+  loadReviewContract,
+  readBlockingPolicy,
+  reviewContractWarnings,
+} from "../../autonomous/review-contract.js";
+import { reviewBackendsForClient } from "../../autonomous/stages/codex-native.js";
 import { ExitCode, formatValidation } from "../../core/output-formatter.js";
 import type { CommandContext, CommandResult } from "../types.js";
+
+/** The coding recipe's default. Named here so the fallback is not a literal. */
+const DEFAULT_REVIEW_BACKENDS: readonly string[] = ["codex", "agent"];
 
 /**
  * ISS-1050 interim: surfaces a plan-ack-without-pre-commit-ack risk for any
@@ -55,6 +64,35 @@ function arrangementFindings(root: string): ValidationFinding[] {
  * every other `validateProject` caller (issue/ticket pre/post-write checks)
  * is unaffected and continues to see pre-T-476 behavior.
  */
+/**
+ * T-487: the review contract's own findings.
+ *
+ * The backend list is the EFFECTIVE one, not the raw override array. A project
+ * that configured no `reviewBackends` still reviews with codex and agent (the
+ * coding recipe's default), and a gate keyed on the raw array left exactly
+ * those projects silent -- which is the population that most needs telling.
+ */
+function reviewContractFindings(ctx: CommandContext): ValidationFinding[] {
+  const overrides = (ctx.state.config as { recipeOverrides?: {
+    reviewBackends?: readonly string[];
+    codexReviewBackends?: readonly string[];
+  } }).recipeOverrides;
+  const effectiveBackends = reviewBackendsForClient({
+    reviewBackends: overrides?.reviewBackends ?? DEFAULT_REVIEW_BACKENDS,
+    ...(overrides?.codexReviewBackends === undefined
+      ? {}
+      : { codexReviewBackends: overrides.codexReviewBackends }),
+  });
+  const contract = loadReviewContract(ctx.root);
+  const { neverBlock } = readBlockingPolicy(ctx.root);
+  return reviewContractWarnings(contract, { effectiveBackends, neverBlock }).map((w) => ({
+    level: w.level,
+    code: w.kind.replace(/-/g, "_"),
+    message: w.message,
+    entity: null,
+  }));
+}
+
 function validateWithRulings(ctx: CommandContext): ValidationResult {
   const { rulings, warnings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loadRulingsSafe(ctx.root);
   // T-494: the SECOND half of the reachability condition. `loadProjectUnlocked`
@@ -105,7 +143,11 @@ function validateWithRulings(ctx: CommandContext): ValidationResult {
     message,
     entity: null,
   }));
-  return appendValidationFindings(merged, [...loaderFindings, ...arrangementFindings(ctx.root)]);
+  return appendValidationFindings(merged, [
+    ...loaderFindings,
+    ...arrangementFindings(ctx.root),
+    ...reviewContractFindings(ctx),
+  ]);
 }
 
 export function handleValidate(ctx: CommandContext): CommandResult {
