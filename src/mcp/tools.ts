@@ -1808,6 +1808,35 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
           // here cost ~1KB on a tools/list payload sent to every client on
           // every connection, to tell a reviewer in advance what it is told
           // again at the moment it reports. See T-460's ratchet below.
+          // T-487: the principle this finding violates, per the project's
+          // review contract. TOLERANT ON PURPOSE, and the shape matters.
+          //
+          // A `z.string().min(1)` here, or a bare `.transform` on a string
+          // schema, REJECTS the value before it can be normalized -- and a
+          // rejection at this boundary is a -32602 for the WHOLE report, so a
+          // reviewer sending `principle: ""` would cost a review round over a
+          // cosmetic slip. `z.preprocess` over `unknown` absorbs instead:
+          // non-strings and blanks become absent, everything else is trimmed
+          // and lowercased to match how `projectDecision` keys the contract.
+          principle: z.preprocess(
+            (v) => {
+              if (typeof v !== "string") return undefined;
+              const trimmed = v.trim().toLowerCase();
+              return trimmed === "" ? undefined : trimmed;
+            },
+            z.string().optional(),
+          ).describe(
+            "The review-contract principle this finding violates, lowercase. " +
+            "Omit it when no principle fits; omitting is how you say 'names none'.",
+          ),
+          // T-487: `lensIdsOf` in review-contract.ts reads `contributingLenses`
+          // and nothing else, and this object has no `.passthrough()`, so
+          // without this key the array is STRIPPED here and a merged lens
+          // finding reaches the contract evaluator with no lens ids at all.
+          // Coverage then falls back to category (the unreliable half) and the
+          // config exemption keyed on lens ids silently stops matching. Same
+          // additive fix ISS-724 made for `lens`, for the same reason.
+          contributingLenses: z.array(z.string()).optional(),
           dispositionReason: z.string().optional().describe(
             "Why this disposition; for 'deferred', 'owner-accepted-risk' or 'valid-deferred'.",
           ),

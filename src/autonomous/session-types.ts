@@ -484,6 +484,19 @@ export interface Finding {
    */
   readonly rawSeverity?: string;
 
+  /**
+   * T-487: the principle of the project's declared review contract this
+   * finding violates, lowercase as the contract names it.
+   *
+   * Optional and never defaulted. ABSENT is the only way to say "names no
+   * principle": `projectDecision` reads a missing value as the empty string,
+   * so a blank stored here would be indistinguishable from absence at exactly
+   * the seam that decides whether the finding is capped -- and the number the
+   * report-only week exists to produce is how often a reviewer names one, so a
+   * reviewer that tried and produced nothing must not read as one that did.
+   */
+  readonly principle?: string;
+
   // ── ISS-1115 D4: provenance, on axes SEPARATE from `disposition` ─────────
   // `disposition` says where a finding STANDS (open/addressed/contested/
   // deferred) and is unchanged by this run. These say where it CAME FROM.

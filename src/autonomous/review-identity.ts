@@ -412,6 +412,25 @@ export function readFindingOrigin(value: unknown): FindingOrigin {
  * Every value other than `open` means settled in some way, so guessing one from
  * an unreadable field is how a live finding disappears from a review.
  */
+/**
+ * T-487: read `principle` from a persisted or reported value.
+ *
+ * A BARE STRING reader, deliberately, following `readFindingOrigin`. A
+ * principle name is project-defined, so there is no enum to have -- and T-328
+ * is why that matters even where one exists: an enum on a persisted field does
+ * not drop a bad value, it makes the whole session unreadable.
+ *
+ * Blank-after-trim and non-string both read as ABSENT, because absent is the
+ * only way to say "names no principle" and a second way to say it would make
+ * the two indistinguishable. Lowercased because `projectDecision` keys the
+ * contract's principles on `name.toLowerCase()`.
+ */
+export function readFindingPrinciple(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 export function readFindingDisposition(value: unknown): LensFindingDisposition {
   return typeof value === "string"
     && (LENS_FINDING_DISPOSITIONS as readonly string[]).includes(value)

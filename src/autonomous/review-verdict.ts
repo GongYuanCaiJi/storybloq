@@ -299,6 +299,17 @@ const FINDING_HASH_DECISIONS = {
   origin: "included",
   originClass: "included",
   sinceRound: "included",
+  // T-487 G-A. INCLUDED, and it could not honestly be anything else: the
+  // runtime hashes the finding object WHOLE, so this field entered the hash
+  // the moment it existed on a finding, and classifying it `excluded` would
+  // mean building the filtering step this map's docblock warns about and
+  // owning the hash break that comes with it. On the merits it belongs here
+  // anyway. The principle a finding names is what the reviewer said, and it
+  // decides how the finding is read: `projectDecision` caps a finding that
+  // names none, so a round reporting a finding against `robustness` is not
+  // the round reporting the same finding against nothing. Existing artifacts
+  // carry no such key, so their hashes are unchanged.
+  principle: "included",
 } satisfies Record<keyof Finding, HashDecision>;
 
 /** Derived from the maps above, so there is exactly one source of truth. */

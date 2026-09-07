@@ -67,6 +67,14 @@ describe("hash classification maps", () => {
     const finding = {
       id: "F-1", severity: "critical", category: "c", description: "d",
       disposition: "open", recommendedNextState: "PLAN", rawSeverity: "blocking",
+      // T-487 G-A. The `satisfies` above already refuses a deleted entry for an
+      // OPTIONAL key, because `Record<keyof Finding, ...>` requires every key
+      // regardless of optionality; this pins the same thing at runtime, where
+      // the map is read by string. Note that this sample is not exhaustive:
+      // the four ISS-1115 D4 keys are classified in the map and absent here,
+      // so the runtime arm of this gate covers less than the map does. That
+      // gap predates this change and is reported rather than widened.
+      principle: "robustness",
     };
     for (const key of Object.keys(finding)) {
       expect(HASH_DECISIONS.finding[key], `unclassified finding key: ${key}`).toBeDefined();

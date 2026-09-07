@@ -27,6 +27,13 @@ export interface CodexFinding {
   readonly line?: number | null;
   readonly suggestion?: string | null;
   readonly recommendedNextState?: "PLAN" | "IMPLEMENT";
+  /**
+   * T-487: the principle of the project's review contract this finding
+   * violates, lowercase. ABSENT is the only way to say "names no principle" --
+   * a consumer reads a missing key as the empty string, so a blank would be
+   * indistinguishable from absence at the seam that decides capping.
+   */
+  readonly principle?: string;
   readonly origin?: string;
   readonly originClass?: string;
   readonly sinceRound?: number;
@@ -70,6 +77,16 @@ function reviewSchema(verdicts: readonly string[]): object {
             line: { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }] },
             suggestion: { anyOf: [{ type: "string" }, { type: "null" }] },
             recommendedNextState: { type: "string", enum: ["PLAN", "IMPLEMENT"] },
+            // T-487: this object is `additionalProperties: false`, so without
+            // this key a reviewer that follows the prompt has its answer
+            // DROPPED BY THE SCHEMA and the contract measures zero while every
+            // layer looks healthy. Same trap as the provenance keys below.
+            //
+            // `minLength: 1` constrains what the REVIEWER is asked for and
+            // nothing else. It still accepts "  ": rejecting whitespace here
+            // would fail the reviewer's whole output, and the normalizer is
+            // the layer that can safely discard instead.
+            principle: { type: "string", minLength: 1 },
             // ISS-1115: provenance. This object is `additionalProperties:
             // false`, so without these four keys a native reviewer CANNOT EMIT
             // a provenance field even when the prompt asks for one, and the
@@ -215,6 +232,7 @@ export function planPrompt(sessionId: string, context?: string): string {
       "Review for correctness, scope, missing risks, feasibility, and testability.",
       "Return only JSON matching the provided schema.",
       "Use verdict approve, revise, or reject.",
+      "Name the principle this finding violates in `principle`, lowercase, exactly as the review contract in the Context section names it; omit the field when the project declares no contract, when no principle fits, or when you would have to reach for one -- omitting is a legitimate answer, guessing is not.",
       "If there are no blocking issues, return findings as an empty array.",
     ].join(" "),
   ].join("\n");
@@ -230,6 +248,7 @@ export function codePrompt(sessionId: string, context?: string): string {
       "Focus on bugs, regressions, security issues, missing tests, and behavior mismatches with the plan.",
       "Return only JSON matching the provided schema.",
       "Use verdict approve, request_changes, or reject.",
+      "Name the principle this finding violates in `principle`, lowercase, exactly as the review contract in the Context section names it; omit the field when the project declares no contract, when no principle fits, or when you would have to reach for one -- omitting is a legitimate answer, guessing is not.",
       "Include file and line when available.",
     ].join(" "),
   ].join("\n");
@@ -293,6 +312,17 @@ async function runCodexExec(
   });
 }
 
+/**
+ * T-487: the one place the codex leg turns a reported principle into a stored
+ * one. Non-string and blank-after-trim both become absent; everything else is
+ * trimmed and lowercased.
+ */
+function normalizePrinciple(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().toLowerCase();
+  return trimmed === "" ? undefined : trimmed;
+}
+
 export function normalizeFinding(finding: CodexFinding, index: number): Finding {
   const severity = finding.severity === "nitpick" ? "suggestion" : finding.severity;
   const location = finding.file
@@ -318,6 +348,14 @@ export function normalizeFinding(finding: CodexFinding, index: number): Finding 
     // Copied only when present, so an absent label stays absent rather than
     // becoming a fabricated `new`, which D3 forbids: absent and unrecognised
     // are different claims and neither may be invented.
+    // T-487: trimmed and lowercased because `projectDecision` keys the
+    // contract's principles on `name.toLowerCase()` -- an unlowered "Quality"
+    // would name a declared principle and be recorded as naming none. A value
+    // that trims to empty is OMITTED rather than passed as "", because absent
+    // is the only way to say "names no principle".
+    ...(normalizePrinciple(finding.principle) === undefined
+      ? {}
+      : { principle: normalizePrinciple(finding.principle)! }),
     ...(finding.origin === undefined ? {} : { origin: finding.origin }),
     ...(finding.originClass === undefined ? {} : { originClass: finding.originClass }),
     ...(finding.sinceRound === undefined ? {} : { sinceRound: finding.sinceRound }),

@@ -567,6 +567,8 @@ export class PlanReviewStage implements WorkflowStage {
           reviewDepthLine(effort, "plan", reviewer, ctx.state.config),
         ].filter(Boolean).join(" "),
         "",
+        "Name the principle this finding violates in `principle`, lowercase, exactly as the review contract in the Context section names it. Omit the field when the project declares no contract, when no principle fits, or when you would have to reach for one. Omitting is a legitimate answer; guessing is not.",
+        "",
         "When done, call `storybloq_autonomous_guide` with:",
         '```json',
         `{ "sessionId": "${ctx.state.sessionId}", "action": "report", "report": { "completedAction": "plan_review_round", "verdict": "<approve|revise|reject>", "findings": [...] } }`,

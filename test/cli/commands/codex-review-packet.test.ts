@@ -52,6 +52,11 @@ describe("ISS-1115 R1: the native prompt carries the packet", () => {
       + " Review for correctness, scope, missing risks, feasibility, and testability."
       + " Return only JSON matching the provided schema."
       + " Use verdict approve, revise, or reject."
+      // T-487 G-A. Spelled out rather than referenced, because a byte-exact
+      // expectation is the point of this test: a prompt that silently loses
+      // this sentence is a reviewer that was never asked for the principle,
+      // reporting the same zero as one that was asked and declined.
+      + " Name the principle this finding violates in `principle`, lowercase, exactly as the review contract in the Context section names it; omit the field when the project declares no contract, when no principle fits, or when you would have to reach for one -- omitting is a legitimate answer, guessing is not."
       + " If there are no blocking issues, return findings as an empty array.",
     );
     expect(codePrompt("sess-1")).not.toContain("\n");

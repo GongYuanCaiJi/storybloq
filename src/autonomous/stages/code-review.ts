@@ -405,6 +405,8 @@ export class CodeReviewStage implements WorkflowStage {
           reviewDepthLine(effort, "code", reviewer, ctx.state.config),
         ].filter(Boolean).join(" "),
         "",
+        "Name the principle this finding violates in `principle`, lowercase, exactly as the review contract in the Context section names it. Omit the field when the project declares no contract, when no principle fits, or when you would have to reach for one. Omitting is a legitimate answer; guessing is not.",
+        "",
         // Until now this branch ended at "When done, report verdict and
         // findings", the only instruction in either stage with no report
         // envelope: it named no session, no completedAction, and no verdict
