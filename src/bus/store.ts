@@ -1269,6 +1269,37 @@ async function createHopCapSuccessorThread(
   });
 }
 
+/**
+ * ISS-1116: is this thread parked by the automatic hop-cap park that produced its
+ * CURRENT state?
+ *
+ * "Some hop_cap park somewhere in the history" is the wrong question, and getting it
+ * wrong is not theoretical: `bus thread update` lets a thread be parked, reopened,
+ * and parked again, so a thread can carry a genuine automatic hop_cap park in its
+ * history while its current park is a human decision to stop the conversation.
+ * fold.ts assigns state as entries are walked and EVERY state entry sets it
+ * (park -> parked, resolve -> resolved, reopen -> open), so the transition that
+ * produced the current state is the LAST state entry in the valid prefix.
+ *
+ * The trigger test is positive equality rather than `!== "duplicate_fingerprint"`.
+ * That matters because BusStatePayloadSchema permits `automatic: true` with NO
+ * trigger at all (ISS-1161): a negative test would silently admit an entry with an
+ * undefined trigger, which is the exact fail-open resolveRefusals already had to
+ * close for itself. This predicate is correct with or without ISS-1161 landing.
+ *
+ * The `state !== "parked"` early return is redundant and kept only for legibility:
+ * the caller reaches this only when the state is not `resolved`, and an open thread's
+ * last state entry is always a reopen, which cannot satisfy `action === "park"`.
+ */
+function isAutomaticHopCapParked(folded: FoldedBusThread): boolean {
+  if (folded.state !== "parked") return false;
+  const last = [...folded.entries].reverse().find((entry) => entry.type === "state");
+  return last?.type === "state" &&
+    last.payload.action === "park" &&
+    last.payload.automatic === true &&
+    last.payload.trigger === "hop_cap";
+}
+
 async function createThread(
   paths: BusPaths,
   endpoint: BusEndpoint,
@@ -1313,8 +1344,27 @@ async function createThread(
     }
     if (input.predecessorThreadId) {
       const predecessor = await foldBusThread(paths.projectRoot, input.predecessorThreadId);
-      if (predecessor.integrity !== "verified" || predecessor.state !== "resolved") {
-        throw new BusError("conflict", "A predecessor thread must be integrity-verified and resolved");
+      // ISS-1116: a thread parked at the hop cap is a legitimate predecessor, not
+      // only a resolved one. Before this, a question or coordination thread that hit
+      // the cap had no continuation path at all: redelivery is issue_notice-only
+      // (createHopCapSuccessorThread's own guard) and this precondition refused a
+      // parked thread, so the conversation simply ended with no way to carry it on.
+      //
+      // What this grants is LINEAGE and nothing else. An ordinary successor carries
+      // no refusedEntryHash, no content match against the refused artifact, no
+      // redeliver marker (so no uniqueness -- several may exist), and no
+      // predecessorRelation, which is why it never reaches verifiedSuccessorState
+      // and never discharges the predecessor's refusal disposition. It grants no new
+      // authority either: the literal participantsInclude check below is unchanged,
+      // and either participant could already open an unrelated thread with the same
+      // content. duplicate_fingerprint parks stay refused because that trigger means
+      // the same actionable message was already sent, so a successor is not the remedy.
+      if (predecessor.integrity !== "verified" ||
+          (predecessor.state !== "resolved" && !isAutomaticHopCapParked(predecessor))) {
+        throw new BusError(
+          "conflict",
+          "A predecessor thread must be integrity-verified, and either resolved or parked at the hop cap",
+        );
       }
       if (!participantsInclude(predecessor.thread, endpoint.endpointId) ||
           !participantsInclude(predecessor.thread, toEndpointId)) {
