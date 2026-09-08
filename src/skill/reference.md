@@ -814,13 +814,13 @@ Coordinate an owner-paired manager and worker with a proved return route and dur
 2. `storybloq handover create --content <md>` -- write session handover
 
 ### Project Setup
-1. `npm install -g @storybloq/storybloq` - install CLI
+1. `npm install -g @storybloq/storybloq@latest` - install CLI
 2. `storybloq setup --client all` - install Storybloq skill, MCP, and hooks for Claude Code and Codex
 3. `storybloq init --name my-project` - initialize .story/ in your project
 
 ## Troubleshooting
 
 - **MCP not connected:** Run `storybloq setup --client all`
-- **CLI not found:** Run `npm install -g @storybloq/storybloq`
+- **CLI not found:** Run `npm install -g @storybloq/storybloq@latest`
 - **Stale data:** Run `storybloq validate` to check integrity
 - **Storybloq skill not available:** Run `storybloq setup --client all` to install the skill

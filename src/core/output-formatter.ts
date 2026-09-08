@@ -2848,14 +2848,14 @@ export function formatReference(
   lines.push("2. `storybloq handover create --content <md>` -- write session handover");
   lines.push("");
   lines.push("### Project Setup");
-  lines.push("1. `npm install -g @storybloq/storybloq` - install CLI");
+  lines.push("1. `npm install -g @storybloq/storybloq@latest` - install CLI");
   lines.push("2. `storybloq setup --client all` - install Storybloq skill, MCP, and hooks for Claude Code and Codex");
   lines.push("3. `storybloq init --name my-project` - initialize .story/ in your project");
   lines.push("");
   lines.push("## Troubleshooting");
   lines.push("");
   lines.push("- **MCP not connected:** Run `storybloq setup --client all`");
-  lines.push("- **CLI not found:** Run `npm install -g @storybloq/storybloq`");
+  lines.push("- **CLI not found:** Run `npm install -g @storybloq/storybloq@latest`");
   lines.push("- **Stale data:** Run `storybloq validate` to check integrity");
   lines.push("- **Storybloq skill not available:** Run `storybloq setup --client all` to install the skill");
 
