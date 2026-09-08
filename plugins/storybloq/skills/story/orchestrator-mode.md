@@ -156,6 +156,13 @@ The wave boundary (step 7) is the FLOOR for handovers, not the whole rule. A sin
 
 Compaction note: `/story auto` gets an automatic post-compaction resume prompt; an orchestrate/pen session driving directly has no autonomous session, so on compaction the resume hook injects only a lightweight continuity breadcrumb (latest handover + `storybloq recap`). That breadcrumb restores only what is already durable -- which is why decisions must reach the ledger continuously, above.
 
+Manager priming order on that breadcrumb (field finding: without a stated order, a manager re-derives it from memory every time, inconsistently). Follow this order, not memory:
+1. Read the breadcrumb's named handover and the `storybloq recap` output before anything else -- the only durable state the breadcrumb itself provides.
+2. If a duet arrangement is in play (not every orchestrator wave has one), call `storybloq_arrangement_get` and compare `currentCoordinationSessionId` and `coordinationCheckpoint` against local runtime before treating any cached coordination state as current (duet-mode.md's own recovery mechanism). A bare orchestrator wave with no arrangement has no comparable identity marker in this codebase today; say so rather than inventing one.
+3. On a federation project, call `storybloq_node_list` for the configured node roster -- topology, not live presence.
+4. Call `ListAgents` (bus-mode.md's own precedent for Claude-side peer discovery) or the harness's equivalent to see which peer sessions are actually live right now.
+5. Before re-deriving a decision from memory, check whether it is already recorded: read the relevant item's `citesRulings` and/or call `storybloq_ruling_get`/`storybloq_ruling_list` in your own project root -- `ruling create --cites` is for recording a decision just now received, never for looking one up. Rulings reach agents by citation, never by paste: on a federation node that cannot resolve a citation today (ISS-1108), you may say a ruling exists and name its id for awareness, but that message is not authority the node can act on -- it still needs its own route to read the record.
+
 ## The 6-stage per-item pipeline (inside dynamic workflows)
 
 1. **PLAN** *(hands; inspector tier for L/risk)* -- read the enriched item + cited notes + the ACTUAL code; re-verify VERIFIED STATE with cheap greps; write a markdown plan: exact edits, tests, migration/deploy safety, post-deploy probe, explicit out-of-scope.
@@ -170,6 +177,8 @@ XS/chore items may collapse stages 1-2 into the implementation prompt, DISCLOSED
 Acceptance is item-scoped at every gate: an item passes on ITS tests and probe with no NEW failures vs the recorded tip baseline. Overall branch health is a wave-level concern, not an item gate -- a red branch state (a pre-existing failing test) becomes its own wave item and never silently stops an unrelated item at the implement or ship gate.
 
 **Standard wave-prompt furniture.** Every wave-stage prompt carries the branch's KNOWN CAVEATS -- pre-existing failures with their tracking IDs, known flakes, and any expected local-only commits -- so agents neither rediscover them, misclassify them as regressions, nor recommend filing items that already exist in the queue. Every IMPLEMENT prompt also states the ledger precedence explicitly: the ledger is orchestrator-owned, so the implementer does NOT create or close any storybloq ticket or issue and touches no ledger item other than updating its OWN assigned item's status when the IMPLEMENT stage requires it (this overrides a repo's own "log ISS-XXX for out-of-scope items" rule). Out-of-scope work and follow-ups it surfaces go back in a `followUps` field of its structured report, for the orchestrator to file.
+
+**Liveness furniture (ISS-1137).** Every dispatch prompt to a session-shaped worker (a duet worker, a long-running cross-session agent) carries the worker's liveness obligation verbatim: never end a turn with an intention; end with the deliverable, a question, or the literal "turn ending, continue needed" plus the current scope; any stop longer than 30 minutes owes a message. The orchestrator's side of the same rule: arm `notify_when_idle: true` on every dispatch and every reply while work is open, treat an idle notice as a trigger to check for the package and send a continue when it is missing, and issue one status demand per 60 silent minutes. See `duet-mode.md`, Liveness obligations.
 
 ## Dynamic-workflow skeleton (tiered models)
 

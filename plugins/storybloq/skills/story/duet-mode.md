@@ -27,6 +27,15 @@ The manager persists collection cursors and report identities, processes direct 
 
 While the manager is active, 60 minutes without meaningful worker activity calls for one status demand per silent interval. Polling is not worker activity. This procedure has no watchdog or timed recovery promise while the manager is idle.
 
+### Liveness obligations (ISS-1137)
+
+A Claude Code session does not resume itself across a turn boundary: a turn that ends with a stated intention ("continuing with scope 2") ends, and nothing wakes it. Both sides therefore carry a numbered obligation.
+
+- **Worker, 30 minutes.** Never end a turn with an intention. A turn ends with the deliverable, a question for the manager, or the literal words "turn ending, continue needed" plus the current scope, so the manager's continue lands on a known state. Any stop longer than 30 minutes owes a message even when its whole content is "blocked on X" or "context exhausted". A dirty shared tree with no message is a duet failure, not a pause.
+- **Manager, 60 minutes and every dispatch.** The manager arms the harness's idle notification (`notify_when_idle: true` on Claude Code cross-session messaging) on every dispatch and on every reply while work is open, so the worker's next idle transition wakes the manager. On that notice, if the expected package or question has not arrived, the manager sends a continue. An idle notice is not a report. Sixty silent minutes while the manager is active is a status demand, as above.
+
+Every dispatch prompt states the worker obligation verbatim so the rule travels with the work rather than living only in this file.
+
 ## Codex
 
 For separately created desktop tasks, discover the callable equivalents of `send_message_to_thread`, `wait_threads`, `read_thread`, and task listing in each task independently. Common full identifiers include `mcp__codex_app__send_message_to_thread` and `mcp__codex_app__wait_threads`; invoke only identifiers actually present. Exact discovery may use a deferred-tool search or the runtime's callable inventory, such as `ALL_TOOLS`. Never infer availability from another task's inventory.
