@@ -1320,6 +1320,9 @@ export async function summarizeV1(root: string): Promise<BusSummary> {
     hookDelivery: { claude: false, codex: false },
     // A v1 runtime predates guarded hook delivery entirely; no channel is active.
     deliveryCapabilities: { onStop: "none", onTool: "none" },
+    // T-489 and ISS-1153 both postdate v1: there is no wake tier here to report,
+    // which is absent rather than zero.
+    wake: { entries: null, lastOutcomes: null },
   };
 }
 

@@ -34,30 +34,87 @@ const WAKE_SECTION_ANCHORS = {
   absence: [
     "no equivalent exists for Codex",
     "not shipped",
-    // ISS-1132. The delivery layer does NOT write `poll_observed`: nothing
-    // writes it anywhere. The claim is corrected in place and anchored here so
-    // it cannot drift back in.
-    "written later, by the delivery layer",
+    // ISS-1132's absence anchor "written later, by the delivery layer" is RETIRED
+    // by ISS-1153, deliberately and not by accident. It guarded a claim that was
+    // FALSE when it was written: the doc promised a writer that did not exist.
+    // The poll path writes `poll_observed` now, so the claim is true, and keeping
+    // an absence anchor against it would forbid this file's own subject from
+    // saying what the code does. An anchor earns its place by being wrong to
+    // violate; this one stopped being that.
   ],
 } as const;
 
 /**
- * ISS-1132 anchors: the opted-out-not-broken paragraph, and the corrected
- * telemetry sentence.
+ * ISS-1132 anchors: the opted-out-not-broken paragraph.
  *
  * Kept as a separate constant from the T-489 set so a future edit can tell which
  * change each anchor belongs to, and so deleting one set cannot quietly take the
  * other with it.
+ *
+ * ISS-1132 also anchored "not yet written" and "ISS-1153" here, pinning the GAP:
+ * the doc had to say `poll_observed` was unwritten and name the issue that owned
+ * it. ISS-1153 closed the gap, so both are retired rather than left to fail. The
+ * anchors that replace them are in WAKE_ISS1153_ANCHORS below, and they pin the
+ * behaviour instead of its absence.
  */
 const WAKE_ISS1132_ANCHORS = {
   presence: [
     // The paragraph: pre-1.14.0 endpoints are opted out, not broken.
     "defaulted to `never` and remain opted out",
-    // The corrected telemetry sentence, and the issue that owns the gap.
-    "not yet written",
-    "ISS-1153",
   ],
 } as const;
+
+/**
+ * ISS-1153 anchors: what the reader must be told about `poll_observed`.
+ *
+ * Every one of these is a claim a reader would get WRONG without the sentence it
+ * anchors. A rate with no lower-bound caveat reads as a measurement; a
+ * `poll_observed` with no causal caveat reads as proof the wake worked; a
+ * cumulative condition read as an in-invocation one makes an empty poll look like
+ * a bug; and a reader who does not know skips never reach the thread will go
+ * looking for them there and conclude the tier is broken.
+ */
+const WAKE_ISS1153_ANCHORS = {
+  presence: [
+    "poll_observed",
+    "storybloq bus status",
+    "That condition is cumulative",
+    "an observation and never a cause",
+    "a lower bound",
+    "Skips never reach the thread",
+  ],
+} as const;
+
+/**
+ * ISS-1153 anchors scoped to the two PARAGRAPHS that carry the load, not to the
+ * section.
+ *
+ * Section scope is too weak here and the weakness is specific: `poll_observed`
+ * appears in several sentences, so a section-scoped anchor survives deleting the
+ * one clause that says WHO writes it and when; and `a lower bound` survives
+ * deleting every sentence that explains what is missing from the count, leaving a
+ * reader with a caveat and no way to act on it. Each anchor below names a clause
+ * whose removal would leave the doc confidently incomplete.
+ */
+const OBSERVATION_MARKER = "The evidence that mail actually reached someone";
+const OBSERVATION_ANCHORS = [
+  "the poll path appends",
+  "polled mailbox cursor stands at or past",
+  "That condition is cumulative",
+  "an observation and never a cause",
+  "storybloq bus status",
+] as const;
+
+const BOUNDARY_MARKER = "What that section reports is a lower bound";
+const BOUNDARY_ANCHORS = [
+  "DISCOVER the `requested` entry",
+  "hold a cursor at or past",
+  "append the observation successfully",
+  "waits on a later poll folding that thread again",
+  "reclaims the thread's mailbox pointer",
+  "written after the poll that would have carried it",
+  "the observation's own append fails",
+] as const;
 
 /**
  * Anchors scoped to the OPTING-IN PARAGRAPH, not to the whole section.
@@ -195,6 +252,9 @@ describe("T-489 skill doc: anchor sets are not empty", () => {
     expect(WAKE_SECTION_ANCHORS.absence.length).toBeGreaterThan(0);
     expect(WAKE_TABLE_ANCHORS.presence.length).toBeGreaterThan(0);
     expect(WAKE_ISS1132_ANCHORS.presence.length).toBeGreaterThan(0);
+    expect(WAKE_ISS1153_ANCHORS.presence.length).toBeGreaterThan(0);
+    expect(OBSERVATION_ANCHORS.length).toBeGreaterThan(0);
+    expect(BOUNDARY_ANCHORS.length).toBeGreaterThan(0);
     expect(OPTING_IN_ANCHORS.length).toBeGreaterThan(0);
   });
 });
@@ -239,6 +299,33 @@ describe("T-489 skill doc: bus-mode.md documents the wake tier", () => {
     expect(section.length).toBeGreaterThan(0);
     for (const anchor of WAKE_ISS1132_ANCHORS.presence) {
       expect(section, `missing ISS-1132 anchor: ${anchor}`).toContain(anchor);
+    }
+  });
+
+  it("ISS-1153: says who writes poll_observed, and every caveat the number needs", async () => {
+    const { section } = extractSection(await skill(), WAKE_HEADING);
+    expect(section.length).toBeGreaterThan(0);
+    for (const anchor of WAKE_ISS1153_ANCHORS.presence) {
+      expect(section, `missing ISS-1153 anchor: ${anchor}`).toContain(anchor);
+    }
+  });
+
+  it("ISS-1153: the observation paragraph names the WRITER and both caveats", async () => {
+    const { section } = extractSection(await skill(), WAKE_HEADING);
+    const paragraph = extractParagraph(section, OBSERVATION_MARKER);
+    // Non-empty FIRST: an empty slice makes every anchor below vacuous.
+    expect(paragraph.trim().length).toBeGreaterThan(0);
+    for (const anchor of OBSERVATION_ANCHORS) {
+      expect(paragraph, `observation paragraph missing: ${anchor}`).toContain(anchor);
+    }
+  });
+
+  it("ISS-1153: the boundary paragraph names all three requirements and all three ways to miss", async () => {
+    const { section } = extractSection(await skill(), WAKE_HEADING);
+    const paragraph = extractParagraph(section, BOUNDARY_MARKER);
+    expect(paragraph.trim().length).toBeGreaterThan(0);
+    for (const anchor of BOUNDARY_ANCHORS) {
+      expect(paragraph, `boundary paragraph missing: ${anchor}`).toContain(anchor);
     }
   });
 

@@ -296,6 +296,11 @@ export const BusWakePayloadSchema = z.object({
   wakeId: UuidSchema,
   endpointId: UuidSchema,
   attempt: z.number().int().min(1).max(3),
+  // ISS-1153: the field means two different things by action, and conflating them
+  // would misreport the measurement. On `requested` and `failed` it is the
+  // recipient's mailbox HIGH-WATER at wake time (the batch the wake was for). On
+  // `poll_observed` it is the POLL's cursor: the position the woken endpoint had
+  // actually reached when the observation was recorded.
   batchCursor: z.number().int().nonnegative(),
   action: z.enum(["requested", "poll_observed", "failed"]),
   reason: z.string().min(1).max(1024).optional(),
@@ -613,6 +618,33 @@ export interface BusParticipantSummary {
   readonly wakePolicy: BusEndpoint["wakePolicy"];
 }
 
+/**
+ * ISS-1153: what the two wake sinks hold, kept apart because they are different
+ * kinds of fact and averaging them would be a lie.
+ *
+ * `entries` is a POPULATION: thread wake entries are append-only, so every
+ * `requested`, `poll_observed` and `failed` ever written is still there to count.
+ * `lastOutcomes` is NOT a population: `lastWakeResult` is one overwritten value per
+ * endpoint, so it can only ever answer "how many endpoints ended their most recent
+ * wake this way".
+ *
+ * Both are nullable, and null means ABSENT rather than zero. A ratio over an empty
+ * denominator is not 0; an endpoint set with no wake telemetry has not told us that
+ * no wake happened. Reporting either as a zero is the failure this shape exists to
+ * prevent.
+ */
+export interface BusWakeSummary {
+  readonly entries: {
+    readonly requested: number;
+    readonly pollObserved: number;
+    /** Ordered count descending, then reason ascending, so output is stable. */
+    readonly failed: readonly { readonly reason: string; readonly count: number }[];
+    /** null when `requested` is 0. */
+    readonly observedPerRequested: number | null;
+  } | null;
+  readonly lastOutcomes: readonly { readonly result: string; readonly endpoints: number }[] | null;
+}
+
 export interface BusSummary {
   readonly enabled: boolean;
   readonly initialized: boolean;
@@ -633,4 +665,8 @@ export interface BusSummary {
     readonly codex: boolean;
   };
   readonly deliveryCapabilities: BusDeliveryCapabilities;
+  // ISS-1153. The recorded rate is a LOWER BOUND: an observation is only written
+  // when a poll folds the wake's thread while the endpoint's cursor is at or past
+  // the wake cursor, so an unobserved request may still have been polled.
+  readonly wake: BusWakeSummary;
 }

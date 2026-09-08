@@ -583,6 +583,41 @@ async function collectAutoAttachAdvisories(root: string, nowMs: number): Promise
   }
 }
 
+/**
+ * ISS-1153: the wake lines.
+ *
+ * Two rules the wording carries rather than the data: the ratio is a LOWER BOUND
+ * (an observation is written only when a poll folds the wake's thread, so an
+ * unobserved request may still have been polled), and it is an OBSERVATION rather
+ * than proof the wake caused the poll. Both go in the sentence a reader sees,
+ * because a bare percentage is read as neither.
+ *
+ * A null half prints nothing, or says "no wake entries recorded" in words. It never
+ * prints zeros: zeroes would assert the wake tier ran and never succeeded.
+ */
+function renderWakeLines(wake: BusSummary["wake"]): string[] {
+  const lines: string[] = [];
+  if (wake.entries === null) {
+    lines.push("Wake: no wake entries recorded.");
+  } else {
+    const { requested, pollObserved, failed, observedPerRequested } = wake.entries;
+    const parts = [`${requested} requested`];
+    parts.push(observedPerRequested === null
+      ? `${pollObserved} recorded as polled (no recorded requests to measure against)`
+      : `${pollObserved} recorded as polled (${pollObserved} of ${requested} recorded requests; a lower bound, and an observation, not proof the wake caused the poll)`);
+    if (failed.length > 0) {
+      const total = failed.reduce((sum, item) => sum + item.count, 0);
+      parts.push(`${total} failed (${failed.map((item) => `${item.reason} ${item.count}`).join(", ")})`);
+    }
+    lines.push(`Wake: ${parts.join(", ")}.`);
+  }
+  if (wake.lastOutcomes !== null) {
+    lines.push(`Wake (last outcome per endpoint, not a count of attempts): ${
+      wake.lastOutcomes.map((item) => `${item.result} ${item.endpoints}`).join(", ")}.`);
+  }
+  return lines;
+}
+
 function renderStatusMarkdown(summary: BusSummary): string {
   if (summary.setupState === "disabled") {
     // T-428: surface the config-revert diagnostic (carried in nextActions) rather
@@ -605,7 +640,8 @@ function renderStatusMarkdown(summary: BusSummary): string {
   const connected = summary.participants.length > 0
     ? `${joinLabels(summary.participants.map((participant) => clientLabel(participant.surface)))} connected`
     : "no clients connected";
-  return `Bus: ${state}; ${connected}; ${deliveryLabelWithWake(summary.deliveryCapabilities, summary.participants)}.`;
+  const base = `Bus: ${state}; ${connected}; ${deliveryLabelWithWake(summary.deliveryCapabilities, summary.participants)}.`;
+  return [base, ...renderWakeLines(summary.wake)].join("\n");
 }
 
 // ISS-871: canonical UUID shape for the pre-mutation --replace preflight (joinEndpoint
