@@ -10,7 +10,7 @@ import { assertBusEnabled, isBusEnabled } from "./config.js";
 import { canonicalHash, hashWithoutKey } from "./canonical.js";
 import { endpointAddressees, listEndpoints, withEndpointCaller } from "./endpoints.js";
 import { BusError } from "./errors.js";
-import { ensureDerivedThread, foldBusThread, verifiedSuccessorState, writeDerivedThread } from "./fold.js";
+import { classifyAutomaticParkTrigger, ensureDerivedThread, foldBusThread, verifiedSuccessorState, writeDerivedThread } from "./fold.js";
 import {
   BusReceiptSchema,
   readReceipt,
@@ -262,6 +262,24 @@ function pointerMatchesCanonical(
     entry.payload.messageId === pointer.messageId && addressees.includes(entry.payload.to);
 }
 
+// ISS-1161: write-time-only. automatic:true requires a valid trigger, and a valid
+// trigger requires automatic:true. Deliberately NOT a BusStatePayloadSchema refinement
+// (unlike the existing droppedMessage-gated one just below) -- fold.ts reads existing
+// on-disk entries through that same schema, and legacy automatic parks can predate
+// this invariant entirely, so a schema-level change here would also apply retroactively
+// to every historical read. This check runs once, at construction, inside makeEntry.
+export function assertValidAutomaticParkTrigger(
+  payload: Pick<BusStatePayload, "automatic" | "trigger">,
+): void {
+  const validTrigger = payload.trigger === "hop_cap" || payload.trigger === "duplicate_fingerprint";
+  if (payload.automatic === true && !validTrigger) {
+    throw new BusError("invalid_input", "An automatic state entry requires a valid trigger (\"hop_cap\" or \"duplicate_fingerprint\")");
+  }
+  if (validTrigger && payload.automatic !== true) {
+    throw new BusError("invalid_input", "A trigger may only be set on an automatic entry (automatic: true)");
+  }
+}
+
 function makeEntry<T extends BusEntry["type"]>(input: {
   type: T;
   threadId: string;
@@ -269,6 +287,9 @@ function makeEntry<T extends BusEntry["type"]>(input: {
   prevHash: string;
   payload: Extract<BusEntry, { type: T }>["payload"];
 }): Extract<BusEntry, { type: T }> {
+  if (input.type === "state") {
+    assertValidAutomaticParkTrigger(input.payload as BusStatePayload);
+  }
   const unsigned = {
     schema: "storybloq-bus-entry/v2" as const,
     entryId: randomUUID(),
@@ -283,6 +304,16 @@ function makeEntry<T extends BusEntry["type"]>(input: {
   const signed = { ...unsigned, entryHash: hashWithoutKey(unsigned, "entryHash") };
   return BusEntrySchema.parse(signed) as Extract<BusEntry, { type: T }>;
 }
+
+// ISS-1161 test-only seam (see lock.ts/endpoints.ts/io.ts for the same convention).
+// Named __testingStore, not __testing: endpoints.ts's own __testing is ALSO
+// re-exported through bus/index.ts's `export *` barrel (lock.ts's and io.ts's are
+// not -- neither is re-exported there at all), so a second same-named `__testing`
+// export here is a genuine `export *` ambiguity TypeScript reports as a hard error
+// (TS2308) on the barrel itself, confirmed directly by running tsc.
+// makeEntry performs no disk I/O and needs no lock, so exposing it here carries none
+// of the risk a locked, disk-writing internal (e.g. appendStateEntry) would.
+export const __testingStore = { makeEntry };
 
 async function listThreadIds(paths: BusPaths): Promise<string[]> {
   let entries;
@@ -589,7 +620,7 @@ async function nextActionForPark(
   const entry = folded.entries.find((candidate) => candidate.entryHash === parkEntryHash);
   if (
     !entry || entry.type !== "state" || entry.payload.action !== "park" ||
-    entry.payload.automatic !== true || entry.payload.trigger !== "hop_cap" ||
+    entry.payload.automatic !== true || classifyAutomaticParkTrigger(entry.payload.trigger) !== "hop_cap" ||
     !entry.payload.droppedMessage ||
     folded.thread.kind !== "issue_notice" || !folded.thread.topicRef.issue
   ) {
@@ -837,9 +868,17 @@ async function createHopCapSuccessorThread(
     throw new BusError("corrupt", predecessor.finding ?? "Predecessor thread is quarantined");
   }
   const parkEntry = predecessor.entries.find((entry) => entry.entryHash === refusedEntryHash);
+  if (!parkEntry || parkEntry.type !== "state" || parkEntry.payload.action !== "park") {
+    throw new BusError("invalid_input", "refusedEntryHash does not name a hop-cap automatic park entry on the predecessor thread");
+  }
+  // ISS-1161: bind the classification to a local before checking it -- TypeScript
+  // cannot narrow `parkEntry.payload.trigger` itself through an opaque function call,
+  // but it DOES narrow this local from the throw guard just below, so the later
+  // `verifiedSuccessorState` call can pass a properly-narrowed "hop_cap" rather than
+  // the still-optional `parkEntry.payload.trigger`.
+  const classification = classifyAutomaticParkTrigger(parkEntry.payload.trigger);
   if (
-    !parkEntry || parkEntry.type !== "state" || parkEntry.payload.action !== "park" ||
-    parkEntry.payload.automatic !== true || parkEntry.payload.trigger !== "hop_cap" ||
+    parkEntry.payload.automatic !== true || classification !== "hop_cap" ||
     !parkEntry.payload.droppedMessage
   ) {
     throw new BusError("invalid_input", "refusedEntryHash does not name a hop-cap automatic park entry on the predecessor thread");
@@ -1119,7 +1158,7 @@ async function createHopCapSuccessorThread(
     // the marker below rather than resuming from its claimed successorThreadId;
     // see the ISS-1002 interim remedy comment on that branch for the corrected
     // model.
-    const verifiedState = await verifiedSuccessorState(paths, existing, refusedEntryHash, artifact, parkEntry.payload.trigger, predecessor);
+    const verifiedState = await verifiedSuccessorState(paths, existing, refusedEntryHash, artifact, classification, predecessor);
     if (verifiedState.status === "invalid") {
       throw new BusError("corrupt", `Redeliver marker ${refusedEntryHash} names a successor that fails its own verification`);
     }
@@ -1297,7 +1336,7 @@ function isAutomaticHopCapParked(folded: FoldedBusThread): boolean {
   return last?.type === "state" &&
     last.payload.action === "park" &&
     last.payload.automatic === true &&
-    last.payload.trigger === "hop_cap";
+    classifyAutomaticParkTrigger(last.payload.trigger) === "hop_cap";
 }
 
 async function createThread(
@@ -2248,9 +2287,13 @@ export async function redeliverBusMessage(root: string, input: BusRedeliverInput
     throw new BusError("corrupt", predecessor.finding ?? "Predecessor thread is quarantined");
   }
   const parkEntry = predecessor.entries.find((entry) => entry.entryHash === input.refusedEntryHash);
+  if (!parkEntry || parkEntry.type !== "state" || parkEntry.payload.action !== "park") {
+    throw new BusError("invalid_input", "refusedEntryHash does not name a hop-cap automatic park entry on the predecessor thread");
+  }
+  // ISS-1161: see the identical comment in createHopCapSuccessorThread.
+  const classification = classifyAutomaticParkTrigger(parkEntry.payload.trigger);
   if (
-    !parkEntry || parkEntry.type !== "state" || parkEntry.payload.action !== "park" ||
-    parkEntry.payload.automatic !== true || parkEntry.payload.trigger !== "hop_cap" ||
+    parkEntry.payload.automatic !== true || classification !== "hop_cap" ||
     !parkEntry.payload.droppedMessage
   ) {
     throw new BusError("invalid_input", "refusedEntryHash does not name a hop-cap automatic park entry on the predecessor thread");
@@ -2305,7 +2348,7 @@ export async function redeliverBusMessage(root: string, input: BusRedeliverInput
     }
     // The SAME verification resolveRefusals/createHopCapSuccessorThread use for
     // disposition, reused directly rather than re-derived.
-    const verifiedState = await verifiedSuccessorState(paths, marker, input.refusedEntryHash, artifact, parkEntry.payload.trigger, predecessor);
+    const verifiedState = await verifiedSuccessorState(paths, marker, input.refusedEntryHash, artifact, classification, predecessor);
     if (verifiedState.status === "invalid") {
       throw new BusError("corrupt", `Redeliver marker ${input.refusedEntryHash} names a successor that fails its own verification`);
     }
