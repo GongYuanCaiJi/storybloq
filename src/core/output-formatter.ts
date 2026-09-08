@@ -2831,6 +2831,10 @@ export function formatReference(
   lines.push("");
   lines.push("Read `bus-mode.md` for setup, endpoint binding, authority boundaries, acknowledgments, deterministic convergence, and the v1 no-wake boundary.");
   lines.push("");
+  lines.push("## /story duet");
+  lines.push("");
+  lines.push("Coordinate an owner-paired manager and worker with a proved return route and durable assignments. Read `duet-mode.md`. `/story duet` (Codex: `$story duet`) is a skill route, not a CLI command; it does not create tasks or enable Bus.");
+  lines.push("");
   lines.push("## Common Workflows");
   lines.push("");
   lines.push("### Session Start");
