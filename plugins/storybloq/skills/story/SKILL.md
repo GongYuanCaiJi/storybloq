@@ -157,13 +157,26 @@ If a guide call reports an existing/resumable session that was absent from statu
 
 **Orchestrate gates (compute BEFORE composing Part 1).**
 
-Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (with `count: 10`) and evaluate BOTH gates below; only then compose Part 1, and render Part 1, Part 2, Part 3 in that order. The gates decide whether the `/story orchestrate` working style is surfaced at all -- this is a recommendation, never an auto-start; selecting it still routes through the explicit opt-in in `orchestrator-mode.md` Step 1.
+Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (with `count: 10`) and evaluate BOTH gates below; then compute the Continuation check below; only then compose Part 1, and render Continuation (when present), Part 1, Part 2, Part 3 in that order. The gates decide whether the `/story orchestrate` working style is surfaced at all -- this is a recommendation, never an auto-start; selecting it still routes through the explicit opt-in in `orchestrator-mode.md` Step 1. This fixed order, the Continuation check, Parts 1-3, and the Part 3 resolution rule below all apply to the NORMAL summary only; the foreign/legacy/resumable session variant later in this section replaces all of them.
 
 - **Gate A -- capability (exact-name allowlist, fails closed).** Probe your own harness for background-orchestration tools by EXACT callable tool name or namespace-qualified identifier only. No fuzzy or keyword matching. The allowlist of names that signal capability is exactly `Workflow`, `Agent`, `Task`, `multi_agent_v1.spawn_agent`, `multi_agent_v1__spawn_agent`, and `spawn_agent` -- the documented multi-agent tool names across supported clients (`Workflow` for dynamic-workflow clients, `Agent` / `Task` for subagent clients, and the dotted or normalized `multi_agent_v1` spelling / exact `spawn_agent` for Codex subagent clients). Gate A passes only when at least one of those exact tool names is available to you in this session. A description, namespace, plugin, or skill that merely mentions agents does not pass. Any other or ambiguous tool surface fails closed: Gate A does not pass and the orchestrate option is simply not surfaced.
 
 - **Gate B -- backlog size (deterministic).** Compute over the loaded `storybloq_recommend` result (`count: 10`): count every row whose `kind` is `"ticket"`; for every row whose `kind` is `"issue"`, call `storybloq_issue_get` and count it ONLY when its status is `open` or `inprogress` AND no explicit blocker or owner-gated marker appears in its `impact` or `resolution` fields; never count a row whose `kind` is `"action"`. Gate B passes when that count is 5 or more. Federation bypass: on an orchestrator project, Gate B ALSO passes when storybloq_node_list returns at least one configured node (storybloq_node_list is the source of truth for the node count).
 
 Record whether both gates passed; Part 1 and Part 3 below branch on that single result.
+
+**Continuation check (compute before Part 1; renders first when present).**
+
+Scan the latest handover loaded in Step 2 item 3 for an actionable heading -- a heading matching next/open/remaining/todo/blocked, case-insensitively (the same pattern `storybloq_recommend`'s own handover-boost logic detects internally, described here in prose since that detector is not exported). Take the section from that heading to the next heading of equal or higher level.
+
+When such a section exists, render it FIRST, before Part 1 -- it is the prior session's own stated next step, not a suggestion, so it always leads:
+
+```
+## Continuation from <handover file or slug>
+<the section's content, listed verbatim -- do not summarize or re-rank it>
+```
+
+Render the section verbatim regardless of what it names -- a blocked or stale item still belongs in the continuity record. Separately, for Part 3's purposes only: walk the section's ticket/issue ids in order and resolve each via `storybloq_ticket_get`/`storybloq_issue_get` until one clears its type's actionability bar -- a ticket needs status `open` or `inprogress` AND an empty (or fully-resolved) `blockedBy`/`crossNodeBlockedBy`; an issue needs status `open` or `inprogress` AND no explicit blocker or owner-gated marker in `impact`/`resolution` (the same bar Gate B already applies to issues). Keep walking past a `get` that fails (deleted/renamed id) or an entity that fails its bar. The first id that clears it is "the first recommended item" for Part 3 below; no continuation candidate promoted this way is ever blocked or unresolvable. A section whose heading itself is a "blocked" heading, or whose ids all fail this walk, or that names no id at all, yields no Part 3 candidate here -- Part 3 falls back to Ready to Work's top row in every one of those cases, carrying that table's own existing caveat (a ranked issue may still be externally blocked; this item does not change that). When no handover exists, or none carries an actionable section, skip this block silently and open with Part 1 exactly as today.
 
 **Part 1: Conversational intro (2-3 sentences)**
 
@@ -173,10 +186,10 @@ Open with the project name and progress. Mention what the last session accomplis
 
 You MUST show the following tables after the prose intro. Do not summarize them in paragraph form.
 
-**Ready to Work table** -- call `storybloq_recommend` with `count: 10` for context-aware suggestions (the table still renders only the top 5 rows, with "(+N more)"; the full 10 rows feed the orchestrate backlog-size gate below). `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table:
+**Ready to Work table (a ranking, not a plan)** -- call `storybloq_recommend` with `count: 10` for context-aware suggestions (the table still renders only the top 5 rows, with "(+N more)"; the full 10 rows feed the orchestrate backlog-size gate below). `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table. A Continuation above always takes priority over this ranking, never the other way around:
 
 ```
-## Ready to Work
+## Ready to Work (ranking)
 | Item    | Type   | Title                            | Context        |
 |---------|--------|----------------------------------|----------------|
 | T-011   | ticket | Rate agreement conditions schema | foundation     |
@@ -223,6 +236,8 @@ Show this once or twice, then never again.
 
 End with `AskUserQuestion`. Which variant depends on the orchestrate-gate result computed above.
 
+**Resolving "first recommended item" (agent-facing meta-rule, applies to every variant below, do NOT render as option text):** when the Continuation check above resolved an actionable candidate (per its own type-specific bar), that candidate IS "the first recommended item" in every option below -- never the Ready table's top row in that case. When the Continuation check found no actionable candidate (no section, no id, or every id failed the bar), "the first recommended item" is the Ready table's top row exactly as today, with that table's own existing external-blocker caveat unchanged.
+
 Default state (the orchestrate gates did NOT both pass):
 - question: "What would you like to do?"
 - header: "Next"
@@ -243,7 +258,7 @@ Note (agent-facing meta-rules, do NOT render as option text): "Orchestrate the b
 
 **Foreign/legacy/resumable session variant:**
 
-Render only a short intro, one compact session line, and the relevant question. Do not render Ready to Work, Decisions Pending, Open Issues, Key Rules, or the first-session guide.
+Render only a short intro, one compact session line, and the relevant question. Do not render the Continuation check, Ready to Work, Decisions Pending, Open Issues, Key Rules, or the first-session guide.
 
 **Different live task with verified owner:**
 
