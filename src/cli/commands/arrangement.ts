@@ -21,7 +21,7 @@ import {
   type ArrangementLifecycle,
   type ArrangementParty,
 } from "../../models/arrangement.js";
-import { TICKET_ID_REGEX, TICKET_CANONICAL_ID_REGEX, ISSUE_ID_REGEX, ISSUE_CANONICAL_ID_REGEX, type OutputFormat } from "../../models/types.js";
+import { TICKET_ID_REGEX, TICKET_CANONICAL_ID_REGEX, ISSUE_ID_REGEX, ISSUE_CANONICAL_ID_REGEX, looksLikeClientTaskId, type OutputFormat } from "../../models/types.js";
 import { CROSS_NODE_REF_CAPTURE_REGEX } from "../../models/ticket.js";
 import { CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
@@ -180,7 +180,17 @@ export async function handleArrangementCreate(
   });
 
   if (!created) throw new Error("Arrangement not created");
-  return { output: formatArrangementCreateResult(created, format) };
+  // ISS-1117: a regex-valid identityAnchor that does not look like a real
+  // client task id (e.g. a session display name) can never resolve against
+  // an OwnerTask -- warn, don't reject, since no name-to-id registry exists
+  // to validate against.
+  const anchorWarnings = created.parties
+    .filter((party) => !looksLikeClientTaskId(party.identityAnchor))
+    .map((party) => `party ${party.role} (${party.client}): identityAnchor does not look like a client task id`);
+  return {
+    output: formatArrangementCreateResult(created, format),
+    ...(anchorWarnings.length > 0 && { warnings: anchorWarnings }),
+  };
 }
 
 /**

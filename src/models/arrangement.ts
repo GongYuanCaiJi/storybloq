@@ -6,6 +6,7 @@ import {
   TicketRefSchema,
   IssueRefSchema,
   CLIENT_TASK_ID_PATTERN,
+  IDENTITY_ANCHOR_FORMAT_MESSAGE,
   RulingIdSchema,
   ConflictEntrySchema,
 } from "./types.js";
@@ -67,7 +68,7 @@ export const ArrangementPartySchema = z
   .object({
     role: z.enum(ARRANGEMENT_ROLES),
     client: z.enum(["claude", "codex"]),
-    identityAnchor: z.string().min(1).max(128).regex(CLIENT_TASK_ID_PATTERN),
+    identityAnchor: z.string().min(1).max(128).regex(CLIENT_TASK_ID_PATTERN, IDENTITY_ANCHOR_FORMAT_MESSAGE),
     modelTier: z.string().max(64).optional(),
     // Reserved per T-473's ACCEPTANCE (5): the schema reserves a per-party
     // outbound-message log reference; logging itself is deferred. Presence

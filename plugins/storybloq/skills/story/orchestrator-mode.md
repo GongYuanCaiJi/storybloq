@@ -18,6 +18,8 @@ Storybloq is the durable STATE plane, background agents are the ephemeral EXECUT
 
 Recovery falls out for free: after any disruption, re-entry is "read the ledger, verify against git, continue." The ledger is the program counter.
 
+When a wave establishes a durable cross-session pen/worker charter (`storybloq_arrangement_create`, e.g. a duet spun off from orchestration), each party's `identityAnchor` must be the client task id, not a session display name: for Claude, `CLAUDE_CODE_SESSION_ID`; for Codex, `CODEX_THREAD_ID`. Run `printenv CLAUDE_CODE_SESSION_ID` or `printenv CODEX_THREAD_ID` to read it, or use the value `/story`'s Step 0 already prints. A display name passes the field's format check but can never resolve against a session's `OwnerTask`, so an arrangement anchored to one is silently dead on arrival.
+
 ## When to use
 
 - The project is a storybloq **orchestrator** (federation `nodes` configured in `.story/config.json`), or a single repo with a large multi-ticket backlog the user wants driven autonomously.

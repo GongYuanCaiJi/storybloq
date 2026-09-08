@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleValidate, handleValidateWithSourceRefs } from "../../../src/cli/commands/validate.js";
+import { loadArrangementsSafe } from "../../../src/core/arrangement-loader.js";
 
 type Json = Record<string, unknown>;
 
@@ -229,6 +230,90 @@ describe("handleValidate", () => {
       );
       // A loader warning is advisory, not a validation failure.
       expect(result.exitCode).toBe(ExitCode.OK);
+    });
+  });
+
+  describe("ISS-1117: arrangement_anchor_unresolvable diagnostic", () => {
+    const tempDirs: string[] = [];
+
+    afterEach(async () => {
+      await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+    });
+
+    async function tempRoot(): Promise<string> {
+      const root = await mkdtemp(join(tmpdir(), "validate-anchors-"));
+      tempDirs.push(root);
+      return root;
+    }
+
+    it("reports two arrangement_anchor_unresolvable findings for a two-party arrangement with non-uuid anchors, one per party", async () => {
+      const root = await tempRoot();
+      // writeArrangementFile's default parties (pen-session / worker-session) are
+      // exactly the shape ISS-1117's field report describes: they pass
+      // CLIENT_TASK_ID_PATTERN but are not client task ids.
+      await writeArrangementFile(root, "a-0123456789abcdef", {});
+      const ctx = makeCtx({ root, format: "json" });
+      const result = handleValidate(ctx);
+      const parsed = JSON.parse(result.output);
+      const anchorFindings = parsed.data.findings.filter(
+        (f: { code: string }) => f.code === "arrangement_anchor_unresolvable",
+      );
+      expect(anchorFindings).toHaveLength(2);
+      expect(anchorFindings).toContainEqual(
+        expect.objectContaining({ message: expect.stringContaining("pen") }),
+      );
+      expect(anchorFindings).toContainEqual(
+        expect.objectContaining({ message: expect.stringContaining("worker") }),
+      );
+      expect(result.exitCode).toBe(ExitCode.OK);
+    });
+
+    it("produces no arrangement_anchor_unresolvable finding when every anchor is uuid-shaped", async () => {
+      const root = await tempRoot();
+      await writeArrangementFile(root, "a-0123456789abcdef", {
+        parties: [
+          { role: "pen", client: "claude", identityAnchor: "b8df203d-d3f5-4520-8057-96babf59612c" },
+          { role: "worker", client: "codex", identityAnchor: "01a07f63-e16d-7783-9ee3-61d9aaaf941c" },
+        ],
+      });
+      // The fixture must actually have loaded (two distinct anchors avoid
+      // ArrangementSchema's duplicate-identity superRefine, which would
+      // otherwise make the "zero findings" assertions below pass vacuously
+      // because the arrangement was never loaded at all -- an empty scan
+      // also has zero loader warnings, so that check alone does not prove
+      // a successful load; assert the load directly (Codex code round 1).
+      const loaded = loadArrangementsSafe(root);
+      expect(loaded.warnings).toEqual([]);
+      expect(loaded.arrangements.map((a) => a.id)).toEqual(["a-0123456789abcdef"]);
+      const ctx = makeCtx({ root, format: "json" });
+      const result = handleValidate(ctx);
+      const parsed = JSON.parse(result.output);
+      expect(
+        parsed.data.findings.filter((f: { code: string }) => f.code === "arrangement_loader_warning"),
+      ).toEqual([]);
+      expect(
+        parsed.data.findings.filter((f: { code: string }) => f.code === "arrangement_anchor_unresolvable"),
+      ).toEqual([]);
+    });
+
+    it("exempts a closed arrangement from the warning even with non-uuid anchors", async () => {
+      const root = await tempRoot();
+      await writeArrangementFile(root, "a-0123456789abcdef", { lifecycle: "closed" });
+      // Assert the fixture actually loaded, not just that it produced no
+      // loader warning -- an empty scan also has zero loader warnings
+      // (Codex code round 1).
+      const loaded = loadArrangementsSafe(root);
+      expect(loaded.warnings).toEqual([]);
+      expect(loaded.arrangements.map((a) => a.id)).toEqual(["a-0123456789abcdef"]);
+      const ctx = makeCtx({ root, format: "json" });
+      const result = handleValidate(ctx);
+      const parsed = JSON.parse(result.output);
+      expect(
+        parsed.data.findings.filter((f: { code: string }) => f.code === "arrangement_loader_warning"),
+      ).toEqual([]);
+      expect(
+        parsed.data.findings.filter((f: { code: string }) => f.code === "arrangement_anchor_unresolvable"),
+      ).toEqual([]);
     });
   });
 });

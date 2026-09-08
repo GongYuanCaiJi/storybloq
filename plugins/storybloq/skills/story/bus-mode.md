@@ -88,6 +88,8 @@ There is no `role=` field. Roles are per message, so the marker declares `role_m
 
 Compaction succession uses a short-lived, one-use lineage record correlated by client and transcript path from hook stdin. It is accidental-concurrency protection, not an authentication secret. Wake tokens are separate and require a protected inherited-environment channel.
 
+An arrangement party's `identityAnchor` (`storybloq_arrangement_create`) is this same client task id, not a session display name: for Claude, `CLAUDE_CODE_SESSION_ID`; for Codex, `CODEX_THREAD_ID`. Run `printenv CLAUDE_CODE_SESSION_ID` or `printenv CODEX_THREAD_ID` to read it, or use the value `/story`'s Step 0 already prints. A display name passes the field's format check but can never resolve against a session's `OwnerTask`, so an arrangement anchored to one is silently dead on arrival.
+
 ## Derived Roles
 
 Roles are display-only metadata derived from each message's kind, never declared and never enforced:

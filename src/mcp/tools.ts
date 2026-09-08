@@ -135,7 +135,7 @@ import {
   handleArrangementCreate,
   handleArrangementUpdate,
 } from "../cli/commands/arrangement.js";
-import { ARRANGEMENT_ROLES, ARRANGEMENT_LIFECYCLE, type ArrangementParty } from "../models/arrangement.js";
+import { ARRANGEMENT_ROLES, ARRANGEMENT_LIFECYCLE, ArrangementPartySchema, type ArrangementParty } from "../models/arrangement.js";
 import { DuetOperationSchema } from "../models/duet.js";
 import { handleDuetCoordinate } from "../cli/commands/duet.js";
 // T-476 section 11: unlike T-473/T-474, the ratified plan calls for all four
@@ -320,7 +320,16 @@ export async function runMcpWriteTool(
       };
     }
 
-    const text = boardLabel ? `${result.output}\n\nBoard: ${boardLabel}` : result.output;
+    let text = boardLabel ? `${result.output}\n\nBoard: ${boardLabel}` : result.output;
+    // ISS-1117: unlike runMcpReadTool, this pipeline never surfaced
+    // handler-produced `CommandResult.warnings` to the MCP caller -- a
+    // write handler's warning (e.g. arrangement create's identityAnchor
+    // shape warning) would reach here and then be silently dropped. Mirrors
+    // runMcpReadTool's own `handlerWarnings` prefix block.
+    const handlerWarnings = result.warnings ?? [];
+    if (handlerWarnings.length > 0) {
+      text = `Warning: ${handlerWarnings.join("; ")}\n\n${text}`;
+    }
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {
@@ -1083,19 +1092,11 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleArrangementGet(args.id, ctx), undefined, args.format ?? "md"));
 
   server.registerTool("storybloq_arrangement_create", {
-    description: "Create a new arrangement (duet/wave party charter). Authentication is out of scope: identityAnchor is a name to match, not a credential.",
+    description: "Create a new arrangement (duet/wave party charter). Authentication is out of scope: identityAnchor is a name to match, not a credential -- it must be the client task id (CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID), never a display name.",
     inputSchema: {
       bounds: z.array(z.string()).min(1).describe("Ticket/issue refs, display-form or canonical"),
       parties: z
-        .array(
-          z.object({
-            role: z.enum(ARRANGEMENT_ROLES),
-            client: z.enum(["claude", "codex"]),
-            identityAnchor: z.string().min(1).max(128),
-            modelTier: z.string().max(64).optional(),
-            provenanceLogRef: z.string().max(1024).optional(),
-          }),
-        )
+        .array(ArrangementPartySchema)
         .min(2)
         .describe("Exactly one pen and one worker party"),
       onIrreversibleWork: z.enum(["hold", "escalate"]),

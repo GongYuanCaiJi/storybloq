@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ArrangementSchema } from "../../src/models/arrangement.js";
+import { IDENTITY_ANCHOR_FORMAT_MESSAGE, looksLikeClientTaskId } from "../../src/models/types.js";
 
 function baseArrangement(overrides: Record<string, unknown> = {}) {
   return {
@@ -212,6 +213,39 @@ describe("ArrangementSchema", () => {
         }),
       );
       expect(result.success).toBe(false);
+    });
+
+    it("rejects a session name with a bracketed ref and names the client-task-id requirement (ISS-1117)", () => {
+      const result = ArrangementSchema.safeParse(
+        baseArrangement({
+          parties: [
+            { role: "pen", client: "claude", identityAnchor: "agentkit-platform-7b [abbe56]" },
+            { role: "worker", client: "claude", identityAnchor: "claude-session-def" },
+          ],
+        }),
+      );
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        const issue = result.error.issues.find((i) => i.path.join(".") === "parties.0.identityAnchor");
+        expect(issue?.message).toBe(IDENTITY_ANCHOR_FORMAT_MESSAGE);
+      }
+    });
+  });
+
+  describe("looksLikeClientTaskId (ISS-1117)", () => {
+    it("accepts uuid-shaped anchors, including a non-v4-conformant Codex-style thread id", () => {
+      expect(looksLikeClientTaskId("b8df203d-d3f5-4520-8057-96babf59612c")).toBe(true);
+      expect(looksLikeClientTaskId("01a07f63-e16d-7783-9ee3-61d9aaaf941c")).toBe(true);
+    });
+
+    it("rejects a chosen display name, even one that already passes CLIENT_TASK_ID_PATTERN", () => {
+      expect(looksLikeClientTaskId("claude-session-abc")).toBe(false);
+      expect(looksLikeClientTaskId("agentkit-platform-7b")).toBe(false);
+      expect(looksLikeClientTaskId("")).toBe(false);
+    });
+
+    it("rejects a uuid-shaped string containing a non-hex character (pins the character class to hex, not just to shape)", () => {
+      expect(looksLikeClientTaskId("g1a07f63-e16d-7783-9ee3-61d9aaaf941c")).toBe(false);
     });
   });
 

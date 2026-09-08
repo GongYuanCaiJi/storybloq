@@ -11,6 +11,7 @@ import { INTEGRITY_WARNING_TYPES } from "../../core/errors.js";
 import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
 import { readDuetCoordination } from "../../core/duet-coordination.js";
 import { arrangementGateRiskWarnings } from "../../core/arrangement-bounds.js";
+import { looksLikeClientTaskId } from "../../models/types.js";
 import {
   loadReviewContract,
   readBlockingPolicy,
@@ -63,6 +64,22 @@ function arrangementFindings(root: string): ValidationFinding[] {
         message: `arrangement ${arrangement.id}: ${warning}`,
         entity: null,
       });
+    }
+    // ISS-1117: a closed arrangement's parties are never read by the
+    // guard's own matching loop (session-guard.ts skips `lifecycle ===
+    // "closed"` arrangements outright), so warning about one is noise, not
+    // a live risk -- exempt it, the same way the guard itself does.
+    if (arrangement.lifecycle !== "closed") {
+      for (const party of arrangement.parties) {
+        if (!looksLikeClientTaskId(party.identityAnchor)) {
+          findings.push({
+            level: "warning",
+            code: "arrangement_anchor_unresolvable",
+            message: `arrangement ${arrangement.id}: party ${party.role} (${party.client}) identityAnchor does not look like a client task id`,
+            entity: null,
+          });
+        }
+      }
     }
   }
   return findings;
