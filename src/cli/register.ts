@@ -5046,6 +5046,38 @@ export function registerSessionCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "intel-prompt",
+          "T-499: synchronous context-pressure sample; emits additionalContext at imperative (UserPromptSubmit hook)",
+          (y2) =>
+            y2.option("client", {
+              type: "string",
+              choices: ["claude", "codex"] as const,
+              default: "claude" as const,
+              describe: "AI client invoking the UserPromptSubmit hook",
+            }),
+          async (argv) => {
+            try {
+              const { readHookStdinContext } = await import("./commands/session-compact.js");
+              const { handleSessionIntelPrompt } = await import("./commands/session-intel.js");
+              // The payload carries the whole prompt: a 1 MiB cap, and the
+              // prompt field itself is never read.
+              const hookContext = await readHookStdinContext(process.stdin, 200, { maxBytes: 1024 * 1024 });
+              const outcome = handleSessionIntelPrompt({
+                client: argv.client as "claude" | "codex",
+                sessionId: hookContext.sessionId,
+                cwd: hookContext.cwd,
+                transcriptPath: hookContext.transcriptPath,
+              });
+              if (outcome.output !== null) process.stdout.write(outcome.output + "\n");
+            } catch (err) {
+              // Hook contract: always exit 0, never block a prompt.
+              process.stderr.write(
+                `[storybloq] intel-prompt failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+          },
+        )
+        .command(
           "limit-stop",
           "Record a usage-limit stop for auto-resume (StopFailure hook)",
           (y2) => y2,
@@ -5438,7 +5470,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
         )
         .demandCommand(
           1,
-          "Specify a session subcommand: compact-prepare, resume-prompt, intel, intel-start, limit-stop, clear-compact, stop, list, show, repair, delete, health, watch, milestone",
+          "Specify a session subcommand: compact-prepare, resume-prompt, intel, intel-start, intel-prompt, limit-stop, clear-compact, stop, list, show, repair, delete, health, watch, milestone",
         )
         .strict(),
     () => {},

@@ -267,11 +267,21 @@ export interface SessionStartHookContext {
   readonly hookEventName?: string;
 }
 
+export const HOOK_STDIN_DEFAULT_MAX_BYTES = 65536;
+
 export async function readHookStdinContext(
   stream: NodeJS.ReadableStream & { isTTY?: boolean },
   timeoutMs = 200,
+  opts: {
+    /**
+     * T-499: a UserPromptSubmit payload carries the whole prompt, so that
+     * hook raises the cap to 1 MiB. The prompt field itself is never parsed.
+     */
+    readonly maxBytes?: number;
+  } = {},
 ): Promise<SessionStartHookContext> {
   if (stream.isTTY) return {};
+  const maxBytes = opts.maxBytes ?? HOOK_STDIN_DEFAULT_MAX_BYTES;
   const raw = await new Promise<string>((resolve) => {
     let data = "";
     let bytes = 0;
@@ -285,7 +295,7 @@ export async function readHookStdinContext(
     };
     const onData = (chunk: Buffer | string): void => {
       bytes += Buffer.byteLength(chunk);
-      if (bytes > 65536) {
+      if (bytes > maxBytes) {
         oversized = true;
         data = "";
         finish();

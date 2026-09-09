@@ -247,3 +247,93 @@ export function handleStopHookSample(options: StopSampleOptions): StopSampleOutc
     return skipped(err instanceof Error ? err.message : String(err));
   }
 }
+
+// ---------------------------------------------------------------------------
+// session intel-prompt (UserPromptSubmit hook, synchronous)
+// ---------------------------------------------------------------------------
+
+export const PROMPT_SAMPLE_SOFT_BUDGET_MS = 500;
+export const PROMPT_HOOK_EVENT_NAME = "UserPromptSubmit";
+
+export interface SessionIntelPromptOptions {
+  readonly sessionId?: string | null;
+  readonly cwd?: string;
+  readonly transcriptPath?: string;
+  readonly client?: "claude" | "codex";
+  readonly now?: number;
+  readonly softBudgetMs?: number;
+  /** Test seams. */
+  readonly projectsDir?: string;
+  readonly userSettingsPath?: string;
+}
+
+export interface SessionIntelPromptOutcome {
+  readonly status: "emitted" | "silent" | "skipped";
+  readonly reason: string | null;
+  readonly capture: CaptureOutcome | null;
+  readonly result: SessionIntelResult | null;
+  /** The hook's stdout, or null when nothing is emitted. */
+  readonly output: string | null;
+}
+
+/** The line the model reads on its next turn. Imperative only. */
+export function renderPromptDirective(p: NonNullable<SessionIntelResult["pressure"]>): string {
+  const pct = p.pct === null ? "n/a" : `${Math.round(p.pct * 100)}%`;
+  const conf = p.ceiling.confidence ? `, ${p.ceiling.confidence} confidence` : "";
+  return `[storybloq] Context pressure IMPERATIVE: ${pct} of the expected auto-compact point (${p.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${p.ceiling.source}${conf}). Write a handover now via storybloq_handover_create (or \`storybloq handover create\`), then continue the user's request.`;
+}
+
+/**
+ * The synchronous UserPromptSubmit sample: one bounded, lifecycle-bound tail
+ * sample for the caller's own session (no glob, 500 ms soft budget), persisted
+ * under the ordering rule. Emits `additionalContext` ONLY when the sample is
+ * usable and imperative; every other outcome, including every failure, is
+ * silent. The prompt text is never read.
+ */
+export function handleSessionIntelPrompt(options: SessionIntelPromptOptions = {}): SessionIntelPromptOutcome {
+  const skipped = (reason: string, capture: CaptureOutcome | null = null): SessionIntelPromptOutcome => ({ status: "skipped", reason, capture, result: null, output: null });
+  try {
+    if ((options.client ?? "claude") !== "claude") return skipped("client is not Claude");
+    const sessionId = options.sessionId ?? null;
+    if (!sessionId) return skipped("no session id");
+    const cwd = options.cwd ?? process.cwd();
+    const root = projectRootFor(cwd);
+    if (!root) return skipped("no project");
+    if (!isPresenceEnabled(root)) return skipped("presence disabled");
+    const cfg = readSessionIntelConfig(root);
+    if (!cfg.enabled) return skipped("sessionIntel disabled");
+    if (!cfg.promptHook) return skipped("promptHook disabled");
+    const startedAt = Date.now();
+    const now = options.now ?? startedAt;
+    const softMs = options.softBudgetMs ?? PROMPT_SAMPLE_SOFT_BUDGET_MS;
+    const capture = ensureCapture({ root, sessionId, source: "stop", now, userSettingsPath: options.userSettingsPath });
+    if (Date.now() - startedAt > softMs) return skipped("soft budget exceeded after capture", capture);
+    const result = sampleSession({
+      root,
+      cwd,
+      sampledBy: "prompt-hook",
+      explicitTaskId: sessionId,
+      transcriptHint: options.transcriptPath ?? null,
+      allowGlob: false,
+      now,
+      projectsDir: options.projectsDir,
+      userSettingsPath: options.userSettingsPath,
+      budget: { startedAt, softMs },
+    });
+    const pressure = result.pressure;
+    // A push surface: only a BOUND caller (record exists, not ended, live era
+    // equal to the record's) may reach the model. A read-only sample of the
+    // same transcript (null era, ended id, era mismatch) can still be usable
+    // and imperative, and stays silent.
+    if (result.binding !== "bound") {
+      return { status: "silent", reason: `unbound caller: ${result.bindingReason}`, capture, result, output: null };
+    }
+    if (!result.usable || !pressure || pressure.state !== "imperative") {
+      return { status: "silent", reason: result.usable ? `state ${pressure?.state ?? "unknown"}` : (result.unusableReason ?? "unusable"), capture, result, output: null };
+    }
+    const output = JSON.stringify({ hookSpecificOutput: { hookEventName: PROMPT_HOOK_EVENT_NAME, additionalContext: renderPromptDirective(pressure) } });
+    return { status: "emitted", reason: null, capture, result, output };
+  } catch (err) {
+    return skipped(err instanceof Error ? err.message : String(err));
+  }
+}

@@ -14,6 +14,11 @@ import {
   LIMITSTOP_SUBCOMMAND,
   STOPFAILURE_MATCHER,
   LIMIT_SESSIONSTART_MATCHER,
+  INTELSTART_SUBCOMMAND,
+  INTELPROMPT_SUBCOMMAND,
+  SESSION_INTEL_SESSIONSTART_MATCHER,
+  INTELSTART_HOOK_TIMEOUT_SECONDS,
+  INTELPROMPT_HOOK_TIMEOUT_SECONDS,
   PRESENCE_BIN_NAME,
   PRESENCE_SUBCOMMAND,
   PRESENCE_HOOK_TIMEOUT_SECONDS,
@@ -730,6 +735,119 @@ export async function ensureLimitHooksRegistered(
   return { changed, action: changed ? "installed" : "unchanged" };
 }
 
+// ---------------------------------------------------------------------------
+// T-499: session-intel hooks (SessionStart intel-start + UserPromptSubmit intel-prompt)
+// ---------------------------------------------------------------------------
+
+const SESSION_INTEL_SESSIONSTART_SOURCES: readonly string[] = ["startup", "resume", "clear", "compact"];
+
+/**
+ * Counts the intel-start entries across ALL SessionStart groups and whether
+ * any of them sits in a group whose matcher covers EVERY intel source. The
+ * settled state is exactly one entry in a full-coverage group: anything else
+ * (a partial matcher, several groups that only collectively cover the
+ * sources, a canonical group plus a stray entry, or duplicates within one
+ * group) would fire the hook twice for some source, and is normalized.
+ */
+async function intelStartEntries(command: string, path: string): Promise<{ total: number; inFullCoverageGroup: number }> {
+  const none = { total: 0, inFullCoverageGroup: 0 };
+  if (!existsSync(path)) return none;
+  try {
+    const settings = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
+    const hooks = settings?.hooks as Record<string, unknown> | undefined;
+    const hookArray = hooks && Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as unknown[]) : [];
+    let total = 0;
+    let inFullCoverageGroup = 0;
+    for (const group of hookArray) {
+      if (typeof group !== "object" || group === null) continue;
+      const g = group as MatcherGroup;
+      if (!Array.isArray(g.hooks)) continue;
+      const full = SESSION_INTEL_SESSIONSTART_SOURCES.every((src) => matcherCoversSource(g.matcher, src));
+      for (const entry of g.hooks) {
+        if (!isHookWithCommand(entry, command)) continue;
+        total += 1;
+        if (full) inFullCoverageGroup += 1;
+      }
+    }
+    return { total, inFullCoverageGroup };
+  } catch {
+    // Unreadable settings: registerHook applies its own guards.
+    return none;
+  }
+}
+
+/** SessionStart `intel-start`, every source, synchronous, 5 s. */
+export async function registerSessionIntelStartHook(
+  settingsPath?: string,
+  binPath?: string,
+): Promise<"registered" | "exists" | "skipped"> {
+  const bin = binPath ?? resolveStorybloqBin() ?? "storybloq";
+  const command = formatHookCommand(bin, INTELSTART_SUBCOMMAND);
+  const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
+  const found = await intelStartEntries(command, path);
+  if (found.total === 1 && found.inFullCoverageGroup === 1) return "exists";
+  // Normalize: every other arrangement of OUR command (a partial matcher,
+  // groups that only collectively cover the sources, a canonical group plus
+  // a stray entry, duplicates) fires the hook twice for some source. Strip
+  // every entry of our command, then install the one canonical group; other
+  // hooks stay where they are.
+  if (found.total > 0) {
+    const stripped = await removeHook("SessionStart", command, settingsPath);
+    if (stripped === "skipped") return "skipped";
+  }
+  return registerHook(
+    "SessionStart",
+    { type: "command", command, timeout: INTELSTART_HOOK_TIMEOUT_SECONDS },
+    settingsPath,
+    SESSION_INTEL_SESSIONSTART_MATCHER,
+    { scopeIdempotencyToMatcher: true },
+  );
+}
+
+/** UserPromptSubmit `intel-prompt`, empty matcher, synchronous, 10 s. */
+export async function registerSessionIntelPromptHook(
+  settingsPath?: string,
+  binPath?: string,
+): Promise<"registered" | "exists" | "skipped"> {
+  const bin = binPath ?? resolveStorybloqBin() ?? "storybloq";
+  const command = formatHookCommand(bin, INTELPROMPT_SUBCOMMAND);
+  return registerHook(
+    "UserPromptSubmit",
+    { type: "command", command, timeout: INTELPROMPT_HOOK_TIMEOUT_SECONDS },
+    settingsPath,
+  );
+}
+
+/**
+ * Idempotent reconcile of the session-intel hooks against the global kill
+ * switch, in the T-424 shape: un-gated (the count-gated legacy sweep can never
+ * install an absent hook type), called from setup-skill, the skill
+ * auto-refresh and housekeeping.
+ *
+ * Enabled  -> ensure both hooks registered.
+ * Disabled -> ensure both removed (every other SessionStart group untouched).
+ */
+export async function ensureSessionIntelHooksRegistered(
+  settingsPath?: string,
+  binPath?: string,
+): Promise<{ changed: boolean; action: "installed" | "removed" | "unchanged" }> {
+  const bin = binPath ?? resolveStorybloqBin();
+  if (!bin) return { changed: false, action: "unchanged" };
+
+  const { isSessionIntelGloballyDisabled } = await import("../../core/limit-ledger.js");
+  if (isSessionIntelGloballyDisabled()) {
+    const r1 = await removeHook("SessionStart", formatHookCommand(bin, INTELSTART_SUBCOMMAND), settingsPath);
+    const r2 = await removeHook("UserPromptSubmit", formatHookCommand(bin, INTELPROMPT_SUBCOMMAND), settingsPath);
+    const changed = r1 === "removed" || r2 === "removed";
+    return { changed, action: changed ? "removed" : "unchanged" };
+  }
+
+  const r1 = await registerSessionIntelStartHook(settingsPath, bin);
+  const r2 = await registerSessionIntelPromptHook(settingsPath, bin);
+  const changed = r1 === "registered" || r2 === "registered";
+  return { changed, action: changed ? "installed" : "unchanged" };
+}
+
 export const CLAUDE_BUS_SESSION_START_MATCHER = "startup|resume|clear|compact";
 
 /**
@@ -1250,6 +1368,16 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
       log("  StopFailure hook removed - usage-limit auto-resume is disabled globally");
     } else {
       log("  StopFailure hook already configured (or disabled globally)");
+    }
+
+    // T-499: session-intel hooks (SessionStart capture + UserPromptSubmit sample).
+    const intelHooks = await ensureSessionIntelHooksRegistered(undefined, resolvedBin);
+    if (intelHooks.action === "installed") {
+      log("  Session-intel hooks registered - context pressure reaches the agent before auto-compaction");
+    } else if (intelHooks.action === "removed") {
+      log("  Session-intel hooks removed - disabled globally");
+    } else {
+      log("  Session-intel hooks already configured (or disabled globally)");
     }
   } else if (skipHooks) {
     log("  Hook registration skipped (--skip-hooks)");

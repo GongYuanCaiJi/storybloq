@@ -11,7 +11,7 @@ import { readCoarseTokenPressureForSession, pctBucketOf } from "../../src/core/s
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/core/presence-enrichment.js";
 import { presenceFileBase } from "../../src/presence/types.js";
 import { emptySessionIntel } from "../../src/presence/session-intel-fields.js";
-import { handleSessionIntelStart, handleStopHookSample } from "../../src/cli/commands/session-intel.js";
+import { handleSessionIntelStart, handleStopHookSample, handleSessionIntelPrompt, PROMPT_HOOK_EVENT_NAME } from "../../src/cli/commands/session-intel.js";
 import { sampleSession } from "../../src/core/session-intel/query.js";
 import { handleSessionCompactPrepare } from "../../src/cli/commands/session-compact.js";
 import { buildActivePayload } from "../../src/autonomous/status-payload.js";
@@ -357,6 +357,118 @@ describe("status.json projection", () => {
       expect(readLedger(f.root)).toEqual([]);
       expect(intelOf(f.root).lastSample).toBeNull();
       expect(intelOf(f.root)).toMatchObject({ ...emptySessionIntel(), era: null, captureKind: "late", autoCompactWindowAtStart: 450_000, autoCompactWindowSource: "user", capturedAt: at(5) });
+    });
+  });
+});
+
+describe("handleSessionIntelPrompt (UserPromptSubmit)", () => {
+  const CEILING = 0.925 * 450_000;
+  const ADVISORY_TOKENS = Math.ceil(0.7 * CEILING) + 1_000;
+  const IMPERATIVE_TOKENS = Math.ceil(0.85 * CEILING) - 25_000 + 1_000;
+  const seams = (f: Fx) => ({ cwd: f.root, projectsDir: f.projects, userSettingsPath: f.userSettings });
+
+  it("emits additionalContext only at imperative from a usable sample; ok and advisory stay silent; the sample is persisted as prompt-hook", () => {
+    withFixture((f) => {
+      ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+      const path = writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: 100_000 })]);
+      const ok = handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 5 * 60_000, ...seams(f) });
+      expect(ok).toMatchObject({ status: "silent", reason: "state ok", output: null });
+      expect(ok.result?.presence).toBe("persisted");
+      expect(intelOf(f.root).lastSample?.sampledBy).toBe("prompt-hook");
+
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(3), read: ADVISORY_TOKENS - 2 })]);
+      expect(handleSessionIntelPrompt({ sessionId: SID, now: T0 + 6 * 60_000, ...seams(f) })).toMatchObject({ status: "silent", reason: "state advisory", output: null });
+
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(4), read: IMPERATIVE_TOKENS - 2 })]);
+      const imp = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 7 * 60_000, ...seams(f) });
+      expect(imp.status).toBe("emitted");
+      const parsed = JSON.parse(imp.output!) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+      expect(parsed).toEqual({ hookSpecificOutput: { hookEventName: PROMPT_HOOK_EVENT_NAME, additionalContext: expect.any(String) } });
+      expect(PROMPT_HOOK_EVENT_NAME).toBe("UserPromptSubmit");
+      expect(parsed.hookSpecificOutput.additionalContext).toMatch(/^\[storybloq\] Context pressure IMPERATIVE: [78][0-9]% of the expected auto-compact point \([0-9,]+ tokens; source setting, high confidence\)\. Write a handover now via storybloq_handover_create/);
+      expect(Object.keys(parsed)).toEqual(["hookSpecificOutput"]);
+    });
+  });
+
+  it("an imperative sample that is NOT usable (pending compaction of this era) emits nothing", async () => {
+    await withFixtureAsync(async (f) => {
+      ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })]);
+      expect(handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");
+      await publishCompactPending(f.root, SID, T0 + 5 * 60_000 + 500);
+      const r = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000 + 1000, ...seams(f) });
+      expect(r.status).toBe("silent");
+      expect(r.result?.usable).toBe(false);
+      expect(r.output).toBeNull();
+    });
+  });
+
+  it("never globs: a transcript reachable only by glob is not found, and the outcome is silent", () => {
+    withFixture((f) => {
+      ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+      writeTranscript(f.projects, "elsewhere", SID, [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })]);
+      const r = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000, ...seams(f) });
+      expect(r.status).toBe("silent");
+      expect(r.result?.transcriptPath).toBeNull();
+      // The Stop hook, which may glob, finds it.
+      expect(handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings }).result?.transcriptPath).not.toBeNull();
+    });
+  });
+
+  it("an unbound caller never emits, even from a usable imperative sample: null era, ended record, era mismatch", () => {
+    withFixture((f) => {
+      ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })]);
+      expect(handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");
+
+      // Null era: the hook runs without CLAUDE_PID.
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      const nullEra = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 6 * 60_000, ...seams(f) });
+      expect(nullEra.result?.binding).toBe("read-only");
+      expect(nullEra.result?.pressure?.state).toBe("imperative");
+      expect(nullEra).toMatchObject({ status: "silent", output: null });
+      expect(nullEra.reason).toMatch(/^unbound caller: /);
+      process.env.CLAUDE_PID = String(process.pid);
+      processEra.reset();
+
+      // Era mismatch: the record belongs to another process era. The hook's
+      // own capture step re-binds it from the era store (revision bump,
+      // cleared subtree) BEFORE sampling, so the emission comes from a record
+      // whose era is the live one, never from the foreign-era record.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base) => ({ ...base, sessionIntel: { ...base.sessionIntel!, era: "1:1" } }));
+      const revisionBefore = intelOf(f.root).revision;
+      const mismatch = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 7 * 60_000, ...seams(f) });
+      expect(mismatch.capture?.status).toBe("transferred"); // from the era store, original kind
+      expect(intelOf(f.root).era).toBe(processEra.current()!.id);
+      expect(intelOf(f.root).revision).toBe(revisionBefore + 1);
+      expect(mismatch.result?.binding).toBe("bound");
+      expect(mismatch.status).toBe("emitted");
+
+      // Ended record.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base) => ({ ...base, endedAt: at(7) }));
+      const ended = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 8 * 60_000, ...seams(f) });
+      expect(ended.result?.binding).toBe("read-only");
+      expect(ended).toMatchObject({ status: "silent", output: null });
+    });
+  });
+
+  it("codex, no session id, no project, presence off, feature off, promptHook off, and a spent budget are skipped with no output", () => {
+    withFixture((f) => {
+      expect(handleSessionIntelPrompt({ client: "codex", sessionId: SID, ...seams(f) })).toMatchObject({ status: "skipped", reason: "client is not Claude", output: null });
+      expect(handleSessionIntelPrompt({ sessionId: null, ...seams(f) })).toMatchObject({ status: "skipped", reason: "no session id" });
+      expect(handleSessionIntelPrompt({ sessionId: SID, ...seams(f), cwd: join(f.base, "home") })).toMatchObject({ status: "skipped", reason: "no project" });
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { promptHook: false } }));
+      expect(handleSessionIntelPrompt({ sessionId: SID, ...seams(f) })).toMatchObject({ status: "skipped", reason: "promptHook disabled" });
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { enabled: false } }));
+      expect(handleSessionIntelPrompt({ sessionId: SID, ...seams(f) })).toMatchObject({ status: "skipped", reason: "sessionIntel disabled" });
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ statusWriter: { presence: false } }));
+      expect(handleSessionIntelPrompt({ sessionId: SID, ...seams(f) })).toMatchObject({ status: "skipped", reason: "presence disabled" });
+      writeFileSync(join(f.root, ".story", "config.json"), "{}\n");
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })]);
+      const r = handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000, softBudgetMs: -1, ...seams(f) });
+      expect(r).toMatchObject({ status: "skipped", reason: "soft budget exceeded after capture", output: null });
+      expect(readPresenceRecord(f.root, SID)?.sessionIntel?.lastSample ?? null).toBeNull();
     });
   });
 });

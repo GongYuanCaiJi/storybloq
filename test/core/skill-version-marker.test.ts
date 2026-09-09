@@ -226,8 +226,13 @@ describe("autoRefreshSkillIfStale with legacy hook sweep", () => {
     expect(settings.hooks?.StopFailure).toEqual([
       { matcher: "rate_limit", hooks: [{ type: "command", command: `${binPath} session limit-stop` }] },
     ]);
+    // T-499: the session-intel hooks reconcile the same un-gated way.
     expect(settings.hooks?.SessionStart).toEqual([
       { matcher: "resume", hooks: [{ type: "command", command: `${binPath} session resume-prompt` }] },
+      { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: `${binPath} session intel-start`, timeout: 5 }] },
+    ]);
+    expect(settings.hooks?.UserPromptSubmit).toEqual([
+      { matcher: "", hooks: [{ type: "command", command: `${binPath} session intel-prompt`, timeout: 10 }] },
     ]);
   });
 
@@ -241,7 +246,7 @@ describe("autoRefreshSkillIfStale with legacy hook sweep", () => {
 
     const globalDir = join(tempDir, "storybloq-global");
     await mkdir(globalDir, { recursive: true });
-    await writeFile(join(globalDir, "config.json"), JSON.stringify({ limitResume: { enabled: false } }), "utf-8");
+    await writeFile(join(globalDir, "config.json"), JSON.stringify({ limitResume: { enabled: false }, sessionIntel: { enabled: false } }), "utf-8");
     const savedGlobal = process.env.STORYBLOQ_GLOBAL_DIR;
     process.env.STORYBLOQ_GLOBAL_DIR = globalDir;
     try {
@@ -524,6 +529,8 @@ describe("autoRefreshSkillIfStale with legacy hook sweep", () => {
     expect(settings.hooks.Stop).toBeUndefined();
     expect(settings.hooks.SessionStart).toEqual([
       { matcher: "resume", hooks: [{ type: "command", command: `${binPath} session resume-prompt` }] },
+      // T-499: the intel-start group is installed the same un-gated way.
+      { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: `${binPath} session intel-start`, timeout: 5 }] },
     ]);
     expect(settings.hooks.StopFailure).toEqual([
       { matcher: "rate_limit", hooks: [{ type: "command", command: `${binPath} session limit-stop` }] },

@@ -280,6 +280,24 @@ export function isLimitResumeGloballyDisabled(): boolean {
   }
 }
 
+/**
+ * T-499 global kill switch for the session-intel hooks (intel-start and the
+ * UserPromptSubmit sample): ~/.claude/storybloq/config.json
+ * { "sessionIntel": { "enabled": false } }. Absence = enabled. Project-level
+ * `sessionIntel.enabled` in .story/config.json gates the handlers per project;
+ * this one decides whether the hooks are registered at all.
+ */
+export function isSessionIntelGloballyDisabled(): boolean {
+  try {
+    const raw = readBoundedFile(join(storybloqGlobalDir(), "config.json"));
+    if (raw === null) return false;
+    const parsed = JSON.parse(raw) as { sessionIntel?: { enabled?: unknown } };
+    return parsed?.sessionIntel?.enabled === false;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Read / write engine
 // ---------------------------------------------------------------------------

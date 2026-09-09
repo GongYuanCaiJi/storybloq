@@ -307,6 +307,24 @@ export async function autoRefreshSkillIfStale(
           );
         }
       }
+      // T-499: same shape for the session-intel hooks (un-gated, kill-switch
+      // aware, honors --skip-hooks through the same flag).
+      if (reconcileLimitHooks) {
+        try {
+          const { ensureSessionIntelHooksRegistered } = await import("../cli/commands/setup-skill.js");
+          const intelHooks = await ensureSessionIntelHooksRegistered(undefined, bin);
+          if (intelHooks.action === "installed") {
+            process.stderr.write("storybloq: registered session-intel hooks on version advance\n");
+          } else if (intelHooks.action === "removed") {
+            process.stderr.write("storybloq: removed session-intel hooks (disabled globally)\n");
+          }
+        } catch (intelErr: unknown) {
+          const intelMsg = intelErr instanceof Error ? intelErr.message : String(intelErr);
+          process.stderr.write(
+            `storybloq: session-intel hook reconcile failed (non-fatal): ${intelMsg}\n`,
+          );
+        }
+      }
     }
 
     return true;

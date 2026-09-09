@@ -75,6 +75,13 @@ export async function preCommandHousekeeping(version: string, argv: string[] = [
     } catch {
       // Best-effort.
     }
+    try {
+      // T-499: the session-intel hooks reconcile the same way.
+      const { ensureSessionIntelHooksRegistered } = await import("./commands/setup-skill.js");
+      await ensureSessionIntelHooksRegistered();
+    } catch {
+      // Best-effort.
+    }
   }
   try {
     const { spawnWakerIfNeeded } = await import("../autonomous/waker.js");
