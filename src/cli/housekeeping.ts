@@ -43,7 +43,11 @@ export function shouldSkipHousekeeping(argv: string[]): boolean {
   if (command === "waker-run") return true;
   if (
     command === "session" &&
-    (argv[1] === "compact-prepare" || argv[1] === "resume-prompt" || argv[1] === "limit-stop")
+    (argv[1] === "compact-prepare" || argv[1] === "resume-prompt" || argv[1] === "limit-stop" ||
+      // T-499: the SessionStart capture and the synchronous UserPromptSubmit
+      // sample fire on every session start and every prompt; the prompt hook
+      // in particular sits on the user's critical path.
+      argv[1] === "intel-start" || argv[1] === "intel-prompt")
   ) {
     return true;
   }
@@ -82,6 +86,19 @@ export async function preCommandHousekeeping(version: string, argv: string[] = [
     } catch {
       // Best-effort.
     }
+  }
+  try {
+    // T-499: the session-intel telemetry sweep (era store, orphan pending
+    // directories). Housekeeping is its ONLY entry point; it is never run from
+    // a hook or a sampler. Bounded: 25 era entries under a 1 s budget.
+    const { discoverProjectRoot } = await import("../core/project-root-discovery.js");
+    const root = discoverProjectRoot();
+    if (root) {
+      const { sweepSessionIntelTelemetry } = await import("../core/session-intel/housekeeping.js");
+      sweepSessionIntelTelemetry(root);
+    }
+  } catch {
+    // Best-effort.
   }
   try {
     const { spawnWakerIfNeeded } = await import("../autonomous/waker.js");

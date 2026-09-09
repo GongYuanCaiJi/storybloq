@@ -318,6 +318,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--cancel", "--requeue", "--recent", "--format"],
   },
   {
+    name: "session intel",
+    description: "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative), session facts. Works without .story/",
+    usage: "storybloq session intel [--session-id <id>] [--transcript <path>] [--caller-model <model>] [--full] [--client-task-id <id>] [--format json|md]",
+    flags: ["--session-id", "--transcript", "--caller-model", "--full", "--client-task-id", "--format"],
+  },
+  {
     name: "setup",
     description: "Install Storybloq skill, MCP, and hooks for Claude, Codex, or both",
     usage: "storybloq setup [--client claude|codex|all] [--skip-hooks] [--skip-skill]",
@@ -575,6 +581,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_session_guard", description: "Session ownership verdict: is anything running, and may I write? Reads only .story/sessions/, no ledger load. Also registered in degraded mode", params: ["clientTaskId?"] },
   { name: "storybloq_session_milestone", description: "Report a self-described work milestone (implementing/gate-hold/blocked-external/reviewing) onto this session's own presence record, for duet/arrangement visibility. Self-reported, never a computed verdict. gateName is required when kind is gate-hold. On lock contention or write failure, returns an explicit machine-readable retryable error rather than a false success.", params: ["kind", "gateName?", "note?", "clientTaskId?"] },
   { name: "storybloq_session_report", description: "Structured analysis of an autonomous session (works even if project state is corrupted)", params: ["sessionId"] },
+  { name: "storybloq_session_intel", description: "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative) and session facts. Works without .story/; sessionId or transcript inspects another session read-only. Also registered in degraded mode", params: ["format?", "sessionId?", "transcript?", "callerModel?", "full?"] },
   { name: "storybloq_register_subprocess", description: "Register a running subprocess so monitors can tell slow builds from hung agents", params: ["pid", "cmd", "category?", "sessionId?"] },
   { name: "storybloq_unregister_subprocess", description: "Unregister a subprocess after it completes (idempotent)", params: ["pid", "sessionId?"] },
   { name: "storybloq_bus_send", description: "Send a task-bound advisory peer message; routes to the sole peer (toRole is deprecated, optional, and ignored)", params: ["endpointId", "clientTaskId", "threadId?", "threadKind?", "predecessorThreadId?", "toRole?", "messageKind", "severity", "body", "refs?", "inReplyTo?", "idempotencyKey"] },

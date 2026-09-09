@@ -286,6 +286,8 @@ When structured interaction is available, offer at most three choices: `Open tas
 
 Before writing a handover at the end of a session, run `storybloq snapshot` first. This ensures the next session's recap can show what changed. When client setup has installed hooks, a PreCompact hook prepares Storybloq state before context compaction.
 
+**Context pressure (T-499).** Auto-compaction fires at about 0.925 x `autoCompactWindow` (measured, model-independent), and nothing in the client tells the model how close it is. `storybloq session intel` (CLI) and `storybloq_session_intel` (MCP) return the current context tokens, the expected auto-compact point with its provenance (`measured-session`, `measured-project`, `setting`, `model`, or `unknown`) and a state: `ok`, `advisory` (70% of the ceiling) or `imperative` (85%, minus a per-turn jump allowance). Both work without `.story/` and inspect another session read-only with `sessionId` or `transcript`. Without being asked, Storybloq also pushes the state on Claude Code: an `advisory` or `imperative` banner is prefixed to MCP tool results and appended to CLI output for the caller's own live session; at `imperative` the next prompt carries an `additionalContext` line from the UserPromptSubmit hook, and the autonomous guide adds a directive. When you see `imperative`, write a handover via `storybloq_handover_create` NOW, then continue: the stamp on your presence record drops the state back to `advisory` until the context grows another step. The banner never appears for an unbound caller (no `CLAUDE_PID`, an ended session id after `/clear`, or a mismatched process era); `session intel` still answers at reduced confidence. `.story/status.json` carries a coarse `tokenPressure` projection of the autonomous owner's state. Configure under a root-level `sessionIntel` block in `.story/config.json` (see the schema below); the hooks themselves can be disabled machine-wide with `~/.claude/storybloq/config.json` `{"sessionIntel": {"enabled": false}}`.
+
 **Lessons** capture non-obvious process learnings that should carry forward across sessions. At the end of a significant session, review what you learned and create lessons via `storybloq_lesson_create` for:
 - Patterns that worked (or failed) and why
 - Architecture decisions with non-obvious rationale
@@ -472,6 +474,20 @@ Do NOT search source code for this. The full config.json schema is shown below. 
   "recipe": "string (default: coding)",
   "statusWriter": {
     "stopHook": "boolean (default true). false stops the turn-end Stop hook from doing ANY status work (no session scan, no payload build, no gitignore heal, no write) for projects whose test harness fails on writes during a run. Autonomous sessions still refresh status on their own MCP transitions."
+  },
+  "sessionIntel": {
+    "enabled": "boolean (default true). false disables sampling, banners, the prompt-hook line, the guide directive and the status projection for this project; `session intel` still answers read-only",
+    "advisoryPct": "number 0.5-0.95 (default 0.70) of the expected auto-compact ceiling",
+    "imperativePct": "number 0.6-0.99 (default 0.85), must exceed advisoryPct; applied after the jump allowance",
+    "ceilingFraction": "number 0.8-1.0 (default 0.925; measured fire point over autoCompactWindow)",
+    "boundarySampleCount": "integer 1-50 (default 20) recent auto-compaction boundaries used for the measured ceiling",
+    "jumpAllowanceFloorTokens": "integer (default 25000) <= jumpAllowanceCapTokens (default 150000); bounds the p90 per-turn growth reserved before imperative",
+    "maxSampleAgeMs": "integer 0-600000 (default 30000); an older stored sample is refreshed by one bound tail read before a banner",
+    "compactPendingTtlMs": "integer 10000-3600000 (default 300000); a PreCompact event with no boundary seen within this window is treated as an assumed compaction",
+    "stepPct": "number 0.01-0.5 (default 0.05); context growth after a handover that re-arms imperative",
+    "banner": "boolean (default true) MCP/CLI response banner",
+    "promptHook": "boolean (default true) UserPromptSubmit additionalContext at imperative",
+    "guideDirective": "boolean (default true) autonomous guide directive at imperative"
   },
   "recipeOverrides": {
     "maxTicketsPerSession": "number (0 = unlimited, default: 0)",

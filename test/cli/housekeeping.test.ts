@@ -193,6 +193,14 @@ describe("shouldSkipHousekeeping (ISS-777)", () => {
     expect(shouldSkipHousekeeping(["session", "resume-prompt"])).toBe(true);
   });
 
+  it("skips session intel-start and intel-prompt (T-499 SessionStart and UserPromptSubmit hooks)", async () => {
+    const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
+    expect(shouldSkipHousekeeping(["session", "intel-start"])).toBe(true);
+    expect(shouldSkipHousekeeping(["session", "intel-prompt"])).toBe(true);
+    // The query surface is interactive and keeps housekeeping.
+    expect(shouldSkipHousekeeping(["session", "intel"])).toBe(false);
+  });
+
   it("does NOT skip interactive session subcommands", async () => {
     const { shouldSkipHousekeeping } = await import("../../src/cli/housekeeping.js");
     expect(shouldSkipHousekeeping(["session", "list"])).toBe(false);

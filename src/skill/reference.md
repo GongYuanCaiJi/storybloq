@@ -391,6 +391,13 @@ Show pending usage-limit auto-resumes (global across projects); cancel or requeu
 storybloq limit-status [--cancel <key>] [--requeue <key>] [--recent] [--format json|md]
 ```
 
+### session intel
+Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative), session facts. Works without .story/
+
+```
+storybloq session intel [--session-id <id>] [--transcript <path>] [--caller-model <model>] [--full] [--client-task-id <id>] [--format json|md]
+```
+
 ### setup
 Install Storybloq skill, MCP, and hooks for Claude, Codex, or both
 
@@ -700,6 +707,7 @@ The base tools below are registered in full mode (inside a .story/ project). The
 - **storybloq_session_guard** (clientTaskId?) - Session ownership verdict: is anything running, and may I write? Reads only .story/sessions/, no ledger load. Also registered in degraded mode
 - **storybloq_session_milestone** (kind, gateName?, note?, clientTaskId?) - Report a self-described work milestone (implementing/gate-hold/blocked-external/reviewing) onto this session's own presence record, for duet/arrangement visibility. Self-reported, never a computed verdict. gateName is required when kind is gate-hold. On lock contention or write failure, returns an explicit machine-readable retryable error rather than a false success.
 - **storybloq_session_report** (sessionId) - Structured analysis of an autonomous session (works even if project state is corrupted)
+- **storybloq_session_intel** (format?, sessionId?, transcript?, callerModel?, full?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative) and session facts. Works without .story/; sessionId or transcript inspects another session read-only. Also registered in degraded mode
 - **storybloq_register_subprocess** (pid, cmd, category?, sessionId?) - Register a running subprocess so monitors can tell slow builds from hung agents
 - **storybloq_unregister_subprocess** (pid, sessionId?) - Unregister a subprocess after it completes (idempotent)
 - **storybloq_bus_send** (endpointId, clientTaskId, threadId?, threadKind?, predecessorThreadId?, toRole?, messageKind, severity, body, refs?, inReplyTo?, idempotencyKey) - Send a task-bound advisory peer message; routes to the sole peer (toRole is deprecated, optional, and ignored)
