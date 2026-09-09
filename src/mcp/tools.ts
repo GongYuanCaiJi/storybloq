@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { NODE_NAME_REGEX } from "../models/federation-config.js";
 import { CROSS_NODE_REF_REGEX } from "../models/ticket.js";
-import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, detectNodeCollision, type McpToolResult } from "./node-resolution.js";
+import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, detectNodeCollision, ORCHESTRATOR_NODE_SENTINEL, type McpToolResult } from "./node-resolution.js";
 import { initProject } from "../core/init.js";
 import { handleNodeList } from "../cli/commands/node.js";
 import { resolveNodePath } from "../federation/resolver.js";
@@ -345,7 +345,15 @@ export async function runMcpWriteTool(
 
 // --- Tool registration ---
 
-const nodeParam = z.string().regex(NODE_NAME_REGEX).optional().describe("Operate on this node's .story/ instead of the orchestrator's own (orchestrator only).");
+const nodeParam = z
+  .string()
+  .refine((v) => v === ORCHESTRATOR_NODE_SENTINEL || NODE_NAME_REGEX.test(v), {
+    message: `Must be "${ORCHESTRATOR_NODE_SENTINEL}" (the orchestrator's own board) or a node name matching ${NODE_NAME_REGEX}`,
+  })
+  .optional()
+  .describe(
+    `Operate on this node's .story/ instead of the orchestrator's own (orchestrator only). Pass "${ORCHESTRATOR_NODE_SENTINEL}" for the orchestrator's own board.`,
+  );
 
 function resolveEffectiveRoot(pinnedRoot: string, nodeName?: string): { root: string } | McpToolResult {
   if (!nodeName) return { root: pinnedRoot };
@@ -391,7 +399,7 @@ async function checkNodeCollision(
     return {
       content: [{
         type: "text" as const,
-        text: `"${displayId}" exists on more than one board (${boards}) and "node" was not specified. Pass node= to disambiguate.`,
+        text: `"${displayId}" exists on more than one board (${boards}) and "node" was not specified. Pass node="${ORCHESTRATOR_NODE_SENTINEL}" for the orchestrator board or node=<name> for a node.`,
       }],
       isError: true,
     };
@@ -414,7 +422,10 @@ function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { 
   if (!config) {
     return { content: [{ type: "text" as const, text: "Cannot read orchestrator config" }], isError: true };
   }
-  if (!checkNodeWritePermission(pinnedRoot, config)) {
+  // ISS-1181: node="." is a write to the orchestrator's OWN board, not a
+  // cross-node write -- it must not be gated behind `federation.allowNodeWrites`,
+  // or enabling federation becomes a prerequisite for editing your own tickets.
+  if (nodeName !== ORCHESTRATOR_NODE_SENTINEL && !checkNodeWritePermission(pinnedRoot, config)) {
     return {
       content: [{ type: "text" as const, text: "Node writes disabled. Set `federation.allowNodeWrites: true` in .story/config.json to enable cross-node writes from this orchestrator." }],
       isError: true,
@@ -579,6 +590,7 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
 
   registerSessionGuardTool(server, pinnedRoot);
   registerSessionMilestoneTool(server, pinnedRoot);
+  registerSessionIntelTool(server, pinnedRoot);
 
   server.registerTool("storybloq_validate", {
     description: "Reference integrity + schema checks. Works even when corrupt JSON blocks project loading.",
@@ -2263,6 +2275,49 @@ export function registerSessionGuardTool(server: McpServer, root: string) {
     return Promise.resolve({
       content: [{ type: "text" as const, text: JSON.stringify(verdict, null, 2) }],
     });
+  });
+}
+
+/**
+ * T-499: `storybloq_session_intel`. Bypasses `runMcpReadTool` because it
+ * must answer WITHOUT a project (transcript-only, read-only), so it is
+ * registered in both the full and the degraded set (removed on the post-init
+ * swap, the T-446 pattern). Same handler as the CLI: identical numbers.
+ */
+export function registerSessionIntelTool(server: McpServer, root: string | null) {
+  return server.registerTool("storybloq_session_intel", {
+    description:
+      "T-499: this session's current context usage, the expected auto-compaction point with its provenance (measured, setting, or model), the pressure state (ok/advisory/imperative) and the session facts the transcript carries. Works without .story/. Pass sessionId or transcript to inspect another session read-only.",
+    inputSchema: {
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
+      sessionId: z.string().optional().describe("Inspect another session read-only"),
+      transcript: z.string().optional().describe("Explicit transcript path, read-only, subject to the access contract"),
+      callerModel: z.string().optional().describe("Cross-check against the transcript's last model; mismatch reported, never overridden"),
+      full: z.boolean().optional().describe("Stream the whole transcript (64 MiB budget) for session-wide counts"),
+      clientTaskId: z
+        .string()
+        .optional()
+        .describe("Omit to inherit the client's environment identity (CLAUDE_CODE_SESSION_ID)."),
+    },
+  }, async (args) => {
+    if (root) { try { touchMcpLiveness(root); } catch { /* best-effort */ } }
+    try {
+      const { handleSessionIntel } = await import("../cli/commands/session-intel.js");
+      const result = handleSessionIntel({
+        cwd: root ?? process.cwd(),
+        format: args.format ?? "md",
+        sessionId: args.sessionId ?? null,
+        transcript: args.transcript ?? null,
+        callerModel: args.callerModel ?? null,
+        full: args.full === true,
+        clientTaskId: args.clientTaskId ?? null,
+        sampledBy: "mcp-refresh",
+      });
+      return { content: [{ type: "text" as const, text: result.output }] };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text" as const, text: formatMcpError("io_error", message, args.format ?? "md") }], isError: true };
+    }
   });
 }
 

@@ -188,7 +188,7 @@ function parseIssueSourceRefs(values: string[] | undefined): IssueSourceRefInput
 function addNodeOption<T>(y: Argv<T>): Argv<T & { node: string | undefined }> {
   return y.option("node", {
     type: "string",
-    describe: "Node name (orchestrator only). Operates on that node's .story/ instead of the orchestrator's.",
+    describe: 'Node name (orchestrator only). Operates on that node\'s .story/ instead of the orchestrator\'s. Pass "." for the orchestrator\'s own board.',
   }) as Argv<T & { node: string | undefined }>;
 }
 
@@ -4980,6 +4980,38 @@ export function registerSessionCommand(yargs: Argv): Argv {
               process.stderr.write(
                 `[storybloq] resume-prompt failed: ${err instanceof Error ? err.message : String(err)}\n`,
               );
+            }
+          },
+        )
+        .command(
+          "intel",
+          "T-499: current context usage, expected auto-compact point and its provenance, session facts (works without .story/)",
+          (y2) =>
+            y2
+              .option("format", { type: "string", choices: ["md", "json"] as const, default: "md" as const, describe: "Output format" })
+              .option("session-id", { type: "string", describe: "Inspect another session read-only (never captures, persists or classifies)" })
+              .option("transcript", { type: "string", describe: "Explicit transcript path, read-only; still subject to the access contract" })
+              .option("caller-model", { type: "string", describe: "Cross-check against the transcript's last model; a mismatch is reported, never overridden" })
+              .option("full", { type: "boolean", default: false, describe: "Stream the whole transcript (64 MiB budget) for session-wide counts" })
+              .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" }),
+          async (argv) => {
+            const { handleSessionIntel } = await import("./commands/session-intel.js");
+            try {
+              const result = handleSessionIntel({
+                format: argv.format as "json" | "md",
+                sessionId: argv["session-id"] as string | undefined,
+                transcript: argv.transcript as string | undefined,
+                callerModel: argv["caller-model"] as string | undefined,
+                full: argv.full === true,
+                clientTaskId: argv["client-task-id"] as string | undefined,
+              });
+              // Same project-free template as limit-status: every byte through writeOutput.
+              writeOutput(result.output);
+              if (result.errorCode) process.exitCode = 1;
+            } catch (err: unknown) {
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(argv.format === "json" ? JSON.stringify({ ok: false, error: message }, null, 2) : message);
+              process.exitCode = 1;
             }
           },
         )
