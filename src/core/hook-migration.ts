@@ -26,7 +26,8 @@ import { basename, join } from "node:path";
 
 import { atomicWriteFollowingSymlink } from "./symlink-write.js";
 
-function defaultSettingsPath(): string {
+/** `~/.claude/settings.json`. Exported for T-499's autoCompactWindow reader, which merges it with the project layers. */
+export function defaultSettingsPath(): string {
   return join(homedir(), ".claude", "settings.json");
 }
 

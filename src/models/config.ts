@@ -81,6 +81,33 @@ export const StatusWriterConfigSchema = z.object({
 
 export type StatusWriterConfig = z.infer<typeof StatusWriterConfigSchema>;
 
+/**
+ * T-499: session intel (token pressure, compaction forecast). Numbers with
+ * bounds and never enums, for the reviewEffort reason: this schema is parsed,
+ * not safe-parsed, and a typo must cost the project today's intel rather
+ * than every command. Cross-field rules (imperative above advisory, floor at
+ * or below cap) are NOT expressed here because a violated pair must fall back
+ * per pair, not throw; `core/session-intel/config.ts` applies them and reports
+ * the fallback. Passthrough so future additive keys never brick older readers.
+ */
+export const SessionIntelConfigSchema = z.object({
+  enabled: z.boolean().optional(),                                   // default true
+  advisoryPct: z.number().min(0.5).max(0.95).optional(),             // default 0.70
+  imperativePct: z.number().min(0.6).max(0.99).optional(),           // default 0.85; must exceed advisoryPct
+  ceilingFraction: z.number().min(0.8).max(1).optional(),            // default 0.925 (measured, T-499)
+  boundarySampleCount: z.number().int().min(1).max(50).optional(),   // default 20; also per-session ledger retention
+  jumpAllowanceFloorTokens: z.number().int().min(0).max(10_000_000).optional(), // default 25000
+  jumpAllowanceCapTokens: z.number().int().min(0).max(10_000_000).optional(),   // default 150000; must be >= floor
+  maxSampleAgeMs: z.number().int().min(0).max(600_000).optional(),   // default 30000
+  compactPendingTtlMs: z.number().int().min(10_000).max(3_600_000).optional(), // default 300000
+  stepPct: z.number().min(0.01).max(0.5).optional(),                 // default 0.05
+  banner: z.boolean().optional(),                                    // default true
+  promptHook: z.boolean().optional(),                                // default true
+  guideDirective: z.boolean().optional(),                            // default true
+}).passthrough();
+
+export type SessionIntelConfigInput = z.infer<typeof SessionIntelConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.number().int().min(1),
@@ -92,6 +119,7 @@ export const ConfigSchema = z
     bus: BusConfigSchema.optional(),
     limitResume: LimitResumeConfigSchema,
     statusWriter: StatusWriterConfigSchema.optional(),
+    sessionIntel: SessionIntelConfigSchema.optional(),
     recipe: z.string().optional(),  // default "coding" applied in guide.ts handleStart
     // ISS-730: opt-in continuous cross-reference integrity check. When true,
     // loadProject runs a full validateProject pass and surfaces ERROR-level

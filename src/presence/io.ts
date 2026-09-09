@@ -181,6 +181,26 @@ export function ensureTelemetrySubdir(root: string, name: string): string | null
   return levels[2]!;
 }
 
+/**
+ * T-499: `.story/telemetry/<name>` without creating anything, validated at
+ * EVERY level (`.story`, `telemetry`, `<name>`) as a real, non-symlink
+ * directory. Checking only the leaf would let a symlinked `.story` or
+ * `telemetry` redirect reads, updates and sweep deletions outside the
+ * project. Null when any level is missing or not a real directory.
+ */
+export function telemetrySubdirIfPresent(root: string, name: string): string | null {
+  if (!TELEMETRY_SUBDIR_NAME.test(name)) return null;
+  const levels = [
+    join(root, ".story"),
+    join(root, ".story", "telemetry"),
+    join(root, ".story", "telemetry", name),
+  ];
+  for (const dir of levels) {
+    if (directoryIdentity(dir) === null) return null;
+  }
+  return levels[2]!;
+}
+
 /** Presence directory path without creating anything. Null if it is not a real directory. */
 export function presenceDirIfPresent(root: string): string | null {
   const dir = join(root, ".story", "telemetry", "presence");
