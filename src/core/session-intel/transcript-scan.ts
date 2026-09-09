@@ -20,7 +20,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, readSync } from "node:fs";
+import { closeSync, lstatSync, readSync } from "node:fs";
 import { openTranscriptReadOnly } from "../../autonomous/limit-transcript.js";
 import type { Epoch, SessionIntelObservation } from "../../presence/session-intel-fields.js";
 import type {
@@ -537,6 +537,40 @@ export function scanFull(req: ScanRequest, budgetBytes = FULL_READ_BUDGET_BYTES)
     );
   } catch {
     return null;
+  } finally {
+    try { closeSync(opened.fd); } catch { /* ignore */ }
+  }
+}
+
+export interface AnchorsCheck {
+  readonly incarnation: string | null;
+  readonly size: number | null;
+  /** One verdict per anchor, in input order, all read through the SAME descriptor. */
+  readonly ok: readonly boolean[];
+  /** The authorized pathname still names the descriptor's inode after the reads. */
+  readonly pathStillIdentifies: boolean;
+}
+
+/**
+ * Re-checks several anchors through ONE open descriptor, so a replacement
+ * between two separate opens cannot validate one anchor against the old
+ * file and another against the new one. After the reads the pathname is
+ * lstat'ed again: a replacement after the open is reported as
+ * `pathStillIdentifies: false`.
+ */
+export function anchorsStillMatch(path: string, anchors: ReadonlyArray<{ offset: number; sha256: string }>): AnchorsCheck {
+  const opened = openTranscriptReadOnly(path);
+  if (!opened) return { incarnation: null, size: null, ok: anchors.map(() => false), pathStillIdentifies: false };
+  try {
+    const ok = anchors.map((a) => {
+      try { return opened.size >= a.offset && anchorFor(opened.fd, a.offset) === a.sha256; } catch { return false; }
+    });
+    let same = false;
+    try {
+      const st = lstatSync(path);
+      same = st.isFile() && `${st.dev}:${st.ino}` === opened.incarnation;
+    } catch { /* gone: not identified */ }
+    return { incarnation: opened.incarnation, size: opened.size, ok, pathStillIdentifies: same };
   } finally {
     try { closeSync(opened.fd); } catch { /* ignore */ }
   }

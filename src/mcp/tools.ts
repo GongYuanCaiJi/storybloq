@@ -2313,7 +2313,12 @@ export function registerSessionIntelTool(server: McpServer, root: string | null)
         clientTaskId: args.clientTaskId ?? null,
         sampledBy: "mcp-refresh",
       });
-      return { content: [{ type: "text" as const, text: result.output }] };
+      // A handler-reported failure (no session identity, transcript not
+      // found or not authorized) is an error to the caller, with the
+      // diagnostic output preserved; the CLI sets exit code 1 for the same.
+      return result.errorCode
+        ? { content: [{ type: "text" as const, text: result.output }], isError: true }
+        : { content: [{ type: "text" as const, text: result.output }] };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: "text" as const, text: formatMcpError("io_error", message, args.format ?? "md") }], isError: true };

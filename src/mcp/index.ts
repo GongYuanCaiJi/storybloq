@@ -21,7 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { serverRegistryBinder } from "../autonomous/mcp-binding.js";
 
 import { discoverProjectRoot } from "../core/project-root-discovery.js";
-import { registerAllTools, registerSessionGuardTool } from "./tools.js";
+import { registerAllTools, registerSessionGuardTool, registerSessionIntelTool } from "./tools.js";
 import { withStrictToolSchemas } from "./strict-schemas.js";
 import { initProject } from "../core/init.js";
 import { startInboxWatcher, stopInboxWatcher } from "../channel/inbox-watcher.js";
@@ -124,6 +124,9 @@ export function registerDegradedTools(rawServer: McpServer, root?: string): void
   // registration, which lands in the catch below and re-registers the degraded
   // surface -- stranding the user in degraded mode after a SUCCESSFUL init.
   const degradedGuard = registerSessionGuardTool(server, root ?? process.cwd());
+  // T-499: session intel answers without a project (transcript-only), so it
+  // is part of the degraded surface too and is swapped out with the rest.
+  const degradedIntel = registerSessionIntelTool(server, null);
 
   const degradedInit = server.registerTool("storybloq_init", {
     description: "Initialize a new .story/ project in the current directory",
@@ -153,6 +156,7 @@ export function registerDegradedTools(rawServer: McpServer, root?: string): void
       degradedStatus.remove();
       degradedInit.remove();
       degradedGuard.remove();
+      degradedIntel.remove();
       registerAllTools(server, result.root);
       // T-450: this server now serves a project it did not know about at
       // startup. Without binding here it would stamp its pid on guide calls
