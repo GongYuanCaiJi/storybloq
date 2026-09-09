@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { cliBannerFor } from "../core/session-intel/push.js";
 import { discoverProjectRoot, loadProject } from "../core/index.js";
 import { ProjectLoaderError, INTEGRITY_WARNING_TYPES, type LoadWarning } from "../core/errors.js";
 import { ExitCode, formatError } from "../core/output-formatter.js";
@@ -37,6 +38,23 @@ export function writeOutput(text: string): void {
       return;
     }
     throw err;
+  }
+}
+
+/**
+ * T-499: the token-pressure banner for the caller's own session, under the
+ * binding rule. md is appended to stdout through `writeOutput`; json emits
+ * ONE line on STDERR so the stdout envelope and `--raw` stay parseable. Hook
+ * subcommands never route through these pipelines, so they never get one.
+ * Best-effort: any failure leaves the output exactly as written.
+ */
+function emitCliBanner(root: string, format: OutputFormat): void {
+  try {
+    const banner = cliBannerFor(root, format === "json" ? "json" : "md", { cwd: process.cwd() });
+    if (banner.stdout) writeOutput(`\n${banner.stdout}`);
+    if (banner.stderr) process.stderr.write(`${banner.stderr}\n`);
+  } catch {
+    // never
   }
 }
 
@@ -108,6 +126,7 @@ export async function runReadCommand(
 
     const result = await handler({ state, warnings, root, handoversDir, format });
     writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
+    emitCliBanner(root, format);
 
     let exitCode = result.exitCode ?? ExitCode.OK;
     // Upgrade to PARTIAL for integrity warnings OR handler-produced render
@@ -152,6 +171,7 @@ export async function runReadCommandWithRoot(
 
     const result = await handler({ state, warnings, root: explicitRoot, handoversDir, format });
     writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
+    emitCliBanner(explicitRoot, format);
 
     let exitCode = result.exitCode ?? ExitCode.OK;
     if (exitCode === ExitCode.OK && (hasIntegrityWarnings(warnings) || (result.warnings?.length ?? 0) > 0)) {

@@ -175,6 +175,7 @@ import { handleExport } from "../cli/commands/export.js";
 import { handleSelftest } from "../cli/commands/selftest.js";
 import { handleHandoverCreate } from "../cli/commands/handover.js";
 import { handleAutonomousGuide } from "../autonomous/guide.js";
+import { applyBannerToMcpText, tokenPressureBannerFor } from "../core/session-intel/push.js";
 import { handleSessionReport } from "../cli/commands/session-report.js";
 import {
   handlePhaseList,
@@ -284,6 +285,10 @@ export async function runMcpReadTool(
       }
     }
 
+    // T-499: the token-pressure banner for the CALLER's own session, under
+    // the binding rule; never on an error result (returned above), never at
+    // ok/unknown. md: prefix block; json: sibling key `tokenPressure`.
+    text = applyBannerToMcpText(text, format, tokenPressureBannerFor(pinnedRoot, { cwd: pinnedRoot }, "mcp"));
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {
@@ -330,6 +335,8 @@ export async function runMcpWriteTool(
     if (handlerWarnings.length > 0) {
       text = `Warning: ${handlerWarnings.join("; ")}\n\n${text}`;
     }
+    // T-499: same banner as the read pipeline (write tools are always md).
+    text = applyBannerToMcpText(text, "md", tokenPressureBannerFor(pinnedRoot, { cwd: pinnedRoot }, "mcp"));
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {
@@ -2287,17 +2294,14 @@ export function registerSessionGuardTool(server: McpServer, root: string) {
 export function registerSessionIntelTool(server: McpServer, root: string | null) {
   return server.registerTool("storybloq_session_intel", {
     description:
-      "T-499: this session's current context usage, the expected auto-compaction point with its provenance (measured, setting, or model), the pressure state (ok/advisory/imperative) and the session facts the transcript carries. Works without .story/. Pass sessionId or transcript to inspect another session read-only.",
+      "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative) and session facts. Works without .story/; sessionId or transcript inspects another session read-only.",
     inputSchema: {
       format: z.enum(["md", "json"]).optional().describe("default: md"),
-      sessionId: z.string().optional().describe("Inspect another session read-only"),
-      transcript: z.string().optional().describe("Explicit transcript path, read-only, subject to the access contract"),
-      callerModel: z.string().optional().describe("Cross-check against the transcript's last model; mismatch reported, never overridden"),
-      full: z.boolean().optional().describe("Stream the whole transcript (64 MiB budget) for session-wide counts"),
-      clientTaskId: z
-        .string()
-        .optional()
-        .describe("Omit to inherit the client's environment identity (CLAUDE_CODE_SESSION_ID)."),
+      sessionId: z.string().optional(),
+      transcript: z.string().optional().describe("Explicit transcript path"),
+      callerModel: z.string().optional().describe("Reported on mismatch, never overrides"),
+      full: z.boolean().optional().describe("Whole-transcript read, 64 MiB budget"),
+      clientTaskId: z.string().optional(),
     },
   }, async (args) => {
     if (root) { try { touchMcpLiveness(root); } catch { /* best-effort */ } }

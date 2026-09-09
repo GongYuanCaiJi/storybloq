@@ -345,13 +345,18 @@ describe("tool description contract (T-460)", () => {
     // format, measured below 61 KB. Most growth is required field surface
     // (identities, fences, evidence and assignment events), not descriptions;
     // its description was trimmed before raising this explicit budget.
+    // T-499 adds storybloq_session_intel: one tool, six optional fields,
+    // measured at 61,920 after its description was cut to the sentence not
+    // already in `storybloq reference` and four field descriptions were
+    // dropped to their names. The remaining growth is field surface, so the
+    // budget is raised from 61,500 to 62,500 as a deliberate act.
     // This ceiling leaves ~500 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
     // above are what protect against over-trimming, and a floor would fail an
     // honest future trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(61_500);
+    expect(bytes).toBeLessThan(62_500);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -376,7 +381,10 @@ describe("tool description contract (T-460)", () => {
     // storybloq_session_milestone (74 -> 75); no _list tool, matching the
     // arrangement/gate-ack/earmark precedent -- a milestone is a field on
     // the caller's own presence record, not a standalone enumerable entity.
-    // ISS-1155 adds one coordinated operation tool (75 -> 76).
-    expect(result.tools.length).toBe(76);
+    // ISS-1155 adds one coordinated operation tool (75 -> 76). T-499 adds
+    // storybloq_session_intel (76 -> 77), registered in the full AND the
+    // degraded set because the no-project case is where an agent most needs
+    // to know its context pressure; no _list tool, nothing to enumerate.
+    expect(result.tools.length).toBe(77);
   });
 });

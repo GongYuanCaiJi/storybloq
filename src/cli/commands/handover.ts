@@ -145,6 +145,8 @@ export async function handleHandoverCreate(
   slugRaw: string,
   format: OutputFormat,
   root: string,
+  /** T-499: the caller's identity for the handover stamp; `stamp: false` skips it (tests, batch tooling). */
+  intel: { readonly clientTaskId?: string | null; readonly stamp?: boolean; readonly now?: number; readonly projectsDir?: string } = {},
 ): Promise<CommandResult> {
   if (!content.trim()) {
     throw new CliValidationError("invalid_input", "Handover content is empty");
@@ -237,6 +239,19 @@ export async function handleHandoverCreate(
       filename = candidate;
     }
   });
+
+  // T-499: the handover is on disk; record it against the caller's current
+  // compaction boundary so imperative pressure is held at advisory until the
+  // context grows by a step or the next compaction. Best-effort, after the
+  // project lock is released, never affecting the result.
+  if (intel.stamp !== false) {
+    try {
+      const { stampHandoverForCaller } = await import("../../core/session-intel/push.js");
+      stampHandoverForCaller(root, { explicitTaskId: intel.clientTaskId, cwd: root, now: intel.now, projectsDir: intel.projectsDir });
+    } catch {
+      // never
+    }
+  }
 
   return { output: formatHandoverCreateResult(filename!, format) };
 }
