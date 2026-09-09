@@ -351,6 +351,19 @@ export interface StatusPayloadActive {
   readonly targetWork: readonly string[] | null;
   readonly currentIssue: CurrentIssueRef | null;
   readonly lastWrittenBy?: "hook" | "guide";
+  /**
+   * T-499: coarse token pressure of the autonomous OWNER's Claude session,
+   * projected from its presence record by both writers through
+   * `readCoarseTokenPressureForSession`. Optional: absent when there is no
+   * owner session id, no record or no sample yet. `contextPressure` above
+   * is the guide's own heuristic and unrelated.
+   */
+  readonly tokenPressure?: {
+    readonly state: "ok" | "advisory" | "imperative" | "unknown";
+    readonly pctBucket: number | null;
+    readonly ceilingSource: "measured-session" | "measured-project" | "setting" | "model" | "unknown";
+    readonly ceilingConfidence: "high" | "medium" | "low" | null;
+  };
 }
 
 export interface StatusPayloadInactive {

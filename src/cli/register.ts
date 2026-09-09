@@ -5016,6 +5016,36 @@ export function registerSessionCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "intel-start",
+          "T-499: capture the auto-compact setting for this process era (SessionStart hook: startup|resume|clear|compact)",
+          (y2) =>
+            y2.option("client", {
+              type: "string",
+              choices: ["claude", "codex"] as const,
+              default: "claude" as const,
+              describe: "AI client invoking the SessionStart hook",
+            }),
+          async (argv) => {
+            try {
+              const { readHookStdinContext } = await import("./commands/session-compact.js");
+              const { handleSessionIntelStart } = await import("./commands/session-intel.js");
+              const hookContext = await readHookStdinContext(process.stdin);
+              handleSessionIntelStart({
+                client: argv.client as "claude" | "codex",
+                source: hookContext.source,
+                sessionId: hookContext.sessionId,
+                cwd: hookContext.cwd,
+                transcriptPath: hookContext.transcriptPath,
+              });
+            } catch (err) {
+              // Hook contract: always exit 0, never block a session start.
+              process.stderr.write(
+                `[storybloq] intel-start failed: ${err instanceof Error ? err.message : String(err)}\n`,
+              );
+            }
+          },
+        )
+        .command(
           "limit-stop",
           "Record a usage-limit stop for auto-resume (StopFailure hook)",
           (y2) => y2,
@@ -5408,7 +5438,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
         )
         .demandCommand(
           1,
-          "Specify a session subcommand: compact-prepare, resume-prompt, limit-stop, clear-compact, stop, list, show, repair, delete, health, watch, milestone",
+          "Specify a session subcommand: compact-prepare, resume-prompt, intel, intel-start, limit-stop, clear-compact, stop, list, show, repair, delete, health, watch, milestone",
         )
         .strict(),
     () => {},

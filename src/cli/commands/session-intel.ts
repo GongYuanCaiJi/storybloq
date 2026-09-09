@@ -8,7 +8,14 @@
  */
 
 import { discoverProjectRoot } from "../../core/project-root-discovery.js";
+import { LIFECYCLE_LOCK_BUDGET_MS } from "../../core/presence-enrichment.js";
+import { isPresenceEnabled } from "../../presence/handler.js";
+import { ensureCapture, type CaptureOutcome, type CaptureSource } from "../../core/session-intel/capture.js";
+import { readSessionIntelConfig } from "../../core/session-intel/config.js";
+import { readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
+import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
+import { scanTail } from "../../core/session-intel/transcript-scan.js";
 
 export interface SessionIntelOptions {
   readonly cwd?: string;
@@ -113,4 +120,130 @@ export function handleSessionIntel(options: SessionIntelOptions = {}): SessionIn
   // lookup failure. For Claude, no identity or no authorized transcript is.
   const notFound = result.client === "claude" && (result.sessionId === null || result.transcriptPath === null);
   return { output, result, errorCode: notFound ? "not_found" : undefined };
+}
+
+// ---------------------------------------------------------------------------
+// session intel-start (SessionStart hook: startup | resume | clear | compact)
+// ---------------------------------------------------------------------------
+
+export interface SessionIntelStartOptions {
+  readonly source?: string;
+  readonly sessionId?: string | null;
+  readonly cwd?: string;
+  readonly transcriptPath?: string;
+  readonly client?: "claude" | "codex";
+  readonly now?: number;
+  /** Test seams. */
+  readonly projectsDir?: string;
+  readonly userSettingsPath?: string;
+}
+
+export interface SessionIntelStartOutcome {
+  readonly status: "done" | "skipped";
+  readonly reason: string | null;
+  readonly capture: CaptureOutcome | null;
+  readonly reconcile: ReconcileOutcome | null;
+}
+
+const CAPTURE_SOURCES: ReadonlySet<string> = new Set(["startup", "resume", "clear", "compact"]);
+
+/**
+ * Per-source capture at SessionStart. `startup` and `resume` are a new
+ * process: capture the setting as `startup`. `clear` is the same process
+ * with a new session id: transfer the era's entry with its ORIGINAL kind.
+ * `compact` is the same process: preserve the capture, never re-read
+ * settings, and reconcile with the backward boundary scan enabled. Silent
+ * on every failure; the hook always exits 0.
+ */
+export function handleSessionIntelStart(options: SessionIntelStartOptions = {}): SessionIntelStartOutcome {
+  const skipped = (reason: string): SessionIntelStartOutcome => ({ status: "skipped", reason, capture: null, reconcile: null });
+  try {
+    if ((options.client ?? "claude") !== "claude") return skipped("client is not Claude");
+    const source = options.source ?? "startup";
+    if (!CAPTURE_SOURCES.has(source)) return skipped(`unknown source ${source}`);
+    const sessionId = options.sessionId ?? null;
+    if (!sessionId) return skipped("no session id");
+    const root = projectRootFor(options.cwd ?? process.cwd());
+    if (!root) return skipped("no project");
+    if (!isPresenceEnabled(root)) return skipped("presence disabled");
+    const cfg = readSessionIntelConfig(root);
+    if (!cfg.enabled) return skipped("sessionIntel disabled");
+    const now = options.now ?? Date.now();
+
+    const capture = ensureCapture({ root, sessionId, source: source as CaptureSource, now, userSettingsPath: options.userSettingsPath });
+    if (source !== "compact") return { status: "done", reason: null, capture, reconcile: null };
+
+    // The compaction just happened: the boundary may sit beyond the tail,
+    // so reconciliation runs with the backward scan and the lifecycle budget.
+    const record = readPresenceRecord(root, sessionId);
+    const transcriptPath = authorizeTranscriptPath(options.transcriptPath, sessionId, options.projectsDir)
+      ?? locateTranscript({ sessionId, cwd: options.cwd ?? process.cwd(), hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: false, projectsDir: options.projectsDir })?.path
+      ?? null;
+    const tail = transcriptPath ? scanTail({ path: transcriptPath, sessionId, era: null, revisionSeen: null, epochSince: null }) : null;
+    const reconcile = reconcileUnderLock({ root, sessionId, cfg, tailBoundaries: tail?.boundaries ?? [], transcriptPath, source: "compact", now }, LIFECYCLE_LOCK_BUDGET_MS);
+    return { status: "done", reason: null, capture, reconcile };
+  } catch (err) {
+    return skipped(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stop-hook sample
+// ---------------------------------------------------------------------------
+
+export const STOP_SAMPLE_SOFT_BUDGET_MS = 2000;
+
+export interface StopSampleOptions {
+  readonly root: string;
+  readonly sessionId: string | null;
+  readonly cwd: string;
+  readonly transcriptPath?: string | null;
+  readonly now?: number;
+  readonly softBudgetMs?: number;
+  /** Test seams. */
+  readonly projectsDir?: string;
+  readonly userSettingsPath?: string;
+}
+
+export interface StopSampleOutcome {
+  readonly status: "sampled" | "skipped";
+  readonly reason: string | null;
+  readonly capture: CaptureOutcome | null;
+  readonly result: SessionIntelResult | null;
+}
+
+/**
+ * The Stop hook's bounded sample: a late capture when the record has none
+ * for the live era, then one lifecycle-bound tail sample persisted under the
+ * ordering rule, with boundaries ingested into the ledger. Best-effort and
+ * budgeted; the caller writes status.json regardless of what happens here.
+ */
+export function handleStopHookSample(options: StopSampleOptions): StopSampleOutcome {
+  const skipped = (reason: string, capture: CaptureOutcome | null = null): StopSampleOutcome => ({ status: "skipped", reason, capture, result: null });
+  try {
+    if (!options.sessionId) return skipped("no session id");
+    const { root, sessionId } = options;
+    if (!isPresenceEnabled(root)) return skipped("presence disabled");
+    if (!readSessionIntelConfig(root).enabled) return skipped("sessionIntel disabled");
+    const startedAt = Date.now();
+    const now = options.now ?? startedAt;
+    const softMs = options.softBudgetMs ?? STOP_SAMPLE_SOFT_BUDGET_MS;
+    const capture = ensureCapture({ root, sessionId, source: "stop", now, userSettingsPath: options.userSettingsPath });
+    if (Date.now() - startedAt > softMs) return skipped("soft budget exceeded after capture", capture);
+    const result = sampleSession({
+      root,
+      cwd: options.cwd,
+      sampledBy: "stop-hook",
+      explicitTaskId: sessionId,
+      transcriptHint: options.transcriptPath ?? null,
+      allowGlob: true,
+      now,
+      projectsDir: options.projectsDir,
+      userSettingsPath: options.userSettingsPath,
+      budget: { startedAt, softMs },
+    });
+    return { status: "sampled", reason: null, capture, result };
+  } catch (err) {
+    return skipped(err instanceof Error ? err.message : String(err));
+  }
 }

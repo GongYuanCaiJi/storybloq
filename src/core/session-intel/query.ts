@@ -39,6 +39,13 @@ export interface SampleSessionOptions {
   readonly sampledBy: SampledBy;
   readonly sessionId?: string | null;
   readonly transcriptPath?: string | null;
+  /**
+   * A transcript path from a HOOK PAYLOAD for the caller's own session: the
+   * first lookup candidate, still subject to the access contract, and unlike
+   * `transcriptPath` it does not make the scan read-only (the session id
+   * came from the same payload, so the scan stays lifecycle-bound).
+   */
+  readonly transcriptHint?: string | null;
   readonly callerModel?: string | null;
   readonly full?: boolean;
   /** Test seam: the --full read budget in bytes. */
@@ -49,6 +56,13 @@ export interface SampleSessionOptions {
   readonly now?: number;
   readonly projectsDir?: string;
   readonly userSettingsPath?: string;
+  /**
+   * Soft budget for non-query paths. Checked between stages (after locate,
+   * after the scan, before the lock); past it the remaining work is
+   * abandoned and nothing computed so far is persisted. No hard deadline:
+   * synchronous I/O cannot be cancelled by a timer.
+   */
+  readonly budget?: { readonly startedAt: number; readonly softMs: number; /** Test seam: the clock the checkpoints read. */ readonly clock?: () => number };
 }
 
 export interface SessionIntelResult {
@@ -123,6 +137,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
 
   // 1. Target.
   const explicit = Boolean(opts.sessionId || opts.transcriptPath);
+  const overBudget = () => opts.budget !== undefined && (opts.budget.clock ?? Date.now)() - opts.budget.startedAt > opts.budget.softMs;
   let binding: CallerBinding | null = null;
   let sessionId = opts.sessionId ?? null;
   if (!explicit) {
@@ -143,12 +158,18 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
   if (opts.transcriptPath) {
     transcriptPath = authorizeTranscriptPath(opts.transcriptPath, sessionId, opts.projectsDir);
   } else {
-    const located = locateTranscript({ sessionId, cwd: opts.cwd, hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: opts.allowGlob ?? true, projectsDir: opts.projectsDir });
-    transcriptPath = located?.path ?? null;
+    transcriptPath = opts.transcriptHint ? authorizeTranscriptPath(opts.transcriptHint, sessionId, opts.projectsDir) : null;
+    if (!transcriptPath) {
+      const located = locateTranscript({ sessionId, cwd: opts.cwd, hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: opts.allowGlob ?? true, projectsDir: opts.projectsDir });
+      transcriptPath = located?.path ?? null;
+    }
   }
   const provenance = resolveTargetProvenance(opts.root, sessionId);
   if (!transcriptPath) {
     return unknownResult({ sessionId, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "transcript not found or not authorized");
+  }
+  if (overBudget()) {
+    return unknownResult({ sessionId, transcriptPath, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "soft budget exceeded after locate");
   }
 
   // 3. Scan (revision read BEFORE the scan).
@@ -164,6 +185,9 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
   let scan = doScan(req);
   if (!scan) {
     return unknownResult({ sessionId, transcriptPath, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "transcript could not be read");
+  }
+  if (overBudget()) {
+    return unknownResult({ sessionId, transcriptPath, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "soft budget exceeded after scan");
   }
 
   // 4. Reconcile, then resolve and compute. Bound: under the record lock.
@@ -227,7 +251,12 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
   // 5. Persist + ingest.
   let presence: PresenceOutcome = opts.root ? (presenceOn ? "skipped" : "presence-disabled") : "no-project";
   let presenceReason: string | null = bound ? null : bindingReason;
-  if (bound && opts.root && usable && scan.observation.authoritative) {
+  if (bound && opts.root && usable && scan.observation.authoritative && overBudget()) {
+    // Computed past the budget: reported, never persisted or ingested.
+    usable = false;
+    unusableReason = "soft budget exceeded before persist";
+    presenceReason = unusableReason;
+  } else if (bound && opts.root && usable && scan.observation.authoritative) {
     const outcome = persistSample({ root: opts.root, sessionId, sample: pressure, transcriptPath, cfg, now, recompute: (rec) => compute(rec) });
     if (outcome.status === "accepted") {
       presence = "persisted";
