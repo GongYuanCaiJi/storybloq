@@ -56,6 +56,20 @@ export const STATUS_ENRICHMENT_LOCK_BUDGET_MS = LOCK_ACQUIRE_BUDGET_MS;
  * retryable error.
  */
 export const MILESTONE_LOCK_BUDGET_MS = LOCK_ACQUIRE_BUDGET_MS * 5;
+/**
+ * T-499 sample persists: one mkdir attempt, no wait. `acquireLock` with a
+ * zero budget tries exactly once and returns on the deadline check, so a
+ * busy lock costs a sampler nothing and the sample is simply dropped (the
+ * next scan produces a fresher one).
+ */
+export const TRY_LOCK_BUDGET_MS = 0;
+/**
+ * T-499 lifecycle transitions (compaction reset, capture) run inside a
+ * SessionStart/PreCompact hook that is already a full-CLI process; a bounded
+ * wait is worth it because a dropped lifecycle write is what the pending
+ * file exists to repair, and repair is later than doing it now.
+ */
+export const LIFECYCLE_LOCK_BUDGET_MS = 2000;
 
 /**
  * Computes `arrangementPresence` for `ownerTask`'s own identity: every
@@ -183,6 +197,7 @@ function freshRecord(sessionId: string, nowIso: string, source: string): Session
     arrangementPresenceTruncated: false,
     milestone: null,
     ownerIdentity: null,
+    sessionIntel: null,
   };
 }
 
