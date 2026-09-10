@@ -258,8 +258,8 @@ class StrictEnv:
         r"^claude mcp remove storybloq .*claude mcp add storybloq -s user -- /opt/bench/node_modules/\.bin/storybloq --mcp$",
         r"^printf '%s' .* > /opt/bench/reviewbridge\.json && mkdir -p /logs/agent/codex-home$", r"^claude mcp add codex-bridge -s user -e RB_CONFIG_PATH=/opt/bench/reviewbridge\.json -e CODEX_HOME=/logs/agent/codex-home -- node /opt/bench/node_modules/codex-claude-bridge/dist/index\.js$",
         r"^sha256sum /logs/agent/sessions/skills/story/SKILL\.md", r"^cat /logs/agent/sessions/settings\.json$", r"^claude mcp list", r"^cd /app && /opt/bench/node_modules/\.bin/storybloq init --name bench-task$",
-        r"^cd /app && /opt/bench/node_modules/\.bin/storybloq config set-overrides --json ", r"^printf '%s' .* > /tmp/instruction\.md$", r"^cd /app && python3 /opt/bench/mkticket\.py /tmp/instruction\.md$",
-        r"^nohup python3 /opt/bench/telemetry-copier\.py /app /logs/agent/story-live", r"^printf '%s' .* > /logs/agent/versions\.json$", r"^date -u .* > /logs/agent/started\.json$",
+        r"^cd /app && /opt/bench/node_modules/\.bin/storybloq config set-overrides --json ", r"^printf '%s' .* > /tmp/instruction\.md$", r"^cd /app && /opt/node/bin/node /opt/bench/mkticket\.cjs /tmp/instruction\.md$",
+        r"^nohup /opt/node/bin/node /opt/bench/telemetry-copier\.cjs /app /logs/agent/story-live", r"^printf '%s' .* > /logs/agent/versions\.json$", r"^date -u .* > /logs/agent/started\.json$",
         r"^mkdir -p \$CLAUDE_CONFIG_DIR/debug", r"^export PATH=\"\$HOME/\.local/bin:\$PATH\"; harbor_claude_code_instruction_", r"^timeout 60 sh -c ", r"^printf '%s' .* > /logs/agent/collect-errors\.json$",
         r"^printf '%s' .* > /logs/agent/infra-failure\.json$", r"^if \[ -e /logs/agent/sessions/skills \]; then ls -A", r"^printf '%s' .* > /logs/agent/compliance-error\.json$",
         r"^command -v curl", r"^set -euo pipefail; if command -v apk",  # the parent's own claude install path (version mismatch case)
@@ -272,7 +272,7 @@ class StrictEnv:
     def __init__(self, table: dict[str, tuple[int, str]] | None = None):
         self.table = {"claude --version": (0, "2.1.267 (Claude Code)\n"), "node --version": (0, "v22.23.2\n"), "command -v claude": (0, ""), "sha256sum": (0, "SHA\n"), "storybloq --version": (0, "9.9.9\n"), "codex --version": (0, "codex-cli 0.153.4\n"),
                       '"$HOME" "$PATH"': (0, "/root\n/usr/local/bin:/usr/bin:/bin\n"), "pwd": (0, "/app\n"), "cd /app && ([ -e .story ]": (0, "GIT=yes\nv22.1.0\n"),
-                      "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.py": (0, "T-001\n"), "for p in": (0, "")}
+                      "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.cjs": (0, "T-001\n"), "for p in": (0, "")}
         self.table.update(table or {})
         self.calls: list[dict] = []
         self.uploads: list[tuple[Path, str]] = []
@@ -555,7 +555,7 @@ async def test_run_configures_propagates_env_and_launches_parent(tmp_path):
     assert launch["env"]["CLAUDE_CONFIG_DIR"] == "/logs/agent/sessions"
     instr = launch["env"][next(k for k in launch["env"] if k.startswith("HARBOR_CLAUDE_CODE_INSTRUCTION_"))]
     assert instr == "/story auto T-001\n\nThe ticket T-001 holds the task.\nFix it.  \nline two\n\n\n\nDo the work in this directory. Do not ask questions; there is no user.\n"
-    order = [next(i for i, c in enumerate(cmds) if k in c) for k in ("storybloq setup --client claude", "storybloq init --name bench-task", "python3 /opt/bench/mkticket.py", "nohup python3 /opt/bench/telemetry-copier.py", "versions.json", "started.json", "harbor_claude_code_instruction_", "story.tgz")]
+    order = [next(i for i, c in enumerate(cmds) if k in c) for k in ("storybloq setup --client claude", "storybloq init --name bench-task", "/opt/node/bin/node /opt/bench/mkticket.cjs", "nohup /opt/node/bin/node /opt/bench/telemetry-copier.cjs", "versions.json", "started.json", "harbor_claude_code_instruction_", "story.tgz")]
     assert order == sorted(order)
     assert not any("| tail" in c for c in cmds)
     versions = json.loads(shlex.split(next(c for c in cmds if "versions.json" in c))[2])
@@ -662,7 +662,7 @@ async def test_run_cleanup_on_real_cancellation_after_copier_start(tmp_path):
         await asyncio.wait_for(a.run("do it\n", env, None), timeout=0.3)
     cmds = env.cmds()
     assert any("story.tgz" in c for c in cmds) and any("kill $(cat /tmp/copier.pid)" in c for c in cmds)
-    assert cmds.index(next(c for c in cmds if "mkticket.py" in c)) < cmds.index(next(c for c in cmds if "story.tgz" in c))
+    assert cmds.index(next(c for c in cmds if "mkticket.cjs" in c)) < cmds.index(next(c for c in cmds if "story.tgz" in c))
     # cancellation DURING preparation (after the copier started, before the launch) still cleans up
     b = build_auto(tmp_path / "b", "A1")
     env = StrictEnv()
@@ -838,7 +838,7 @@ async def test_baseline_post_run_check_is_bounded(tmp_path, monkeypatch):
 
 
 def _copier_once(work: Path, dest: Path) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(ROOT / "agents" / "telemetry-copier.py"), str(work), str(dest), "--once"], capture_output=True, text=True)
+    return subprocess.run(["node", str(ROOT / "agents" / "telemetry-copier.cjs"), str(work), str(dest), "--once"], capture_output=True, text=True)
 
 
 def test_telemetry_copier_publishes_atomically_and_only_on_success(tmp_path):
@@ -863,19 +863,21 @@ def test_telemetry_copier_publishes_atomically_and_only_on_success(tmp_path):
     good_target = os.readlink(link)
     (work / ".story" / "sessions" / "s1" / "state.json").write_text('{"v":3}')
     import agents  # noqa: F401
-    src_copy = ROOT / "agents" / "telemetry-copier.py"
-    hacked = tmp_path / "copier-failing.py"
-    hacked.write_text(src_copy.read_text().replace("shutil.copytree(src, tmp_dir, symlinks=True)", "shutil.copytree(src, tmp_dir, symlinks=True); (_ for _ in ()).throw(OSError('disk full mid-copy'))"))
-    r = subprocess.run([sys.executable, str(hacked), str(work), str(dest), "--once"], capture_output=True, text=True)
+    src_copy = ROOT / "agents" / "telemetry-copier.cjs"
+    hacked = tmp_path / "copier-failing.cjs"
+    assert "    copyTree(src, tmpDir);\n" in src_copy.read_text()
+    hacked.write_text(src_copy.read_text().replace("    copyTree(src, tmpDir);\n", "    copyTree(src, tmpDir); throw new Error('disk full mid-copy');\n"))
+    r = subprocess.run(["node", str(hacked), str(work), str(dest), "--once"], capture_output=True, text=True)
     assert r.returncode == 1
     assert os.readlink(link) == good_target and (link / "sessions" / "s1" / "state.json").read_text() == '{"v":2}'
     assert not list(dest.glob("*.partial")) and (dest / "last-snapshot").read_text() == stamp2 and stamp2 >= stamp
     assert "disk full mid-copy" in (dest / "copier-errors.log").read_text()
     # failure AFTER the swap (the stamp write fails): the published directory is kept, the link stays valid
-    hacked2 = tmp_path / "copier-stamp-failing.py"
-    hacked2.write_text(src_copy.read_text().replace("        fh.write(now() + \"\\n\")\n        fh.flush()", "        raise OSError('stamp write failed')"))  # fails DURING the write, after the file is open
+    hacked2 = tmp_path / "copier-stamp-failing.cjs"
+    assert '    fs.writeSync(fd, now() + "\\n");\n' in src_copy.read_text()
+    hacked2.write_text(src_copy.read_text().replace('    fs.writeSync(fd, now() + "\\n");\n', "    throw new Error('stamp write failed');\n"))  # fails DURING the write, after the file is open
     (work / ".story" / "sessions" / "s1" / "state.json").write_text('{"v":4}')
-    r = subprocess.run([sys.executable, str(hacked2), str(work), str(dest), "--once"], capture_output=True, text=True)
+    r = subprocess.run(["node", str(hacked2), str(work), str(dest), "--once"], capture_output=True, text=True)
     assert r.returncode == 1
     assert os.readlink(link) != good_target and (link / "sessions" / "s1" / "state.json").read_text() == '{"v":4}'  # published and intact
     assert (dest / os.readlink(link)).is_dir() and "stamp failed" in (dest / "copier-errors.log").read_text()
@@ -892,6 +894,49 @@ def test_telemetry_copier_publishes_atomically_and_only_on_success(tmp_path):
     assert source == "story-live" and tree[".story/sessions/s1/state.json"] == b'{"v":4}'
 
 
+def test_telemetry_copier_survives_removal_failures_and_keeps_running(tmp_path):
+    """A failing rm (permission, I/O) during error cleanup or pruning is logged and never terminates the
+    periodic copier; the published snapshot stays readable and the next interval succeeds."""
+    import time
+
+    src_copy = ROOT / "agents" / "telemetry-copier.cjs"
+    anchor = "    fs.rmSync(target, { recursive: true, force: true });\n"
+    assert anchor in src_copy.read_text()
+    # every removal of an existing path throws, and the copy of the FIRST interval fails after copying: cleanup failures must not hide it
+    flaky = tmp_path / "copier-rm-fails.cjs"
+    flaky.write_text(src_copy.read_text().replace(anchor, "    if (fs.existsSync(target)) throw new Error('rm denied');\n")
+                     .replace("    copyTree(src, tmpDir);\n", "    copyTree(src, tmpDir); if (!fs.existsSync(dest + '/.first')) { fs.writeFileSync(dest + '/.first', ''); throw new Error('first copy failed'); }\n"))
+    work = tmp_path / "work"
+    (work / ".story").mkdir(parents=True)
+    (work / ".story" / "a.json").write_text("1")
+    dest = tmp_path / "dest"
+    proc = subprocess.Popen(["node", str(flaky), str(work), str(dest), "--interval", "0.3"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.time() + 6
+        while time.time() < deadline and not (dest / "last-snapshot").exists():
+            time.sleep(0.1)
+        assert proc.poll() is None, proc.stderr.read()  # still running after the failing first interval
+        assert (dest / ".story" / "a.json").read_text() == "1"  # the second interval published
+        log = (dest / "copier-errors.log").read_text()
+        assert "copy failed: Error: first copy failed" in log and "cleanup failed: Error: rm denied" in log
+        assert log.index("first copy failed") < log.index("rm denied")  # the original failure is logged first
+        # pruning failures: three more intervals leave more than KEEP snapshots, each prune attempt logged, process alive
+        for i in range(3):
+            (work / ".story" / "a.json").write_text(str(i + 2))
+            time.sleep(0.45)
+        assert proc.poll() is None
+        assert "prune failed: Error: rm denied" in (dest / "copier-errors.log").read_text()
+        assert (dest / ".story" / "a.json").read_text() in {"3", "4"} and (dest / os.readlink(dest / ".story")).is_dir()
+    finally:
+        proc.kill()
+        proc.wait()
+    # and a --once run reports failure (rc 1) on a copy error even when cleanup also fails
+    (work / ".story" / "a.json").write_text("x")
+    dest2 = tmp_path / "dest2"
+    r = subprocess.run(["node", str(flaky), str(work), str(dest2), "--once"], capture_output=True, text=True)
+    assert r.returncode == 1 and not (dest2 / "last-snapshot").exists() and "first copy failed" in (dest2 / "copier-errors.log").read_text()
+
+
 def test_instruction_bytes_preserved_by_mkticket(tmp_path):
     """mkticket passes the file bytes as argv; simulate storybloq with a recorder."""
     text = "Fix it.  \nline two café 🎉\n\n"
@@ -901,8 +946,10 @@ def test_instruction_bytes_preserved_by_mkticket(tmp_path):
     fake_bin.mkdir()
     (fake_bin / "storybloq").write_text("#!/usr/bin/env python3\nimport sys,json\nopen('" + str(tmp_path / "desc.txt") + "','w',encoding='utf-8').write(sys.argv[sys.argv.index('--description')+1])\nprint(json.dumps({'data':{'displayId':'T-007'}}))\n")
     (fake_bin / "storybloq").chmod(0o755)
-    env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}
-    r = subprocess.run([sys.executable, str(ROOT / "agents" / "mkticket.py"), str(f)], capture_output=True, text=True, env=env)
+    import shutil
+    node = shutil.which("node")
+    env = {"PATH": f"{fake_bin}:/usr/bin:/bin"}  # the helper resolves `storybloq` on PATH; node itself is given by absolute path
+    r = subprocess.run([node, str(ROOT / "agents" / "mkticket.cjs"), str(f)], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "T-007"
     assert (tmp_path / "desc.txt").read_text(encoding="utf-8") == text

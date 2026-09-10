@@ -45,6 +45,7 @@ ARM_OVERRIDES = {
 ARM_ARTIFACTS = {"A1": ("storybloq",), "A2": ("storybloq", "bridge"), "A3": ("storybloq", "lenses"), "A4": ("storybloq", "bridge", "lenses")}
 PACKAGE_OF = {"storybloq": "@storybloq/storybloq", "bridge": "codex-claude-bridge", "lenses": "@storybloq/lenses"}
 REMOTE = PurePosixPath("/opt/bench")
+NODE = "/opt/node/bin/node"  # the pinned runtime the adapter installs; task images need not ship python
 GATE_POLL_SECONDS = 5
 GATE_POLL_ROUNDS = 120
 BIN = REMOTE / "node_modules" / ".bin"
@@ -167,9 +168,9 @@ class StorybloqAuto(ClaudeCode):
             versions["codex_version"] = got
             versions["bridge_commit"] = self.manifest.artifact("bridge").get("commit")
             versions["reviewer_model"] = self.manifest.data.get("reviewer_model")
-        await environment.upload_file(BENCH_ROOT / "agents" / "mkticket.py", f"{REMOTE}/mkticket.py")
-        await environment.upload_file(BENCH_ROOT / "agents" / "telemetry-copier.py", f"{REMOTE}/telemetry-copier.py")
-        await sh.must(f"chmod +x {REMOTE}/mkticket.py {REMOTE}/telemetry-copier.py", "artifact")
+        await environment.upload_file(BENCH_ROOT / "agents" / "mkticket.cjs", f"{REMOTE}/mkticket.cjs")
+        await environment.upload_file(BENCH_ROOT / "agents" / "telemetry-copier.cjs", f"{REMOTE}/telemetry-copier.cjs")
+        await sh.must(f"chmod +x {REMOTE}/mkticket.cjs {REMOTE}/telemetry-copier.cjs", "artifact")
         self._versions = versions
 
     # ----- run ---------------------------------------------------------------------
@@ -195,14 +196,14 @@ class StorybloqAuto(ClaudeCode):
         await sh.must(f"cd {wd} && {BIN}/storybloq init --name bench-task", "config", env)
         await sh.must(f"cd {wd} && {BIN}/storybloq config set-overrides --json {shlex.quote(overrides)}", "config", env)
         await sh.must(write_file_command("/tmp/instruction.md", instruction), "config", env)
-        r = await sh.must(f"cd {wd} && python3 {REMOTE}/mkticket.py /tmp/instruction.md", "config", env)
+        r = await sh.must(f"cd {wd} && {NODE} {REMOTE}/mkticket.cjs /tmp/instruction.md", "config", env)
         lines = r.stdout.strip().splitlines()
         if not lines:
             raise InfraError("config", "mkticket printed no ticket id")
         tid = lines[-1]
         live = (self.environment_logs_dir / "story-live").as_posix()
         self._created.add("copier")
-        await sh.must(f"nohup python3 {REMOTE}/telemetry-copier.py {wd} {shlex.quote(live)} >/dev/null 2>&1 & echo $! > /tmp/copier.pid", "config", env)
+        await sh.must(f"nohup {NODE} {REMOTE}/telemetry-copier.cjs {wd} {shlex.quote(live)} >/dev/null 2>&1 & echo $! > /tmp/copier.pid", "config", env)
         return tid
 
     def _cleanup_steps(self) -> list[tuple[str, str]]:

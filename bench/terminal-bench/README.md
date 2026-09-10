@@ -123,7 +123,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 67 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 68 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 

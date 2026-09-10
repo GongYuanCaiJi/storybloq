@@ -16,7 +16,7 @@ ALLOWED_ENV = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
 FORBIDDEN_ENV_RE = re.compile(r"(_API_KEY$|_TOKEN$|^CLAUDE_|^CODEX_|^RB_)")
 ADAPTER_FILES = (
     "agents/common.py", "agents/baseline.py", "agents/storybloq_auto.py", "agents/instruction.txt",
-    "agents/mkticket.py", "agents/telemetry-copier.py", "report/parse.py", "report/prices.json",
+    "agents/mkticket.cjs", "agents/telemetry-copier.cjs", "report/parse.py", "report/prices.json",
     "report/build_report.py", "report/seed.py", "seed/pilot-tasks.json", "README.md",
 )
 CLEANUP_STEP_TIMEOUT = 60
