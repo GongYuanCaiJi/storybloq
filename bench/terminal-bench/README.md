@@ -69,8 +69,10 @@ Everything the run stores lives on the SSD; nothing benchmark-related goes on th
 Claude Code is installed from manifest artifacts, never resolved at run time: a
 checksum-verified Node linux-x64 tarball (`prepare.py --node-version`) extracted to
 `/opt/node`, and a locked install project (`install/claude`, `npm ci --ignore-scripts`, so only
-lock-hashed bytes land and no lifecycle script can fetch anything) for the pinned
-`@anthropic-ai/claude-code`. Harbor's own bootstrap installer (a Bun binary) is never used:
+lock-hashed bytes land and no lifecycle script runs) for the pinned
+`@anthropic-ai/claude-code`. Its postinstall would only hardlink the linux-x64 platform
+package's binary into place; instead the manifest records that binary's SHA-256 and the
+container verifies the installed file and links it as `claude` directly. Harbor's own bootstrap installer (a Bun binary) is never used:
 the Terminal-Bench images are linux/amd64 only and it segfaults under qemu on Apple Silicon.
 Install method, node version and tarball hash are recorded in `versions.json`.
 
@@ -84,7 +86,14 @@ prices, and never overwrites a frozen manifest.
 ## What is recorded per trial
 
 `agent/versions.json` (manifest hash, versions, measured SKILL.md SHA-256, ticket id,
-WORKDIR, preflight, runtime env), `agent/started.json` (written right before claude is
+WORKDIR, preflight, runtime env, `home_after_install`: what the installs left in the real
+home. The clean-home isolation gate runs before any install; a second gate after the installs
+permits exactly one file on treatment arms, `~/.claude/settings.json` as written by storybloq's
+CLI housekeeping (a single `hooks` key, every command a storybloq program), and nothing on A0;
+skills, MCP config, Codex state or a foreign hook are pre-start infra errors. The effective
+configuration under `CLAUDE_CONFIG_DIR` is asserted again before launch. A hook command passes
+only as a single plain invocation of storybloq with an audited subcommand: no shell operators,
+substitutions, quotes or redirections anywhere in the string), `agent/started.json` (written right before claude is
 launched), `agent/infra-failure.json` (written on a PRE-START failure; the only thing the
 report accepts as an infra exclusion), `agent/compliance-error.json` (A0 isolation violated
 after the run; the row stays in the denominator, flagged), `agent/claude-code.txt`
@@ -112,7 +121,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 64 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 66 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 

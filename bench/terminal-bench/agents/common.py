@@ -219,7 +219,16 @@ async def install_claude_from_artifacts(sh: Shell, environment: Any, root_exec: 
     r = await sh.run(f"cd {CLAUDE_REMOTE} && npm ci --ignore-scripts --no-audit --no-fund", timeout=900)
     if r.return_code != 0:
         raise InfraError("artifact", f"npm ci (claude) rc={r.return_code}: {(r.stderr or r.stdout)[-400:]}")
-    await root_exec(f"ln -sf {CLAUDE_REMOTE}/node_modules/.bin/claude /usr/local/bin/claude")
+    # Claude Code's postinstall (never run) would only hardlink the platform package's binary into
+    # bin/claude.exe. Verify that lock-hashed binary against the manifest and link it directly.
+    native = inst.get("native") or {}
+    native_path = f"{CLAUDE_REMOTE}/node_modules/{native.get('package')}/{native.get('file')}"
+    if not native.get("sha256"):
+        raise InfraError("manifest", "claude install project lacks the native binary hash")
+    r = await sh.must(f"sha256sum {native_path} | cut -d' ' -f1", "artifact")
+    if r.stdout.strip() != native["sha256"]:
+        raise InfraError("artifact", f"installed {native_path} sha {r.stdout.strip()[:12]} != manifest {native['sha256'][:12]}")
+    await root_exec(f"chmod 0755 {native_path} && ln -sf {native_path} /usr/local/bin/claude")
     r = await sh.must("claude --version", "artifact")
     got = parse_semver(r.stdout)
     if got != pin:
@@ -227,10 +236,43 @@ async def install_claude_from_artifacts(sh: Shell, environment: Any, root_exec: 
     return {"claude_code_version": got, "claude_install_method": "artifact", "node_version": f"v{node['version']}", "node_sha256": node["sha256"]}
 
 
+HOME_PROBE = 'for p in ~/.claude/skills ~/.claude/settings.json ~/.claude.json ~/.codex; do [ -e "$p" ] && echo "$p"; done; true'
+
+
 async def ensure_clean_home(sh: Shell) -> None:
-    r = await sh.must('for p in ~/.claude/skills ~/.claude/settings.json ~/.claude.json ~/.codex; do [ -e "$p" ] && echo "$p"; done; true', "dirty-home")
+    """Pre-install isolation check: the image itself carries no Claude or Codex user state.
+    Runs BEFORE anything is installed: storybloq's CLI housekeeping writes hooks into
+    ~/.claude/settings.json on ordinary invocations (ignoring CLAUDE_CONFIG_DIR), so a
+    post-install probe is a record (`home_after_install`), not a gate; the run's effective
+    configuration lives under CLAUDE_CONFIG_DIR and is asserted separately."""
+    r = await sh.must(HOME_PROBE, "dirty-home")
     if r.stdout.strip():
         raise InfraError("dirty-home", r.stdout.strip().replace("\n", ","))
+
+
+async def check_home_after_install(sh: Shell, *, allow_storybloq_settings: bool, program: str) -> dict[str, Any]:
+    """Post-install isolation gate. The only real-home file an install may create is the
+    storybloq housekeeping hooks file (treatment arms), and its content must be exactly the
+    shape that housekeeping writes: a single `hooks` key whose every command invokes `program`.
+    Anything else (skills, MCP config, Codex state, a foreign hook) is a pre-start infra error.
+    Returns the record stored in versions.json as `home_after_install`."""
+    r = await sh.must(HOME_PROBE, "dirty-home-after-install")
+    paths = [p for p in r.stdout.split("\n") if p.strip()]
+    allowed = {"/.claude/settings.json"} if allow_storybloq_settings else set()
+    unexpected = [p for p in paths if not any(p.endswith(a) for a in allowed)]
+    if unexpected:
+        raise InfraError("dirty-home-after-install", ",".join(unexpected))
+    out: dict[str, Any] = {"paths": paths}
+    if paths:
+        c = await sh.must("cat ~/.claude/settings.json", "dirty-home-after-install")
+        try:
+            settings = json.loads(c.stdout)
+        except json.JSONDecodeError as exc:
+            raise InfraError("dirty-home-after-install", f"~/.claude/settings.json is not JSON: {exc}") from None
+        if not isinstance(settings, dict) or set(settings) != {"hooks"} or not _hooks_mention(settings, program):
+            raise InfraError("dirty-home-after-install", "~/.claude/settings.json is not the storybloq housekeeping hooks file")
+        out["settings_json"] = c.stdout
+    return out
 
 
 async def capture_workdir(sh: Shell) -> str:
@@ -261,13 +303,36 @@ async def preflight_task_state(sh: Shell, workdir: str) -> dict[str, Any]:
     return {"git": "GIT=yes" in out, "node": node}
 
 
-HOOK_EVENTS = {"PreCompact", "SessionStart", "SessionEnd", "Stop", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "SubagentStop"}
+HOOK_EVENTS = {"PreCompact", "SessionStart", "SessionEnd", "Stop", "StopFailure", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "SubagentStop"}
+
+
+# Hook command lines storybloq 1.14.0 writes (setup-skill.ts, hook-migration.ts): the program followed
+# by one of these argument tuples (further plain flags such as --quiet are accepted).
+HOOK_SUBCOMMANDS = {("snapshot",), ("hook-bus-tool",), ("hook-status",), ("session", "compact-prepare"), ("session", "intel-prompt"),
+                    ("session", "intel-start"), ("session", "limit-stop"), ("session", "resume-prompt")}
+_SHELL_META = set(";|&$`()<>{}[]*?!~'\"\\\n\r\t#")
+_PLAIN_TOKEN = re.compile(r"^[A-Za-z0-9_./=:@%+-]+$")
+
+
+def _hook_command_ok(command: str, needle: str) -> bool:
+    """True only when `command` is a single plain invocation of `needle` with an audited subcommand:
+    no shell operators, substitutions, quotes or redirections anywhere, every token plain, the
+    program `needle` or a path ending in /needle, and the arguments starting with an allowed tuple."""
+    if not isinstance(command, str) or any(ch in _SHELL_META for ch in command):
+        return False
+    tokens = command.split(" ")
+    if not tokens or not all(_PLAIN_TOKEN.match(t) for t in tokens):
+        return False
+    prog, args = tokens[0], tokens[1:]
+    if not (prog == needle or prog.endswith("/" + needle)):
+        return False
+    return any(tuple(args[: len(sub)]) == sub for sub in HOOK_SUBCOMMANDS)
 
 
 def _hooks_mention(settings: Any, needle: str) -> bool:
     """True only when every hook entry is structurally valid (known event, list of matchers, each
-    with a list of {type: "command", command: str} hooks, none disabled) and at least one command
-    invokes `needle` as a program (first word, or path ending in /needle)."""
+    with a list of {type: "command", command: str} hooks, none disabled), EVERY command invokes
+    `needle` as its program (first word, or path ending in /needle), and there is at least one."""
     if not isinstance(settings, dict) or settings.get("disableAllHooks") is True:
         return False
     hooks = settings.get("hooks")
@@ -284,9 +349,9 @@ def _hooks_mention(settings: Any, needle: str) -> bool:
             for h in inner:
                 if not isinstance(h, dict) or h.get("type") != "command" or not isinstance(h.get("command"), str) or h.get("disabled") is True:
                     return False
-                prog = h["command"].split()[0] if h["command"].split() else ""
-                if prog == needle or prog.endswith("/" + needle):
-                    found = True
+                if not _hook_command_ok(h["command"], needle):
+                    return False  # a foreign program, a compound command or a substitution is never accepted
+                found = True
     return found
 
 

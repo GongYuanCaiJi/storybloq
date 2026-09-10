@@ -24,6 +24,7 @@ from agents.common import (
     check_env_allowlist,
     check_pins,
     ensure_clean_home,
+    check_home_after_install,
     install_claude_from_artifacts,
     parse_semver,
     preflight_task_state,
@@ -94,6 +95,7 @@ class StorybloqAuto(ClaudeCode):
     async def install(self, environment: BaseEnvironment) -> None:
         sh = self._shell(environment)
         try:
+            await ensure_clean_home(sh)  # before any install: the image carries no user state
             self._install_versions = await install_claude_from_artifacts(sh, environment, lambda cmd: self.exec_as_root(environment, cmd), self.manifest)
             await super().install(environment)  # finds the pinned claude and skips its bootstrap
         except asyncio.CancelledError:
@@ -103,6 +105,7 @@ class StorybloqAuto(ClaudeCode):
             raise
         try:
             await self._install_bench(environment, sh)
+            self._versions["home_after_install"] = await check_home_after_install(sh, allow_storybloq_settings=True, program="storybloq")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001  any install failure is pre-start; the container is up so the marker lands in /logs/agent
@@ -221,7 +224,6 @@ class StorybloqAuto(ClaudeCode):
         env = self.runtime_env or await self._resolve_runtime_env(sh)
         try:
             try:
-                await ensure_clean_home(sh)
                 self.workdir = await capture_workdir(sh)
                 preflight = await preflight_task_state(sh, self.workdir)
                 measured = await self._configure(sh, env)

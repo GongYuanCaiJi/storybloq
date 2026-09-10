@@ -21,6 +21,7 @@ from agents.common import (
     check_env_allowlist,
     check_pins,
     ensure_clean_home,
+    check_home_after_install,
     install_claude_from_artifacts,
     record_infra_failure,
     record_started,
@@ -59,8 +60,10 @@ class StorybloqBaseline(ClaudeCode):
     async def install(self, environment: BaseEnvironment) -> None:
         sh = self._shell(environment)
         try:
+            await ensure_clean_home(sh)  # before any install: the image carries no user state
             self._install_versions = await install_claude_from_artifacts(sh, environment, lambda cmd: self.exec_as_root(environment, cmd), self.manifest)
             await super().install(environment)  # finds the pinned claude and skips its bootstrap
+            self._install_versions["home_after_install"] = await check_home_after_install(sh, allow_storybloq_settings=False, program="storybloq")  # A0 installs nothing: nothing may appear
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001  harbor's own claude install failed: pre-start, marker written
@@ -71,7 +74,6 @@ class StorybloqBaseline(ClaudeCode):
         sh = self._shell(environment)
         logs = self.environment_logs_dir
         try:
-            await ensure_clean_home(sh)  # the parent copies ~/.claude/skills into the config dir: a clean home is the pre-start isolation check
             versions = {"manifest_sha256": self.manifest.sha256, "arm": self.ARM, "harbor_version": self.manifest.data.get("harbor_version"),
                         "executor_model": self.manifest.data.get("executor_model"), **getattr(self, "_install_versions", {})}
             await sh.must(write_file_command((logs / "versions.json").as_posix(), json.dumps(versions, sort_keys=True)), "config")

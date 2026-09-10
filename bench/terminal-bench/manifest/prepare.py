@@ -96,7 +96,36 @@ def lock_claude_project(out: Path, claude_version: str) -> dict:
     got = ((lock.get("packages") or {}).get("node_modules/@anthropic-ai/claude-code") or {}).get("version")
     if got != claude_version:
         raise SystemExit(f"lockfile resolved @anthropic-ai/claude-code {got!r}, expected {claude_version!r}")
-    return {"dir": str(proj), "package_json_sha256": sha256(proj / "package.json"), "package_lock_sha256": sha256(proj / "package-lock.json")}
+    native = lock_native_binary(proj, lock, claude_version)
+    return {"dir": str(proj), "package_json_sha256": sha256(proj / "package.json"), "package_lock_sha256": sha256(proj / "package-lock.json"), "native": native}
+
+
+NATIVE_PACKAGE = "@anthropic-ai/claude-code-linux-x64"  # the task images are linux/amd64, glibc
+
+
+def lock_native_binary(proj: Path, lock: dict, claude_version: str) -> dict:
+    """Claude Code's postinstall only hardlinks the platform package's binary into place; the adapter
+    never runs it (npm ci --ignore-scripts). Record that binary's hash so the container can verify
+    the installed file and link it directly. The tarball is checked against the lock's integrity."""
+    import base64
+    import tempfile
+
+    entry = (lock.get("packages") or {}).get(f"node_modules/{NATIVE_PACKAGE}") or {}
+    integrity = entry.get("integrity", "")
+    if entry.get("version") != claude_version or not integrity.startswith("sha512-"):
+        raise SystemExit(f"lockfile lacks {NATIVE_PACKAGE}@{claude_version} with a sha512 integrity")
+    with tempfile.TemporaryDirectory(dir=proj) as td:
+        tgz_name = sh(["npm", "pack", f"{NATIVE_PACKAGE}@{claude_version}", "--ignore-scripts", "--pack-destination", td], proj).splitlines()[-1]
+        tgz = Path(td) / tgz_name
+        got = base64.b64encode(hashlib.sha512(tgz.read_bytes()).digest()).decode()
+        if got != integrity[len("sha512-"):]:
+            raise SystemExit(f"{NATIVE_PACKAGE} tarball integrity differs from the lockfile")
+        with tarfile.open(tgz, "r:gz") as tf:
+            f = tf.extractfile("package/claude")
+            if f is None:
+                raise SystemExit(f"{NATIVE_PACKAGE} tarball has no package/claude")
+            digest = hashlib.sha256(f.read()).hexdigest()
+    return {"package": NATIVE_PACKAGE, "file": "claude", "sha256": digest, "tarball_integrity": integrity}
 
 
 def lock_install_projects(out: Path, artifacts: dict, codex_version: str | None, arms: list[str]) -> dict:
