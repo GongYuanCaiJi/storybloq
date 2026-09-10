@@ -22,18 +22,29 @@ export interface ContinuationIndex {
   file: string;
 }
 
-export interface ParsedHandover {
-  records: SectionRecord[];
-  shippedIds: string[];
-  unclassifiedFallback: boolean;
-}
-
 export type TrajectoryDisposition =
   | "continuation"
   | "blocked"
   | "owner-gated"
   | "carried"
   | "shipped";
+
+export interface IdOccurrence {
+  id: string;
+  disposition: TrajectoryDisposition;
+}
+
+export interface ParsedHandover {
+  records: SectionRecord[];
+  shippedIds: string[];
+  unclassifiedFallback: boolean;
+  // Every id-bearing occurrence (classified records plus shipped ids), in
+  // DOCUMENT ORDER. This is what lets buildTrajectory resolve a same-
+  // handover tie (e.g. a shipped mention and a continuation mention of the
+  // same id in one handover) by whichever occurs textually first, per the
+  // plan -- a plain records[] + shippedIds[] pair loses that ordering.
+  orderedIdOccurrences: IdOccurrence[];
+}
 
 export interface TrajectoryEntry {
   id: string;
@@ -45,8 +56,7 @@ export interface TrajectoryEntry {
 
 export interface TrajectoryHandoverInput {
   filename: string;
-  records: SectionRecord[];
-  shippedIds: string[];
+  orderedIdOccurrences: IdOccurrence[];
 }
 
 const CAP_BYTES = 1600;
@@ -145,22 +155,46 @@ function isWordChar(ch: string): boolean {
   return /[a-z0-9-]/.test(ch);
 }
 
+function isWhitespaceChar(ch: string): boolean {
+  return /\s/.test(ch);
+}
+
+function skipWhitespace(s: string, pos: number): number {
+  let i = pos;
+  while (i < s.length && isWhitespaceChar(s[i] as string)) i++;
+  return i;
+}
+
 /**
- * `--` is a delimiter when surrounded by spaces or at a word's end -- not
- * absorbed into the preceding word by the hyphen-inclusive word definition.
- * We special-case it here: a word token ending in "--" (or "-") followed by
- * more hyphens is not produced by tokenizeNormalized in the first place
- * because '-' is a word character; instead we detect "--" as a delimiter by
- * scanning the RAW normalized string directly for word boundaries.
+ * `--` counts as the delimiter character at `pos` even though a single `-`
+ * is itself a word character -- it is never absorbed into a word.
  */
-function findDoubleHyphenDelimiters(normalized: string): Set<number> {
-  const positions = new Set<number>();
-  let idx = normalized.indexOf("--");
-  while (idx !== -1) {
-    positions.add(idx);
-    idx = normalized.indexOf("--", idx + 2);
+function isDelimiterCharAt(s: string, pos: number): boolean {
+  const ch = s[pos];
+  if (ch === undefined) return false;
+  if (ch === ":" || ch === "," || ch === "(") return true;
+  return ch === "-" && s[pos + 1] === "-";
+}
+
+/**
+ * Reads one word (a maximal run of letters/digits/hyphens) starting at
+ * `pos`, stopping early at a `--` run so it is never absorbed into the
+ * word. Returns null if `pos` is not the start of a word (e.g. an
+ * unsupported punctuation character) -- this is what makes an input like
+ * "Next !!!" fail to classify instead of being silently treated as if the
+ * heading ended there.
+ */
+function readWordAt(s: string, pos: number): { word: string; nextPos: number } | null {
+  let i = pos;
+  let word = "";
+  while (i < s.length) {
+    if (s[i] === "-" && s[i + 1] === "-") break;
+    const ch = s[i] as string;
+    if (!isWordChar(ch)) break;
+    word += ch;
+    i++;
   }
-  return positions;
+  return word.length > 0 ? { word, nextPos: i } : null;
 }
 
 export function classifyHeading(rawHeading: string): Disposition | "shipped" | null {
@@ -190,102 +224,34 @@ export function classifyHeading(rawHeading: string): Disposition | "shipped" | n
 
 /**
  * remainder is everything in the normalized heading after the category
- * token. Returns true if the heading classifies given this remainder.
+ * token (already known to start at a valid boundary: whitespace, a
+ * delimiter character, "--", or end-of-string). Parses it POSITIONALLY --
+ * consume separators, recognize an immediate delimiter or delimiter word,
+ * otherwise consume exactly one content word and require end-of-heading or
+ * a delimiter at the position right after it. A delimiter character must
+ * be found at its actual position; punctuation that never resolves to a
+ * word or a delimiter (e.g. "!!!") fails the grammar outright rather than
+ * being treated as if nothing followed the token.
  */
 function classifyRemainder(remainder: string): boolean {
-  const doubleHyphenPositions = findDoubleHyphenDelimiters(remainder);
+  let pos = skipWhitespace(remainder, 0);
+  if (pos >= remainder.length) return true;
+  if (isDelimiterCharAt(remainder, pos)) return true;
 
-  // Walk "words" in remainder, respecting that a `--` delimiter breaks a
-  // word even though '-' is otherwise a word character.
-  const words = splitWordsRespectingDoubleHyphen(remainder, doubleHyphenPositions);
+  const word1 = readWordAt(remainder, pos);
+  if (word1 === null) return false;
+  if (DELIMITER_WORDS.has(word1.word.toLowerCase())) return true;
 
-  // First: is the position right after the token itself (start of
-  // remainder) a delimiter character/end/space? Already validated by the
-  // caller (boundaryOk). We now need to know: does the remainder consist of
-  // ONLY a delimiter char/space run before the first word (case: heading
-  // ends there, or a delimiter char immediately)? Or does it lead into a
-  // word?
-  const trimmedStart = leadingDelimiterCharAt0(remainder);
-  if (trimmedStart) {
-    // A delimiter character/`--` immediately follows the token -- classifies.
-    return true;
-  }
+  pos = skipWhitespace(remainder, word1.nextPos);
+  if (pos >= remainder.length) return true;
+  if (isDelimiterCharAt(remainder, pos)) return true;
 
-  if (words.length === 0) {
-    // Only whitespace remained -- heading ends right there.
-    return true;
-  }
+  const word2 = readWordAt(remainder, pos);
+  if (word2 === null) return false;
+  if (DELIMITER_WORDS.has(word2.word.toLowerCase())) return true;
 
-  const firstWord = words[0];
-  if (firstWord === undefined) return true;
-  if (DELIMITER_WORDS.has(firstWord.toLowerCase())) {
-    return true;
-  }
-
-  // firstWord counts as the one permitted further word. After it, we must
-  // hit end-of-string or a delimiter (char or word).
-  const secondWord = words[1];
-  if (secondWord === undefined) return true;
-  if (DELIMITER_WORDS.has(secondWord.toLowerCase())) return true;
-
-  // Not a delimiter word -- check whether it's actually a delimiter
-  // CHARACTER immediately following the first word (e.g. "loops," where
-  // the comma is captured as part of the "word" splitting boundary).
+  // A second non-delimiter word exceeds the one-word allowance.
   return false;
-}
-
-function leadingDelimiterCharAt0(remainder: string): boolean {
-  if (remainder.length === 0) return false;
-  if (/^\s+$/.test(remainder)) return true;
-  const afterSpaces = remainder.replace(/^\s+/, "");
-  if (afterSpaces.length === 0) return true;
-  if (/^[:,(]/.test(afterSpaces) && afterSpaces === remainder.trimStart()) {
-    // A delimiter char with no word before it (only if it's truly at the
-    // very front, i.e. no leading word chars were skipped to get here).
-    return /^\s*[:,(]/.test(remainder) && !/^\s*[a-z0-9]/.test(remainder);
-  }
-  if (afterSpaces.startsWith("--")) {
-    return !/^\s*[a-z0-9]/.test(remainder) || /^\s*--/.test(remainder);
-  }
-  return false;
-}
-
-/**
- * Splits `remainder` into word tokens (letters/digits/hyphens), treating any
- * `--` occurrence as a hard delimiter that breaks a word even though a
- * single `-` is a word character. Delimiter characters and whitespace
- * separate words but are not returned.
- */
-function splitWordsRespectingDoubleHyphen(
-  remainder: string,
-  doubleHyphenPositions: Set<number>,
-): string[] {
-  const words: string[] = [];
-  let current = "";
-  let i = 0;
-  while (i < remainder.length) {
-    if (doubleHyphenPositions.has(i)) {
-      if (current) {
-        words.push(current);
-        current = "";
-      }
-      i += 2;
-      continue;
-    }
-    const ch = remainder[i] as string;
-    if (isWordChar(ch)) {
-      current += ch;
-      i++;
-    } else {
-      if (current) {
-        words.push(current);
-        current = "";
-      }
-      i++;
-    }
-  }
-  if (current) words.push(current);
-  return words;
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +493,7 @@ export function parseHandoverMarkdown(
   const sections = splitFenceAwareSections(markdown);
   const records: SectionRecord[] = [];
   const shippedIds: string[] = [];
+  const orderedIdOccurrences: IdOccurrence[] = [];
 
   let anyClassified = false;
 
@@ -540,18 +507,29 @@ export function parseHandoverMarkdown(
     if (category === "shipped") {
       for (const bullet of bullets) {
         const id = extractIdToken(bullet.firstLine);
-        if (id) shippedIds.push(id);
+        if (id) {
+          shippedIds.push(id);
+          orderedIdOccurrences.push({ id, disposition: "shipped" });
+        }
       }
       continue;
     }
 
     for (const bullet of bullets) {
-      records.push(buildRecordFromBullet(bullet, category, file));
+      const record = buildRecordFromBullet(bullet, category, file);
+      records.push(record);
+      if (record.id !== null) {
+        // `category` here is never "unclassified" in practice -- that
+        // disposition is only ever produced by buildUnclassifiedFallback,
+        // not by classifyHeading -- so this narrows safely to the
+        // trajectory-relevant subset of Disposition.
+        orderedIdOccurrences.push({ id: record.id, disposition: category as TrajectoryDisposition });
+      }
     }
   }
 
   if (anyClassified) {
-    return { records, shippedIds, unclassifiedFallback: false };
+    return { records, shippedIds, unclassifiedFallback: false, orderedIdOccurrences };
   }
 
   const fallback = buildUnclassifiedFallback(sections, file);
@@ -559,6 +537,7 @@ export function parseHandoverMarkdown(
     records: fallback ? [fallback] : [],
     shippedIds,
     unclassifiedFallback: true,
+    orderedIdOccurrences: [],
   };
 }
 
@@ -601,9 +580,66 @@ function recordBytes(record: SectionRecord): number {
   return byteLength(JSON.stringify(record));
 }
 
-function shortenedRecord(record: SectionRecord): SectionRecord {
-  if (record.rationale === "unknown") return record;
-  return { ...record, rationale: "unknown" };
+/**
+ * The bound this module promises is on the ACTUAL final serialized form the
+ * caller receives -- array brackets, commas, and property names included --
+ * not a sum of independently-stringified pieces (round-1 code review finding:
+ * byte-budget).
+ */
+function fitsEnvelope(records: SectionRecord[], index: ContinuationIndex | null): boolean {
+  return byteLength(JSON.stringify({ records, index })) <= CAP_BYTES;
+}
+
+/**
+ * Binary search for the LONGEST UTF-8-safe label prefix (via `truncateUtf8`,
+ * so the ellipsis marker and JSON escaping are already reflected in the
+ * real serialized size `fitsEnvelope` measures) whose envelope fits the
+ * remaining budget -- not a fixed shrink target (round-2 code review
+ * finding: record-selection -- a fixed target rejects a record that could
+ * still fit with further truncation, and can end the reserve pass
+ * prematurely). `truncateUtf8(label, n)` is monotonic non-decreasing in
+ * `n`, which is what makes the search valid. Returns null only when even
+ * the minimal (fully truncated) label does not fit.
+ */
+function shrinkLabelToFit(
+  selected: SectionRecord[],
+  record: SectionRecord,
+): SectionRecord | null {
+  let lo = 0;
+  let hi = byteLength(record.label);
+  let best: string | null = null;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const label = truncateUtf8(record.label, mid);
+    if (fitsEnvelope([...selected, { ...record, label }], null)) {
+      best = label;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return best === null ? null : { ...record, label: best };
+}
+
+/**
+ * Tries to add `candidate` to the already-committed `selected` array,
+ * shrinking it (rationale, then label, per the plan's ordering) until it
+ * fits the real envelope or every shrink stage has been exhausted. Returns
+ * the record actually to add, or null if the candidate cannot be admitted
+ * (cap already full, or not even a minimally-shrunk form fits).
+ */
+function tryAdmit(selected: SectionRecord[], candidate: SectionRecord): SectionRecord | null {
+  if (selected.length + 1 > CAP_RECORDS) return null;
+
+  if (fitsEnvelope([...selected, candidate], null)) return candidate;
+
+  const rationaleDropped =
+    candidate.rationale === "unknown" ? candidate : { ...candidate, rationale: "unknown" };
+  if (fitsEnvelope([...selected, rationaleDropped], null)) return rationaleDropped;
+
+  return shrinkLabelToFit(selected, rationaleDropped);
 }
 
 export function selectBoundedRecords(
@@ -611,8 +647,12 @@ export function selectBoundedRecords(
   file: string,
 ): { records: SectionRecord[]; index: ContinuationIndex | null } {
   const selected: SectionRecord[] = [];
-  const reservedIndices = new Set<number>();
-  let bytes = 0;
+  // Parallel to `selected`: the ORIGINAL candidate index each entry came
+  // from, tracked explicitly rather than by object identity (round-1 code
+  // review finding: omission-accounting -- a shrunk record is a new object,
+  // so identity-based omission detection double-counted it).
+  const selectedOriginalIndices: number[] = [];
+  const admitted = new Set<number>();
 
   const decisionEntries = candidates
     .map((c, i) => ({ c, i }))
@@ -632,51 +672,33 @@ export function selectBoundedRecords(
     if (reservedCount >= reserveFloorCount && reservedBytes >= reserveFloorBytes) {
       break;
     }
-    let candidate = c;
-    let candidateBytes = recordBytes(candidate);
-    if (bytes + candidateBytes > CAP_BYTES) {
-      candidate = shortenedRecord(candidate);
-      candidateBytes = recordBytes(candidate);
-    }
-    if (selected.length >= CAP_RECORDS || bytes + candidateBytes > CAP_BYTES) {
-      break;
-    }
-    selected.push(candidate);
-    reservedIndices.add(i);
-    bytes += candidateBytes;
-    reservedBytes += candidateBytes;
+    const result = tryAdmit(selected, c);
+    if (result === null) break;
+    selected.push(result);
+    selectedOriginalIndices.push(i);
+    admitted.add(i);
+    reservedBytes += recordBytes(result);
     reservedCount++;
   }
 
   for (let i = 0; i < candidates.length; i++) {
-    if (reservedIndices.has(i)) continue;
-    let candidate = candidates[i] as SectionRecord;
-    let candidateBytes = recordBytes(candidate);
-    if (bytes + candidateBytes > CAP_BYTES) {
-      candidate = shortenedRecord(candidate);
-      candidateBytes = recordBytes(candidate);
-    }
-    if (selected.length >= CAP_RECORDS || bytes + candidateBytes > CAP_BYTES) {
-      continue;
-    }
-    selected.push(candidate);
-    bytes += candidateBytes;
+    if (admitted.has(i)) continue;
+    const result = tryAdmit(selected, candidates[i] as SectionRecord);
+    if (result === null) continue;
+    selected.push(result);
+    selectedOriginalIndices.push(i);
+    admitted.add(i);
   }
 
-  const selectedSet = new Set(selected);
-  const omitted = candidates.filter((c) => !selectedSet.has(c));
+  const omittedOriginalIndices = candidates
+    .map((_, i) => i)
+    .filter((i) => !admitted.has(i));
 
-  if (omitted.length === 0) {
+  if (omittedOriginalIndices.length === 0) {
     return { records: selected, index: null };
   }
 
-  const { records: finalSelected, index } = fitIndex(
-    selected,
-    omitted,
-    file,
-    bytes,
-  );
-  return { records: finalSelected, index };
+  return fitIndex(selected, selectedOriginalIndices, omittedOriginalIndices, candidates, file);
 }
 
 function indexNonFileBytes(omittedCount: number, ids: string[]): number {
@@ -695,35 +717,43 @@ function buildIndex(
   return { omittedCount, ids, file };
 }
 
+function buildIndexFromOmitted(
+  omittedOriginalIndices: number[],
+  candidates: SectionRecord[],
+  file: string,
+): ContinuationIndex {
+  const ids = omittedOriginalIndices
+    .map((i) => candidates[i]?.id)
+    .filter((x): x is string => x !== null && x !== undefined);
+  return buildIndex(omittedOriginalIndices.length, ids, file);
+}
+
 function fitIndex(
   selected: SectionRecord[],
-  omitted: SectionRecord[],
+  selectedOriginalIndices: number[],
+  omittedOriginalIndices: number[],
+  candidates: SectionRecord[],
   file: string,
-  selectedBytes: number,
 ): { records: SectionRecord[]; index: ContinuationIndex } {
-  let working = [...selected];
-  let currentOmitted = [...omitted];
-  let bytes = selectedBytes;
+  const working = [...selected];
+  const workingIndices = [...selectedOriginalIndices];
+  const omitted = [...omittedOriginalIndices];
 
-  let index = buildIndex(
-    currentOmitted.length,
-    currentOmitted.map((o) => o.id).filter((x): x is string => x !== null),
-    file,
-  );
+  let index = buildIndexFromOmitted(omitted, candidates, file);
 
-  while (working.length > 0) {
-    const indexBytes = byteLength(JSON.stringify(index));
-    if (bytes + indexBytes <= CAP_BYTES && working.length + 1 <= CAP_RECORDS) {
-      break;
-    }
-    const evicted = working.pop()!;
-    bytes -= recordBytes(evicted);
-    currentOmitted = [...currentOmitted, evicted];
-    index = buildIndex(
-      currentOmitted.length,
-      currentOmitted.map((o) => o.id).filter((x): x is string => x !== null),
-      file,
-    );
+  // `working` is ordered [reserve-pass records..., fill-pass records...], so
+  // popping from the end evicts the last fill-pass record first and only
+  // reaches reserve-pass decisions (most-recently-reserved first) once every
+  // fill-pass record is gone -- exactly the eviction order the plan
+  // specifies, with no separate bookkeeping needed.
+  while (
+    working.length > 0 &&
+    (!fitsEnvelope(working, index) || working.length + 1 > CAP_RECORDS)
+  ) {
+    working.pop();
+    const evictedOriginalIndex = workingIndices.pop() as number;
+    omitted.push(evictedOriginalIndex);
+    index = buildIndexFromOmitted(omitted, candidates, file);
   }
 
   return { records: working, index };
@@ -749,26 +779,20 @@ export function buildTrajectory(
   // handovers is expected newest-to-oldest. We iterate in that order so the
   // FIRST time we see an id, it's the newest (latest) mention.
   for (const handover of handovers) {
-    const idsThisHandover = new Set<string>();
-    const dispositionsThisHandover = new Map<string, TrajectoryDisposition>();
-
-    for (const record of handover.records) {
-      if (record.id === null) continue;
-      if (record.disposition === "unclassified") continue;
-      idsThisHandover.add(record.id);
-      if (!dispositionsThisHandover.has(record.id)) {
-        dispositionsThisHandover.set(record.id, record.disposition);
-      }
-    }
-    for (const id of handover.shippedIds) {
-      idsThisHandover.add(id);
-      if (!dispositionsThisHandover.has(id)) {
-        dispositionsThisHandover.set(id, "shipped");
+    // Within one handover, resolve a same-id tie (e.g. shipped AND
+    // continuation both name it) by whichever occurrence is textually
+    // first -- round-1 code review finding: trajectory-ordering. This
+    // requires the caller's occurrences to already be in document order;
+    // relying on Map insertion order over that stream is what implements
+    // "textually first" here.
+    const firstDispositionThisHandover = new Map<string, TrajectoryDisposition>();
+    for (const occurrence of handover.orderedIdOccurrences) {
+      if (!firstDispositionThisHandover.has(occurrence.id)) {
+        firstDispositionThisHandover.set(occurrence.id, occurrence.disposition);
       }
     }
 
-    for (const id of idsThisHandover) {
-      const disposition = dispositionsThisHandover.get(id)!;
+    for (const [id, disposition] of firstDispositionThisHandover) {
       const existing = byId.get(id);
       if (!existing) {
         byId.set(id, {

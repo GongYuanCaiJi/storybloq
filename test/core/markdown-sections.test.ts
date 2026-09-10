@@ -30,6 +30,7 @@ describe("classifyHeading", () => {
     ["Open", "continuation"],
     ["Worker state", "continuation"],
     ["Exact next step", "continuation"],
+    ["Next step: implementation details", "continuation"],
   ];
 
   for (const [heading, expected] of positive) {
@@ -44,6 +45,7 @@ describe("classifyHeading", () => {
     "Reopened",
     "Unblocked",
     "Blocked out early today",
+    "Next !!!",
   ];
 
   for (const heading of negative) {
@@ -235,6 +237,23 @@ describe("parseHandoverMarkdown: record extraction", () => {
       "This is the first paragraph",
     );
   });
+
+  it("preserves document order across sections in orderedIdOccurrences, including shipped", () => {
+    const md = [
+      "# Title",
+      "",
+      "## Shipped",
+      "- T-1: done",
+      "",
+      "## Next",
+      "- T-1: still open somehow",
+    ].join("\n");
+    const parsed = parseHandoverMarkdown(md, "h.md");
+    expect(parsed.orderedIdOccurrences).toEqual([
+      { id: "T-1", disposition: "shipped" },
+      { id: "T-1", disposition: "continuation" },
+    ]);
+  });
 });
 
 function makeRecord(overrides: Partial<SectionRecord>): SectionRecord {
@@ -394,6 +413,92 @@ describe("selectBoundedRecords: byte budget", () => {
     expect(index).not.toBeNull();
     expect(records.length).toBeLessThanOrEqual(12);
   });
+
+  it("keeps the FULL serialized envelope (records + index together) within the cap, not just summed record sizes", () => {
+    const candidates: SectionRecord[] = Array.from({ length: 12 }, (_, i) =>
+      makeRecord({ id: `T-${i}`, label: "x".repeat(118), rationale: "unknown" }),
+    );
+    const { records, index } = selectBoundedRecords(candidates, "h.md");
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify({ records, index }),
+      "utf-8",
+    );
+    expect(envelopeBytes).toBeLessThanOrEqual(1600);
+  });
+
+  it("shortens the label (after the rationale) when rationale-dropping alone still does not fit", () => {
+    const bigLabelRecord = makeRecord({
+      id: "T-1",
+      kind: "item",
+      label: "L".repeat(3000),
+      rationale: "R".repeat(500),
+    });
+    const { records } = selectBoundedRecords([bigLabelRecord], "h.md");
+    expect(records).toHaveLength(1);
+    const record = records[0] as SectionRecord;
+    expect(record.rationale).toBe("unknown");
+    expect(record.label.length).toBeLessThan(bigLabelRecord.label.length);
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify({ records, index: null }),
+      "utf-8",
+    );
+    expect(envelopeBytes).toBeLessThanOrEqual(1600);
+  });
+
+  it("finds a label shorter than a fixed 40-byte shrink target when the remaining budget requires it", () => {
+    // Filler sized so a 40-byte label does not fit the remainder, but a
+    // 10-byte label does -- proves the shrink is a real search against the
+    // available budget, not a fixed truncation target that would have
+    // rejected this record outright.
+    const filler = makeRecord({
+      id: "T-0",
+      kind: "item",
+      label: "f".repeat(1350),
+      rationale: "unknown",
+    });
+    const tight = makeRecord({
+      id: "T-1",
+      kind: "item",
+      label: "L".repeat(3000),
+      rationale: "R".repeat(500),
+    });
+    const { records } = selectBoundedRecords([filler, tight], "h.md");
+    const t1 = records.find((r) => r.id === "T-1");
+    expect(t1).toBeDefined();
+    expect(Buffer.byteLength(t1!.label, "utf-8")).toBeLessThan(40);
+    const envelopeBytes = Buffer.byteLength(
+      JSON.stringify({ records, index: null }),
+      "utf-8",
+    );
+    expect(envelopeBytes).toBeLessThanOrEqual(1600);
+  });
+
+  it("does not double-count a shrunk-but-retained record as omitted", () => {
+    const needsShortening = makeRecord({
+      id: "T-1",
+      kind: "item",
+      label: "a".repeat(50),
+      rationale: "b".repeat(300),
+    });
+    const filler: SectionRecord[] = Array.from({ length: 20 }, (_, i) =>
+      makeRecord({
+        id: `T-${i + 2}`,
+        kind: "item",
+        label: "z".repeat(115),
+        rationale: "w".repeat(115),
+      }),
+    );
+    const candidates = [needsShortening, ...filler];
+    const { records, index } = selectBoundedRecords(candidates, "h.md");
+
+    const t1 = records.find((r) => r.id === "T-1");
+    expect(t1).toBeDefined();
+    if (index) {
+      expect(index.ids).not.toContain("T-1");
+    }
+    const includedIds = new Set(records.map((r) => r.id));
+    expect(index?.omittedCount ?? 0).toBe(candidates.length - includedIds.size);
+  });
 });
 
 // Mimics the "dropped reserve pass" mutant: process the full candidate
@@ -425,16 +530,14 @@ describe("buildTrajectory", () => {
     const handovers = [
       {
         filename: "b.md",
-        records: [
-          makeRecord({ id: "T-1", disposition: "continuation" }),
-          makeRecord({ id: "T-1", disposition: "continuation" }),
+        orderedIdOccurrences: [
+          { id: "T-1", disposition: "continuation" as const },
+          { id: "T-1", disposition: "continuation" as const },
         ],
-        shippedIds: [],
       },
       {
         filename: "a.md",
-        records: [makeRecord({ id: "T-1", disposition: "blocked" })],
-        shippedIds: [],
+        orderedIdOccurrences: [{ id: "T-1", disposition: "blocked" as const }],
       },
     ];
     const trajectory = buildTrajectory(handovers);
@@ -444,11 +547,13 @@ describe("buildTrajectory", () => {
 
   it("reports shipped as latestDisposition when it is the newest mention", () => {
     const handovers = [
-      { filename: "newest.md", records: [], shippedIds: ["T-1"] },
+      {
+        filename: "newest.md",
+        orderedIdOccurrences: [{ id: "T-1", disposition: "shipped" as const }],
+      },
       {
         filename: "older.md",
-        records: [makeRecord({ id: "T-1", disposition: "continuation" })],
-        shippedIds: [],
+        orderedIdOccurrences: [{ id: "T-1", disposition: "continuation" as const }],
       },
     ];
     const trajectory = buildTrajectory(handovers);
@@ -465,11 +570,40 @@ describe("buildTrajectory", () => {
     const handovers = [
       {
         filename: "newest.md",
-        records: [makeRecord({ id: "T-1", disposition: "continuation" })],
-        shippedIds: [],
+        orderedIdOccurrences: [{ id: "T-1", disposition: "continuation" as const }],
       },
     ];
     const trajectory = buildTrajectory(handovers);
     expect(trajectory.find((t) => t.id === "T-1")).toBeDefined();
+  });
+
+  it("resolves a same-handover tie by whichever occurrence is textually first: shipped before continuation", () => {
+    const handovers = [
+      {
+        filename: "h.md",
+        orderedIdOccurrences: [
+          { id: "T-1", disposition: "shipped" as const },
+          { id: "T-1", disposition: "continuation" as const },
+        ],
+      },
+    ];
+    const trajectory = buildTrajectory(handovers);
+    const entry = trajectory.find((t) => t.id === "T-1")!;
+    expect(entry.latestDisposition).toBe("shipped");
+  });
+
+  it("resolves a same-handover tie by whichever occurrence is textually first: continuation before shipped", () => {
+    const handovers = [
+      {
+        filename: "h.md",
+        orderedIdOccurrences: [
+          { id: "T-1", disposition: "continuation" as const },
+          { id: "T-1", disposition: "shipped" as const },
+        ],
+      },
+    ];
+    const trajectory = buildTrajectory(handovers);
+    const entry = trajectory.find((t) => t.id === "T-1")!;
+    expect(entry.latestDisposition).toBe("continuation");
   });
 });
