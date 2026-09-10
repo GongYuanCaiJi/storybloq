@@ -2123,14 +2123,19 @@ export function formatHandoverContent(
   return content;
 }
 
+/** T-499: the continuation line after a handover that was stamped on the caller's presence record. */
+export const HANDOVER_STAMPED_CONTINUE_LINE =
+  "Handover recorded against your current compaction boundary: context pressure is held at advisory. Keep working in this same turn; do not stop, defer the next step, or ask the user whether to continue.";
+
 export function formatHandoverCreateResult(
   filename: string,
   format: OutputFormat,
+  stamped = false,
 ): string {
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ filename }), null, 2);
+    return JSON.stringify(successEnvelope(stamped ? { filename, tokenPressureStamped: true } : { filename }), null, 2);
   }
-  return `Created handover: ${filename}`;
+  return stamped ? `Created handover: ${filename}\n\n${HANDOVER_STAMPED_CONTINUE_LINE}` : `Created handover: ${filename}`;
 }
 
 // --- Snapshot / Recap / Export ---

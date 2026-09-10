@@ -500,10 +500,22 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
     const intel = base.sessionIntel;
     if (expectedEra === null || !intel || intel.era === null || intel.era !== expectedEra) { refused = "record era differs from the caller's live era"; return base; }
     if (base.endedAt !== null) { refused = "caller session has ended"; return base; }
+    // The stored sample is rewritten to its suppressed form in the same
+    // write: the stamp records the sample's own token count, so the step
+    // rule holds by construction, and every reader (banner, guide directive,
+    // status projection) drops to advisory at once instead of repeating
+    // IMPERATIVE until the next Stop sample lands. Field finding 2026-09-09:
+    // agents that had just written a handover kept seeing the imperative
+    // banner and stopped.
+    const last = intel.lastSample;
+    const lastSample = last && last.state === "imperative" && last.ceiling !== null && (tokensAtHandover === null || tokensAtHandover === last.contextTokens)
+      ? { ...last, state: "advisory" as const, suppressedBy: "handover" as const }
+      : last;
     return {
       ...base,
       sessionIntel: {
         ...intel,
+        lastSample,
         handoverWrittenAt: nowIso,
         tokensAtHandover: tokensAtHandover ?? intel.lastSample?.contextTokens ?? null,
         handoverBoundaryAt: intel.lastBoundaryAt,

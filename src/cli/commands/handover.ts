@@ -244,14 +244,21 @@ export async function handleHandoverCreate(
   // compaction boundary so imperative pressure is held at advisory until the
   // context grows by a step or the next compaction. Best-effort, after the
   // project lock is released, never affecting the result.
+  let stamped = false;
   if (intel.stamp !== false) {
     try {
       const { stampHandoverForCaller } = await import("../../core/session-intel/push.js");
-      stampHandoverForCaller(root, { explicitTaskId: intel.clientTaskId, cwd: root, now: intel.now, projectsDir: intel.projectsDir });
+      const r = stampHandoverForCaller(root, { explicitTaskId: intel.clientTaskId, cwd: root, now: intel.now, projectsDir: intel.projectsDir });
+      // Only a stamp whose locked write LANDED counts: a busy lock, a failed
+      // write, or a refusal under the lock leaves the record unchanged.
+      stamped = r.status === "stamped" && r.outcome.status === "written";
     } catch {
       // never
     }
   }
 
-  return { output: formatHandoverCreateResult(filename!, format) };
+  // The continuation line rides only on a landed stamp: an unbound caller
+  // (or a stamp that missed) gets the bare result, so the line never claims
+  // a suppression that did not happen.
+  return { output: formatHandoverCreateResult(filename!, format, stamped) };
 }

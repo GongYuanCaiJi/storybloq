@@ -11,7 +11,7 @@ import { handleStopHookSample } from "../../src/cli/commands/session-intel.js";
 import { handleHandoverCreate } from "../../src/cli/commands/handover.js";
 import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
 import { runReadCommandWithRoot } from "../../src/cli/run.js";
-import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/core/presence-enrichment.js";
+import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../../src/core/presence-enrichment.js";
 import type { SessionPresence } from "../../src/presence/types.js";
 import { SID, assistantRecord, boundaryRecord, writeTranscript } from "./session-intel-fixtures.js";
 
@@ -20,14 +20,16 @@ import { SID, assistantRecord, boundaryRecord, writeTranscript } from "./session
  * another writer (a sampler, a compaction hook) that landed between an
  * unlocked read and this write acquiring the lock.
  */
-const inject: { transformBase: ((base: SessionPresence) => SessionPresence) | null; onCall: number; calls: number } = { transformBase: null, onCall: 1, calls: 0 };
+const inject: { transformBase: ((base: SessionPresence) => SessionPresence) | null; onCall: number; calls: number; forceOutcome: EnrichmentOutcome | null } = { transformBase: null, onCall: 1, calls: 0, forceOutcome: null };
 vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../src/core/presence-enrichment.js")>();
   const wrapped: typeof mod.applyPresenceEnrichment = (root, sessionId, budgetMs, source, mutate, now) => {
-    const transform = inject.transformBase;
-    if (!transform || source !== "session-intel") return mod.applyPresenceEnrichment(root, sessionId, budgetMs, source, mutate, now);
+    // A forced outcome stands in for a busy lock or a failed write on the next session-intel write: nothing is written.
+    if (source !== "session-intel" || (!inject.forceOutcome && !inject.transformBase)) return mod.applyPresenceEnrichment(root, sessionId, budgetMs, source, mutate, now);
     // Applied on the `onCall`-th session-intel write only (1 = the first).
     if (++inject.calls !== inject.onCall) return mod.applyPresenceEnrichment(root, sessionId, budgetMs, source, mutate, now);
+    if (inject.forceOutcome) { const o = inject.forceOutcome; inject.forceOutcome = null; return o; }
+    const transform = inject.transformBase!;
     inject.transformBase = null;
     return mod.applyPresenceEnrichment(root, sessionId, budgetMs, source, (base, nowIso) => mutate(transform(base), nowIso), now);
   };
@@ -236,7 +238,7 @@ describe("guide directive and handover stamp", () => {
       expect(guideDirectiveFor(f.root, SID, now)).toBeNull();
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(3), read: IMPERATIVE_TOKENS - 2 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
-      expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/^Context pressure imperative \([78][0-9]% of ceiling, source setting, high confidence\): write a handover now via storybloq_handover_create, then continue\.$/);
+      expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/^Context pressure imperative \([78][0-9]% of ceiling, source setting, high confidence\): write a handover now via storybloq_handover_create, then keep working in this same turn\./);
       expect(guideDirectiveFor(f.root, null, now + 1000)).toBeNull();
       markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 2000).toISOString() });
       expect(guideDirectiveFor(f.root, SID, now + 3000)).toBeNull();
@@ -253,6 +255,11 @@ describe("guide directive and handover stamp", () => {
       expect(intelOf(f.root).lastSample?.state).toBe("imperative");
       const r = await handleHandoverCreate("# Handover\nDone.", "session", "md", f.root, { now, projectsDir: f.projects });
       expect(r.output).toContain("Created handover:");
+      // The reply itself tells the caller to keep working (the pause-after-handover field finding, 2026-09-09).
+      expect(r.output).toMatch(/Keep working in this same turn; do not stop/);
+      // Every reader drops to advisory at once, before any new sample lands.
+      expect(tokenPressureBannerFor(f.root, { now, ...seams(f) })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+      expect(guideDirectiveFor(f.root, SID, now)).toBeNull();
       const intel = intelOf(f.root);
       expect(intel.handoverWrittenAt).toBe(new Date(now).toISOString());
       expect(intel.tokensAtHandover).toBe(intel.lastSample?.contextTokens);
@@ -265,7 +272,37 @@ describe("guide directive and handover stamp", () => {
       applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, handoverWrittenAt: null, tokensAtHandover: null, handoverBoundaryAt: null }, endedAt: at(9) }));
       expect(stampHandoverForCaller(f.root, { now: now + 2000, projectsDir: f.projects })).toMatchObject({ status: "skipped", reason: expect.stringMatching(/ended/) });
       applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: null }));
-      await handleHandoverCreate("# Two", "two", "md", f.root, { stamp: false, now: now + 3000 });
+      const two = await handleHandoverCreate("# Two", "two", "md", f.root, { stamp: false, now: now + 3000 });
+      expect(intelOf(f.root).handoverWrittenAt).toBeNull();
+      // No stamp, no continuation line: the reply never claims a suppression that did not happen.
+      expect(two.output).not.toMatch(/Keep working/);
+      const asJson = await handleHandoverCreate("# Three", "three", "json", f.root, { now: now + 4000, projectsDir: f.projects });
+      expect(JSON.parse(asJson.output as string).data).toMatchObject({ tokenPressureStamped: true });
+    });
+  });
+
+  it("the continuation line and tokenPressureStamped ride only on a stamp whose locked write LANDED: busy lock, failed write, and a refusal under the lock all yield the bare reply and leave the record imperative", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      for (const forced of [{ status: "skipped-lock-busy" }, { status: "skipped-write-failed" }] as const) {
+        // The stamp's reconcile is session-intel write 1; the stamp itself is write 2.
+        inject.calls = 0;
+        inject.onCall = 2;
+        inject.forceOutcome = forced;
+        const r = await handleHandoverCreate("# H", `h-${forced.status}`, "json", f.root, { now, projectsDir: f.projects });
+        expect(inject.forceOutcome).toBeNull();
+        expect(JSON.parse(r.output as string).data).toEqual({ filename: expect.any(String) });
+        expect(r.output).not.toMatch(/Keep working/);
+        expect(intelOf(f.root)).toMatchObject({ handoverWrittenAt: null, lastSample: { state: "imperative" } });
+      }
+      // Refused under the lock: the record's era changes between the binding check and the locked write.
+      inject.calls = 0;
+      inject.onCall = 2;
+      inject.transformBase = (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, era: "999:1" } });
+      const md = await handleHandoverCreate("# H", "h-refused", "md", f.root, { now, projectsDir: f.projects });
+      expect(inject.transformBase).toBeNull();
+      expect(md.output).toMatch(/^Created handover: [^\n]+$/);
       expect(intelOf(f.root).handoverWrittenAt).toBeNull();
     });
   });
