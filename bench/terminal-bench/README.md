@@ -92,7 +92,8 @@ permits exactly one file on treatment arms, `~/.claude/settings.json` as written
 CLI housekeeping (a single `hooks` key, every command a storybloq program), and nothing on A0;
 skills, MCP config, Codex state or a foreign hook are pre-start infra errors. The effective
 configuration under `CLAUDE_CONFIG_DIR` is asserted again before launch. A hook command passes
-only as a single plain invocation of storybloq with an audited subcommand: no shell operators,
+only as a single plain invocation of one of the package's two bins (`storybloq`,
+`storybloq-presence`) with an audited subcommand: no shell operators,
 substitutions, quotes or redirections anywhere in the string), `agent/started.json` (written right before claude is
 launched), `agent/infra-failure.json` (written on a PRE-START failure, including a pre-start hang cut by
 the task timeout, reason `pre-start-timeout`; the only thing the report accepts as an infra

@@ -318,27 +318,35 @@ async def preflight_task_state(sh: Shell, workdir: str) -> dict[str, Any]:
 HOOK_EVENTS = {"PreCompact", "SessionStart", "SessionEnd", "Stop", "StopFailure", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "SubagentStop"}
 
 
-# Hook command lines storybloq 1.14.0 writes (setup-skill.ts, hook-migration.ts): the program followed
-# by one of these argument tuples (further plain flags such as --quiet are accepted).
-HOOK_SUBCOMMANDS = {("snapshot",), ("hook-bus-tool",), ("hook-status",), ("session", "compact-prepare"), ("session", "intel-prompt"),
-                    ("session", "intel-start"), ("session", "limit-stop"), ("session", "resume-prompt")}
+# Hook command lines storybloq 1.14.0 writes (setup-skill.ts, hook-migration.ts): a program from the
+# package's own bin map (`storybloq` = dist/cli.js, `storybloq-presence` = dist/presence.js, both
+# hash-verified from the tarball) followed by one of its argument tuples (further plain flags
+# such as --quiet are accepted).
+HOOK_SUBCOMMANDS: dict[str, set[tuple[str, ...]]] = {
+    "storybloq": {("snapshot",), ("hook-bus-tool",), ("hook-status",), ("session", "compact-prepare"), ("session", "intel-prompt"),
+                  ("session", "intel-start"), ("session", "limit-stop"), ("session", "resume-prompt")},
+    "storybloq-presence": {("hook",)},
+}
 _SHELL_META = set(";|&$`()<>{}[]*?!~'\"\\\n\r\t#")
 _PLAIN_TOKEN = re.compile(r"^[A-Za-z0-9_./=:@%+-]+$")
 
 
 def _hook_command_ok(command: str, needle: str) -> bool:
-    """True only when `command` is a single plain invocation of `needle` with an audited subcommand:
-    no shell operators, substitutions, quotes or redirections anywhere, every token plain, the
-    program `needle` or a path ending in /needle, and the arguments starting with an allowed tuple."""
+    """True only when `command` is a single plain invocation of an audited program with an audited
+    subcommand: no shell operators, substitutions, quotes or redirections anywhere, every token
+    plain, the program one of HOOK_SUBCOMMANDS' keys (`needle` names the family: `storybloq` and
+    `storybloq-presence`), bare or a path ending in /<program>, and the arguments starting with
+    one of that program's tuples."""
     if not isinstance(command, str) or any(ch in _SHELL_META for ch in command):
         return False
     tokens = command.split(" ")
     if not tokens or not all(_PLAIN_TOKEN.match(t) for t in tokens):
         return False
     prog, args = tokens[0], tokens[1:]
-    if not (prog == needle or prog.endswith("/" + needle)):
-        return False
-    return any(tuple(args[: len(sub)]) == sub for sub in HOOK_SUBCOMMANDS)
+    for program, subs in HOOK_SUBCOMMANDS.items():
+        if program.startswith(needle) and (prog == program or prog.endswith("/" + program)):
+            return any(tuple(args[: len(sub)]) == sub for sub in subs)
+    return False
 
 
 def _hooks_mention(settings: Any, needle: str) -> bool:

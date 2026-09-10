@@ -607,7 +607,13 @@ async def test_run_refuses_a_foreign_hook_in_the_effective_config_before_launch(
         cmds = env.cmds()
         assert json.loads(shlex.split(next(c for c in cmds if "infra-failure.json" in c))[2])["reason"] == "config"
         assert not any("started.json" in c or "harbor_claude_code_instruction_" in c for c in cmds)
-    for good in ("/opt/bench/node_modules/.bin/storybloq snapshot --quiet", "storybloq session limit-stop", "/opt/bench/node_modules/.bin/storybloq hook-bus-tool"):
+    # the settings storybloq 1.14.0 `setup --client claude` actually wrote in the r7 dry run (both bins)
+    real = json.loads(Path(__file__).with_name("fixtures").joinpath("settings-1.14.0.json").read_text())
+    assert _hooks_mention(real, "storybloq")
+    for bad in ("/opt/bench/node_modules/.bin/storybloq-presence", "/opt/bench/node_modules/.bin/storybloq-presence hook; id", "/opt/bench/node_modules/.bin/storybloq-presence snapshot",
+                "/opt/bench/node_modules/.bin/storybloq-presencex hook", "/opt/bench/node_modules/.bin/xstorybloq snapshot"):
+        assert not _hooks_mention({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": bad}]}]}}, "storybloq"), bad
+    for good in ("/opt/bench/node_modules/.bin/storybloq snapshot --quiet", "storybloq session limit-stop", "/opt/bench/node_modules/.bin/storybloq hook-bus-tool", "/opt/bench/node_modules/.bin/storybloq-presence hook"):
         assert _hooks_mention(json.loads(json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": good}]}]}})), "storybloq"), good
 
 
