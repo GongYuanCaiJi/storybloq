@@ -14,6 +14,12 @@ import type { CommandContext } from "../../../src/cli/run.js";
 import { mkdtemp, writeFile, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readPresenceRecord } from "../../../src/core/session-intel/presence-bridge.js";
+import { createEraIfAbsent } from "../../../src/core/session-intel/era-store.js";
+import { processEra } from "../../../src/core/session-intel/process-era.js";
+import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../../src/core/presence-enrichment.js";
+import { emptySessionIntel } from "../../../src/presence/session-intel-fields.js";
+import { makeWorktreePair, SID } from "../../core/session-intel-fixtures.js";
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
   return {
@@ -273,5 +279,57 @@ describe("handleHandoverCreate", () => {
     const files = await readdir(join(dir, ".story", "handovers"));
     const sorted = files.filter((f) => f.endsWith(".md")).sort().reverse();
     expect(sorted[0]).toMatch(/02-aaa\.md/);
+  });
+});
+
+describe("ISS-1185: handleHandoverCreate's stamped-root diagnostic", () => {
+  function bindCallerAt(root: string): void {
+    const era = processEra.current()!.id;
+    const now = new Date().toISOString();
+    const entry = { era, pid: process.pid, startedAt: processEra.current()!.startedAt, captureKind: "startup" as const, autoCompactWindowAtStart: 450_000, autoCompactWindowSource: "user" as const, capturedAt: now, endedAt: null, lastVerifiedAt: now, unverifiableStreak: 0, sessionIds: [SID] };
+    createEraIfAbsent(root, entry);
+    const r = applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...emptySessionIntel(), era } }));
+    expect(r.status).toBe("written");
+  }
+
+  it("reports the stamped root (MD parenthetical, JSON tokenPressureStampedRoot) only when it diverges from the MCP root", async () => {
+    const wt = makeWorktreePair("hc-wt-");
+    const saved = { CLAUDE_CODE_SESSION_ID: process.env.CLAUDE_CODE_SESSION_ID, CLAUDE_PID: process.env.CLAUDE_PID };
+    try {
+      await initProject(wt.main, { name: "hc-main" });
+      await initProject(wt.worktree, { name: "hc-wt" });
+      process.env.CLAUDE_CODE_SESSION_ID = SID;
+      process.env.CLAUDE_PID = String(process.pid);
+      processEra.reset();
+      // The caller's record lives ONLY under the worktree: the MCP root (main) has none.
+      bindCallerAt(wt.worktree);
+      expect(readPresenceRecord(wt.main, SID)).toBeNull();
+
+      const md = await handleHandoverCreate("# H\nDone.", "session", "md", wt.main);
+      expect(md.output).toMatch(/Keep working in this same turn; do not stop/);
+      expect(md.output).toMatch(new RegExp(`\\(stamped under a different root: ${wt.worktree.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
+      expect(readPresenceRecord(wt.worktree, SID)!.sessionIntel!.handoverWrittenAt).not.toBeNull();
+
+      // A second call, bound the same way, checked in JSON.
+      const json = await handleHandoverCreate("# H2", "session-json", "json", wt.main);
+      const parsed = JSON.parse(json.output as string) as { data: { tokenPressureStamped?: boolean; tokenPressureStampedRoot?: string } };
+      expect(parsed.data.tokenPressureStamped).toBe(true);
+      expect(parsed.data.tokenPressureStampedRoot).toBe(wt.worktree);
+
+      // A record found directly under the MCP root itself: no divergence note.
+      bindCallerAt(wt.main);
+      const direct = await handleHandoverCreate("# H3", "session-direct", "md", wt.main);
+      expect(direct.output).toMatch(/Keep working in this same turn; do not stop/);
+      expect(direct.output).not.toMatch(/stamped under a different root/);
+      const directJson = await handleHandoverCreate("# H4", "session-direct-json", "json", wt.main);
+      const parsedDirect = JSON.parse(directJson.output as string) as { data: { tokenPressureStamped?: boolean; tokenPressureStampedRoot?: string } };
+      expect(parsedDirect.data.tokenPressureStamped).toBe(true);
+      expect(parsedDirect.data.tokenPressureStampedRoot).toBeUndefined();
+    } finally {
+      if (saved.CLAUDE_CODE_SESSION_ID === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = saved.CLAUDE_CODE_SESSION_ID;
+      if (saved.CLAUDE_PID === undefined) delete process.env.CLAUDE_PID; else process.env.CLAUDE_PID = saved.CLAUDE_PID;
+      processEra.reset();
+      wt.cleanup();
+    }
   });
 });

@@ -16,9 +16,11 @@
  */
 
 import * as fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, TRY_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../presence-enrichment.js";
 import { currentClientTaskId, currentStorybloqClient } from "../../autonomous/client-profile.js";
+import { assertNoSymlinkOnPath } from "../skill-sync-check.js";
 import { presenceDirIfPresent, readBoundedNoFollow, directoryIdentity, ensureTelemetrySubdir, removeRegularFile, telemetrySubdirIfPresent } from "../../presence/io.js";
 import { parsePresenceRecord } from "../../presence/record.js";
 import { MAX_RECORD_BYTES, presenceFileBase, type SessionPresence } from "../../presence/types.js";
@@ -59,6 +61,152 @@ export function resolveTargetProvenance(root: string | null, sessionId: string):
 }
 
 // ---------------------------------------------------------------------------
+// Worktree fallback (ISS-1185)
+//
+// The MCP server's own root and the hook cwd that actually WRITES presence
+// records can resolve to two different `.story` directories: a git worktree
+// is the field case (the server launched from the main checkout, hooks
+// running with cwd = a worktree). This walk FINDS an existing record under a
+// sibling worktree; it never creates one. Strictly opt-in (the `walk`
+// parameter below): every existing 2-3 arg `resolveCallerBinding` call site
+// (all of query.ts's sampleSession) takes zero fallback code path, so
+// sampleSession's own binding + persistence semantics are byte-identical to
+// before this ticket.
+// ---------------------------------------------------------------------------
+
+export interface WorktreeWalkOptions {
+  readonly deadline?: number;
+  readonly clock?: () => number;
+}
+
+const GIT_TIMEOUT_MS_DEFAULT = 1000;
+const WORKTREE_DISCOVERY_MAX_BUFFER = 1024 * 1024;
+const WORKTREE_DISCOVERY_DEFAULT_LIMIT = 32;
+
+/**
+ * The main checkout plus every worktree `git worktree list --porcelain -z`
+ * reports for `root`, capped at `limit`. `-z` (NUL-delimited) avoids any
+ * quoting/escaping of path bytes that line-based porcelain output applies.
+ * Any git failure (absent binary, not a repository, timeout) returns `[]`:
+ * this is a fallback only, never the primary path. The deadline is checked
+ * with a SINGLE `clock()` call before deciding whether to invoke git at all,
+ * so a deadline that expires between the check and the read can never turn
+ * into a zero (unbounded) `execFileSync` timeout.
+ */
+export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & { readonly limit?: number } = {}): string[] {
+  const clock = opts.clock ?? Date.now;
+  const remaining = opts.deadline !== undefined ? opts.deadline - clock() : GIT_TIMEOUT_MS_DEFAULT;
+  if (remaining <= 0) return [];
+  const limit = opts.limit ?? WORKTREE_DISCOVERY_DEFAULT_LIMIT;
+  if (limit <= 0) return [];
+  let out: string;
+  try {
+    out = execFileSync("git", ["-C", root, "worktree", "list", "--porcelain", "-z"], {
+      encoding: "utf-8",
+      timeout: Math.min(GIT_TIMEOUT_MS_DEFAULT, remaining),
+      maxBuffer: WORKTREE_DISCOVERY_MAX_BUFFER,
+      // This runs on every "no record here" miss across every project, most
+      // of which are not worktrees (or not git repos at all): git's own
+      // "fatal: not a git repository" must never leak to the real process
+      // stderr the way an ad hoc CLI git invocation's would.
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return [];
+  }
+  const roots: string[] = [];
+  for (const field of out.split("\0")) {
+    if (!field.startsWith("worktree ")) continue;
+    roots.push(field.slice("worktree ".length));
+    if (roots.length >= limit) break;
+  }
+  return roots;
+}
+
+export interface CandidateIdentity {
+  readonly dev: number;
+  readonly ino: number;
+}
+
+/**
+ * A candidate root is safe to read from when it is itself a real directory
+ * (not a symlink -- a registered worktree path can be replaced after
+ * registration) AND no component from the candidate down through
+ * `.story/telemetry/presence` is a symlink (reusing `assertNoSymlinkOnPath`,
+ * the same no-follow chain check `scripts/sync-plugin-skill.ts` already
+ * relies on). The identity captured here is the SAME `lstatSync` call used
+ * for the symlink check, so capture and validation happen atomically.
+ */
+function isSafeCandidateRoot(candidate: string): { ok: true; identity: CandidateIdentity } | { ok: false } {
+  try {
+    const st = fs.lstatSync(candidate);
+    if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false };
+    assertNoSymlinkOnPath(candidate, join(candidate, ".story", "telemetry", "presence"));
+    return { ok: true, identity: { dev: st.dev, ino: st.ino } };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Re-runs the exact same safety check and additionally requires the
+ * identity to be unchanged since discovery. Mirrors the inode-swap guard
+ * already established in `core/limit-lock.ts` (capture an inode, re-check
+ * it immediately before a security-relevant operation, refuse on mismatch):
+ * this narrows, but does not eliminate, the filesystem TOCTOU window between
+ * discovery and use, which is this codebase's already-accepted posture.
+ */
+export function revalidateCandidateIdentity(candidate: string, expected: CandidateIdentity): boolean {
+  const check = isSafeCandidateRoot(candidate);
+  return check.ok && check.identity.dev === expected.dev && check.identity.ino === expected.ino;
+}
+
+export interface WorktreePresenceMatch {
+  readonly root: string;
+  readonly record: SessionPresence;
+  readonly identity: CandidateIdentity;
+}
+
+/**
+ * Walks `root`'s worktree candidates (skipping `root` itself) looking for a
+ * presence record for `sessionId`. Self is excluded by IDENTITY (dev/ino),
+ * not by string comparison: `git worktree list` reports its own realpath,
+ * so a `root` reached through a symlinked ancestor (a common case -- macOS
+ * resolves its own tmpdir through `/private`) would never string-match its
+ * own entry and would waste a walk slot re-considering itself. `fs.statSync`
+ * on `root` follows symlinks deliberately here: `root` is the caller's own
+ * trusted argument, not a walked candidate, so this is identity lookup, not
+ * the untrusted-candidate symlink walk `isSafeCandidateRoot` guards.
+ *
+ * Exact-session-id matching by construction: `readPresenceRecord` always
+ * targets `presenceFileBase(sessionId)` specifically, never lists a
+ * directory and grabs the first file -- so a candidate holding a DIFFERENT
+ * session's record is never mistaken for a match. Returns the first match
+ * with its discovery-time identity, or `null`. Find only: never creates
+ * anything.
+ */
+export function findPresenceRecordAcrossWorktrees(root: string, sessionId: string, opts: WorktreeWalkOptions = {}): WorktreePresenceMatch | null {
+  const clock = opts.clock ?? Date.now;
+  let rootIdentity: CandidateIdentity | null = null;
+  try {
+    const st = fs.statSync(root);
+    rootIdentity = { dev: st.dev, ino: st.ino };
+  } catch {
+    rootIdentity = null;
+  }
+  const candidates = discoverWorktreeRoots(root, opts);
+  for (const candidate of candidates) {
+    if (opts.deadline !== undefined && clock() >= opts.deadline) return null;
+    const safe = isSafeCandidateRoot(candidate);
+    if (!safe.ok) continue;
+    if (rootIdentity && safe.identity.dev === rootIdentity.dev && safe.identity.ino === rootIdentity.ino) continue;
+    const record = readPresenceRecord(candidate, sessionId);
+    if (record) return { root: candidate, record, identity: safe.identity };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Caller binding
 // ---------------------------------------------------------------------------
 
@@ -69,22 +217,42 @@ export interface CallerBinding {
   readonly era: string | null;
   readonly check: ProcessCheck;
   readonly reason: string;
+  /** The root the caller's record was actually found under: `root` itself, a worktree found by `walk`, or null when unbound/nothing found. */
+  readonly recordRoot: string | null;
+  /** Populated only when `recordRoot` came from the worktree walk (never for a record found directly under `root`, which is the MCP server's own pre-existing trust boundary). */
+  readonly recordRootIdentity: CandidateIdentity | null;
 }
 
-export function resolveCallerBinding(root: string | null, explicitTaskId?: string | null, resolver: ProcessEraResolver = processEra): CallerBinding {
-  if (currentStorybloqClient() !== "claude") return { sessionId: null, bound: false, era: null, check: "unverifiable", reason: "client is not Claude" };
+/**
+ * `walk` is STRICTLY OPT-IN: `undefined` (every existing 2-3 arg call site)
+ * takes zero fallback code path -- behavior is byte-identical to before
+ * ISS-1185. Only an explicit object (even `{}`) turns the worktree fallback
+ * on, and only when the direct read under `root` misses.
+ */
+export function resolveCallerBinding(root: string | null, explicitTaskId?: string | null, resolver: ProcessEraResolver = processEra, walk?: WorktreeWalkOptions): CallerBinding {
+  if (currentStorybloqClient() !== "claude") return { sessionId: null, bound: false, era: null, check: "unverifiable", reason: "client is not Claude", recordRoot: null, recordRootIdentity: null };
   const sessionId = currentClientTaskId(explicitTaskId);
-  if (!sessionId) return { sessionId: null, bound: false, era: null, check: "unverifiable", reason: "no caller session id" };
+  if (!sessionId) return { sessionId: null, bound: false, era: null, check: "unverifiable", reason: "no caller session id", recordRoot: null, recordRootIdentity: null };
   const era = resolver.current();
-  if (!root) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "no project" };
-  const record = readPresenceRecord(root, sessionId);
-  if (!record) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "no presence record for the caller" };
-  if (record.endedAt !== null) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "caller session has ended" };
-  if (!era) return { sessionId, bound: false, era: null, check: "unverifiable", reason: "process era unknown" };
+  if (!root) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "no project", recordRoot: null, recordRootIdentity: null };
+  let record = readPresenceRecord(root, sessionId);
+  let recordRoot: string | null = record ? root : null;
+  let recordRootIdentity: CandidateIdentity | null = null;
+  if (!record && walk !== undefined) {
+    const match = findPresenceRecordAcrossWorktrees(root, sessionId, walk);
+    if (match) {
+      record = match.record;
+      recordRoot = match.root;
+      recordRootIdentity = match.identity;
+    }
+  }
+  if (!record) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "no presence record for the caller", recordRoot: null, recordRootIdentity: null };
+  if (record.endedAt !== null) return { sessionId, bound: false, era: era?.id ?? null, check: "unverifiable", reason: "caller session has ended", recordRoot, recordRootIdentity };
+  if (!era) return { sessionId, bound: false, era: null, check: "unverifiable", reason: "process era unknown", recordRoot, recordRootIdentity };
   const check = resolver.revalidate();
-  if (check !== "live") return { sessionId, bound: false, era: era.id, check, reason: `process era ${check}` };
-  if (record.sessionIntel?.era !== era.id) return { sessionId, bound: false, era: era.id, check, reason: "record era differs from the live process era" };
-  return { sessionId, bound: true, era: era.id, check, reason: "bound" };
+  if (check !== "live") return { sessionId, bound: false, era: era.id, check, reason: `process era ${check}`, recordRoot, recordRootIdentity };
+  if (record.sessionIntel?.era !== era.id) return { sessionId, bound: false, era: era.id, check, reason: "record era differs from the live process era", recordRoot, recordRootIdentity };
+  return { sessionId, bound: true, era: era.id, check, reason: "bound", recordRoot, recordRootIdentity };
 }
 
 // ---------------------------------------------------------------------------

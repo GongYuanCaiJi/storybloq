@@ -1,5 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, readdirSync, writeFileSync, existsSync, truncateSync, appendFileSync, utimesSync, chmodSync, renameSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readdirSync, writeFileSync, existsSync, truncateSync, appendFileSync, utimesSync, chmodSync, renameSync, readFileSync, realpathSync } from "node:fs";
+
+/**
+ * ISS-1185 test seam: counts real `execFileSync` invocations (still
+ * delegating to the genuine implementation) so a test can prove git was
+ * never invoked at all, not merely that its result was unused. `vi.spyOn`
+ * cannot target a named export of a Node builtin ESM module directly.
+ */
+const execProbe: { calls: number } = { calls: 0 };
+vi.mock("node:child_process", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...mod,
+    execFileSync: (...args: Parameters<typeof mod.execFileSync>) => {
+      execProbe.calls++;
+      return (mod.execFileSync as (...a: typeof args) => ReturnType<typeof mod.execFileSync>)(...args);
+    },
+  };
+});
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,6 +53,8 @@ import {
   PENDING_SUBDIR,
   applyAssumedReset,
   applyBoundaryReset,
+  discoverWorktreeRoots,
+  findPresenceRecordAcrossWorktrees,
   judgeSample,
   markCompactPending,
   persistSample,
@@ -42,6 +62,7 @@ import {
   reconcileIntel,
   reconcileUnderLock,
   resolveCallerBinding,
+  revalidateCandidateIdentity,
   stampHandover,
 } from "../../src/core/session-intel/presence-bridge.js";
 import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
@@ -52,7 +73,7 @@ import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/cor
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
 import { presenceFileBase } from "../../src/presence/types.js";
 import type { CeilingResolution, TokenPressureSample } from "../../src/core/session-intel/types.js";
-import { SID, assistantRecord, boundaryRecord, growingSession, writeTranscript } from "./session-intel-fixtures.js";
+import { SID, assistantRecord, bareStoryInit, boundaryRecord, git, growingSession, makeWorktreePair, symlinkSync, writeTranscript } from "./session-intel-fixtures.js";
 
 const cfg = resolveSessionIntelConfig(null);
 const T0 = Date.parse("2026-09-09T12:00:00Z");
@@ -487,3 +508,194 @@ describe("resolveCallerBinding", () => {
     });
   });
 });
+
+describe("ISS-1185: worktree fallback", () => {
+  const SID2 = "9c1a2b3d-4e5f-6071-8293-a4b5c6d7e8f9";
+
+  it("discoverWorktreeRoots: finds the main checkout and the worktree; limit caps the list; a non-repo returns []", () => {
+    const wt = makeWorktreePair("si-bridge-wt-");
+    try {
+      const roots = discoverWorktreeRoots(wt.main).map((r) => realpathOf(r));
+      expect(roots).toEqual(expect.arrayContaining([realpathOf(wt.main), realpathOf(wt.worktree)]));
+      expect(discoverWorktreeRoots(wt.main, { limit: 1 })).toHaveLength(1);
+      expect(discoverWorktreeRoots(wt.main, { limit: 0 })).toEqual([]);
+      const bare = mkdtempSync(join(tmpdir(), "not-a-repo-"));
+      try {
+        expect(discoverWorktreeRoots(bare)).toEqual([]);
+      } finally {
+        rmSync(bare, { recursive: true, force: true });
+      }
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("discoverWorktreeRoots: an already-past deadline returns [] WITHOUT ever invoking git", () => {
+    const wt = makeWorktreePair("si-bridge-wt-deadline-"); // setup itself calls execFileSync (git init/worktree add) several times
+    try {
+      const before = execProbe.calls;
+      const past = 1000;
+      const clock = () => 2000; // already past `past`
+      expect(discoverWorktreeRoots(wt.main, { deadline: past, clock })).toEqual([]);
+      expect(execProbe.calls).toBe(before); // no git invocation happened for this call specifically
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("findPresenceRecordAcrossWorktrees: finds a record seeded only under the worktree; exact-id match (a different session's record elsewhere is never mistaken for a match); refuses a symlinked candidate root and a symlinked .story/telemetry component", () => {
+    const wt = makeWorktreePair("si-bridge-fpaw-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID)).toBeNull();
+      seed(wt.worktree, { era: "1:2" }, SID);
+      const match = findPresenceRecordAcrossWorktrees(wt.main, SID);
+      expect(match).toMatchObject({ root: wt.worktree, record: { sessionIntel: { era: "1:2" } } });
+      expect(match!.identity).toMatchObject({ dev: expect.any(Number), ino: expect.any(Number) });
+      // A DIFFERENT session's record living in the same worktree is not a match for SID2.
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID2)).toBeNull();
+      seed(wt.worktree, { era: "9:9" }, SID2);
+      const forSid2 = findPresenceRecordAcrossWorktrees(wt.main, SID2);
+      expect(forSid2!.record.sessionIntel!.era).toBe("9:9");
+      // The registered worktree path itself replaced by a symlink to a
+      // directory that DOES hold a matching record: git still lists the
+      // original path string, but the walk must refuse to follow it.
+      const movedAside = join(wt.base, "wt-moved-aside");
+      renameSync(wt.worktree, movedAside);
+      symlinkSync(movedAside, wt.worktree);
+      try {
+        expect(findPresenceRecordAcrossWorktrees(wt.main, SID)).toBeNull();
+      } finally {
+        rmSync(wt.worktree, { force: true }); // remove the symlink itself so wt.cleanup()'s rmSync(base) does not follow it
+        renameSync(movedAside, wt.worktree);
+      }
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("findPresenceRecordAcrossWorktrees: refuses a candidate whose .story/telemetry component is a symlink, even when the real target holds a matching record", () => {
+    const wt = makeWorktreePair("si-bridge-telemetry-symlink-");
+    const shadow = mkdtempSync(join(tmpdir(), "si-bridge-shadow-"));
+    try {
+      bareStoryInit(wt.main);
+      mkdirSync(join(wt.worktree, ".story"), { recursive: true }); // `.story` itself is a real directory
+      bareStoryInit(shadow);
+      seed(shadow, { era: "1:2" }, SID); // a real, matching record -- reachable only by following the symlink below
+      symlinkSync(join(shadow, ".story", "telemetry"), join(wt.worktree, ".story", "telemetry"));
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID)).toBeNull();
+    } finally {
+      rmSync(shadow, { recursive: true, force: true });
+      wt.cleanup();
+    }
+  });
+
+  it("findPresenceRecordAcrossWorktrees: a deadline expiring mid-walk (after candidate A is genuinely read, before candidate B is reached) stops with candidate B's own matching record never returned", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "si-bridge-multi-wt-")));
+    try {
+      const main = join(base, "main");
+      mkdirSync(main, { recursive: true });
+      git(main, ["init", "-q", "--object-format=sha1"]);
+      git(main, ["config", "user.email", "test@example.com"]);
+      git(main, ["config", "user.name", "Test"]);
+      writeFileSync(join(main, "f.txt"), "x\n");
+      git(main, ["add", "-A"]);
+      git(main, ["commit", "-q", "-m", "init"]);
+      const wtA = join(base, "wtA");
+      const wtB = join(base, "wtB");
+      git(main, ["worktree", "add", "-q", "-b", "a", wtA]); // listed first
+      git(main, ["worktree", "add", "-q", "-b", "b", wtB]); // listed second
+      bareStoryInit(main);
+      bareStoryInit(wtA);
+      bareStoryInit(wtB);
+      seed(wtA, { era: "9:9" }, SID2); // candidate A holds a record, but for a DIFFERENT session -- read, genuinely inspected, no match for SID
+      seed(wtB, { era: "1:2" }, SID); // only candidate B holds SID's own record
+
+      // clock() is called once for the discovery deadline check, then once
+      // per listed entry BEFORE that entry is read (`main` itself is listed
+      // first and is skipped by identity, not by the deadline, but the
+      // per-entry deadline check still runs for it). Budget the schedule so
+      // discovery, main's own check, and candidate A's check all pass (A is
+      // actually read), and only candidate B's check trips the deadline --
+      // proving the walk reached and inspected A, and stopped strictly
+      // before reading B.
+      function makeClock(schedule: number[]): { clock: () => number; calls: number[] } {
+        const calls: number[] = [];
+        let i = 0;
+        const clock = () => { const n = i < schedule.length ? schedule[i]! : schedule[schedule.length - 1]!; i++; calls.push(n); return n; };
+        return { clock, calls };
+      }
+      const forB = makeClock([0, 10, 20, 100]);
+      expect(findPresenceRecordAcrossWorktrees(main, SID, { deadline: 50, clock: forB.clock })).toBeNull();
+      expect(forB.calls).toEqual([0, 10, 20, 100]); // discovery, main (skipped by identity), candidate A (read, no match), candidate B (aborted before any read of B)
+
+      // Same schedule, but for SID2 (candidate A's own session): reached and
+      // returned after only 3 calls, proving A really is inspected within
+      // that budget and the walk never needed to reach candidate B at all.
+      const forA = makeClock([0, 10, 20, 100]);
+      const match = findPresenceRecordAcrossWorktrees(main, SID2, { deadline: 50, clock: forA.clock });
+      expect(match).toMatchObject({ root: wtA, record: { sessionIntel: { era: "9:9" } } });
+      expect(forA.calls).toEqual([0, 10, 20]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("revalidateCandidateIdentity: true only when the chain is still safe AND the inode is unchanged since discovery", () => {
+    const wt = makeWorktreePair("si-bridge-revalidate-");
+    try {
+      bareStoryInit(wt.worktree);
+      seed(wt.worktree, { era: "1:2" }, SID);
+      const match = findPresenceRecordAcrossWorktrees(wt.main, SID)!;
+      expect(revalidateCandidateIdentity(wt.worktree, match.identity)).toBe(true);
+      // Replace the path with a genuinely different directory instance (via
+      // rename, so the inode is guaranteed to differ, unlike rmdir+mkdir at
+      // the same path where inode reuse is filesystem-dependent).
+      const replacement = mkdtempSync(join(tmpdir(), "si-bridge-replacement-"));
+      rmSync(wt.worktree, { recursive: true, force: true });
+      renameSync(replacement, wt.worktree);
+      expect(revalidateCandidateIdentity(wt.worktree, match.identity)).toBe(false);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("resolveCallerBinding: walk is strictly opt-in -- the 2-3 arg form never falls back, even when a worktree holds a matching record; only an explicit walk arg (even {}) finds it and reports recordRoot/recordRootIdentity", () => {
+    const wt = makeWorktreePair("si-bridge-binding-wt-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      process.env.CLAUDE_CODE_SESSION_ID = SID;
+      process.env.CLAUDE_PID = String(process.pid);
+      delete process.env.STORYBLOQ_CLIENT;
+      processEra.reset();
+      const era = processEra.current()!.id;
+      seed(wt.worktree, { era });
+      // No 4th arg at all: byte-identical to pre-ISS-1185 behavior, unbound.
+      expect(resolveCallerBinding(wt.main)).toMatchObject({ bound: false, recordRoot: null, recordRootIdentity: null });
+      expect(resolveCallerBinding(wt.main, null, processEra)).toMatchObject({ bound: false, recordRoot: null });
+      // An explicit walk, even {}, finds it.
+      const bound = resolveCallerBinding(wt.main, null, processEra, {});
+      expect(bound).toMatchObject({ bound: true, sessionId: SID, era, recordRoot: wt.worktree });
+      expect(bound.recordRootIdentity).toMatchObject({ dev: expect.any(Number), ino: expect.any(Number) });
+      // A direct local record takes precedence and reports recordRootIdentity null (it's the trusted root itself, not a walked candidate).
+      seed(wt.main, { era }, SID);
+      const local = resolveCallerBinding(wt.main, null, processEra, {});
+      expect(local).toMatchObject({ bound: true, recordRoot: wt.main, recordRootIdentity: null });
+    } finally {
+      delete process.env.CLAUDE_CODE_SESSION_ID;
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      wt.cleanup();
+    }
+  });
+});
+
+function realpathOf(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}

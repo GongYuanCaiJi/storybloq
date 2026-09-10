@@ -2127,15 +2127,27 @@ export function formatHandoverContent(
 export const HANDOVER_STAMPED_CONTINUE_LINE =
   "Handover recorded against your current compaction boundary: context pressure is held at advisory. Keep working in this same turn; do not stop, defer the next step, or ask the user whether to continue.";
 
+/**
+ * ISS-1185: `stampedRoot`/`mcpRoot` report the actually-stamped root only
+ * when it diverges from the MCP server's own root (the common single-root
+ * case stays exactly as before, no added noise).
+ */
 export function formatHandoverCreateResult(
   filename: string,
   format: OutputFormat,
   stamped = false,
+  stampedRoot: string | null = null,
+  mcpRoot: string | null = null,
 ): string {
+  const diverged = stamped && stampedRoot !== null && mcpRoot !== null && stampedRoot !== mcpRoot;
   if (format === "json") {
-    return JSON.stringify(successEnvelope(stamped ? { filename, tokenPressureStamped: true } : { filename }), null, 2);
+    const data: Record<string, unknown> = stamped ? { filename, tokenPressureStamped: true } : { filename };
+    if (diverged) data.tokenPressureStampedRoot = stampedRoot;
+    return JSON.stringify(successEnvelope(data), null, 2);
   }
-  return stamped ? `Created handover: ${filename}\n\n${HANDOVER_STAMPED_CONTINUE_LINE}` : `Created handover: ${filename}`;
+  if (!stamped) return `Created handover: ${filename}`;
+  const note = diverged ? ` (stamped under a different root: ${stampedRoot})` : "";
+  return `Created handover: ${filename}\n\n${HANDOVER_STAMPED_CONTINUE_LINE}${note}`;
 }
 
 // --- Snapshot / Recap / Export ---

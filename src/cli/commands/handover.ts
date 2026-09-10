@@ -155,9 +155,9 @@ export async function handleHandoverCreate(
   const slug = normalizeSlug(slugRaw);
   const date = todayISO();
   let filename: string | undefined;
+  const absRoot = resolve(root);
 
   await withProjectLock(root, { strict: false }, async () => {
-    const absRoot = resolve(root);
     const handoversDir = join(absRoot, ".story", "handovers");
     await mkdir(handoversDir, { recursive: true });
     const wrapDir = join(absRoot, ".story");
@@ -245,6 +245,7 @@ export async function handleHandoverCreate(
   // context grows by a step or the next compaction. Best-effort, after the
   // project lock is released, never affecting the result.
   let stamped = false;
+  let stampedRoot: string | null = null;
   if (intel.stamp !== false) {
     try {
       const { stampHandoverForCaller } = await import("../../core/session-intel/push.js");
@@ -252,6 +253,7 @@ export async function handleHandoverCreate(
       // Only a stamp whose locked write LANDED counts: a busy lock, a failed
       // write, or a refusal under the lock leaves the record unchanged.
       stamped = r.status === "stamped" && r.outcome.status === "written";
+      if (stamped && r.status === "stamped") stampedRoot = r.root;
     } catch {
       // never
     }
@@ -259,6 +261,8 @@ export async function handleHandoverCreate(
 
   // The continuation line rides only on a landed stamp: an unbound caller
   // (or a stamp that missed) gets the bare result, so the line never claims
-  // a suppression that did not happen.
-  return { output: formatHandoverCreateResult(filename!, format, stamped) };
+  // a suppression that did not happen. ISS-1185: stampedRoot is reported
+  // only when it diverges from the MCP root (formatHandoverCreateResult
+  // gates on that itself).
+  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot) };
 }

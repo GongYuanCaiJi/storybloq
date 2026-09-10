@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
@@ -13,7 +13,7 @@ import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
 import { runReadCommandWithRoot } from "../../src/cli/run.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../../src/core/presence-enrichment.js";
 import type { SessionPresence } from "../../src/presence/types.js";
-import { SID, assistantRecord, boundaryRecord, writeTranscript } from "./session-intel-fixtures.js";
+import { SID, assistantRecord, boundaryRecord, git, makeWorktreePair, writeTranscript } from "./session-intel-fixtures.js";
 
 /**
  * Test seam: a one-shot transform of the locked base record, standing in for
@@ -34,6 +34,49 @@ vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
     return mod.applyPresenceEnrichment(root, sessionId, budgetMs, source, (base, nowIso) => mutate(transform(base), nowIso), now);
   };
   return { ...mod, applyPresenceEnrichment: wrapped };
+});
+
+/**
+ * ISS-1185 test seam: force `revalidateCandidateIdentity` to fail on its Nth
+ * call (1 = on resolution, 2 = pre-reconcile, 3 = pre-stamp), one-shot. Also
+ * counts `reconcileUnderLock` calls, so a test can assert the write path was
+ * never reached rather than only inferring it from one output field.
+ */
+const identityInject: { forceFailOnCall: number | null; calls: number; reconcileCalls: number } = { forceFailOnCall: null, calls: 0, reconcileCalls: 0 };
+vi.mock("../../src/core/session-intel/presence-bridge.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../../src/core/session-intel/presence-bridge.js")>();
+  const wrappedIdentity: typeof mod.revalidateCandidateIdentity = (candidate, expected) => {
+    identityInject.calls++;
+    if (identityInject.forceFailOnCall === identityInject.calls) {
+      identityInject.forceFailOnCall = null;
+      return false;
+    }
+    return mod.revalidateCandidateIdentity(candidate, expected);
+  };
+  const wrappedReconcile: typeof mod.reconcileUnderLock = (input, budgetMs) => {
+    identityInject.reconcileCalls++;
+    return mod.reconcileUnderLock(input, budgetMs);
+  };
+  return { ...mod, revalidateCandidateIdentity: wrappedIdentity, reconcileUnderLock: wrappedReconcile };
+});
+
+/**
+ * ISS-1185 test seam: a one-shot REAL swap (not a mocked identity result) run
+ * from inside the genuine `locateTranscript` call site push.ts invokes
+ * between the pre-reconcile identity check and `reconcileUnderLock`. Proves
+ * the guard against an actual filesystem substitution, not only against a
+ * forced `revalidateCandidateIdentity` return value.
+ */
+const locateSwap: { hook: (() => void) | null } = { hook: null };
+vi.mock("../../src/core/session-intel/transcript-locate.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../../src/core/session-intel/transcript-locate.js")>();
+  const wrapped: typeof mod.locateTranscript = (req) => {
+    const hook = locateSwap.hook;
+    locateSwap.hook = null;
+    hook?.();
+    return mod.locateTranscript(req);
+  };
+  return { ...mod, locateTranscript: wrapped };
 });
 
 const T0 = Date.parse("2026-09-09T12:00:00Z");
@@ -74,6 +117,10 @@ afterEach(() => {
   }
   processEra.reset();
   vi.restoreAllMocks();
+  identityInject.forceFailOnCall = null;
+  identityInject.calls = 0;
+  identityInject.reconcileCalls = 0;
+  locateSwap.hook = null;
 });
 
 const encoded = (root: string) => root.replace(/[^A-Za-z0-9]/g, "-");
@@ -334,6 +381,176 @@ describe("guide directive and handover stamp", () => {
       expect(intel.handoverBoundaryAt).toBe(at(6));
       expect(intel.tokensAtHandover).toBe(12_345);
       expect(intel.tokensAtHandover).not.toBe(old.lastSample?.contextTokens);
+    });
+  });
+});
+
+describe("ISS-1185: worktree fallback (push surfaces)", () => {
+  interface WtFx { base: string; main: string; worktree: string; projects: string; userSettings: string }
+
+  async function withWorktreeFixture(fn: (f: WtFx) => Promise<void> | void): Promise<void> {
+    const wt = makeWorktreePair("si-push-wt-");
+    try {
+      await initProject(wt.main, { name: "push-main" });
+      await initProject(wt.worktree, { name: "push-wt" });
+      const projects = join(wt.base, "home", ".claude", "projects");
+      mkdirSync(projects, { recursive: true });
+      const userSettings = join(wt.base, "home", ".claude", "settings.json");
+      writeFileSync(userSettings, JSON.stringify({ autoCompactWindow: 450_000 }));
+      await fn({ base: wt.base, main: wt.main, worktree: wt.worktree, projects, userSettings });
+    } finally {
+      wt.cleanup();
+    }
+  }
+
+  /** Binds the caller and persists one Stop-hook sample at `tokens` under `root` (the hook's own cwd). */
+  function primedUnder(f: WtFx, root: string, tokens: number, now = T0 + 5 * 60_000): string {
+    ensureCapture({ root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+    writeTranscript(f.projects, encoded(root), SID, [assistantRecord({ ts: at(2), read: tokens - 2 })]);
+    const r = handleStopHookSample({ root, sessionId: SID, cwd: root, now, projectsDir: f.projects, userSettingsPath: f.userSettings });
+    expect(r.result?.presence).toBe("persisted");
+    return processEra.current()!.id;
+  }
+
+  it("ACCEPTANCE: a record created under the worktree by a stop-hook sample is found by tokenPressureBannerFor, guideDirectiveFor and stampHandoverForCaller when the MCP root is the main checkout; a later imperative sample is suppressed", async () => {
+    await withWorktreeFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primedUnder(f, f.worktree, IMPERATIVE_TOKENS, now);
+      // The MCP root (main) has no record at all for this session: the direct read misses entirely.
+      expect(readPresenceRecord(f.main, SID)).toBeNull();
+      expect(tokenPressureBannerFor(f.main, { now, projectsDir: f.projects, userSettingsPath: f.userSettings })).toMatchObject({ state: "imperative" });
+      expect(guideDirectiveFor(f.main, SID, now)).toMatch(/^Context pressure imperative/);
+      const r = await handleHandoverCreate("# H\nDone.", "session", "md", f.main, { now, projectsDir: f.projects });
+      expect(r.output).toMatch(/Keep working in this same turn; do not stop/);
+      // The stamp landed on the WORKTREE's record, never on the main checkout.
+      expect(readPresenceRecord(f.main, SID)).toBeNull();
+      const stamped = readPresenceRecord(f.worktree, SID)!.sessionIntel!;
+      expect(stamped.handoverWrittenAt).toBe(new Date(now).toISOString());
+      // Every reader drops to advisory at once, still resolved via the fallback.
+      expect(tokenPressureBannerFor(f.main, { now, projectsDir: f.projects, userSettingsPath: f.userSettings })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+      expect(guideDirectiveFor(f.main, SID, now)).toBeNull();
+      // The next Stop sample at the same level, still under the worktree, is held at advisory.
+      const next = handleStopHookSample({ root: f.worktree, sessionId: SID, cwd: f.worktree, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(next.result?.pressure).toMatchObject({ state: "advisory", rawState: "imperative", suppressedBy: "handover" });
+    });
+  });
+
+  it("mutant-2 proof: a DIFFERENT session's record in the first-listed worktree is never mistaken for the bound session's own record in the second-listed worktree", async () => {
+    const base = mkdtempSync(join(tmpdir(), "si-push-tri-wt-"));
+    try {
+      const main = join(base, "main");
+      mkdirSync(main, { recursive: true });
+      git(main, ["init", "-q", "--object-format=sha1"]);
+      git(main, ["config", "user.email", "test@example.com"]);
+      git(main, ["config", "user.name", "Test"]);
+      writeFileSync(join(main, "f.txt"), "x\n");
+      git(main, ["add", "-A"]);
+      git(main, ["commit", "-q", "-m", "init"]);
+      const wtA = join(base, "wtA");
+      const wtB = join(base, "wtB");
+      git(main, ["worktree", "add", "-q", "-b", "a", wtA]);
+      git(main, ["worktree", "add", "-q", "-b", "b", wtB]);
+      await initProject(main, { name: "tri-main" });
+      await initProject(wtA, { name: "tri-a" });
+      await initProject(wtB, { name: "tri-b" });
+      const projects = join(base, "home", ".claude", "projects");
+      mkdirSync(projects, { recursive: true });
+      const userSettings = join(base, "home", ".claude", "settings.json");
+      writeFileSync(userSettings, JSON.stringify({ autoCompactWindow: 450_000 }));
+      const f: WtFx = { base, main, worktree: wtB, projects, userSettings };
+
+      const OTHER_SID = "9c1a2b3d-4e5f-6071-8293-a4b5c6d7e8f9";
+      const now = T0 + 5 * 60_000;
+      // A different session's own bound record, seeded in wtA (the first-listed worktree).
+      process.env.CLAUDE_CODE_SESSION_ID = OTHER_SID;
+      processEra.reset();
+      ensureCapture({ root: wtA, sessionId: OTHER_SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: userSettings });
+      writeTranscript(projects, encoded(wtA), OTHER_SID, [assistantRecord({ ts: at(2), read: 10, sessionId: OTHER_SID })]);
+      handleStopHookSample({ root: wtA, sessionId: OTHER_SID, cwd: wtA, now, projectsDir: projects, userSettingsPath: userSettings });
+      const otherBefore = readPresenceRecord(wtA, OTHER_SID)!.sessionIntel!;
+
+      // Back to SID as the caller (beforeEach set it; OTHER_SID above overrode it), bound under wtB (the second-listed worktree).
+      process.env.CLAUDE_CODE_SESSION_ID = SID;
+      processEra.reset();
+      primedUnder(f, wtB, IMPERATIVE_TOKENS, now);
+
+      const r = await handleHandoverCreate("# H", "session", "md", main, { now, projectsDir: projects });
+      expect(r.output).toMatch(/Keep working/);
+      // The bound session's own record (wtB) was stamped.
+      expect(readPresenceRecord(wtB, SID)!.sessionIntel!.handoverWrittenAt).not.toBeNull();
+      // The other session's record (wtA) is byte-for-byte untouched.
+      expect(readPresenceRecord(wtA, OTHER_SID)!.sessionIntel).toEqual(otherBefore);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("TOCTOU: a failed identity revalidation refuses the stamp at all three check points (on resolution, before reconciliation, before the write); the first two checks never reach reconcileUnderLock at all, the third reaches it exactly once but never writes the handover stamp; a clean revalidation stamps normally", async () => {
+    await withWorktreeFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primedUnder(f, f.worktree, IMPERATIVE_TOKENS, now);
+      const before = readPresenceRecord(f.worktree, SID)!.sessionIntel;
+
+      identityInject.calls = 0;
+      identityInject.reconcileCalls = 0;
+      identityInject.forceFailOnCall = 1; // on resolution, before any read
+      expect(stampHandoverForCaller(f.main, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", reason: expect.stringMatching(/candidate root changed/) });
+      expect(identityInject.reconcileCalls).toBe(0); // the write path is never reached
+      expect(readPresenceRecord(f.worktree, SID)!.sessionIntel).toEqual(before);
+
+      identityInject.calls = 0;
+      identityInject.reconcileCalls = 0;
+      identityInject.forceFailOnCall = 2; // immediately before reconcileUnderLock (the first write)
+      expect(stampHandoverForCaller(f.main, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", reason: expect.stringMatching(/candidate root changed/) });
+      // This is the finding the code-review's call-2 fixed: a check that only
+      // ran BEFORE locateTranscript/scanTail would let this pass through to
+      // reconcileUnderLock. Asserting zero calls here, not just that
+      // handoverWrittenAt stayed null, catches a regression that moved the
+      // guard after reconcileUnderLock but reconciliation itself happens not
+      // to touch handoverWrittenAt.
+      expect(identityInject.reconcileCalls).toBe(0);
+      expect(readPresenceRecord(f.worktree, SID)!.sessionIntel).toEqual(before);
+
+      identityInject.calls = 0;
+      identityInject.reconcileCalls = 0;
+      identityInject.forceFailOnCall = 3; // immediately before stampHandover
+      expect(stampHandoverForCaller(f.main, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", reason: expect.stringMatching(/candidate root changed/) });
+      expect(identityInject.reconcileCalls).toBe(1); // reconciliation itself already ran by this point
+      expect(readPresenceRecord(f.worktree, SID)!.sessionIntel!.handoverWrittenAt).toBeNull(); // but the stamp write never happened
+
+      identityInject.calls = 0;
+      identityInject.reconcileCalls = 0;
+      expect(stampHandoverForCaller(f.main, { now, projectsDir: f.projects })).toMatchObject({ status: "stamped", outcome: { status: "written" } });
+      expect(identityInject.reconcileCalls).toBe(1);
+      expect(readPresenceRecord(f.worktree, SID)!.sessionIntel!.handoverWrittenAt).not.toBeNull();
+    });
+  });
+
+  it("TOCTOU (real swap, not a mocked identity result): the worktree root is replaced on disk from inside the genuine locateTranscript call, between the pre-read and pre-reconcile checks; the real (unmocked) revalidateCandidateIdentity refuses the stamp, reconcileUnderLock is never reached, and the original record is left byte-for-byte untouched", async () => {
+    await withWorktreeFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primedUnder(f, f.worktree, IMPERATIVE_TOKENS, now);
+      const before = readPresenceRecord(f.worktree, SID)!.sessionIntel;
+
+      const movedAside = `${f.worktree}-moved-aside`;
+      const replacement = mkdtempSync(join(tmpdir(), "si-push-swap-replacement-"));
+      identityInject.reconcileCalls = 0;
+      locateSwap.hook = () => {
+        // A real substitution of the candidate root, not a forced mock
+        // return value: the original directory (with its real record) is
+        // moved aside, and an unrelated real directory takes its place at
+        // the exact path `stampHandoverForCaller` captured identity for.
+        renameSync(f.worktree, movedAside);
+        renameSync(replacement, f.worktree);
+      };
+      try {
+        expect(stampHandoverForCaller(f.main, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", reason: expect.stringMatching(/candidate root changed/) });
+        expect(identityInject.reconcileCalls).toBe(0);
+        expect(readPresenceRecord(movedAside, SID)!.sessionIntel).toEqual(before);
+      } finally {
+        rmSync(f.worktree, { recursive: true, force: true });
+        renameSync(movedAside, f.worktree);
+      }
     });
   });
 });

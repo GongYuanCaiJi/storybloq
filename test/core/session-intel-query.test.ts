@@ -25,7 +25,7 @@ import { processEra } from "../../src/core/session-intel/process-era.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/core/presence-enrichment.js";
 import { emptySessionIntel } from "../../src/presence/session-intel-fields.js";
 import { handleSessionIntel, formatSessionIntelMd } from "../../src/cli/commands/session-intel.js";
-import { SID, assistantRecord, boundaryRecord, growingSession, writeTranscript } from "./session-intel-fixtures.js";
+import { SID, assistantRecord, boundaryRecord, growingSession, makeWorktreePair, writeTranscript } from "./session-intel-fixtures.js";
 
 const T0 = Date.parse("2026-09-09T12:00:00Z");
 const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
@@ -325,6 +325,46 @@ describe("handleSessionIntel (the shared CLI/MCP handler)", () => {
       expect(cli.errorCode).toBe("not_found");
       delete process.env.CLAUDE_CODE_SESSION_ID;
       expect(handleSessionIntel({ cwd: f.root, projectsDir: f.projects }).errorCode).toBe("not_found");
+    });
+  });
+});
+
+describe("ISS-1185: handleSessionIntel's worktree diagnostic", () => {
+  function withWorktreeFixture(fn: (f: { base: string; main: string; worktree: string; projects: string }) => void): void {
+    const wt = makeWorktreePair("si-query-wt-");
+    try {
+      for (const root of [wt.main, wt.worktree]) {
+        mkdirSync(join(root, ".story"), { recursive: true });
+        writeFileSync(join(root, ".story", "config.json"), "{}\n");
+      }
+      const projects = join(wt.base, "home", ".claude", "projects");
+      mkdirSync(projects, { recursive: true });
+      fn({ base: wt.base, main: wt.main, worktree: wt.worktree, projects });
+    } finally {
+      wt.cleanup();
+    }
+  }
+
+  it("reports recordRoot (JSON and MD) only when the record lives under a different root than the one sampled; sampleSession's own binding decision is untouched (still unbound, still read-only)", () => {
+    withWorktreeFixture((f) => {
+      bindCaller(f.worktree);
+      const cli = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects });
+      const parsed = JSON.parse(cli.output) as { data: { sessionId: string; binding: string; bindingReason: string; root: string; recordRoot: string | null } };
+      // Regression (round-2 finding 1): sampleSession's own binding path is
+      // strictly unaffected by the fallback -- unbound, exactly as before
+      // this ticket, since query.ts passes no `walk` argument.
+      expect(parsed.data.binding).toBe("read-only");
+      expect(parsed.data.bindingReason).toMatch(/no presence record/);
+      expect(parsed.data.root).toBe(f.main);
+      expect(parsed.data.recordRoot).toBe(f.worktree);
+      const md = handleSessionIntel({ cwd: f.main, format: "md", projectsDir: f.projects }).output;
+      expect(md).toMatch(new RegExp(`Record found under a different root: ${f.worktree.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(sampled root: ${f.main.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
+
+      // A record found directly under the sampled root: no diagnostic noise.
+      bindCaller(f.main);
+      const direct = JSON.parse(handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).output) as { data: { recordRoot: string | null } };
+      expect(direct.data.recordRoot).toBeNull();
+      expect(handleSessionIntel({ cwd: f.main, format: "md", projectsDir: f.projects }).output).not.toMatch(/Record found under a different root/);
     });
   });
 });

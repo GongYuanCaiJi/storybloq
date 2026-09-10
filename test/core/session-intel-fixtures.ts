@@ -1,7 +1,50 @@
 /** T-499 test fixtures: inline JSONL record builders shaped like real Claude Code transcripts. */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/** ISS-1185: a real two-root git fixture -- a main checkout plus a second worktree. */
+export function git(cwd: string, args: string[]): string {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf-8" }).trim();
+}
+
+export interface WorktreePair {
+  readonly base: string;
+  readonly main: string;
+  readonly worktree: string;
+  readonly cleanup: () => void;
+}
+
+/**
+ * A real git repository at `<base>/main` with one commit, plus a second real
+ * worktree at `<base>/wt` (`git worktree add`). Mirrors the field bug
+ * exactly: one git history, two independent `.story` directories, since
+ * `.story` is local/gitignored state that each worktree must initialize on
+ * its own.
+ */
+export function makeWorktreePair(prefix: string): WorktreePair {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const main = join(base, "main");
+  mkdirSync(main, { recursive: true });
+  git(main, ["init", "-q", "--object-format=sha1"]);
+  git(main, ["config", "user.email", "test@example.com"]);
+  git(main, ["config", "user.name", "Test"]);
+  writeFileSync(join(main, "f.txt"), "x\n");
+  git(main, ["add", "-A"]);
+  git(main, ["commit", "-q", "-m", "init"]);
+  const worktree = join(base, "wt");
+  git(main, ["worktree", "add", "-q", "-b", "wt-branch", worktree]);
+  return { base, main, worktree, cleanup: () => rmSync(base, { recursive: true, force: true }) };
+}
+
+/** Bare `.story` init (no full initProject): enough for readPresenceRecord/discovery tests. */
+export function bareStoryInit(root: string): void {
+  mkdirSync(join(root, ".story"), { recursive: true });
+}
+
+export { symlinkSync };
 
 export const SID = "4d99abbf-5dcb-4be3-90d3-2b13e0f50b29";
 

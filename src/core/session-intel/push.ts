@@ -18,7 +18,7 @@ import { isPresenceEnabled } from "../../presence/handler.js";
 import type { SessionIntelSample } from "../../presence/session-intel-fields.js";
 import { LIFECYCLE_LOCK_BUDGET_MS } from "../presence-enrichment.js";
 import { readSessionIntelConfig, type SessionIntelConfig } from "./config.js";
-import { peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, stampHandover, type HandoverStampOutcome } from "./presence-bridge.js";
+import { findPresenceRecordAcrossWorktrees, peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, revalidateCandidateIdentity, stampHandover, type HandoverStampOutcome } from "./presence-bridge.js";
 import { sampleSession } from "./query.js";
 import { locateTranscript } from "./transcript-locate.js";
 import { scanTail } from "./transcript-scan.js";
@@ -74,17 +74,24 @@ export function tokenPressureBannerFor(root: string, opts: BannerOptions = {}, s
     const cfg = readSessionIntelConfig(root);
     if (!cfg.enabled || !cfg.banner) return null;
     if (!isPresenceEnabled(root)) return null;
-    const binding = resolveCallerBinding(root, opts.explicitTaskId);
+    const binding = resolveCallerBinding(root, opts.explicitTaskId, undefined, { deadline: startedAt + softMs, clock });
     if (!binding.bound || !binding.sessionId) return null;
     if (clock() - startedAt > softMs) return null;
+    // ISS-1185: the caller's record can live under a worktree the MCP
+    // server's own root never sees. `recordRootIdentity` is set only when it
+    // came from that fallback walk; re-checked immediately before the
+    // record is actually used so a swap after discovery never surfaces
+    // content read through since-redirected storage.
+    const resolvedRoot = binding.recordRoot ?? root;
+    if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) return null;
 
-    let intel = readPresenceRecord(root, binding.sessionId)?.sessionIntel ?? null;
+    let intel = readPresenceRecord(resolvedRoot, binding.sessionId)?.sessionIntel ?? null;
     let sample = intel?.lastSample ?? null;
     const stale = sample === null || now - Date.parse(sample.sampledAt) > cfg.maxSampleAgeMs;
     if (stale) {
       const r = sampleSession({
-        root,
-        cwd: opts.cwd ?? root,
+        root: resolvedRoot,
+        cwd: opts.cwd ?? resolvedRoot,
         sampledBy: opts.sampledBy ?? "mcp-refresh",
         explicitTaskId: binding.sessionId,
         allowGlob: false,
@@ -94,14 +101,14 @@ export function tokenPressureBannerFor(root: string, opts: BannerOptions = {}, s
         budget: { startedAt, softMs, clock },
       });
       if (!r.usable || r.presence !== "persisted") return null;
-      intel = readPresenceRecord(root, binding.sessionId)?.sessionIntel ?? null;
+      intel = readPresenceRecord(resolvedRoot, binding.sessionId)?.sessionIntel ?? null;
       sample = intel?.lastSample ?? null;
     }
     if (!intel || !sample) return null;
     if (clock() - startedAt > softMs) return null;
     // Same usability rule as the status projection: the sample must survive
     // reconciliation of the pending set unchanged.
-    const rec = reconcileIntel(intel, null, peekPending(root, binding.sessionId, now), cfg, now);
+    const rec = reconcileIntel(intel, null, peekPending(resolvedRoot, binding.sessionId, now), cfg, now);
     if (rec.status !== "complete" || rec.intel.lastSample !== sample) return null;
     if (sample.state !== "advisory" && sample.state !== "imperative") return null;
     return {
@@ -165,10 +172,20 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
   try {
     if (!ownerClaudeSessionId || !cfg.enabled || !cfg.guideDirective) return null;
     if (!isPresenceEnabled(root)) return null;
-    const intel = readPresenceRecord(root, ownerClaudeSessionId)?.sessionIntel ?? null;
+    // ISS-1185: symmetric worktree fallback -- find only, never create.
+    let resolvedRoot = root;
+    let record = readPresenceRecord(root, ownerClaudeSessionId);
+    if (!record) {
+      const match = findPresenceRecordAcrossWorktrees(root, ownerClaudeSessionId);
+      if (match && revalidateCandidateIdentity(match.root, match.identity)) {
+        record = match.record;
+        resolvedRoot = match.root;
+      }
+    }
+    const intel = record?.sessionIntel ?? null;
     const sample = intel?.lastSample ?? null;
     if (!intel || !sample || sample.state !== "imperative") return null;
-    const rec = reconcileIntel(intel, null, peekPending(root, ownerClaudeSessionId, now), cfg, now);
+    const rec = reconcileIntel(intel, null, peekPending(resolvedRoot, ownerClaudeSessionId, now), cfg, now);
     if (rec.status !== "complete" || rec.intel.lastSample !== sample) return null;
     return `Context pressure imperative (${pctText(sample.pct)} of ceiling, source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}): write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.`;
   } catch {
@@ -181,34 +198,57 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
 // ---------------------------------------------------------------------------
 
 export type HandoverStampResult =
-  | { readonly status: "stamped"; readonly sessionId: string; readonly outcome: HandoverStampOutcome }
+  | { readonly status: "stamped"; readonly sessionId: string; readonly outcome: HandoverStampOutcome; readonly root: string }
   | { readonly status: "skipped"; readonly reason: string };
 
 /**
  * After a successful `handover create`: reconcile the caller's record (a
  * boundary the tail shows is applied first, so the stamp lands on the
  * CURRENT compaction), then stamp it under the binding rule. Best-effort.
+ *
+ * ISS-1185: when `root` (the MCP server's own root) has no record for the
+ * caller, a worktree fallback finds it -- never creates one. The candidate's
+ * identity, captured at discovery, is revalidated THREE times: immediately
+ * on resolution (before any read), again immediately before
+ * `reconcileUnderLock` (locateTranscript/scanTail between those two points
+ * can read a large file, widening the window), and again immediately before
+ * `stampHandover`. A root swapped since discovery refuses the stamp rather
+ * than reconciling or writing through it.
  */
 export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: string | null; cwd?: string; now?: number; projectsDir?: string } = {}): HandoverStampResult {
   try {
     const cfg = readSessionIntelConfig(root);
     if (!cfg.enabled) return { status: "skipped", reason: "sessionIntel disabled" };
     if (!isPresenceEnabled(root)) return { status: "skipped", reason: "presence disabled" };
-    const binding = resolveCallerBinding(root, opts.explicitTaskId);
+    const binding = resolveCallerBinding(root, opts.explicitTaskId, undefined, {});
     if (!binding.bound || !binding.sessionId || !binding.era) return { status: "skipped", reason: binding.reason };
     const now = opts.now ?? Date.now();
     const sessionId = binding.sessionId;
-    const record = readPresenceRecord(root, sessionId);
-    const located = locateTranscript({ sessionId, cwd: opts.cwd ?? root, hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: false, projectsDir: opts.projectsDir });
+    const resolvedRoot = binding.recordRoot ?? root;
+    if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
+      return { status: "skipped", reason: "candidate root changed since discovery" };
+    }
+    const record = readPresenceRecord(resolvedRoot, sessionId);
+    const located = locateTranscript({ sessionId, cwd: opts.cwd ?? resolvedRoot, hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: false, projectsDir: opts.projectsDir });
     const tail = located ? scanTail({ path: located.path, sessionId, era: null, revisionSeen: null, epochSince: null }) : null;
-    reconcileUnderLock({ root, sessionId, cfg, tailBoundaries: tail?.boundaries ?? [], transcriptPath: located?.path ?? null, source: "other", now }, LIFECYCLE_LOCK_BUDGET_MS);
+    // Re-checked HERE too, immediately before the first write
+    // (reconcileUnderLock): locateTranscript/scanTail above can read a
+    // large transcript file, widening the window since the check before
+    // them. Never rely on that earlier check alone to guard this write.
+    if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
+      return { status: "skipped", reason: "candidate root changed since discovery" };
+    }
+    reconcileUnderLock({ root: resolvedRoot, sessionId, cfg, tailBoundaries: tail?.boundaries ?? [], transcriptPath: located?.path ?? null, source: "other", now }, LIFECYCLE_LOCK_BUDGET_MS);
+    if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
+      return { status: "skipped", reason: "candidate root changed since discovery" };
+    }
     // tokensAtHandover is taken from the record INSIDE the stamp's lock (the
     // null fallback in stampHandover reads lastSample there), so the token
     // count and handoverBoundaryAt always describe the same locked record; a
     // sampler or compaction landing between the reconcile and the stamp
     // cannot pair an old count with a newer boundary.
-    const outcome = stampHandover(root, sessionId, binding.era, null, now);
-    return { status: "stamped", sessionId, outcome };
+    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now);
+    return { status: "stamped", sessionId, outcome, root: resolvedRoot };
   } catch (err) {
     return { status: "skipped", reason: err instanceof Error ? err.message : String(err) };
   }

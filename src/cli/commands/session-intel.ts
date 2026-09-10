@@ -12,7 +12,7 @@ import { LIFECYCLE_LOCK_BUDGET_MS } from "../../core/presence-enrichment.js";
 import { isPresenceEnabled } from "../../presence/handler.js";
 import { ensureCapture, type CaptureOutcome, type CaptureSource } from "../../core/session-intel/capture.js";
 import { readSessionIntelConfig } from "../../core/session-intel/config.js";
-import { readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
+import { findPresenceRecordAcrossWorktrees, readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
 import { scanTail } from "../../core/session-intel/transcript-scan.js";
@@ -53,7 +53,7 @@ function pctText(p: number | null): string {
   return p === null ? "n/a" : `${(p * 100).toFixed(1)}%`;
 }
 
-export function formatSessionIntelMd(r: SessionIntelResult): string {
+export function formatSessionIntelMd(r: SessionIntelResult, root: string | null = null, recordRoot: string | null = null): string {
   const lines: string[] = ["# Session intel", ""];
   const p = r.pressure;
   if (!p || !r.usable) {
@@ -93,6 +93,9 @@ export function formatSessionIntelMd(r: SessionIntelResult): string {
   if (r.callerModelMismatch) lines.push(`Caller model mismatch: caller says ${r.callerModelMismatch.caller}, transcript says ${r.callerModelMismatch.transcript ?? "unknown"}`);
   lines.push(`Provenance: era ${r.provenance.era ?? "none"}, capture ${r.provenance.capture ? `${r.provenance.capture.captureKind} (autoCompactWindow ${r.provenance.capture.autoCompactWindowAtStart ?? "absent"})` : "none"}`);
   lines.push(`Presence: ${r.presence}${r.presenceReason ? ` (${r.presenceReason})` : ""}`);
+  // ISS-1185: the record can live under a different root than the one
+  // sampled (a git worktree). Diagnostic only -- reported when it differs.
+  if (recordRoot !== null && recordRoot !== root) lines.push(`Record found under a different root: ${recordRoot} (sampled root: ${root ?? "none"})`);
   if (r.config.notes.length) lines.push(`Config notes: ${r.config.notes.join("; ")}`);
   return lines.join("\n");
 }
@@ -114,8 +117,20 @@ export function handleSessionIntel(options: SessionIntelOptions = {}): SessionIn
     userSettingsPath: options.userSettingsPath,
     fullBudgetBytes: options.fullBudgetBytes,
   });
+  // ISS-1185: a purely additive, read-only diagnostic. Never feeds back into
+  // `sampleSession`'s own binding/persistence logic (untouched above): a
+  // direct miss under `root` only probes the worktree candidates to REPORT
+  // where the record actually lives, exactly the way `session intel` is
+  // scoped on the ticket (find only, report only).
+  let recordRoot: string | null = null;
+  if (root && result.sessionId && !readPresenceRecord(root, result.sessionId)) {
+    const match = findPresenceRecordAcrossWorktrees(root, result.sessionId);
+    if (match) recordRoot = match.root;
+  }
   const format = options.format ?? "md";
-  const output = format === "json" ? JSON.stringify({ ok: true, data: result }, null, 2) : formatSessionIntelMd(result);
+  const output = format === "json"
+    ? JSON.stringify({ ok: true, data: { ...result, root, recordRoot } }, null, 2)
+    : formatSessionIntelMd(result, root, recordRoot);
   // A Codex client short-circuits to "unknown" by design: an answer, not a
   // lookup failure. For Claude, no identity or no authorized transcript is.
   const notFound = result.client === "claude" && (result.sessionId === null || result.transcriptPath === null);
