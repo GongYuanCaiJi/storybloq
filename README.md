@@ -2,11 +2,11 @@
   <img src="https://raw.githubusercontent.com/Storybloq/storybloq/main/assets/logo.png" width="120" alt="Storybloq logo" />
 </p>
 
-<h1 align="center">storybloq</h1>
+<h1 align="center">Storybloq</h1>
 
 <p align="center">
-  <strong>Cross-session context persistence for AI coding.</strong><br />
-  A file convention, a CLI, an MCP server, and Claude Code/Codex skills that together turn every coding session into a building block instead of a reset.
+  <strong>Your project’s memory. Your agents’ workflow.</strong><br />
+  Project memory and workflows for Claude Code and Codex. Keep stories, plans, handovers, and review evidence beside your code. Pick up work across sessions and follow progress in the optional Mac app.
 </p>
 
 <p align="center">
@@ -25,20 +25,20 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Storybloq/storybloq/main/assets/hero.png" alt="Storybloq Mac app showing a live project sidebar alongside an AI coding terminal" />
+  <img src="https://www.storybloq.com/media/luma-board-detail.webp" alt="Storybloq Mac app showing stories and progress in the Luma demo project" />
 </p>
 
 ---
 
 ## The problem
 
-AI coding assistants are stateless. Every new session starts from zero. The model doesn't know what was built yesterday, what's broken, what decisions were made, or what to work on next. Developers compensate with CLAUDE.md files and scattered notes, but there's no standard structure, no session continuity, and no tooling.
+A new coding session may be missing the decisions and unfinished work from the last. Project instructions describe how to work; handovers, stories, and review records capture what happened and where to continue.
 
 The real cost isn't wasted setup time. It's repeated mistakes, relitigated design decisions, hallucinated context, and linear instead of compounding work.
 
 ## The idea
 
-Every project gets a `.story/` directory of JSON and markdown files. Tickets, issues, roadmap phases, session handovers, and lessons learned all live there, tracked by git, readable by any AI.
+Every project gets a `.story/` directory of JSON and markdown files. Stories, issues, roadmap phases, session handovers, and lessons learned live there as readable files you can track with Git. Stories use ticket records in the CLI and file format.
 
 - **CLI:** `storybloq` - inspect and mutate `.story/` from the terminal.
 - **MCP server:** structured tools Claude Code and Codex can call directly, with five additional tools when the local Bus is enabled. No subprocess spawning.
@@ -55,6 +55,23 @@ storybloq setup --client all
 Requires Node.js 20+ and at least one AI client: Claude Code or Codex CLI 0.130.0+. Package lives on npm at [**@storybloq/storybloq**](https://www.npmjs.com/package/@storybloq/storybloq); releases are tagged on this repo at [github.com/Storybloq/storybloq/releases](https://github.com/Storybloq/storybloq/releases).
 
 `setup --client all` installs the Storybloq skill for Claude and Codex, registers this package as an MCP server, and configures available client hooks. Re-running it is safe. Codex reports installed hooks with trust `unknown`; open `/hooks` in Codex to review and trust them. `setup-skill` remains as a compatibility alias for Claude-only setup.
+
+## Your first two sessions
+
+1. Open your project in Claude Code or Codex. Type `/story` in Claude Code chat or `$story` in Codex chat. For a new project, the skill guides you through setup.
+2. Ask: “Record a story to add an empty calendar state. Record the decision that the API owns availability.”
+3. Before stopping, ask: “Write a handover.”
+4. Start a new chat and invoke `/story` or `$story` again to load the recorded project context.
+
+## See the work
+
+The optional Mac app shows stories, progress, and handovers from your project files. [Explore the Mac app](https://www.storybloq.com/mac) or follow the [tutorials](https://www.storybloq.com/tutorials).
+
+## Add structure as your work grows
+
+Start with one project and one agent. Add autonomous workflows, independent review, or connected repositories when the work calls for them. Review records preserve what was checked; they do not guarantee correctness. Tests, CI, and release checks still matter.
+
+The CLI and MCP server are source-available under PolyForm Shield. Your coding client and optional review backends have their own data handling and costs. See the [privacy policy](https://www.storybloq.com/privacy) and the license below.
 
 ## Upgrading
 
