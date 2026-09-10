@@ -5,6 +5,7 @@
  */
 
 import type {
+  AutoCompactWindowSource,
   CaptureKind,
   CeilingConfidence,
   CeilingSource,
@@ -15,6 +16,7 @@ import type {
 } from "../../presence/session-intel-fields.js";
 
 export type {
+  AutoCompactWindowSource,
   CaptureKind,
   CeilingConfidence,
   CeilingSource,
@@ -82,8 +84,39 @@ export interface ScanResult {
 export interface TargetCapture {
   readonly captureKind: CaptureKind;
   readonly autoCompactWindowAtStart: number | null;
+  readonly autoCompactWindowSource: AutoCompactWindowSource | null;
   readonly capturedAt: string | null;
 }
+
+/**
+ * T-501: the inputs the usage-cost advisory is decided from, resolved for the
+ * TARGET session (never the caller's live environment when a capture exists).
+ *
+ *   capture  a capture object was present: `window` is what the process saw at
+ *            start, and a captured null (`captureKind: "absent"`) STAYS null --
+ *            re-reading the file mid-session would report a window this
+ *            process is not running under;
+ *   live     no capture object at all: the setting is read now;
+ *   none     neither -- nothing is claimed.
+ */
+export interface UsageAdvisoryInput {
+  readonly window: number | null;
+  readonly source: AutoCompactWindowSource | null;
+  readonly provenance: "capture" | "live" | "none";
+}
+
+/**
+ * T-501: what the advisory says, as data. The message is rendered from this at
+ * push time and never stored, so wording changes need no new sample.
+ *
+ *   window  a window above `recommendedMax` was observed;
+ *   model   the session runs a 1M-context model and NO window was observed, so
+ *           nothing bounds the context below the model's own capacity. A
+ *           configured window at or under the max gives no advisory at all.
+ */
+export type UsageAdvisory =
+  | { readonly kind: "window"; readonly observed: number; readonly source: AutoCompactWindowSource | null; readonly recommendedMax: number }
+  | { readonly kind: "model"; readonly nativeWindow: 1_000_000; readonly recommendedMax: number };
 
 /** Provenance resolved for the TARGET session, never the caller. */
 export interface TargetProvenance {
@@ -125,6 +158,10 @@ export interface TokenPressureSample {
   readonly suppressedBy: "handover" | null;
   readonly imperativeSince: string | null;
   readonly reason: string | null;
+  /** T-501: the advisory's inputs, kept so the record can store them and the decision can be recomputed under the current config. */
+  readonly usageInput: UsageAdvisoryInput;
+  /** T-501: the decision under the config this sample was computed with. Never persisted. */
+  readonly usageAdvisory: UsageAdvisory | null;
 }
 
 /** The unobserved epoch, for callers that have no record yet. */

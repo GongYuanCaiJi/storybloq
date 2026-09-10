@@ -151,3 +151,35 @@ describe("sessionIntel config: hot-path reader agrees with the zod schema", () =
     expect(SessionIntelConfigSchema.safeParse({ jumpAllowanceFloorTokens: 9, jumpAllowanceCapTokens: 1 }).success).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-501: recommendedWindowMax -- 0 (disabled) or 100,000 to 1,000,000.
+// ---------------------------------------------------------------------------
+
+describe("sessionIntel.recommendedWindowMax", () => {
+  it("defaults to 450000", () => {
+    expect(resolveSessionIntelConfig(null).recommendedWindowMax).toBe(450_000);
+    expect(resolveSessionIntelConfig({}).recommendedWindowMax).toBe(450_000);
+  });
+
+  it("0 is accepted as the disable value by both the reader and the schema", () => {
+    const cfg = resolveSessionIntelConfig({ recommendedWindowMax: 0 });
+    expect(cfg.recommendedWindowMax).toBe(0);
+    expect(cfg.notes).toEqual([]);
+    expect(SessionIntelConfigSchema.safeParse({ recommendedWindowMax: 0 }).success).toBe(true);
+  });
+
+  it("50,000, 1,500,000 and -1 are rejected with the documented fallback", () => {
+    for (const value of [50_000, 1_500_000, -1]) {
+      const cfg = resolveSessionIntelConfig({ recommendedWindowMax: value });
+      expect(cfg.recommendedWindowMax, `${value} reader`).toBe(450_000);
+      expect(cfg.notes.some((n) => n.startsWith("sessionIntel.recommendedWindowMax ignored")), `${value} note`).toBe(true);
+      expect(SessionIntelConfigSchema.safeParse({ recommendedWindowMax: value }).success, `${value} schema`).toBe(false);
+    }
+  });
+
+  it("both ends of the live range are accepted", () => {
+    expect(resolveSessionIntelConfig({ recommendedWindowMax: 100_000 }).notes).toEqual([]);
+    expect(resolveSessionIntelConfig({ recommendedWindowMax: 1_000_000 }).notes).toEqual([]);
+  });
+});

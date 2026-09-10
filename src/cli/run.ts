@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { cliBannerFor } from "../core/session-intel/push.js";
+import { cliBannerFor, cliStatusPushesFor } from "../core/session-intel/push.js";
 import { discoverProjectRoot, loadProject } from "../core/index.js";
 import { ProjectLoaderError, INTEGRITY_WARNING_TYPES, type LoadWarning } from "../core/errors.js";
 import { ExitCode, formatError } from "../core/output-formatter.js";
@@ -48,14 +48,29 @@ export function writeOutput(text: string): void {
  * subcommands never route through these pipelines, so they never get one.
  * Best-effort: any failure leaves the output exactly as written.
  */
-function emitCliBanner(root: string, format: OutputFormat): void {
+function emitCliBanner(root: string, format: OutputFormat, pushes: ReadCommandPushes = {}): void {
   try {
-    const banner = cliBannerFor(root, format === "json" ? "json" : "md", { cwd: process.cwd() });
-    if (banner.stdout) writeOutput(`\n${banner.stdout}`);
-    if (banner.stderr) process.stderr.write(`${banner.stderr}\n`);
+    const cliFormat = format === "json" ? "json" : "md";
+    // T-501: the priming call (`storybloq status`) derives BOTH pushes from
+    // one acquisition under one deadline; every other read command keeps the
+    // pressure banner alone. Two separate acquisitions would double the
+    // permitted push overhead and could describe two different samples.
+    const out = pushes.usageAdvisory
+      ? cliStatusPushesFor(root, cliFormat, { cwd: process.cwd() })
+      : (() => {
+          const banner = cliBannerFor(root, cliFormat, { cwd: process.cwd() });
+          return { stdout: banner.stdout ? [banner.stdout] : [], stderr: banner.stderr ? [banner.stderr] : [] };
+        })();
+    for (const line of out.stdout) writeOutput(`\n${line}`);
+    for (const line of out.stderr) process.stderr.write(`${line}\n`);
   } catch {
     // never
   }
+}
+
+/** T-501: which optional session-intel pushes a read command may emit. */
+export interface ReadCommandPushes {
+  readonly usageAdvisory?: boolean;
 }
 
 /**
@@ -110,6 +125,7 @@ function hasIntegrityWarnings(warnings: readonly LoadWarning[]): boolean {
 export async function runReadCommand(
   format: OutputFormat,
   handler: (ctx: CommandContext) => Promise<CommandResult> | CommandResult,
+  pushes: ReadCommandPushes = {},
 ): Promise<void> {
   try {
     const root = discoverProjectRoot();
@@ -126,7 +142,7 @@ export async function runReadCommand(
 
     const result = await handler({ state, warnings, root, handoversDir, format });
     writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
-    emitCliBanner(root, format);
+    emitCliBanner(root, format, pushes);
 
     let exitCode = result.exitCode ?? ExitCode.OK;
     // Upgrade to PARTIAL for integrity warnings OR handler-produced render
@@ -164,6 +180,7 @@ export async function runReadCommandWithRoot(
   format: OutputFormat,
   explicitRoot: string,
   handler: (ctx: CommandContext) => Promise<CommandResult> | CommandResult,
+  pushes: ReadCommandPushes = {},
 ): Promise<void> {
   try {
     const { state, warnings } = await loadProject(explicitRoot);
@@ -171,7 +188,7 @@ export async function runReadCommandWithRoot(
 
     const result = await handler({ state, warnings, root: explicitRoot, handoversDir, format });
     writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
-    emitCliBanner(explicitRoot, format);
+    emitCliBanner(explicitRoot, format, pushes);
 
     let exitCode = result.exitCode ?? ExitCode.OK;
     if (exitCode === ExitCode.OK && (hasIntegrityWarnings(warnings) || (result.warnings?.length ?? 0) > 0)) {

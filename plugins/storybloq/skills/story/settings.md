@@ -119,6 +119,7 @@ Do NOT search source code for this. The full config.json schema is shown below. 
     "maxSampleAgeMs": "integer 0-600000 (default 30000); an older stored sample is refreshed by one bound tail read before a banner",
     "compactPendingTtlMs": "integer 10000-3600000 (default 300000); a PreCompact event with no boundary seen within this window is treated as an assumed compaction",
     "stepPct": "number 0.01-0.5 (default 0.05); context growth after a handover that re-arms imperative",
+    "recommendedWindowMax": "integer 0 or 100000-1000000 (default 450000); the auto-compact window at or below which no usage advisory is shown. A threshold, not a sentinel: a 2000000 window against a 1000000 max still fires. 0 disables the advisory entirely",
     "banner": "boolean (default true) MCP/CLI response banner",
     "promptHook": "boolean (default true) UserPromptSubmit additionalContext at imperative",
     "guideDirective": "boolean (default true) autonomous guide directive at imperative"
@@ -190,6 +191,24 @@ Do NOT search source code for this. The full config.json schema is shown below. 
   }
 }
 ```
+
+### Auto-compact window and usage (T-501)
+
+`autoCompactWindow` is a CLAUDE CODE setting, not a Storybloq one: it decides how large the context grows before Claude Code compacts it. Every turn re-sends the whole context, so allowing larger contexts can increase per-turn usage as the context grows. Storybloq recommends a ceiling of 450,000 tokens.
+
+Claude Code merges it from three files, last DEFINED wins:
+
+| Layer | File |
+|-------|------|
+| user | `~/.claude/settings.json` |
+| project | `.claude/settings.json` |
+| project-local | `.claude/settings.local.json` |
+
+Set it as a plain number, for example `{"autoCompactWindow": 450000}`. Claude Code reads the value at PROCESS start, so an edit takes effect on the next Claude Code start, not in the running session. A value set only by managed (policy) settings is out of the user's reach and Storybloq reports it as not observed rather than guessing.
+
+Codex has no equivalent setting, so the advisory never appears there.
+
+Storybloq only ADVISES: it reads the value, never writes it. `storybloq status` (and `storybloq_status`) carries the advisory once per session when the observed window is above `sessionIntel.recommendedWindowMax`, or when the session runs a 1M-context model with no window observed at all. `storybloq session intel` reports it on every call. Set `sessionIntel.recommendedWindowMax` to `0` to turn the advisory off.
 
 ### Review effort
 

@@ -1000,7 +1000,7 @@ describe("setup-skill", () => {
     expect(settingsRouteLines[0]).toContain("/story settings");
   });
 
-  it("settings.md's body (after its heading and intro line) is byte-for-byte identical to the pre-split fixture (T-460 Leg C step 1)", () => {
+  it("settings.md's body still contains every pre-split line, in order and unreworded (T-460 Leg C step 1)", () => {
     // Proves the T-460 Leg C step 1 relocation moved the Settings section
     // verbatim -- zero rewording -- the same preservation-proof pattern T-496
     // used for session-guard.md. The fixture is the exact pre-split body
@@ -1024,7 +1024,23 @@ describe("setup-skill", () => {
     const headerBytes = Buffer.byteLength(expectedHeader, "utf-8");
     expect(settings.subarray(0, headerBytes).toString("utf-8")).toBe(expectedHeader);
     const body = settings.subarray(headerBytes);
-    expect(body.equals(fixture)).toBe(true);
+    // T-501: settings.md is a living document again (it now documents
+    // `autoCompactWindow`), so a byte-for-byte equality with the frozen
+    // pre-split fixture would forbid every later addition rather than prove
+    // anything about the relocation. What the relocation proof is actually
+    // about survives as stated: every pre-split line is still present, in the
+    // same order, with its bytes unchanged -- so nothing was reworded,
+    // reordered or dropped, and a later ticket may only ADD.
+    const bodyLines = body.toString("utf-8").split("\n");
+    const fixtureLines = fixture.toString("utf-8").split("\n");
+    let cursor = 0;
+    const missing: string[] = [];
+    for (const line of fixtureLines) {
+      const at = bodyLines.indexOf(line, cursor);
+      if (at === -1) missing.push(line);
+      else cursor = at + 1;
+    }
+    expect(missing, "pre-split lines missing or reworded in settings.md").toEqual([]);
   });
 
   // -------------------------------------------------------------------------

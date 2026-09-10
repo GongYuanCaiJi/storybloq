@@ -220,7 +220,9 @@ export function registerStatusCommand(yargs: Argv): Argv {
     async (argv) => {
       const format = parseOutputFormat(argv.format);
       const clientTaskId = argv["client-task-id"] as string | undefined;
-      await runReadCommand(format, (ctx) => handleStatus(ctx, clientTaskId));
+      // T-501: status is the /story priming call and the only CLI surface
+      // that shows (and consumes) the usage-cost advisory.
+      await runReadCommand(format, (ctx) => handleStatus(ctx, clientTaskId), { usageAdvisory: true });
     },
   );
 }

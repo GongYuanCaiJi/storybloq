@@ -175,7 +175,7 @@ import { handleExport } from "../cli/commands/export.js";
 import { handleSelftest } from "../cli/commands/selftest.js";
 import { handleHandoverCreate } from "../cli/commands/handover.js";
 import { handleAutonomousGuide } from "../autonomous/guide.js";
-import { applyBannerToMcpText, tokenPressureBannerFor } from "../core/session-intel/push.js";
+import { applyBannerToMcpText, applyStatusPushesToMcpText, statusPushesFor, tokenPressureBannerFor } from "../core/session-intel/push.js";
 import { handleSessionReport } from "../cli/commands/session-report.js";
 import {
   handlePhaseList,
@@ -216,6 +216,11 @@ export async function runMcpReadTool(
   handler: (ctx: CommandContext) => Promise<CommandResult> | CommandResult,
   effectiveRoot?: string,
   format: OutputFormat = "md",
+  // T-501: the usage-cost advisory is attached by the PRIMING call only
+  // (`storybloq_status`), never by every read tool -- it is a once-per-session
+  // line and any other tool consuming it would spend it where the user is not
+  // looking.
+  pushes: { readonly usageAdvisory?: boolean } = {},
 ): Promise<McpToolResult> {
   // Liveness is always anchored to pinnedRoot (the orchestrator), not the effective node root.
   try { touchMcpLiveness(pinnedRoot); } catch { /* best-effort */ }
@@ -288,7 +293,13 @@ export async function runMcpReadTool(
     // T-499: the token-pressure banner for the CALLER's own session, under
     // the binding rule; never on an error result (returned above), never at
     // ok/unknown. md: prefix block; json: sibling key `tokenPressure`.
-    text = applyBannerToMcpText(text, format, tokenPressureBannerFor(pinnedRoot, { cwd: pinnedRoot }, "mcp"));
+    // T-501: on the priming call both pushes come from ONE acquisition under
+    // one deadline (`statusPushesFor`); every other read tool keeps the
+    // pressure banner alone and never touches the advisory.
+    const statusPushes = pushes.usageAdvisory
+      ? statusPushesFor(pinnedRoot, { cwd: pinnedRoot }, "mcp")
+      : { banner: tokenPressureBannerFor(pinnedRoot, { cwd: pinnedRoot }, "mcp"), usage: null };
+    text = applyStatusPushesToMcpText(text, format, statusPushes.banner, statusPushes.usage);
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {
@@ -521,7 +532,9 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
     },
   }, async (args) => {
     const format = args.format ?? "md";
-    const result = await runMcpReadTool(pinnedRoot, (ctx) => handleStatus(ctx, args.clientTaskId), undefined, format);
+    // T-501: status is the /story priming call, and the only surface that
+    // attaches and consumes the usage-cost advisory.
+    const result = await runMcpReadTool(pinnedRoot, (ctx) => handleStatus(ctx, args.clientTaskId), undefined, format, { usageAdvisory: true });
     // ISS-570 G2: prepend update-available notice so /story's first MCP
     // call surfaces 'newer storybloq available' proactively. Synchronous
     // cache read; a background refresh is kicked off so the NEXT status

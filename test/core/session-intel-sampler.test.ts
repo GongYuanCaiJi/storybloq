@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { computeSample, handoverSuppresses, jumpAllowanceFor, p90 } from "../../src/core/session-intel/sampler.js";
+import { computeSample, handoverSuppresses, jumpAllowanceFor, p90, usageAdvisoryFrom } from "../../src/core/session-intel/sampler.js";
 import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
-import type { CeilingResolution, ScanResult } from "../../src/core/session-intel/types.js";
+import type { CeilingResolution, ScanResult, UsageAdvisoryInput } from "../../src/core/session-intel/types.js";
 
 const cfg = resolveSessionIntelConfig(null);
 const NOW = "2026-09-09T12:30:00.000Z";
@@ -20,8 +20,10 @@ function scan(contextTokens: number | null, deltas: number[] = []): ScanResult {
   };
 }
 
-const sample = (tokens: number | null, over: { deltas?: number[]; record?: SessionIntelPresence | null; ceiling?: CeilingResolution } = {}) =>
-  computeSample({ scan: scan(tokens, over.deltas ?? []), ceiling: over.ceiling ?? ceiling(), cfg, sampledBy: "query", sampledAt: NOW, record: over.record ?? null });
+const NO_USAGE: UsageAdvisoryInput = { window: null, source: null, provenance: "none" };
+
+const sample = (tokens: number | null, over: { deltas?: number[]; record?: SessionIntelPresence | null; ceiling?: CeilingResolution; usage?: UsageAdvisoryInput } = {}) =>
+  computeSample({ scan: scan(tokens, over.deltas ?? []), ceiling: over.ceiling ?? ceiling(), cfg, sampledBy: "query", sampledAt: NOW, record: over.record ?? null, usage: over.usage ?? NO_USAGE });
 
 describe("computeSample states", () => {
   it("266,711 against 417,737 is 63.8%, ok", () => {
@@ -106,5 +108,77 @@ describe("handover suppression", () => {
     expect(s.state).toBe("advisory");
     expect(sample(imperativeTokens).imperativeSince).toBe(NOW);
     expect(sample(1000).imperativeSince).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-501: the usage-cost advisory, decided from the resolved inputs alone.
+// ---------------------------------------------------------------------------
+
+describe("usageAdvisoryFrom", () => {
+  const input = (window: number | null, source: UsageAdvisoryInput["source"] = null): UsageAdvisoryInput =>
+    ({ window, source, provenance: window === null ? "none" : "capture" });
+
+  it("a window above the recommended max gives kind window with the observed value and its source", () => {
+    expect(usageAdvisoryFrom(input(1_000_000, "user"), null, cfg)).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000 });
+  });
+
+  it("a window at the recommended max gives nothing", () => {
+    expect(usageAdvisoryFrom(input(450_000, "user"), null, cfg)).toBeNull();
+    expect(usageAdvisoryFrom(input(450_001, "user"), null, cfg)).toEqual({ kind: "window", observed: 450_001, source: "user", recommendedMax: 450_000 });
+  });
+
+  it("no observed window plus a 1M model gives kind model", () => {
+    expect(usageAdvisoryFrom(input(null), true, cfg)).toEqual({ kind: "model", nativeWindow: 1_000_000, recommendedMax: 450_000 });
+  });
+
+  it("a 1M model with a window at or under the max gives nothing (the window bounds it)", () => {
+    expect(usageAdvisoryFrom(input(450_000, "user"), true, cfg)).toBeNull();
+  });
+
+  it("no observed window and no 1M evidence gives nothing", () => {
+    expect(usageAdvisoryFrom(input(null), null, cfg)).toBeNull();
+    expect(usageAdvisoryFrom(input(null), false, cfg)).toBeNull();
+  });
+
+  it("recommendedWindowMax 0 disables BOTH kinds", () => {
+    const off = resolveSessionIntelConfig({ recommendedWindowMax: 0 });
+    expect(off.recommendedWindowMax).toBe(0);
+    expect(usageAdvisoryFrom(input(1_000_000, "user"), true, off)).toBeNull();
+    expect(usageAdvisoryFrom(input(null), true, off)).toBeNull();
+  });
+
+  it("the max is a threshold, never a sentinel by magnitude: 2,000,000 against a max of 1,000,000 still fires", () => {
+    const high = resolveSessionIntelConfig({ recommendedWindowMax: 1_000_000 });
+    expect(usageAdvisoryFrom(input(2_000_000, "local"), null, high)).toEqual({ kind: "window", observed: 2_000_000, source: "local", recommendedMax: 1_000_000 });
+  });
+
+  it("a window with no known source keeps the advisory and reports source null", () => {
+    expect(usageAdvisoryFrom(input(600_000), null, cfg)).toEqual({ kind: "window", observed: 600_000, source: null, recommendedMax: 450_000 });
+  });
+});
+
+describe("computeSample carries the advisory on every path", () => {
+  it("an ok sample still carries the advisory", () => {
+    const s = sample(10, { usage: { window: 1_000_000, source: "user", provenance: "capture" } });
+    expect(s.state).toBe("ok");
+    expect(s.usageAdvisory).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000 });
+    expect(s.usageInput).toEqual({ window: 1_000_000, source: "user", provenance: "capture" });
+  });
+
+  it("an unknown sample (no context tokens) still carries the advisory and the input", () => {
+    const s = sample(null, { usage: { window: 600_000, source: "project", provenance: "live" } });
+    expect(s.state).toBe("unknown");
+    expect(s.usageAdvisory).toEqual({ kind: "window", observed: 600_000, source: "project", recommendedMax: 450_000 });
+  });
+
+  it("an unknown-ceiling sample still carries the advisory", () => {
+    const s = sample(100, { ceiling: ceiling({ ceiling: null }), usage: { window: 600_000, source: "user", provenance: "capture" } });
+    expect(s.usageAdvisory).not.toBeNull();
+  });
+
+  it("the model kind reads oneMillionFlag from the scan", () => {
+    const withFlag = computeSample({ scan: { ...scan(10), oneMillionFlag: true }, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: NOW, record: null, usage: NO_USAGE });
+    expect(withFlag.usageAdvisory).toEqual({ kind: "model", nativeWindow: 1_000_000, recommendedMax: 450_000 });
   });
 });

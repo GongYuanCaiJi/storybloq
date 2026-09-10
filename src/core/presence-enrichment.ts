@@ -173,8 +173,18 @@ function hasLivePresenceMatch(root: string, client: StorybloqClient, identityAnc
   return false;
 }
 
+/**
+ * T-501: returned by a mutation callback to mean "precondition failed, write
+ * nothing". Needed because this helper always serializes and writes, and
+ * fabricates a fresh record when none exists: returning the base unchanged
+ * would still write, and for a deleted record would RECREATE it. Existing
+ * callers never return it and are unaffected.
+ */
+export const ABORT_ENRICHMENT = Symbol("storybloq.abortEnrichment");
+
 export type EnrichmentOutcome =
   | { readonly status: "written" }
+  | { readonly status: "aborted" }
   | { readonly status: "skipped-no-directory" }
   | { readonly status: "skipped-lock-busy" }
   | { readonly status: "skipped-too-large" }
@@ -215,7 +225,7 @@ export function applyPresenceEnrichment(
   sessionId: string,
   budgetMs: number,
   freshRecordSource: string,
-  mutate: (base: SessionPresence, nowIso: string) => SessionPresence,
+  mutate: (base: SessionPresence, nowIso: string) => SessionPresence | typeof ABORT_ENRICHMENT,
   now: () => Date = () => new Date(),
 ): EnrichmentOutcome {
   const dir = ensurePresenceDir(root);
@@ -232,6 +242,7 @@ export function applyPresenceEnrichment(
     const previous = existingText === null ? null : parsePresenceRecord(existingText, sessionId);
     const baseRecord = previous ?? freshRecord(sessionId, nowIso, freshRecordSource);
     const next = mutate(baseRecord, nowIso);
+    if (next === ABORT_ENRICHMENT) return { status: "aborted" };
     const serialized = serializePresence(next);
     if (serialized === null) return { status: "skipped-too-large" };
     return atomicWriteInDir(dir, recordPath, serialized) ? { status: "written" } : { status: "skipped-write-failed" };

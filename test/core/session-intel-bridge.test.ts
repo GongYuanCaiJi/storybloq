@@ -28,10 +28,16 @@ import { join } from "node:path";
  * the write as failed (the callback's side effects happen, the record does
  * not change). Both are one-shot.
  */
-const inject: { beforeMutate: (() => void) | null; failWrite: boolean } = { beforeMutate: null, failWrite: false };
+const inject: { beforeMutate: (() => void) | null; failWrite: boolean; beforeCall: (() => void) | null } = { beforeMutate: null, failWrite: false, beforeCall: null };
 vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../src/core/presence-enrichment.js")>();
   const wrapped: typeof mod.applyPresenceEnrichment = (root, sessionId, budgetMs, source, mutate, now) => {
+    // T-501 seam: runs BEFORE the lock is taken and before the record is
+    // read, standing in for another process that stamps in the window
+    // between an unlocked read and this call's lock. One-shot.
+    const beforeCall = inject.beforeCall;
+    inject.beforeCall = null;
+    beforeCall?.();
     const before = inject.beforeMutate;
     const fail = inject.failWrite;
     inject.beforeMutate = null;
@@ -63,6 +69,8 @@ import {
   reconcileUnderLock,
   resolveCallerBinding,
   revalidateCandidateIdentity,
+  compactSample,
+  consumeUsageAdvisory,
   stampHandover,
 } from "../../src/core/session-intel/presence-bridge.js";
 import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
@@ -72,7 +80,7 @@ import { processEra } from "../../src/core/session-intel/process-era.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/core/presence-enrichment.js";
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
 import { presenceFileBase } from "../../src/presence/types.js";
-import type { CeilingResolution, TokenPressureSample } from "../../src/core/session-intel/types.js";
+import type { CeilingResolution, TokenPressureSample, UsageAdvisoryInput } from "../../src/core/session-intel/types.js";
 import { SID, assistantRecord, bareStoryInit, boundaryRecord, git, growingSession, makeWorktreePair, symlinkSync, writeTranscript } from "./session-intel-fixtures.js";
 
 const cfg = resolveSessionIntelConfig(null);
@@ -96,13 +104,16 @@ function seed(root: string, intel: Partial<SessionIntelPresence>, sessionId = SI
 
 const intelOf = (root: string) => readPresenceRecord(root, SID)!.sessionIntel!;
 
+/** T-501: a window well above the recommended max, so every advisory path is exercised. */
+const USAGE: UsageAdvisoryInput = { window: 1_000_000, source: "user", provenance: "capture" };
+
 function ceiling(): CeilingResolution {
   return { ceiling: 417_737, source: "setting", confidence: "high", sampleCount: 0, independentSessions: 0, effectiveSampleWindow: 0, basis: "t", conflict: null, autoCompactWindowAtStart: 450_000, captureKind: "startup", nativeWindow: null, highWaterMark: null };
 }
 
 function sampleFor(path: string, era: string | null, revisionSeen: number | null, record: SessionIntelPresence | null = null): TokenPressureSample {
   const scan = scanTail({ path, sessionId: SID, era, revisionSeen, epochSince: null })!;
-  return computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record });
+  return computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record, usage: USAGE });
 }
 
 describe("pure resets", () => {
@@ -403,11 +414,11 @@ describe("persistSample end to end", () => {
       const tokens = Math.ceil(0.85 * 417_737) - 25_000;
       const path = writeTranscript(join(root, "projects"), "p", SID, [assistantRecord({ ts: at(0), read: tokens - 2 })]);
       const scan = scanTail({ path, sessionId: SID, era: "1:2", revisionSeen: 0, epochSince: null })!;
-      const computed = computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record: null });
+      const computed = computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record: null, usage: USAGE });
       expect(computed.state).toBe("imperative");
       expect(stampHandover(root, SID, "1:2", tokens, T0).status).toBe("written");
       // Production recomputation reuses the validated scan; only suppression changes.
-      const recompute = (rec: SessionIntelPresence) => computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record: rec });
+      const recompute = (rec: SessionIntelPresence) => computeSample({ scan, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record: rec, usage: USAGE });
       const out = persistSample({ root, sessionId: SID, sample: computed, transcriptPath: path, cfg, now: T0, recompute });
       expect(out.status).toBe("accepted");
       expect(intelOf(root).lastSample).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
@@ -699,3 +710,125 @@ function realpathOf(p: string): string {
     return p;
   }
 }
+
+// ---------------------------------------------------------------------------
+// T-501: the persisted advisory INPUTS and the once-per-session stamp.
+// ---------------------------------------------------------------------------
+
+describe("compactSample: usage inputs", () => {
+  it("carries the window, its source and the 1M flag, and null when nothing was resolved", () => {
+    withRoot((root) => {
+      const path = join(root, "t.jsonl");
+      writeFileSync(path, growingSession(2, 1000, 100).join(""));
+      const s = sampleFor(path, "1:2", 0);
+      expect(compactSample(s).usageInput).toEqual({ window: 1_000_000, source: "user", oneMillionFlag: null });
+      const none = computeSample({ scan: scanTail({ path, sessionId: SID, era: "1:2", revisionSeen: 0, epochSince: null })!, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: at(0), record: null, usage: { window: null, source: null, provenance: "none" } });
+      expect(compactSample(none).usageInput).toBeNull();
+    });
+  });
+});
+
+describe("consumeUsageAdvisory", () => {
+  const slim = (root: string) => intelOf(root).lastSample!;
+  const raw = (root: string) => readFileSync(join(root, ".story", "telemetry", "presence", `${presenceFileBase(SID)}.json`), "utf-8");
+
+  function seeded(root: string): { era: string; revision: number } {
+    const path = join(root, "t.jsonl");
+    writeFileSync(path, growingSession(2, 1000, 100).join(""));
+    seed(root, { era: "1:2", revision: 0, incarnation: null, consumedOffset: 0, baselineAnchor: null });
+    const s = sampleFor(path, "1:2", 0);
+    const outcome = persistSample({ root, sessionId: SID, sample: s, transcriptPath: path, cfg, now: T0, recompute: () => s });
+    expect(outcome.status).toBe("accepted");
+    return { era: "1:2", revision: intelOf(root).revision };
+  }
+
+  it("stamps once, inside the lock, and refuses the second call", () => {
+    withRoot((root) => {
+      const { era, revision } = seeded(root);
+      const first = consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision, T0);
+      expect(first.stamped).toBe(true);
+      expect(intelOf(root).usageAdvisoryShownAt).toBe(new Date(T0).toISOString());
+      const second = consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision, T0 + 1000);
+      expect(second.stamped).toBe(false);
+      expect(second.reason).toBe("already shown");
+      expect(intelOf(root).usageAdvisoryShownAt).toBe(new Date(T0).toISOString());
+    });
+  });
+
+  it("a stale revision, an era change, a sample mismatch and an ended session all refuse and leave the record byte-identical", () => {
+    withRoot((root) => {
+      const { era, revision } = seeded(root);
+      const before = raw(root);
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision + 1, T0).reason).toBe("stale revision");
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era: "9:9" }, slim(root), revision, T0).reason).toBe("era changed since the sample");
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era: null }, slim(root), revision, T0).reason).toBe("era changed since the sample");
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era }, { ...slim(root), sampledAt: at(9) }, revision, T0).reason).toBe("sample replaced since it was read");
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era }, { ...slim(root), observation: { ...slim(root).observation, consumedOffset: 7 } }, revision, T0).reason).toBe("sample replaced since it was read");
+      expect(raw(root)).toBe(before);
+      applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(1) }));
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision, T0).reason).toBe("session has ended");
+    });
+  });
+
+  it("no record at all: refuses AND leaves the presence file absent (the abort path)", () => {
+    withRoot((root) => {
+      const path = join(root, "t.jsonl");
+      writeFileSync(path, growingSession(2, 1000, 100).join(""));
+      const s = compactSample(sampleFor(path, "1:2", 0));
+      const file = join(root, ".story", "telemetry", "presence", `${presenceFileBase(SID)}.json`);
+      const r = consumeUsageAdvisory(root, { sessionId: SID, era: "1:2" }, s, 0, T0);
+      expect(r.stamped).toBe(false);
+      expect(r.reason).toBe("no session intel on the record");
+      expect(existsSync(file)).toBe(false);
+    });
+  });
+
+  it("a failed write refuses without consuming the stamp", () => {
+    withRoot((root) => {
+      const { era, revision } = seeded(root);
+      inject.failWrite = true;
+      const failed = consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision, T0);
+      expect(failed.stamped).toBe(false);
+      expect(intelOf(root).usageAdvisoryShownAt).toBeNull();
+      // A later call still stamps: nothing was consumed.
+      expect(consumeUsageAdvisory(root, { sessionId: SID, era }, slim(root), revision, T0).stamped).toBe(true);
+    });
+  });
+
+  it("two concurrent callers produce exactly ONE stamp: the lock serializes them", () => {
+    withRoot((root) => {
+      const { era, revision } = seeded(root);
+      const sample = slim(root);
+      const results: boolean[] = [];
+      // The second caller runs while the first holds the lock, from inside the
+      // first's own mutation callback.
+      inject.beforeMutate = () => {
+        results.push(consumeUsageAdvisory(root, { sessionId: SID, era }, sample, revision, T0 + 500).stamped);
+      };
+      results.push(consumeUsageAdvisory(root, { sessionId: SID, era }, sample, revision, T0).stamped);
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(intelOf(root).usageAdvisoryShownAt).not.toBeNull();
+    });
+  });
+
+  it("the stamp check must live INSIDE the lock: a stamp that lands between an unlocked read and the lock is honoured, not overwritten", () => {
+    withRoot((root) => {
+      const { era, revision } = seeded(root);
+      const sample = slim(root);
+      const racing = at(3);
+      const file = join(root, ".story", "telemetry", "presence", `${presenceFileBase(SID)}.json`);
+      // Another process stamps in the window a pre-lock check would read
+      // through: the record is written directly, exactly as a second process
+      // holding the lock for its own turn would have left it.
+      inject.beforeCall = () => {
+        const record = JSON.parse(readFileSync(file, "utf-8")) as { sessionIntel: Record<string, unknown> };
+        record.sessionIntel.usageAdvisoryShownAt = racing;
+        writeFileSync(file, JSON.stringify(record));
+      };
+      const r = consumeUsageAdvisory(root, { sessionId: SID, era }, sample, revision, T0);
+      expect(r.stamped).toBe(false);
+      expect(r.reason).toBe("already shown");
+      expect(intelOf(root).usageAdvisoryShownAt).toBe(racing);
+    });
+  });
+});

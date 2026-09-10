@@ -101,6 +101,10 @@ export const SessionIntelConfigSchema = z.object({
   maxSampleAgeMs: z.number().int().min(0).max(600_000).optional(),   // default 30000
   compactPendingTtlMs: z.number().int().min(10_000).max(3_600_000).optional(), // default 300000
   stepPct: z.number().min(0.01).max(0.5).optional(),                 // default 0.05
+  // T-501: 0 disables the usage-cost advisory; any other value is a
+  // threshold compared as written. The union mirrors the hot-path reader's
+  // `allowZero` rule exactly (the agreement test pins both ends).
+  recommendedWindowMax: z.union([z.literal(0), z.number().int().min(100_000).max(1_000_000)]).optional(), // default 450000
   banner: z.boolean().optional(),                                    // default true
   promptHook: z.boolean().optional(),                                // default true
   guideDirective: z.boolean().optional(),                            // default true

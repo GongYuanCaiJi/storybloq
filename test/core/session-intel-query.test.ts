@@ -368,3 +368,94 @@ describe("ISS-1185: handleSessionIntel's worktree diagnostic", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-501: the usage-advisory input follows the TARGET's capture, not the
+// caller's live environment.
+// ---------------------------------------------------------------------------
+
+describe("sampleSession: usage advisory input provenance", () => {
+  function bindWithCapture(root: string, intel: Partial<ReturnType<typeof emptySessionIntel>>, eraEntry: { captureKind: "startup" | "late" | "absent"; window: number | null; source: "user" | "project" | "local" | null } | null): string {
+    const era = processEra.current()!.id;
+    if (eraEntry) {
+      expect(createEraIfAbsent(root, { era, pid: process.pid, startedAt: processEra.current()!.startedAt, captureKind: eraEntry.captureKind, autoCompactWindowAtStart: eraEntry.window, autoCompactWindowSource: eraEntry.source, capturedAt: at(-30), endedAt: null, lastVerifiedAt: at(-30), unverifiableStreak: 0, sessionIds: [SID] })).toBe("created");
+    }
+    applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...emptySessionIntel(), era, ...intel } }));
+    return era;
+  }
+
+  const oneTurn = (f: Fx) => writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(0), read: 10 })]);
+
+  it("a captured ABSENT window stays null even after the settings file gains one mid-session", () => {
+    withFixture((f) => {
+      bindWithCapture(f.root, { captureKind: "absent", autoCompactWindowAtStart: null, capturedAt: at(-30) }, { captureKind: "absent", window: null, source: null });
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.pressure?.usageInput).toEqual({ window: null, source: null, provenance: "capture" });
+      expect(r.pressure?.usageAdvisory).toBeNull();
+    });
+  });
+
+  it("no capture object at all: the live setting supplies the window and its source", () => {
+    withFixture((f) => {
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.provenance.capture).toBeNull();
+      expect(r.pressure?.usageInput).toEqual({ window: 1_000_000, source: "user", provenance: "live" });
+      expect(r.pressure?.usageAdvisory).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000 });
+    });
+  });
+
+  it("no capture object and no setting anywhere: nothing is claimed", () => {
+    withFixture((f) => {
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.pressure?.usageInput).toEqual({ window: null, source: null, provenance: "none" });
+    });
+  });
+
+  it("the authoritative era entry supplies the source", () => {
+    withFixture((f) => {
+      bindWithCapture(f.root, { captureKind: "startup", autoCompactWindowAtStart: 600_000, capturedAt: at(-30) }, { captureKind: "startup", window: 600_000, source: "user" });
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.pressure?.usageInput).toEqual({ window: 600_000, source: "user", provenance: "capture" });
+    });
+  });
+
+  it("the presence fallback (no era entry) supplies the record's own source", () => {
+    withFixture((f) => {
+      bindWithCapture(f.root, { captureKind: "startup", autoCompactWindowAtStart: 600_000, autoCompactWindowSource: "local", capturedAt: at(-30) }, null);
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.provenance.capture?.autoCompactWindowSource).toBe("local");
+      expect(r.pressure?.usageInput).toEqual({ window: 600_000, source: "local", provenance: "capture" });
+    });
+  });
+
+  it("an older record with a window but no recorded source keeps the window and reports source null", () => {
+    withFixture((f) => {
+      bindWithCapture(f.root, { captureKind: "startup", autoCompactWindowAtStart: 600_000, capturedAt: at(-30) }, null);
+      oneTurn(f);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.pressure?.usageInput).toEqual({ window: 600_000, source: null, provenance: "capture" });
+      expect(r.pressure?.usageAdvisory).toEqual({ kind: "window", observed: 600_000, source: null, recommendedMax: 450_000 });
+    });
+  });
+
+  it("the capture, not the session id, carries the input: a transferred era keeps its window on a new session id", () => {
+    withFixture((f) => {
+      const era = bindWithCapture(f.root, { captureKind: "startup", autoCompactWindowAtStart: 900_000, capturedAt: at(-30) }, { captureKind: "startup", window: 900_000, source: "project" });
+      // `/clear`: a new session id in the SAME process era, the era entry transferred.
+      const next = "11111111-2222-3333-4444-555555555555";
+      process.env.CLAUDE_CODE_SESSION_ID = next;
+      applyPresenceEnrichment(f.root, next, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...emptySessionIntel(), era, captureKind: "startup", autoCompactWindowAtStart: 900_000, capturedAt: at(-30) } }));
+      writeTranscript(f.projects, encoded(f.root), next, [assistantRecord({ sessionId: next, ts: at(0), read: 10 })]);
+      const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+      expect(r.sessionId).toBe(next);
+      expect(r.pressure?.usageInput).toEqual({ window: 900_000, source: "project", provenance: "capture" });
+    });
+  });
+});

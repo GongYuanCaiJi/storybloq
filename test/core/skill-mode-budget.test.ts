@@ -41,7 +41,12 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // pinning tightly against regrowth rather than leaving slack an
   // accumulating edit could silently reoccupy. Measured, not estimated.
   "SKILL.md": 56000,
-  "settings.md": 11000, // T-460 Leg C step 1: 10,194 measured, rounded up
+  // T-460 Leg C step 1: 10,194 measured, rounded up to 11,000. Raised to
+  // 12,000 by T-501, which documents `autoCompactWindow` (the three Claude
+  // Code layers, when an edit takes effect, and Codex having no equivalent)
+  // here rather than in SKILL.md: this file is read only on `/story
+  // settings`, so it is off the priming path SKILL.md's ceiling protects.
+  "settings.md": 12000,
   "session-guard.md": 41000,
   "setup-flow.md": 47000, // ISS-1146: already over a design target, ceiling only pins regrowth
   "autonomous-mode.md": 27000,

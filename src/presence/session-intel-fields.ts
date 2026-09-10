@@ -64,6 +64,18 @@ export interface SessionIntelObservation {
   readonly epoch: Epoch;
 }
 
+/**
+ * T-501: the advisory's INPUTS as the record keeps them -- never the decision.
+ * Eligibility is recomputed from the current config at render time, so raising,
+ * lowering or zeroing `recommendedWindowMax` changes the outcome without
+ * waiting for a new sample.
+ */
+export interface SessionIntelUsageInput {
+  readonly window: number | null;
+  readonly source: AutoCompactWindowSource | null;
+  readonly oneMillionFlag: boolean | null;
+}
+
 /** The compact form of a pressure sample that the presence record retains. */
 export interface SessionIntelSample {
   readonly sampledAt: string;
@@ -78,6 +90,8 @@ export interface SessionIntelSample {
   readonly observation: SessionIntelObservation;
   readonly imperativeSince: string | null;
   readonly suppressedBy: "handover" | null;
+  /** T-501: null on an older record, or when a malformed value was refused. */
+  readonly usageInput: SessionIntelUsageInput | null;
 }
 
 export interface SessionIntelPresence {
@@ -100,6 +114,12 @@ export interface SessionIntelPresence {
   readonly handoverWrittenAt: string | null;
   readonly tokensAtHandover: number | null;
   readonly handoverBoundaryAt: string | null;
+  /**
+   * T-501: when the usage-cost advisory was shown for this session. Written
+   * once, inside the record lock, and never shed: shedding it would show the
+   * advisory again on the next priming call.
+   */
+  readonly usageAdvisoryShownAt: string | null;
 }
 
 const CAPTURE_KINDS: ReadonlySet<string> = new Set(["startup", "late", "absent"]);
@@ -128,6 +148,7 @@ export function emptySessionIntel(): SessionIntelPresence {
     handoverWrittenAt: null,
     tokensAtHandover: null,
     handoverBoundaryAt: null,
+    usageAdvisoryShownAt: null,
   };
 }
 
@@ -162,6 +183,7 @@ export function parseSessionIntel(value: unknown): SessionIntelPresence | null {
     handoverWrittenAt: isoOrNull(v.handoverWrittenAt),
     tokensAtHandover: nonNegativeIntOrNull(v.tokensAtHandover),
     handoverBoundaryAt: isoOrNull(v.handoverBoundaryAt),
+    usageAdvisoryShownAt: isoOrNull(v.usageAdvisoryShownAt),
   };
   return fitSessionIntel(parsed);
 }
@@ -299,5 +321,25 @@ function parseSample(value: unknown): SessionIntelSample | null {
     observation,
     imperativeSince: isoOrNull(v.imperativeSince),
     suppressedBy: v.suppressedBy === "handover" ? "handover" : null,
+    // A malformed input is refused on its own; it must never cost the record
+    // the sample around it (the same rule the sample gets inside the subtree).
+    usageInput: parseUsageInput(v.usageInput),
   };
+}
+
+function parseUsageInput(value: unknown): SessionIntelUsageInput | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  const window = v.window === undefined || v.window === null ? null : positiveIntOrNull(v.window);
+  if (window === null && v.window !== undefined && v.window !== null) return null;
+  const source = v.source === undefined || v.source === null
+    ? null
+    : typeof v.source === "string" && WINDOW_SOURCES.has(v.source)
+      ? (v.source as AutoCompactWindowSource)
+      : undefined;
+  if (source === undefined) return null;
+  const oneMillionFlag = v.oneMillionFlag === undefined || v.oneMillionFlag === null ? null : v.oneMillionFlag === true ? true : v.oneMillionFlag === false ? false : undefined;
+  if (oneMillionFlag === undefined) return null;
+  if (window === null && source === null && oneMillionFlag === null) return null;
+  return { window, source, oneMillionFlag };
 }

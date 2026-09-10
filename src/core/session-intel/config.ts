@@ -26,6 +26,13 @@ export interface SessionIntelConfig {
   readonly maxSampleAgeMs: number;
   readonly compactPendingTtlMs: number;
   readonly stepPct: number;
+  /**
+   * T-501: the auto-compact window at or below which no usage advisory is
+   * shown. A THRESHOLD, never a sentinel by magnitude: 0 disables the
+   * advisory outright, and any other value is compared as written (a
+   * 2,000,000 window against a 1,000,000 max still fires).
+   */
+  readonly recommendedWindowMax: number;
   readonly banner: boolean;
   readonly promptHook: boolean;
   readonly guideDirective: boolean;
@@ -44,6 +51,7 @@ export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
   maxSampleAgeMs: 30_000,
   compactPendingTtlMs: 300_000,
   stepPct: 0.05,
+  recommendedWindowMax: 450_000,
   banner: true,
   promptHook: true,
   guideDirective: true,
@@ -60,6 +68,9 @@ export const SESSION_INTEL_BOUNDS = {
   maxSampleAgeMs: { min: 0, max: 600_000, integer: true },
   compactPendingTtlMs: { min: 10_000, max: 3_600_000, integer: true },
   stepPct: { min: 0.01, max: 0.5, integer: false },
+  // T-501: 0 is a legal DISABLE value outside the live range, so it is named
+  // here rather than widening the range (a 1-token max is not a threshold).
+  recommendedWindowMax: { min: 100_000, max: 1_000_000, integer: true, allowZero: true },
 } as const;
 
 type NumericKey = keyof typeof SESSION_INTEL_BOUNDS;
@@ -73,6 +84,7 @@ function numberOr(
   const fallback = DEFAULT_SESSION_INTEL_CONFIG[key];
   if (value === undefined) return fallback;
   const b = SESSION_INTEL_BOUNDS[key];
+  if ("allowZero" in b && b.allowZero && value === 0) return 0;
   const ok =
     typeof value === "number" &&
     Number.isFinite(value) &&
@@ -127,6 +139,7 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     maxSampleAgeMs: numberOr(raw, "maxSampleAgeMs", notes),
     compactPendingTtlMs: numberOr(raw, "compactPendingTtlMs", notes),
     stepPct: numberOr(raw, "stepPct", notes),
+    recommendedWindowMax: numberOr(raw, "recommendedWindowMax", notes),
     banner: boolOr(raw, "banner"),
     promptHook: boolOr(raw, "promptHook"),
     guideDirective: boolOr(raw, "guideDirective"),

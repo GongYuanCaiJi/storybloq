@@ -26,7 +26,7 @@ import { boundaryInsideEra, peekPending, persistSample, readPresenceRecord, reco
 import { processEra } from "./process-era.js";
 import { authorizeTranscriptPath, locateTranscript } from "./transcript-locate.js";
 import { scanFull, scanTail, type ScanRequest } from "./transcript-scan.js";
-import type { ScanResult, ScannedSessionFacts, SampledBy, TargetProvenance, TokenPressureSample } from "./types.js";
+import type { ScanResult, ScannedSessionFacts, SampledBy, TargetProvenance, TokenPressureSample, UsageAdvisoryInput } from "./types.js";
 import { TRY_LOCK_BUDGET_MS } from "../presence-enrichment.js";
 
 export type BindingMode = "bound" | "read-only";
@@ -227,12 +227,19 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
     }
   }
   const ledger = opts.root ? readLedger(opts.root) : [];
-  const liveSetting = provenance.capture === null
-    ? (() => {
-        const r = readAutoCompactWindow(opts.root ?? opts.cwd, opts.userSettingsPath);
-        return r ? { value: r.value, basis: opts.root ? "live read, unbound" : "live read, no capture" } : null;
-      })()
-    : null;
+  // The live setting is read ONLY when there is no capture object at all. A
+  // capture that recorded no window (`captureKind: "absent"`) is a captured
+  // null: re-reading the file here would report a window this process is not
+  // actually running under.
+  const liveReading = provenance.capture === null ? readAutoCompactWindow(opts.root ?? opts.cwd, opts.userSettingsPath) : null;
+  const liveSetting = liveReading ? { value: liveReading.value, basis: opts.root ? "live read, unbound" : "live read, no capture" } : null;
+  // T-501: the advisory's inputs, from the same resolution, passed explicitly
+  // into the pure sampler.
+  const usage: UsageAdvisoryInput = provenance.capture !== null
+    ? { window: provenance.capture.autoCompactWindowAtStart, source: provenance.capture.autoCompactWindowSource, provenance: "capture" }
+    : liveReading
+      ? { window: liveReading.value, source: liveReading.source, provenance: "live" }
+      : { window: null, source: null, provenance: "none" };
   const ceiling = resolveCeiling({
     sessionId,
     target: provenance,
@@ -245,7 +252,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
     cfg,
   });
   const sampledAt = new Date(now).toISOString();
-  const compute = (rec: typeof recordNow) => computeSample({ scan, ceiling, cfg, sampledBy: opts.sampledBy, sampledAt, record: rec });
+  const compute = (rec: typeof recordNow) => computeSample({ scan, ceiling, cfg, sampledBy: opts.sampledBy, sampledAt, record: rec, usage });
   let pressure = compute(recordNow);
 
   // 5. Persist + ingest.

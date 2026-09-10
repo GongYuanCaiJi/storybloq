@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
 import { ensureCapture } from "../../src/core/session-intel/capture.js";
-import { applyBannerToMcpText, cliBannerFor, guideDirectiveFor, stampHandoverForCaller, tokenPressureBannerFor } from "../../src/core/session-intel/push.js";
+import { applyBannerToMcpText, applyStatusPushesToMcpText, cliBannerFor, cliStatusPushesFor, guideDirectiveFor, renderUsageAdvisory, stampHandoverForCaller, statusPushesFor, tokenPressureBannerFor, usageAdvisoryFor } from "../../src/core/session-intel/push.js";
+import type { UsageAdvisory } from "../../src/core/session-intel/types.js";
 import { markCompactPending, readPresenceRecord } from "../../src/core/session-intel/presence-bridge.js";
 import { processEra } from "../../src/core/session-intel/process-era.js";
-import { handleStopHookSample } from "../../src/cli/commands/session-intel.js";
+import { handleSessionIntel, handleStopHookSample } from "../../src/cli/commands/session-intel.js";
 import { handleHandoverCreate } from "../../src/cli/commands/handover.js";
 import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
 import { runReadCommandWithRoot } from "../../src/cli/run.js";
@@ -42,7 +43,7 @@ vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
  * counts `reconcileUnderLock` calls, so a test can assert the write path was
  * never reached rather than only inferring it from one output field.
  */
-const identityInject: { forceFailOnCall: number | null; calls: number; reconcileCalls: number } = { forceFailOnCall: null, calls: 0, reconcileCalls: 0 };
+const identityInject: { forceFailOnCall: number | null; calls: number; reconcileCalls: number; bindingCalls: number; consumeCalls: number; throwOnConsume: boolean } = { forceFailOnCall: null, calls: 0, reconcileCalls: 0, bindingCalls: 0, consumeCalls: 0, throwOnConsume: false };
 vi.mock("../../src/core/session-intel/presence-bridge.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../src/core/session-intel/presence-bridge.js")>();
   const wrappedIdentity: typeof mod.revalidateCandidateIdentity = (candidate, expected) => {
@@ -57,7 +58,18 @@ vi.mock("../../src/core/session-intel/presence-bridge.js", async (importOriginal
     identityInject.reconcileCalls++;
     return mod.reconcileUnderLock(input, budgetMs);
   };
-  return { ...mod, revalidateCandidateIdentity: wrappedIdentity, reconcileUnderLock: wrappedReconcile };
+  // T-501 seams: count acquisitions (one per push pipeline is the contract),
+  // and let a test make the stamp itself throw.
+  const wrappedBinding: typeof mod.resolveCallerBinding = (root, explicit, walk, opts) => {
+    identityInject.bindingCalls++;
+    return mod.resolveCallerBinding(root, explicit, walk, opts);
+  };
+  const wrappedConsume: typeof mod.consumeUsageAdvisory = (root, binding, sample, revisionSeen, now) => {
+    identityInject.consumeCalls++;
+    if (identityInject.throwOnConsume) { identityInject.throwOnConsume = false; throw new Error("injected stamp failure"); }
+    return mod.consumeUsageAdvisory(root, binding, sample, revisionSeen, now);
+  };
+  return { ...mod, revalidateCandidateIdentity: wrappedIdentity, reconcileUnderLock: wrappedReconcile, resolveCallerBinding: wrappedBinding, consumeUsageAdvisory: wrappedConsume };
 });
 
 /**
@@ -120,6 +132,9 @@ afterEach(() => {
   identityInject.forceFailOnCall = null;
   identityInject.calls = 0;
   identityInject.reconcileCalls = 0;
+  identityInject.bindingCalls = 0;
+  identityInject.consumeCalls = 0;
+  identityInject.throwOnConsume = false;
   locateSwap.hook = null;
 });
 
@@ -551,6 +566,425 @@ describe("ISS-1185: worktree fallback (push surfaces)", () => {
         rmSync(f.worktree, { recursive: true, force: true });
         renameSync(movedAside, f.worktree);
       }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-501: the usage-cost advisory. Its own line, its own gate, once per
+// session, and only on the priming call.
+// ---------------------------------------------------------------------------
+
+describe("usage advisory: rendering", () => {
+  const win = (over: Partial<Extract<UsageAdvisory, { kind: "window" }>> = {}): UsageAdvisory =>
+    ({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000, ...over });
+
+  it("names the settings file for each source and never guesses one it does not know", () => {
+    expect(renderUsageAdvisory(win())).toBe(
+      "Your Claude Code auto-compact window is 1,000,000 tokens, set in ~/.claude/settings.json. Larger contexts increase usage on every turn. Set `autoCompactWindow` to 450,000 or lower in that file (see /story settings). It takes effect on the next Claude Code start.",
+    );
+    expect(renderUsageAdvisory(win({ source: "project" }))).toContain("set in .claude/settings.json.");
+    expect(renderUsageAdvisory(win({ source: "local" }))).toContain("set in .claude/settings.local.json.");
+    const unknown = renderUsageAdvisory(win({ source: null, observed: 600_000 }));
+    expect(unknown).toBe(
+      "Your Claude Code auto-compact window is 600,000 tokens, set in your Claude Code settings. Larger contexts increase usage on every turn. Set `autoCompactWindow` to 450,000 or lower in your Claude Code settings (see /story settings). It takes effect on the next Claude Code start.",
+    );
+    expect(unknown).not.toContain("settings.json");
+  });
+
+  it("the model message claims only what was observed and carries no cost multiplier", () => {
+    const text = renderUsageAdvisory({ kind: "model", nativeWindow: 1_000_000, recommendedMax: 450_000 });
+    expect(text).toBe(
+      "This session runs a 1M-context model, and Storybloq did not observe an `autoCompactWindow` setting, so context can grow toward 1,000,000 tokens and usage rises with it on every turn. Set `autoCompactWindow` to 450,000 or lower in ~/.claude/settings.json (see /story settings). It takes effect on the next Claude Code start.",
+    );
+    for (const forbidden of ["half", "twice", "4x", "2x", "double"]) expect(text).not.toContain(forbidden);
+  });
+});
+
+describe("usageAdvisoryFor", () => {
+  /** Binds the caller with a 1,000,000 window captured at start, then persists one ok sample. */
+  function primedWide(f: Fx, now = T0 + 5 * 60_000): string {
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+    return primed(f, 10_000, now);
+  }
+
+  it("an ok sample still yields the advisory: it bypasses the pressure gate entirely", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      expect(tokenPressureBannerFor(f.root, { now, ...seams(f) })).toBeNull();
+      const a = usageAdvisoryFor(f.root, { now, ...seams(f) });
+      expect(a?.advisory).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000 });
+      expect(a!.text).toContain("~/.claude/settings.json");
+    });
+  });
+
+  it("is not yielded before it is stamped, and never a second time once it is", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      const first = usageAdvisoryFor(f.root, { now, ...seams(f) })!;
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      expect(first.commit()).toBe(true);
+      expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+      expect(usageAdvisoryFor(f.root, { now: now + 1000, ...seams(f) })).toBeNull();
+    });
+  });
+
+  it("enabled=false, banner=false, a Codex client, an unbound caller and a blown budget all yield nothing", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).not.toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { banner: false } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { enabled: false } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), "{}");
+      process.env.STORYBLOQ_CLIENT = "codex";
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      delete process.env.STORYBLOQ_CLIENT;
+      let ticks = 0;
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f), clock: () => T0 + (ticks++ === 0 ? 0 : 10_000) })).toBeNull();
+      // Nothing was consumed by any of the refusals.
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).not.toBeNull();
+    });
+  });
+
+  it("eligibility is recomputed from the CURRENT config against the cached inputs, and 0 disables without consuming the stamp", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 600_000 }));
+      primed(f, 10_000, now);
+      expect(intelOf(f.root).lastSample?.usageInput).toEqual({ window: 600_000, source: "user", oneMillionFlag: null });
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })?.advisory).toMatchObject({ observed: 600_000, recommendedMax: 450_000 });
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { recommendedWindowMax: 800_000 } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { recommendedWindowMax: 0 } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { recommendedWindowMax: 500_000 } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })?.advisory).toMatchObject({ recommendedMax: 500_000 });
+    });
+  });
+
+  it("a window that only becomes excessive after the max is lowered is advised then, with no new sample", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 500_000 }));
+      primed(f, 10_000, now);
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { recommendedWindowMax: 600_000 } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })).toBeNull();
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { recommendedWindowMax: 450_000 } }));
+      expect(usageAdvisoryFor(f.root, { now, ...seams(f) })?.advisory).toEqual({ kind: "window", observed: 500_000, source: "user", recommendedMax: 450_000 });
+    });
+  });
+
+  it("the worktree-fallback binding still finds the record (ISS-1185)", async () => {
+    const pair = makeWorktreePair("si-t501-wt-");
+    const savedSid = process.env.CLAUDE_CODE_SESSION_ID;
+    try {
+      await initProject(pair.worktree, { name: "wt" });
+      const projects = join(pair.base, "projects");
+      mkdirSync(projects, { recursive: true });
+      const userSettings = join(pair.base, "settings.json");
+      writeFileSync(userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      const now = T0 + 5 * 60_000;
+      ensureCapture({ root: pair.worktree, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: userSettings });
+      writeTranscript(projects, encoded(pair.worktree), SID, [assistantRecord({ ts: at(2), read: 9_000, cwd: pair.worktree })]);
+      expect(handleStopHookSample({ root: pair.worktree, sessionId: SID, cwd: pair.worktree, now, projectsDir: projects, userSettingsPath: userSettings }).result?.presence).toBe("persisted");
+      // Called with the MAIN checkout as root: the record lives under the worktree.
+      const a = usageAdvisoryFor(pair.main, { now, cwd: pair.worktree, projectsDir: projects, userSettingsPath: userSettings });
+      expect(a?.advisory).toMatchObject({ kind: "window", observed: 1_000_000 });
+      expect(a!.commit()).toBe(true);
+      expect(readPresenceRecord(pair.worktree, SID)!.sessionIntel!.usageAdvisoryShownAt).not.toBeNull();
+    } finally {
+      if (savedSid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = savedSid;
+      pair.cleanup();
+    }
+  });
+});
+
+describe("usage advisory: surfaces", () => {
+  function primedWide(f: Fx, now = T0 + 5 * 60_000): void {
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+    primed(f, 10_000, now);
+  }
+
+  it("applyStatusPushesToMcpText: md gets one line, json one sibling key, and the stamp is consumed exactly once", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      const md = applyStatusPushesToMcpText("body", "md", null, usageAdvisoryFor(f.root, { now, ...seams(f) }));
+      expect(md.split("auto-compact window is")).toHaveLength(2);
+      expect(md).toMatch(/^Your Claude Code auto-compact window is 1,000,000 tokens/);
+      expect(md).toMatch(/body$/);
+      expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+      // Second call: nothing to attach.
+      expect(applyStatusPushesToMcpText("body", "md", null, usageAdvisoryFor(f.root, { now: now + 1000, ...seams(f) }))).toBe("body");
+    });
+  });
+
+  it("json: the sibling key sits beside tokenPressure; a non-object json shape attaches nothing and consumes nothing", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      const array = applyStatusPushesToMcpText("[1,2]", "json", null, usageAdvisoryFor(f.root, { now, ...seams(f) }));
+      expect(array).toBe("[1,2]");
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      const broken = applyStatusPushesToMcpText("not json", "json", null, usageAdvisoryFor(f.root, { now, ...seams(f) }));
+      expect(broken).toBe("not json");
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      // Both siblings together: the advisory must not displace the pressure
+      // banner, and a failed stamp must not take the banner with it.
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(6), read: Math.ceil(0.7 * 0.925 * 1_000_000) })]);
+      handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      const both = statusPushesFor(f.root, { now: now + 1000, ...seams(f) });
+      expect(both.banner?.state).toBe("advisory");
+      expect(both.usage).not.toBeNull();
+      const json = JSON.parse(applyStatusPushesToMcpText(JSON.stringify({ version: 1, data: { x: 1 } }), "json", both.banner, both.usage)) as Record<string, unknown>;
+      expect(json.usageAdvisory).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000, message: expect.stringContaining("~/.claude/settings.json") });
+      expect(json.tokenPressure).toMatchObject({ state: "advisory" });
+      expect(json.data).toEqual({ x: 1 });
+      expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+      // Failed stamp: the banner and the payload survive, the advisory does not.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, usageAdvisoryShownAt: null } }));
+      const again = statusPushesFor(f.root, { now: now + 2000, ...seams(f) });
+      inject.forceOutcome = { status: "skipped-lock-busy" };
+      inject.calls = 0;
+      inject.onCall = 1;
+      const stripped = JSON.parse(applyStatusPushesToMcpText(JSON.stringify({ version: 1, data: { x: 1 } }), "json", again.banner, again.usage)) as Record<string, unknown>;
+      expect(stripped.usageAdvisory).toBeUndefined();
+      expect(stripped.tokenPressure).toMatchObject({ state: "advisory" });
+      expect(stripped.data).toEqual({ x: 1 });
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+    });
+  });
+
+  it("a failed stamp strips the line again: nothing is ever shown unstamped", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      const push = usageAdvisoryFor(f.root, { now, ...seams(f) });
+      expect(push).not.toBeNull();
+      inject.forceOutcome = { status: "skipped-lock-busy" };
+      inject.calls = 0;
+      inject.onCall = 1;
+      expect(applyStatusPushesToMcpText("body", "md", null, push)).toBe("body");
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+    });
+  });
+
+  it("only the status surface attaches it: an unrelated read tool and every write tool leave the stamp alone", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      const other = await runMcpReadTool(f.root, () => ({ output: "hello" }));
+      expect((other.content[0] as { text: string }).text).toBe("hello");
+      const written = await runMcpWriteTool(f.root, async () => ({ output: "wrote" }));
+      expect((written.content[0] as { text: string }).text).toBe("wrote");
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      const status = await runMcpReadTool(f.root, () => ({ output: "hello" }), undefined, "md", { usageAdvisory: true });
+      expect((status.content[0] as { text: string }).text).toMatch(/^Your Claude Code auto-compact window/);
+      expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+    });
+  });
+
+  it("an isError result attaches nothing and consumes nothing", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      const err = await runMcpReadTool(f.root, () => ({ output: "boom", errorCode: "io_error" }), undefined, "md", { usageAdvisory: true });
+      expect(err.isError).toBe(true);
+      expect((err.content[0] as { text: string }).text).not.toMatch(/auto-compact window/);
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+    });
+  });
+
+  it("CLI status: md appends the line, json emits it on stderr, and both stamp exactly once", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      const out = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+      const errw = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      const origCwd = process.cwd();
+      process.chdir(f.root);
+      try {
+        await runReadCommandWithRoot("md", f.root, () => ({ output: "body" }), { usageAdvisory: true });
+        expect(out.mock.calls.map((c) => String(c[0])).join("")).toMatch(/Your Claude Code auto-compact window is 1,000,000 tokens/);
+        expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+        // A second command in the same session shows nothing.
+        out.mockClear();
+        await runReadCommandWithRoot("md", f.root, () => ({ output: "body" }), { usageAdvisory: true });
+        expect(out.mock.calls.map((c) => String(c[0])).join("")).not.toMatch(/auto-compact window/);
+      } finally {
+        process.chdir(origCwd);
+      }
+      // json, on a fresh stamp.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, usageAdvisoryShownAt: null } }));
+      out.mockClear();
+      errw.mockClear();
+      process.chdir(f.root);
+      try {
+        await runReadCommandWithRoot("json", f.root, () => ({ output: JSON.stringify({ version: 1, data: 1 }) }), { usageAdvisory: true });
+        expect(out.mock.calls.map((c) => String(c[0])).join("")).toBe(JSON.stringify({ version: 1, data: 1 }) + "\n");
+        expect(errw.mock.calls.map((c) => String(c[0])).join("")).toMatch(/^\[storybloq\] Your Claude Code auto-compact window/m);
+        expect(intelOf(f.root).usageAdvisoryShownAt).not.toBeNull();
+      } finally {
+        process.chdir(origCwd);
+      }
+      // An ordinary read command never attaches it.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, usageAdvisoryShownAt: null } }));
+      out.mockClear();
+      process.chdir(f.root);
+      try {
+        await runReadCommandWithRoot("md", f.root, () => ({ output: "body" }));
+        expect(out.mock.calls.map((c) => String(c[0])).join("")).not.toMatch(/auto-compact window/);
+        expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      } finally {
+        process.chdir(origCwd);
+      }
+    });
+  });
+
+  it("session intel reports the advisory on every call and never stamps it", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      primed(f, 10_000, now);
+      for (const pass of [1, 2]) {
+        const r = handleSessionIntel({ cwd: f.root, format: "json", now: undefined, projectsDir: f.projects, userSettingsPath: f.userSettings });
+        const data = JSON.parse(r.output).data as { pressure: { usageAdvisory: unknown } };
+        expect(data.pressure.usageAdvisory, `pass ${pass}`).toEqual({ kind: "window", observed: 1_000_000, source: "user", recommendedMax: 450_000 });
+        expect(intelOf(f.root).usageAdvisoryShownAt, `pass ${pass}`).toBeNull();
+      }
+      const md = handleSessionIntel({ cwd: f.root, format: "md", projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(md.output).toMatch(/Usage advisory: /);
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-501, Codex round 1: one acquisition per push pipeline, and a commit that
+// re-checks everything the acquisition proved.
+// ---------------------------------------------------------------------------
+
+describe("usage advisory: one budget, one acquisition, a guarded commit", () => {
+  function primedWide(f: Fx, now = T0 + 5 * 60_000): void {
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+    primed(f, 10_000, now);
+  }
+
+  it("statusPushesFor binds ONCE for both pushes, where the two separate entry points bind twice", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      identityInject.bindingCalls = 0;
+      statusPushesFor(f.root, { now, ...seams(f) });
+      const shared = identityInject.bindingCalls;
+      expect(shared).toBe(1);
+      identityInject.bindingCalls = 0;
+      tokenPressureBannerFor(f.root, { now, ...seams(f) });
+      usageAdvisoryFor(f.root, { now, ...seams(f) });
+      expect(identityInject.bindingCalls).toBeGreaterThan(shared);
+    });
+  });
+
+  it("the MCP status surface acquires once per call and the CLI status surface too", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      identityInject.bindingCalls = 0;
+      await runMcpReadTool(f.root, () => ({ output: "hello" }), undefined, "md", { usageAdvisory: true });
+      expect(identityInject.bindingCalls).toBe(1);
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, usageAdvisoryShownAt: null } }));
+      const out = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+      const origCwd = process.cwd();
+      process.chdir(f.root);
+      try {
+        identityInject.bindingCalls = 0;
+        await runReadCommandWithRoot("md", f.root, () => ({ output: "body" }), { usageAdvisory: true });
+        expect(identityInject.bindingCalls).toBe(1);
+        expect(out.mock.calls.map((c) => String(c[0])).join("")).toMatch(/auto-compact window/);
+      } finally {
+        process.chdir(origCwd);
+      }
+    });
+  });
+
+  it("a budget spent AFTER acquisition refuses the stamp at commit time", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      // The clock is inside budget for every acquisition read, then jumps
+      // past the deadline before `commit()` runs.
+      let jumped = false;
+      const push = usageAdvisoryFor(f.root, { now, ...seams(f), clock: () => (jumped ? T0 + 10_000 : T0) });
+      expect(push).not.toBeNull();
+      jumped = true;
+      expect(push!.commit()).toBe(false);
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      expect(identityInject.consumeCalls).toBe(0);
+    });
+  });
+
+  it("a stamp that throws is absorbed: commit reports false and the response is left alone", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primedWide(f, now);
+      const push = usageAdvisoryFor(f.root, { now, ...seams(f) })!;
+      identityInject.throwOnConsume = true;
+      expect(applyStatusPushesToMcpText("body", "md", null, push)).toBe("body");
+      expect(intelOf(f.root).usageAdvisoryShownAt).toBeNull();
+      // Same through the CLI pipeline.
+      const push2 = usageAdvisoryFor(f.root, { now, ...seams(f) })!;
+      identityInject.throwOnConsume = true;
+      expect(push2.commit()).toBe(false);
+    });
+  });
+
+  it("a fallback record root swapped between acquisition and commit refuses the stamp (ISS-1185)", async () => {
+    const pair = makeWorktreePair("si-t501-swap-");
+    const savedSid = process.env.CLAUDE_CODE_SESSION_ID;
+    try {
+      await initProject(pair.worktree, { name: "wt" });
+      const projects = join(pair.base, "projects");
+      mkdirSync(projects, { recursive: true });
+      const userSettings = join(pair.base, "settings.json");
+      writeFileSync(userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      const now = T0 + 5 * 60_000;
+      ensureCapture({ root: pair.worktree, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: userSettings });
+      writeTranscript(projects, encoded(pair.worktree), SID, [assistantRecord({ ts: at(2), read: 9_000, cwd: pair.worktree })]);
+      expect(handleStopHookSample({ root: pair.worktree, sessionId: SID, cwd: pair.worktree, now, projectsDir: projects, userSettingsPath: userSettings }).result?.presence).toBe("persisted");
+      const push = usageAdvisoryFor(pair.main, { now, cwd: pair.worktree, projectsDir: projects, userSettingsPath: userSettings })!;
+      expect(push).not.toBeNull();
+      // The candidate root's identity no longer matches: the write is refused
+      // rather than landing in whatever now sits at that path.
+      identityInject.forceFailOnCall = identityInject.calls + 1;
+      expect(push.commit()).toBe(false);
+      expect(readPresenceRecord(pair.worktree, SID)!.sessionIntel!.usageAdvisoryShownAt).toBeNull();
+      expect(identityInject.consumeCalls).toBe(0);
+    } finally {
+      if (savedSid === undefined) delete process.env.CLAUDE_CODE_SESSION_ID; else process.env.CLAUDE_CODE_SESSION_ID = savedSid;
+      pair.cleanup();
+    }
+  });
+
+  it("cliStatusPushesFor puts the advisory before the banner and emits both on one acquisition", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+      primed(f, Math.ceil(0.7 * 0.925 * 1_000_000), now);
+      identityInject.bindingCalls = 0;
+      const md = cliStatusPushesFor(f.root, "md", { now, ...seams(f) });
+      expect(identityInject.bindingCalls).toBe(1);
+      expect(md.stdout).toHaveLength(2);
+      expect(md.stdout[0]).toMatch(/^Your Claude Code auto-compact window/);
+      expect(md.stdout[1]).toMatch(/^Context pressure ADVISORY/);
+      expect(md.stderr).toEqual([]);
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, usageAdvisoryShownAt: null } }));
+      const json = cliStatusPushesFor(f.root, "json", { now, ...seams(f) });
+      expect(json.stdout).toEqual([]);
+      expect(json.stderr).toHaveLength(2);
+      expect(json.stderr[0]).toMatch(/^\[storybloq\] Your Claude Code auto-compact window/);
     });
   });
 });

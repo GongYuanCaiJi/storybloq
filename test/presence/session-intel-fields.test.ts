@@ -67,6 +67,7 @@ function sample(over: Partial<SessionIntelSample> = {}): SessionIntelSample {
     },
     imperativeSince: "2026-09-09T09:50:00.000Z",
     suppressedBy: "handover",
+    usageInput: { window: 1_000_000, source: "user", oneMillionFlag: true },
     ...over,
   };
 }
@@ -89,6 +90,7 @@ function full(): SessionIntelPresence {
     handoverWrittenAt: "2026-09-09T09:55:00.000Z",
     tokensAtHandover: 290_000,
     handoverBoundaryAt: "2026-09-09T08:00:00.000Z",
+    usageAdvisoryShownAt: "2026-09-09T09:00:00.000Z",
   };
 }
 
@@ -282,7 +284,11 @@ describe("presence record carries session intel (T-499)", () => {
     expect(bytes).toBeLessThanOrEqual(MAX_RECORD_BYTES);
     // Nothing was shed to get there: the caps, not the ladder, are the bound.
     expect(parsePresenceRecord(text, SESSION)!.sessionIntel).toEqual(intel);
-    expect(bytes).toBeLessThan(MAX_RECORD_BYTES * 0.95);
+    // T-501 added two fields (`lastSample.usageInput` and
+    // `usageAdvisoryShownAt`), so the worst case is about a hundred bytes
+    // larger than the 5%-headroom form of this assertion allowed. Stated as
+    // the margin it is actually about, in bytes.
+    expect(MAX_RECORD_BYTES - bytes).toBeGreaterThan(512);
   });
 });
 
@@ -306,5 +312,51 @@ describe("ensureTelemetrySubdir (T-499)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-501: the advisory's persisted INPUTS and its once-per-session stamp.
+// ---------------------------------------------------------------------------
+
+describe("usage advisory persistence (T-501)", () => {
+  it("round-trips usageInput and the shown stamp", () => {
+    const parsed = parseSessionIntel(JSON.parse(JSON.stringify(full())))!;
+    expect(parsed.lastSample!.usageInput).toEqual({ window: 1_000_000, source: "user", oneMillionFlag: true });
+    expect(parsed.usageAdvisoryShownAt).toBe("2026-09-09T09:00:00.000Z");
+  });
+
+  it("an older record without either field reads null for both, keeping the sample", () => {
+    const { usageAdvisoryShownAt: _s, ...noStamp } = full();
+    const { usageInput: _u, ...noInput } = full().lastSample!;
+    const parsed = parseSessionIntel({ ...noStamp, lastSample: noInput })!;
+    expect(parsed.usageAdvisoryShownAt).toBeNull();
+    expect(parsed.lastSample).not.toBeNull();
+    expect(parsed.lastSample!.usageInput).toBeNull();
+  });
+
+  it("a malformed usageInput reads null WITHOUT dropping the sample, and a malformed stamp reads null", () => {
+    for (const bad of [42, "x", [], { window: "big", source: "user", oneMillionFlag: true }, { window: 1.5 }, { window: 600_000, source: "policy" }]) {
+      const parsed = parseSessionIntel({ ...full(), lastSample: { ...full().lastSample!, usageInput: bad } })!;
+      expect(parsed.lastSample, JSON.stringify(bad)).not.toBeNull();
+      expect(parsed.lastSample!.usageInput, JSON.stringify(bad)).toBeNull();
+    }
+    expect(parseSessionIntel({ ...full(), usageAdvisoryShownAt: "not a date" })!.usageAdvisoryShownAt).toBeNull();
+  });
+
+  it("a partial usageInput keeps only what validates", () => {
+    const parsed = parseSessionIntel({ ...full(), lastSample: { ...full().lastSample!, usageInput: { window: 600_000, source: null, oneMillionFlag: null } } })!;
+    expect(parsed.lastSample!.usageInput).toEqual({ window: 600_000, source: null, oneMillionFlag: null });
+  });
+
+  it("shedding still drops the sample (and the input with it) first, and NEVER the stamp", () => {
+    const shed = fitSessionIntel(full(), sessionIntelBytes(full()) - 1)!;
+    expect(shed.lastSample).toBeNull();
+    expect(shed.usageAdvisoryShownAt).toBe("2026-09-09T09:00:00.000Z");
+    expect(shed.autoCompactWindowAtStart).toBe(450_000);
+  });
+
+  it("a full subtree carrying usageInput and the stamp still fits the real cap", () => {
+    expect(sessionIntelBytes(full())).toBeLessThanOrEqual(MAX_SESSION_INTEL_BYTES);
   });
 });

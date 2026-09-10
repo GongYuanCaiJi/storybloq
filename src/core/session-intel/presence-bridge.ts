@@ -18,7 +18,7 @@
 import * as fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, TRY_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../presence-enrichment.js";
+import { ABORT_ENRICHMENT, applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, TRY_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../presence-enrichment.js";
 import { currentClientTaskId, currentStorybloqClient } from "../../autonomous/client-profile.js";
 import { assertNoSymlinkOnPath } from "../skill-sync-check.js";
 import { presenceDirIfPresent, readBoundedNoFollow, directoryIdentity, ensureTelemetrySubdir, removeRegularFile, telemetrySubdirIfPresent } from "../../presence/io.js";
@@ -54,10 +54,13 @@ export function resolveTargetProvenance(root: string | null, sessionId: string):
   if (!intel) return { era: null, capture: null };
   const entry = intel.era ? readEra(root, intel.era) : null;
   if (entry) {
-    return { era: intel.era, capture: { captureKind: entry.captureKind, autoCompactWindowAtStart: entry.autoCompactWindowAtStart, capturedAt: entry.capturedAt } };
+    // T-501: the source travels with the window in BOTH branches. It only
+    // ever names the file the value came from; older or incomplete data
+    // reports null and the advisory then names no file at all.
+    return { era: intel.era, capture: { captureKind: entry.captureKind, autoCompactWindowAtStart: entry.autoCompactWindowAtStart, autoCompactWindowSource: entry.autoCompactWindowSource, capturedAt: entry.capturedAt } };
   }
   if (intel.capturedAt === null && intel.autoCompactWindowAtStart === null) return { era: intel.era, capture: null };
-  return { era: intel.era, capture: { captureKind: intel.captureKind, autoCompactWindowAtStart: intel.autoCompactWindowAtStart, capturedAt: intel.capturedAt } };
+  return { era: intel.era, capture: { captureKind: intel.captureKind, autoCompactWindowAtStart: intel.autoCompactWindowAtStart, autoCompactWindowSource: intel.autoCompactWindowSource, capturedAt: intel.capturedAt } };
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +570,12 @@ export function compactSample(s: TokenPressureSample): SessionIntelSample {
     observation: s.observation,
     imperativeSince: s.imperativeSince,
     suppressedBy: s.suppressedBy,
+    // T-501: the INPUTS, not the decision -- so a later render decides under
+    // whatever `recommendedWindowMax` is configured then. Null when nothing
+    // was resolved, which keeps an unresolved input off the record entirely.
+    usageInput: s.usageInput.window === null && s.usageInput.source === null && s.oneMillionFlag === null
+      ? null
+      : { window: s.usageInput.window, source: s.usageInput.source, oneMillionFlag: s.oneMillionFlag },
   };
 }
 
@@ -691,6 +700,58 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
     };
   }, () => new Date(now));
   return refused !== null && outcome.status === "written" ? { status: "refused", reason: refused } : outcome;
+}
+
+// ---------------------------------------------------------------------------
+// Usage-cost advisory stamp (T-501)
+// ---------------------------------------------------------------------------
+
+export interface UsageAdvisoryConsumeResult {
+  readonly stamped: boolean;
+  readonly reason: string;
+}
+
+/**
+ * Consumes the once-per-session right to show the usage-cost advisory.
+ *
+ * Every precondition is re-checked INSIDE the lock callback against the
+ * record as it is there -- same era as the caller's binding, the revision the
+ * caller saw, the same `lastSample` by identity, and no stamp yet -- because
+ * a check made before the lock cannot keep two callers from both deciding
+ * they may show it. A failed precondition aborts (`ABORT_ENRICHMENT`): no
+ * serialization, no write, and a record that does not exist is not created.
+ *
+ * `stamped: false` means NO advisory may be shown; a later priming call
+ * retries. The stamp is cleared with the capture transfer on a new era, so
+ * the advisory returns once per process era.
+ */
+export function consumeUsageAdvisory(
+  root: string,
+  binding: { readonly sessionId: string; readonly era: string | null },
+  sample: SessionIntelSample,
+  revisionSeen: number,
+  now: number = Date.now(),
+): UsageAdvisoryConsumeResult {
+  let reason = "not attempted";
+  const outcome = applyPresenceEnrichment(root, binding.sessionId, TRY_LOCK_BUDGET_MS, "session-intel", (base, nowIso) => {
+    const intel = base.sessionIntel;
+    if (!intel) { reason = "no session intel on the record"; return ABORT_ENRICHMENT; }
+    if (base.endedAt !== null) { reason = "session has ended"; return ABORT_ENRICHMENT; }
+    if (binding.era === null || intel.era === null || intel.era !== binding.era) { reason = "era changed since the sample"; return ABORT_ENRICHMENT; }
+    if (intel.revision !== revisionSeen) { reason = "stale revision"; return ABORT_ENRICHMENT; }
+    const last = intel.lastSample;
+    if (!last || last.sampledAt !== sample.sampledAt || last.observation.consumedOffset !== sample.observation.consumedOffset) {
+      reason = "sample replaced since it was read";
+      return ABORT_ENRICHMENT;
+    }
+    if (intel.usageAdvisoryShownAt !== null) { reason = "already shown"; return ABORT_ENRICHMENT; }
+    reason = "stamped";
+    return { ...base, sessionIntel: { ...intel, usageAdvisoryShownAt: nowIso } };
+  }, () => new Date(now));
+  if (reason !== "stamped") return { stamped: false, reason };
+  return outcome.status === "written"
+    ? { stamped: true, reason: "stamped" }
+    : { stamped: false, reason: `presence write ${outcome.status}` };
 }
 
 /** Whether a boundary timestamp lies inside an era entry's proven interval. */

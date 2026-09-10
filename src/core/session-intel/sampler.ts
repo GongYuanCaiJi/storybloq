@@ -19,7 +19,7 @@
 
 import type { SessionIntelPresence, TokenPressureState } from "../../presence/session-intel-fields.js";
 import type { SessionIntelConfig } from "./config.js";
-import type { CeilingResolution, SampledBy, ScanResult, TokenPressureSample } from "./types.js";
+import type { CeilingResolution, SampledBy, ScanResult, TokenPressureSample, UsageAdvisory, UsageAdvisoryInput } from "./types.js";
 
 export interface ComputeSampleInput {
   readonly scan: ScanResult;
@@ -29,6 +29,8 @@ export interface ComputeSampleInput {
   readonly sampledAt: string;
   /** The target's presence subtree as it is NOW (null when none). */
   readonly record: SessionIntelPresence | null;
+  /** T-501: resolved by the caller (query.ts) from the TARGET's capture; this file reads no settings file. */
+  readonly usage: UsageAdvisoryInput;
 }
 
 export const MIN_DELTAS_FOR_P90 = 5;
@@ -59,6 +61,32 @@ export function handoverSuppresses(record: SessionIntelPresence | null, contextT
   return contextTokens < record.tokensAtHandover + cfg.stepPct * ceiling;
 }
 
+/**
+ * T-501: the usage-cost advisory as a pure function of the resolved inputs
+ * and the CURRENT config, so raising, lowering or zeroing
+ * `recommendedWindowMax` changes the outcome without a new sample.
+ *
+ * An observed window decides on its own: above the max it is the advisory,
+ * at or under it there is nothing to say -- including for a 1M-context model,
+ * which compacts at the window, not at its native capacity. The model kind is
+ * therefore reserved for the case where NO window was observed and nothing
+ * bounds the context below 1,000,000.
+ */
+export function usageAdvisoryFrom(
+  input: Pick<UsageAdvisoryInput, "window" | "source">,
+  oneMillionFlag: boolean | null,
+  cfg: SessionIntelConfig,
+): UsageAdvisory | null {
+  const recommendedMax = cfg.recommendedWindowMax;
+  if (recommendedMax === 0) return null;
+  if (input.window !== null) {
+    return input.window > recommendedMax
+      ? { kind: "window", observed: input.window, source: input.source, recommendedMax }
+      : null;
+  }
+  return oneMillionFlag === true ? { kind: "model", nativeWindow: 1_000_000, recommendedMax } : null;
+}
+
 export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   const { scan, ceiling, cfg, record } = input;
   const common = {
@@ -71,6 +99,8 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
     oneMillionFlag: scan.oneMillionFlag,
     modelEvidence: scan.modelEvidence,
     ceiling,
+    usageInput: input.usage,
+    usageAdvisory: usageAdvisoryFrom(input.usage, scan.oneMillionFlag, cfg),
   };
   const previousSince = record?.lastSample?.imperativeSince ?? null;
 

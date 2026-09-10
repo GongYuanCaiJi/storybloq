@@ -13,6 +13,7 @@ import { isPresenceEnabled } from "../../presence/handler.js";
 import { ensureCapture, type CaptureOutcome, type CaptureSource } from "../../core/session-intel/capture.js";
 import { readSessionIntelConfig } from "../../core/session-intel/config.js";
 import { findPresenceRecordAcrossWorktrees, readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
+import { renderUsageAdvisory } from "../../core/session-intel/push.js";
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
 import { scanTail } from "../../core/session-intel/transcript-scan.js";
@@ -70,6 +71,9 @@ export function formatSessionIntelMd(r: SessionIntelResult, root: string | null 
     if (p.state === "imperative") lines.push("", "Write a handover now (storybloq handover create / storybloq_handover_create), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.");
     else if (p.state === "advisory") lines.push("", "Plan a handover before the next large step.");
   }
+  // T-501: reported on every call, whatever the pressure state, and never
+  // stamped -- this surface is the diagnostic, not the push.
+  if (p?.usageAdvisory) lines.push("", `Usage advisory: ${renderUsageAdvisory(p.usageAdvisory)}`);
   lines.push("");
   lines.push(`Session ${r.sessionId ?? "unknown"}: ${r.binding} (${r.bindingReason}); coverage ${r.coverage}, ${r.scannedBytes.toLocaleString()} bytes scanned${r.truncationReason ? `; ${r.truncationReason}` : ""}`);
   if (r.transcriptPath) lines.push(`Transcript: ${r.transcriptPath}`);
