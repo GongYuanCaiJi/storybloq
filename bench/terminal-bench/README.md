@@ -43,15 +43,19 @@ freeze requires a new manifest; affected arms rerun and the report lists both.
 
 ## Authentication (subscriptions, never API keys)
 
-The owner's decision: model calls run on the Claude and ChatGPT subscriptions. The adapter's env
-allow-list accepts exactly `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and
-`CLAUDE_FORCE_OAUTH=1` (harbor then drops any API key so the CLI uses the token) and refuses every
-`*_API_KEY` and every other `CLAUDE_*`, `CODEX_*`, `RB_*` or `*_TOKEN` variable. A2/A4 pass the
+The owner's decision: model calls run on the Claude and ChatGPT subscriptions. The token from
+`claude setup-token` is the ONLY `--ae` value (`--ae CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN"`);
+harbor scrubs every sensitive-looking `--ae` value from the collected artifacts, which is wanted for
+the token. `CLAUDE_FORCE_OAUTH=1` (harbor then drops any API key so the CLI uses the token) must be
+EXPORTED in the launch shell and never passed with `--ae`: as an `--ae` value harbor scrubbed its
+`1` from every collected file and corrupted result.json (r11 dry run). The allow-list refuses every
+`*_API_KEY` and every other `CLAUDE_*`, `CODEX_*`, `RB_*` or `*_TOKEN` variable, in `--ae` and
+exported alike. A2/A4 pass the
 ChatGPT login file with `--ak codex_auth=~/.codex/auth.json` (regular file, mode 0600, `auth_mode`
 chatgpt); it is uploaded to the container's `CODEX_HOME` at `/opt/bench/codex-home` (0700), which is
 OUTSIDE harbor's collection tree; only `codex-home/sessions/` (rollouts) is copied into `/logs/agent`
 at cleanup, so no auth file, refreshed or not, can be collected. Credentials live in `/Volumes/Sharge/cpm-bench/.env` (mode 600, gitignored), sourced
-only in the launch shell and never printed:
+only in the launch shell (`set -a; . /Volumes/Sharge/cpm-bench/.env; set +a`) and never printed:
 
 ```
 CLAUDE_CODE_OAUTH_TOKEN=<output of claude setup-token>
@@ -60,8 +64,9 @@ CODEX_AUTH=/Users/<owner>/.codex/auth.json
 ```
 
 The report parser refuses to build when any collected artifact (every file and every tar member
-read to its end; anything not completely inspectable fails closed, so `story.tgz` is built in a
-same-mount staging directory outside the collection tree and published by hard link, never by mv or cp) carries the Codex login file, an OAuth token (`sk-ant-oat`),
+read to its end; anything not completely inspectable fails closed, so `story.tgz` is built as
+`story.tgz.partial` inside the bind-mounted `/logs/agent` and published by an atomic same-directory
+rename; a leftover `*.partial` is rejected by the scanner) carries the Codex login file, an OAuth token (`sk-ant-oat`),
 the variable assignment or a token field. Cost is therefore ESTIMATED AT API LIST PRICE
 from transcript token counts and is never reconciled against a bill; the harness figure it is
 reconciled against is Claude Code's own estimate. Subscription runs are rate-limit bound: a 429,
@@ -80,7 +85,7 @@ $PY manifest/prepare.py --out /Volumes/Sharge/cpm-bench/artifacts/<date> --story
 $PY manifest/freeze.py .../prepare-manifest.json .../run-manifest.json   # prints the manifest SHA-256 (file bytes)
 PYTHONPATH=$PWD /Volumes/Sharge/cpm-bench/venv/tb-env/bin/harbor run --path .../tasks --agent agents.storybloq_auto:StorybloqAuto \
    --ak manifest=.../run-manifest.json --ak arm=A1 --ak version=<claude code pin> \
-   -m anthropic/claude-sonnet-5 --ae CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" --ae CLAUDE_FORCE_OAUTH=1 \
+   -m anthropic/claude-sonnet-5 --ae CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
    [--ak codex_auth="$CODEX_AUTH"]  -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
    --agent-include-logs '**' 2>&1 | tee /Volumes/Sharge/cpm-bench/runs/<job>.log
 $PY report/build_report.py --job A1=/Volumes/Sharge/cpm-bench/runs/<job>/<YYYY-MM-DD__HH-MM-SS> ... \

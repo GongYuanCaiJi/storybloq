@@ -6,11 +6,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Awaitable, Callable
+from typing import Mapping, Any, Awaitable, Callable
 
 ALLOWED_ENV = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
 FORBIDDEN_ENV_RE = re.compile(r"(_API_KEY$|_TOKEN$|^CLAUDE_|^CODEX_|^RB_)")
@@ -42,23 +43,32 @@ def sha256_file(p: Path) -> str:
 
 
 AUTH_MODE = "subscription"  # the owner's decision (2026-09-10): subscriptions, never API keys
-OAUTH_ENV = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_FORCE_OAUTH"}
+TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+FORCE_ENV = "CLAUDE_FORCE_OAUTH"
 
 
-def check_env_allowlist(extra_env: dict[str, str], arm: str) -> None:
-    """Subscription auth only: exactly CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and
-    CLAUDE_FORCE_OAUTH=1 (harbor then drops any API key so the CLI uses the token). Any *_API_KEY,
-    any other CLAUDE_/CODEX_/RB_/*_TOKEN variable is refused. Codex (A2/A4) authenticates with the
-    ChatGPT login file passed as --ak codex_auth=<path>, never with an environment variable."""
+def check_env_allowlist(extra_env: dict[str, str], arm: str, host_env: Mapping[str, str] | None = None) -> None:
+    """Subscription auth only. The token (from `claude setup-token`) travels as the ONLY --ae value:
+    harbor scrubs every --ae value whose key looks sensitive from the collected artifacts, which is
+    wanted for the token. CLAUDE_FORCE_OAUTH (harbor's switch that drops any API key so the CLI uses
+    the token) must come from the launch shell's environment instead: as an --ae value its "1" would
+    be scrubbed out of every collected file, corrupting result.json and the transcripts (seen in the
+    r11 dry run). Any *_API_KEY and any other CLAUDE_/CODEX_/RB_/*_TOKEN variable is refused. Codex
+    (A2/A4) authenticates with the ChatGPT login file passed as --ak codex_auth=<path>."""
+    host = os.environ if host_env is None else host_env
     for k in extra_env:
-        if k in OAUTH_ENV:
+        if k == TOKEN_ENV:
             continue
+        if k == FORCE_ENV:
+            raise InfraError("env-allowlist", f"{FORCE_ENV} must be exported in the launch shell, not passed with --ae (harbor would scrub its value from every artifact)")
         if FORBIDDEN_ENV_RE.search(k):
-            raise InfraError("env-allowlist", f"{k} is not allowed: subscription auth uses only CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_FORCE_OAUTH")
-    if not (extra_env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
-        raise InfraError("env-allowlist", "CLAUDE_CODE_OAUTH_TOKEN missing (--ae CLAUDE_CODE_OAUTH_TOKEN=<claude setup-token>)")
-    if (extra_env.get("CLAUDE_FORCE_OAUTH") or "").strip().lower() not in ("1", "true", "yes"):
-        raise InfraError("env-allowlist", "CLAUDE_FORCE_OAUTH=1 missing (--ae CLAUDE_FORCE_OAUTH=1)")
+            raise InfraError("env-allowlist", f"{k} is not allowed: subscription auth uses only --ae {TOKEN_ENV} and an exported {FORCE_ENV}=1")
+    if not (extra_env.get(TOKEN_ENV) or "").strip():
+        raise InfraError("env-allowlist", f"{TOKEN_ENV} missing (--ae {TOKEN_ENV}=<claude setup-token>)")
+    if (host.get(FORCE_ENV) or "").strip().lower() not in ("1", "true", "yes"):
+        raise InfraError("env-allowlist", f"{FORCE_ENV}=1 must be exported in the launch shell")
+    if (host.get("ANTHROPIC_API_KEY") or "").strip() or (host.get("OPENAI_API_KEY") or "").strip():
+        raise InfraError("env-allowlist", "an API key is exported in the launch shell; subscription runs refuse it")
 
 
 def validate_codex_auth(path: str | None) -> Path:

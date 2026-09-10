@@ -385,6 +385,10 @@ def test_credential_leak_scan_refuses_collected_tokens(tmp_path):
     with pytest.raises(CredentialLeak, match="archive not completely inspectable"):
         scan_credential_leak(agent)
     (agent / "story.tgz").unlink()
+    (agent / "story.tgz.partial").write_bytes(b"\x1f\x8b\x08\x00cut")  # a cut archive build is never inspectable
+    with pytest.raises(CredentialLeak, match="partial archive, not inspectable"):
+        scan_credential_leak(agent)
+    (agent / "story.tgz.partial").unlink()
     # whole-file scanning: a token far beyond the chunk size, and one straddling a chunk boundary, are both found
     from report.parse import SCAN_CHUNK
 

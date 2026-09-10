@@ -70,21 +70,26 @@ def shell(table=None) -> tuple[Shell, FakeExec]:
 
 
 def test_env_allowlist_is_subscription_only():
-    """Owner's decision: subscriptions, never API keys. Exactly the OAuth pair passes; keys and every
-    other client variable are refused; both halves of the pair are required."""
-    check_env_allowlist(dict(OAUTH), "A1")
-    check_env_allowlist(dict(OAUTH), "A2")
+    """Owner's decision: subscriptions, never API keys. The token is the only --ae value; CLAUDE_FORCE_OAUTH
+    must be exported in the launch shell (as an --ae value harbor scrubs its "1" from every artifact); keys
+    and every other client variable are refused, in --ae and in the launch shell alike."""
+    host = {"CLAUDE_FORCE_OAUTH": "1"}
+    check_env_allowlist(dict(OAUTH), "A1", host)
+    check_env_allowlist(dict(OAUTH), "A2", {"CLAUDE_FORCE_OAUTH": "true"})
     for bad in ({"ANTHROPIC_API_KEY": "x", **OAUTH}, {"OPENAI_API_KEY": "y", **OAUTH}, {"GITHUB_TOKEN": "t", **OAUTH}, {"CODEX_HOME": "/x", **OAUTH}, {"RB_CONFIG_PATH": "/x", **OAUTH}):
         with pytest.raises(InfraError, match="env-allowlist"):
-            check_env_allowlist(bad, "A2")
+            check_env_allowlist(bad, "A2", host)
+    with pytest.raises(InfraError, match="must be exported in the launch shell, not passed with --ae"):
+        check_env_allowlist({**OAUTH, "CLAUDE_FORCE_OAUTH": "1"}, "A1", host)
     with pytest.raises(InfraError, match="CLAUDE_CODE_OAUTH_TOKEN missing"):
-        check_env_allowlist({"CLAUDE_FORCE_OAUTH": "1"}, "A1")
-    with pytest.raises(InfraError, match="CLAUDE_FORCE_OAUTH=1 missing"):
-        check_env_allowlist({"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "A1")
-    with pytest.raises(InfraError, match="CLAUDE_FORCE_OAUTH=1 missing"):
-        check_env_allowlist({"CLAUDE_CODE_OAUTH_TOKEN": "t", "CLAUDE_FORCE_OAUTH": "0"}, "A1")
-    with pytest.raises(InfraError, match="CLAUDE_CODE_OAUTH_TOKEN missing"):
-        check_env_allowlist({}, "A1")
+        check_env_allowlist({}, "A1", host)
+    for h in ({}, {"CLAUDE_FORCE_OAUTH": "0"}, {"CLAUDE_FORCE_OAUTH": "false"}):
+        with pytest.raises(InfraError, match="CLAUDE_FORCE_OAUTH=1 must be exported"):
+            check_env_allowlist(dict(OAUTH), "A1", h)
+    for h in ({"CLAUDE_FORCE_OAUTH": "1", "ANTHROPIC_API_KEY": "k"}, {"CLAUDE_FORCE_OAUTH": "1", "OPENAI_API_KEY": "k"}):
+        with pytest.raises(InfraError, match="API key is exported"):
+            check_env_allowlist(dict(OAUTH), "A1", h)
+    check_env_allowlist(dict(OAUTH), "A1")  # the default host env is os.environ (the autouse fixture exports the switch)
 
 
 def test_codex_auth_login_file_is_validated_uploaded_and_removed_before_collection(tmp_path):
@@ -307,7 +312,7 @@ class StrictEnv:
         r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
         r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
         r"^cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund$", r"^chmod 0755 /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude && ln -sf /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude /usr/local/bin/claude$", r'^export PATH="\$HOME/\.local/bin:\$PATH"; claude --version$',
-        r"^cat ~/\.claude/settings\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/story-stage && cd /app && tar czf /logs/story-stage/story\.tgz \.story && ln /logs/story-stage/story\.tgz /logs/agent/story\.tgz && rm -f /logs/story-stage/story\.tgz'$", r"^chmod 0600 /opt/bench/codex-home/auth\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/agent/codex-home/sessions && if \[ -d /opt/bench/codex-home/sessions \]; then cp -R /opt/bench/codex-home/sessions/\. /logs/agent/codex-home/sessions/; fi'$",
+        r"^cat ~/\.claude/settings\.json$", r"^timeout 60 sh -c 'cd /app && tar czf /logs/agent/story\.tgz\.partial \.story && mv -f /logs/agent/story\.tgz\.partial /logs/agent/story\.tgz'$", r"^chmod 0600 /opt/bench/codex-home/auth\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/agent/codex-home/sessions && if \[ -d /opt/bench/codex-home/sessions \]; then cp -R /opt/bench/codex-home/sessions/\. /logs/agent/codex-home/sessions/; fi'$",
         r"^\[ -s /logs/agent/claude-code\.txt \] && \[ -f /logs/agent/story-live/last-snapshot \] && echo READY$",
     ]
 
@@ -360,7 +365,15 @@ class StrictEnv:
         return [c["command"] for c in self.calls]
 
 
-OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test", "CLAUDE_FORCE_OAUTH": "1"}
+OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test"}  # the only --ae value
+
+
+@pytest.fixture(autouse=True)
+def launch_shell_env(monkeypatch):
+    """What the launch shell exports: CLAUDE_FORCE_OAUTH=1 and no API key. Restored after every test."""
+    monkeypatch.setenv("CLAUDE_FORCE_OAUTH", "1")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
 
 def codex_login(tmp_path: Path, **over) -> Path:
@@ -744,9 +757,10 @@ async def test_a2_login_file_never_enters_the_collection_tree(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_story_archive_is_published_by_hard_link_from_a_same_mount_stage(tmp_path):
-    """No mv or cp ever writes story.tgz into the collection tree: the archive is built under /logs/story-stage
-    (same filesystem, not collected) and published with ln, which is atomic and refuses EXDEV."""
+async def test_story_archive_is_built_as_partial_and_published_by_same_directory_rename(tmp_path):
+    """/logs/agent is a bind mount (a hard link from anywhere else fails with EXDEV, seen in the r11 dry run),
+    so the archive is built as story.tgz.partial inside it and published by an atomic same-directory rename.
+    A cut leaves only a *.partial file, which the scanner rejects; a partial story.tgz can never exist."""
     a = build_auto(tmp_path, "A1")
     env = StrictEnv()
     await a.install(env)
@@ -754,12 +768,11 @@ async def test_story_archive_is_published_by_hard_link_from_a_same_mount_stage(t
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(a.run("do it\n", env, None), timeout=0.3)
     tar = next(c for c in env.cmds() if "story.tgz" in c)
-    assert "tar czf /logs/story-stage/story.tgz .story && ln /logs/story-stage/story.tgz /logs/agent/story.tgz && rm -f /logs/story-stage/story.tgz" in tar
-    assert not any(("mv " in c or "cp " in c) and "story.tgz" in c for c in env.cmds())
-    assert not any("tar czf /logs/agent/" in c for c in env.cmds())  # nothing is ever written in place under the collection tree
-    # a failed publication (EXDEV or a cut) leaves the other cleanup steps running and nothing under /logs/agent
+    assert "tar czf /logs/agent/story.tgz.partial .story && mv -f /logs/agent/story.tgz.partial /logs/agent/story.tgz" in tar
+    assert not any("tar czf /logs/agent/story.tgz " in c for c in env.cmds())  # never written in place under its final name
+    assert not any(("ln " in c or "cp " in c) and "story.tgz" in c for c in env.cmds())
     b = build_auto(tmp_path / "b", "A1")
-    env = StrictEnv({"ln /logs/story-stage/story.tgz": (1, "ln: failed to create hard link: Invalid cross-device link")})
+    env = StrictEnv({"mv -f /logs/agent/story.tgz.partial": (1, "")})
     await b.install(env)
     env.hang_on = "harbor_claude_code_instruction_"
     with pytest.raises(asyncio.TimeoutError):

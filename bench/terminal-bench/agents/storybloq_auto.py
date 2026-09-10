@@ -49,7 +49,7 @@ PACKAGE_OF = {"storybloq": "@storybloq/storybloq", "bridge": "codex-claude-bridg
 REMOTE = PurePosixPath("/opt/bench")
 NODE = "/opt/node/bin/node"
 CODEX_HOME_REMOTE = "/opt/bench/codex-home"
-STAGE = "/logs/story-stage"  # same mount as /logs/agent, not collected by harbor  # login file and rollouts live here; only sessions/ is copied out for collection  # the pinned runtime the adapter installs; task images need not ship python
+  # login file and rollouts live here; only sessions/ is copied out for collection  # the pinned runtime the adapter installs; task images need not ship python
 GATE_POLL_SECONDS = 5
 GATE_POLL_ROUNDS = 120
 BIN = REMOTE / "node_modules" / ".bin"
@@ -231,11 +231,11 @@ class StorybloqAuto(ClaudeCode):
             steps += [
                 ("status", f"cd {wd} && {BIN}/storybloq status --format json > {logs}/story-status.json"),
                 ("sessions", f"cd {wd} && {BIN}/storybloq session list --format json > {logs}/story-sessions.json"),
-                # Built in a staging dir on the SAME filesystem as the collection tree but outside it, then
-                # published by hard link: link(2) is atomic and fails with EXDEV instead of copying, so a cut
-                # never leaves a partial archive under /logs/agent (the scanner rejects any archive it
-                # cannot read to the end).
-                ("tar", f"mkdir -p {STAGE} && cd {wd} && tar czf {STAGE}/story.tgz .story && ln {STAGE}/story.tgz {logs}/story.tgz && rm -f {STAGE}/story.tgz"),
+                # /logs/agent is harbor's bind mount, so the only place on the same filesystem is inside it:
+                # build story.tgz.partial there and publish with a same-directory rename (atomic). A cut can
+                # leave only a *.partial file, which the credential scanner rejects as not inspectable, never
+                # a partial story.tgz.
+                ("tar", f"cd {wd} && tar czf {logs}/story.tgz.partial .story && mv -f {logs}/story.tgz.partial {logs}/story.tgz"),
             ]
         return steps
 

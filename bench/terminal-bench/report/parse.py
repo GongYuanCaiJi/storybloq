@@ -423,6 +423,9 @@ def scan_credential_leak(agent_dir: Path) -> None:
         if rel.startswith("codex-home/") and f.name.startswith("auth.json"):
             hits.append(rel)
             continue
+        if f.name.endswith(".partial"):  # a cut archive build: its bytes cannot be inspected as an archive
+            hits.append(f"{rel} (partial archive, not inspectable)")
+            continue
         try:
             with f.open("rb") as fh:
                 leaked = _stream_leak(fh)
