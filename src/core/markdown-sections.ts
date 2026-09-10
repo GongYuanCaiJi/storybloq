@@ -68,6 +68,15 @@ const RATIONALE_MAX_BYTES = 240;
 const INDEX_NON_FILE_MAX_BYTES = 160;
 const INDEX_MAX_IDS = 20;
 
+// CommonMark's plain fence-open rule: at most 3 leading spaces, applied at
+// the top document level where there is no enclosing list item.
+const TOP_LEVEL_FENCE_MAX_INDENT = 3;
+// Marker indent (up to 3) + widest marker text ("123. ", 5 chars) + up to 3
+// more spaces of CommonMark's container-indentation allowance, applied only
+// within a single classified section's body, where a fence may legitimately
+// be nested under a list item.
+const NESTED_FENCE_MAX_INDENT = 11;
+
 const ID_TOKEN_REGEX = /\b(?:T|ISS|N|L)-\d+\b/;
 
 const DECISION_CUE_TOKENS = [
@@ -264,13 +273,61 @@ interface RawSection {
   bodyLines: string[];
 }
 
-function markFenceLines(lines: string[]): boolean[] {
+/**
+ * `maxColumns` bounds how far a fence-open marker may sit from column 0
+ * before it is ignored. Tabs expand to the next multiple of 4, the same
+ * tab-stop model `nestedLineIndent` uses, so a tab-indented line is judged
+ * by its actual expanded column like any other line -- treating "contains
+ * a tab" as an automatic bypass (an earlier version of this function did)
+ * let a tab-indented top-level line open a fence regardless of
+ * `maxColumns`, silently reintroducing the exact swallowed-heading bug the
+ * scoped tolerance was meant to fix (Codex review finding: fence-awareness).
+ */
+function stripFenceOpenIndent(line: string, maxColumns: number): string {
+  let i = 0;
+  let column = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (ch === " ") {
+      column += 1;
+      i++;
+      continue;
+    }
+    if (ch === "\t") {
+      column += 4 - (column % 4);
+      i++;
+      continue;
+    }
+    break;
+  }
+  if (column > maxColumns) return line;
+  return line.slice(i);
+}
+
+/**
+ * `maxOpenIndentColumns` is deliberately a per-call parameter, not a module
+ * constant: the two callers need different tolerances, and defaulting one
+ * over the other here would silently apply the wrong rule to whichever
+ * caller omitted it (Codex review finding: fence-awareness). At the TOP
+ * document level (splitFenceAwareSections), a fence must open within
+ * CommonMark's plain 3-space rule -- widening this here let a top-level
+ * INDENTED CODE SAMPLE's literal "```" line be mistaken for a real fence
+ * opener, swallowing every heading (and its records) until end of document.
+ * WITHIN a single classified section's body (extractBullets), a fence
+ * nested under a list item may legitimately sit at the item's content
+ * indent (marker indent up to 3 spaces, plus marker text up to "123. " = 5
+ * chars) plus up to 3 more spaces of CommonMark's container-indentation
+ * allowance -- up to 11 columns -- which is what a numbered marker like
+ * "10. " (content indent already 4) requires (pen ruling, T-320 commit 1
+ * fence-indent fix).
+ */
+function markFenceLines(lines: string[], maxOpenIndentColumns: number): boolean[] {
   const inFence: boolean[] = new Array(lines.length).fill(false);
   let fenceChar: string | null = null;
   let fenceLen = 0;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] as string;
-    const stripped = line.replace(/^ {0,3}/, "");
+    const stripped = stripFenceOpenIndent(line, maxOpenIndentColumns);
     const match = /^(`{3,}|~{3,})/.exec(stripped);
     const fenceRun = match?.[1];
     if (fenceChar === null) {
@@ -308,7 +365,7 @@ function matchAtxHeading(line: string): { level: number; text: string } | null {
 
 export function splitFenceAwareSections(markdown: string): RawSection[] {
   const lines = markdown.split(/\r\n|\r|\n/);
-  const inFence = markFenceLines(lines);
+  const inFence = markFenceLines(lines, TOP_LEVEL_FENCE_MAX_INDENT);
 
   const root: RawSection = { level: 0, heading: "", bodyLines: [] };
   const sections: RawSection[] = [root];
@@ -350,39 +407,116 @@ interface RawBullet {
   hasNestedFence: boolean;
 }
 
-const BULLET_MARKER_REGEX = /^( {0,3})[-*+][ \t]+(.*)$/;
+/**
+ * A list-item marker is either a GFM dash/star/plus bullet or an ordered-list
+ * marker: 1 to 3 digits immediately followed by "." or ")" then whitespace.
+ * The digit cap means a decimal mid-line ("1.5 ratio") never matches (the
+ * single digit before the "." must be followed directly by whitespace, which
+ * "5" is not) and a four-digit year ("2026. ") never matches either (no
+ * digit-count backtrack reaches "." from any 1-3 digit prefix of "2026") --
+ * both fall through as ordinary prose, which is the intended, accepted
+ * boundary of this grammar, not a gap to special-case.
+ */
+const BULLET_MARKER_REGEX = /^( {0,3})(?:[-*+]|\d{1,3}[.)])[ \t]+(.*)$/;
+
+/**
+ * Column width of the leading spaces-and-tabs run, expanding each tab to
+ * the next multiple of 4. A bullet marker's own indent is at most 3 spaces
+ * (BULLET_MARKER_REGEX), so any leading tab -- alone or after 1-3 leading
+ * spaces -- always expands past that, and correctly counts as nested
+ * content. Walking the full mixed-whitespace prefix (rather than checking
+ * only whether the line STARTS with a tab) is what makes a "one space then
+ * a tab" continuation register as deeper than a 1-3-space marker indent
+ * instead of wrongly ending the bullet (Codex review finding: indentation).
+ */
+function nestedLineIndent(line: string): number {
+  let column = 0;
+  for (const ch of line) {
+    if (ch === " ") {
+      column += 1;
+      continue;
+    }
+    if (ch === "\t") {
+      column += 4 - (column % 4);
+      continue;
+    }
+    break;
+  }
+  return column;
+}
 
 function extractBullets(bodyLines: string[]): RawBullet[] {
   const bullets: RawBullet[] = [];
-  const inFence = markFenceLines(bodyLines);
   let i = 0;
+  // The outer scan (finding bullet-marker lines themselves) tracks its own
+  // STRICT top-level fence state INCREMENTALLY, one line at a time, and
+  // only over lines that are not already claimed by a bullet's nested
+  // region below. A precomputed, whole-body outer fence pass (an earlier
+  // version of this function used one) independently re-evaluates every
+  // line under the strict tolerance, including a bullet's own nested-fence
+  // CLOSING delimiter -- which, sitting at a narrow column valid for the
+  // wide-tolerance opener that started it, is then misread as a fresh
+  // top-level fence-OPEN, corrupting the outer scan's state and dropping
+  // every following sibling bullet (Codex review finding: fence-
+  // awareness, round 4). Skipping nested-region lines entirely here, by
+  // jumping straight from a bullet's marker line to the line after its
+  // nested region, keeps those lines governed exclusively by their own
+  // local wide-tolerance fence scan below.
+  let outerFenceChar: string | null = null;
+  let outerFenceLen = 0;
+
   while (i < bodyLines.length) {
     const line = bodyLines[i] as string;
-    if (!inFence[i]) {
+
+    if (outerFenceChar === null) {
       const m = BULLET_MARKER_REGEX.exec(line);
       if (m) {
         const markerIndent = (m[1] as string).length;
         const firstLine = m[2] as string;
-        const nested: string[] = [];
-        let sawFence = false;
+
+        // The nested region's extent is purely indentation-based
+        // (blank lines always continue it), independent of fence state.
+        // Known limitation (pen byte-review, T-320 commit 1): a column-0
+        // line INSIDE a nested fence's body (not just its opener/closer)
+        // ends the nested region right there, same as any other column-0
+        // line would. This matches CommonMark itself -- a column-0 line
+        // is lazy continuation only for a paragraph, and it closes the
+        // list item's container for a fenced code block the same way it
+        // would for any other block -- so this is spec-accurate, not a
+        // bug to fix.
         let j = i + 1;
         while (j < bodyLines.length) {
           const next = bodyLines[j] as string;
           if (next.trim() === "") {
-            nested.push(next);
             j++;
             continue;
           }
-          const nextIndentMatch = /^( *)/.exec(next);
-          const nextIndent = nextIndentMatch ? (nextIndentMatch[1] as string).length : 0;
-          if (nextIndent <= markerIndent) break;
-          if (inFence[j]) {
+          if (nestedLineIndent(next) <= markerIndent) break;
+          j++;
+        }
+
+        // A fence nested under THIS bullet gets the wider CommonMark
+        // container allowance, scoped to exactly this bullet's own nested
+        // lines via a fresh, local fence scan -- never to content outside
+        // any bullet's nested region, and never observed by the outer
+        // scan's fence state above or below.
+        const nestedRaw = bodyLines.slice(i + 1, j);
+        const nestedInFence = markFenceLines(nestedRaw, NESTED_FENCE_MAX_INDENT);
+        const nested: string[] = [];
+        let sawFence = false;
+        for (let k = 0; k < nestedRaw.length; k++) {
+          const next = nestedRaw[k] as string;
+          if (next.trim() === "") {
+            nested.push(next);
+            continue;
+          }
+          if (nestedInFence[k]) {
             sawFence = true;
           } else {
             nested.push(next);
           }
-          j++;
         }
+
         bullets.push({
           firstLine,
           nestedNonFenceLines: nested.filter((l) => l.trim() !== ""),
@@ -391,6 +525,26 @@ function extractBullets(bodyLines: string[]): RawBullet[] {
         i = j;
         continue;
       }
+    }
+
+    // This line is not a bullet marker claiming a nested region below --
+    // advance the outer, strict-tolerance fence state over it exactly as
+    // markFenceLines would, one line at a time.
+    const stripped = stripFenceOpenIndent(line, TOP_LEVEL_FENCE_MAX_INDENT);
+    const fenceRun = /^(`{3,}|~{3,})/.exec(stripped)?.[1];
+    if (outerFenceChar === null) {
+      if (fenceRun) {
+        outerFenceChar = fenceRun[0] as string;
+        outerFenceLen = fenceRun.length;
+      }
+    } else if (
+      fenceRun &&
+      fenceRun[0] === outerFenceChar &&
+      fenceRun.length >= outerFenceLen &&
+      stripped.slice(fenceRun.length).trim() === ""
+    ) {
+      outerFenceChar = null;
+      outerFenceLen = 0;
     }
     i++;
   }
@@ -558,7 +712,7 @@ function buildUnclassifiedFallback(
       if (paragraphLines.length > 0) break;
       continue;
     }
-    if (/^ {0,3}[-*+][ \t]+/.test(line)) break;
+    if (BULLET_MARKER_REGEX.test(line)) break;
     paragraphLines.push(line);
   }
   if (paragraphLines.length === 0) return null;
@@ -681,8 +835,24 @@ export function selectBoundedRecords(
     reservedCount++;
   }
 
+  // Fill pass, per the plan: id-bearing records in document order, THEN
+  // remaining id-less bullets -- two separate passes, not one combined
+  // document-order walk (pen byte-review finding: an id-less bullet sitting
+  // before an id-bearing one in the source document must not take budget
+  // the id-bearing one needs).
   for (let i = 0; i < candidates.length; i++) {
     if (admitted.has(i)) continue;
+    if ((candidates[i] as SectionRecord).id === null) continue;
+    const result = tryAdmit(selected, candidates[i] as SectionRecord);
+    if (result === null) continue;
+    selected.push(result);
+    selectedOriginalIndices.push(i);
+    admitted.add(i);
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    if (admitted.has(i)) continue;
+    if ((candidates[i] as SectionRecord).id !== null) continue;
     const result = tryAdmit(selected, candidates[i] as SectionRecord);
     if (result === null) continue;
     selected.push(result);
@@ -746,6 +916,9 @@ function fitIndex(
   // reaches reserve-pass decisions (most-recently-reserved first) once every
   // fill-pass record is gone -- exactly the eviction order the plan
   // specifies, with no separate bookkeeping needed.
+  // `+ 1` treats the index as occupying one of the 12 record slots itself
+  // (conservative by design, per the plan's "competes for the SAME
+  // 1,600-byte/12-record budget").
   while (
     working.length > 0 &&
     (!fitsEnvelope(working, index) || working.length + 1 > CAP_RECORDS)
@@ -786,25 +959,41 @@ export function buildTrajectory(
     // relying on Map insertion order over that stream is what implements
     // "textually first" here.
     const firstDispositionThisHandover = new Map<string, TrajectoryDisposition>();
+    // occurrenceCount counts handovers whose continuation/blocked/
+    // owner-gated/carried sections name the id -- a shipped-only mention
+    // sets latest/latestDisposition (via firstDispositionThisHandover
+    // above) but never increments occurrenceCount (pen byte-review
+    // finding).
+    const hasNonShippedMention = new Set<string>();
     for (const occurrence of handover.orderedIdOccurrences) {
       if (!firstDispositionThisHandover.has(occurrence.id)) {
         firstDispositionThisHandover.set(occurrence.id, occurrence.disposition);
       }
+      if (occurrence.disposition !== "shipped") {
+        hasNonShippedMention.add(occurrence.id);
+      }
     }
 
     for (const [id, disposition] of firstDispositionThisHandover) {
-      const existing = byId.get(id);
-      if (!existing) {
+      if (!byId.has(id)) {
         byId.set(id, {
-          occurrenceCount: 1,
+          occurrenceCount: 0,
           firstSeenInWindow: handover.filename,
           latest: handover.filename,
           latestDisposition: disposition,
         });
-      } else {
-        existing.occurrenceCount += 1;
-        existing.firstSeenInWindow = handover.filename;
       }
+    }
+
+    for (const id of hasNonShippedMention) {
+      const entry = byId.get(id) as {
+        occurrenceCount: number;
+        firstSeenInWindow: string;
+        latest: string;
+        latestDisposition: TrajectoryDisposition;
+      };
+      entry.occurrenceCount += 1;
+      entry.firstSeenInWindow = handover.filename;
     }
   }
 
