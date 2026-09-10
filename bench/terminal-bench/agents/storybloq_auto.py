@@ -48,6 +48,10 @@ ARM_ARTIFACTS = {"A1": ("storybloq",), "A2": ("storybloq", "bridge"), "A3": ("st
 PACKAGE_OF = {"storybloq": "@storybloq/storybloq", "bridge": "codex-claude-bridge", "lenses": "@storybloq/lenses"}
 REMOTE = PurePosixPath("/opt/bench")
 NODE = "/opt/node/bin/node"
+# Per package: a Node one-liner that exercises the native binding, printing "ok" on success.
+PREBUILD_PROBES = {
+    "better-sqlite3": lambda d: f'const D=require({json.dumps(d)});const db=new D(":memory:");if(db.prepare("SELECT 1 AS one").get().one!==1)throw new Error("bad row");db.close();console.log("ok")',
+}
 CODEX_HOME_REMOTE = "/opt/bench/codex-home"
   # login file and rollouts live here; only sessions/ is copied out for collection  # the pinned runtime the adapter installs; task images need not ship python
 GATE_POLL_SECONDS = 5
@@ -140,9 +144,37 @@ class StorybloqAuto(ClaudeCode):
             r = await sh.must(f"sha256sum {shlex.quote(remote)} | cut -d' ' -f1", "artifact")
             if r.stdout.strip() != digest:
                 raise InfraError("artifact", f"uploaded {remote} sha {r.stdout.strip()[:12]} != {digest[:12]}")
+        prebuilds = inst.get("prebuilds")
+        if prebuilds is None:
+            raise InfraError("manifest", f"{self.arm} install project records no prebuilds list (re-run prepare.py)")
         r = await sh.run(f"cd {REMOTE} && npm ci --ignore-scripts --no-audit --no-fund", timeout=900)
         if r.return_code != 0:
             raise InfraError("artifact", f"npm ci rc={r.return_code}: {(r.stderr or r.stdout)[-400:]}")
+        # Native addons: install scripts never run, so the manifest-pinned prebuild is placed by hand
+        # and the addon must load on the pinned runtime.
+        for pb in prebuilds:
+            local = local_dir / pb["file"]
+            if not local.exists() or sha256_file(local) != pb["sha256"]:
+                raise InfraError("artifact", f"prebuild {local} missing or differs from manifest")
+            remote = f"{REMOTE}/{Path(pb['file']).name}"
+            await environment.upload_file(local, remote)
+            r = await sh.must(f"sha256sum {shlex.quote(remote)} | cut -d' ' -f1", "artifact")
+            if r.stdout.strip() != pb["sha256"]:
+                raise InfraError("artifact", f"uploaded {remote} sha {r.stdout.strip()[:12]} != {pb['sha256'][:12]}")
+            rel = pb.get("path") or ""
+            parts = rel.split("/")
+            if not rel.startswith("node_modules/") or any(seg in ("", ".", "..") for seg in parts) or parts[-1] != pb["package"]:
+                raise InfraError("manifest", f"prebuild path {rel!r} is not an in-project node_modules path")
+            pkg_dir = f"{REMOTE}/{rel}"
+            await sh.must(f"[ -d {shlex.quote(pkg_dir)} ] && tar -xzf {shlex.quote(remote)} -C {shlex.quote(pkg_dir)} {shlex.quote(pb['member'])}", "artifact")
+            # The require alone loads only JavaScript; the binding is dlopen'd when a database is
+            # opened, so the probe opens one, runs a statement and closes it.
+            probe = PREBUILD_PROBES.get(pb["package"])
+            if probe is None:
+                raise InfraError("manifest", f"no load probe for prebuilt package {pb['package']}")
+            r = await sh.run(f"{NODE} -e {shlex.quote(probe(pkg_dir))}")
+            if r.return_code != 0 or r.stdout.strip() != "ok":
+                raise InfraError("artifact", f"prebuilt {pb['package']} at {rel} does not load on the pinned runtime: {(r.stderr or r.stdout)[-300:]}")
         for name in self._artifacts():
             pkg = PACKAGE_OF[name]
             for rel, digest in (self.manifest.artifact(name).get("files") or {}).items():

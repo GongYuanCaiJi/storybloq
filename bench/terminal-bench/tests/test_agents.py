@@ -154,7 +154,14 @@ def make_manifest(tmp_path: Path, bench_root: Path = ROOT, *, arms=("A1", "A2"),
         (d / "package.json").write_text("{}")
         (d / "package-lock.json").write_text("{}")
         tarballs = {"storybloq": "storybloq.tgz"} | ({"bridge": "bridge.tgz"} if arm == "A2" else {})
-        install[arm] = {"dir": str(d), "package_json_sha256": hashlib.sha256(b"{}").hexdigest(), "package_lock_sha256": hashlib.sha256(b"{}").hexdigest(), "tarballs": tarballs}
+        prebuilds = []
+        if arm == "A2":
+            (d / "prebuilds").mkdir()
+            pb = d / "prebuilds" / "better-sqlite3-v12.11.1-node-v127-linux-x64.tar.gz"
+            pb.write_bytes(b"fake prebuild")
+            prebuilds = [{"package": "better-sqlite3", "version": "12.11.1", "path": "node_modules/better-sqlite3", "abi": "127", "arch": "linux-x64", "url": "https://example.invalid/x.tar.gz",
+                          "file": "prebuilds/better-sqlite3-v12.11.1-node-v127-linux-x64.tar.gz", "sha256": hashlib.sha256(b"fake prebuild").hexdigest(), "member": "build/Release/better_sqlite3.node"}]
+        install[arm] = {"dir": str(d), "package_json_sha256": hashlib.sha256(b"{}").hexdigest(), "package_lock_sha256": hashlib.sha256(b"{}").hexdigest(), "tarballs": tarballs, "prebuilds": prebuilds}
     cd = tmp_path / "install" / "claude"
     cd.mkdir(parents=True)
     (cd / "package.json").write_text('{"dependencies": {"@anthropic-ai/claude-code": "%s"}}' % claude)
@@ -312,6 +319,8 @@ class StrictEnv:
         r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
         r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
         r"^cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund$", r"^chmod 0755 /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude && ln -sf /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude /usr/local/bin/claude$", r'^export PATH="\$HOME/\.local/bin:\$PATH"; claude --version$',
+        r"^\[ -d /opt/bench/node_modules/better-sqlite3 \] && tar -xzf /opt/bench/better-sqlite3-v12\.11\.1-node-v127-linux-x64\.tar\.gz -C /opt/bench/node_modules/better-sqlite3 build/Release/better_sqlite3\.node$",
+        r"^/opt/node/bin/node -e 'const D=require\(\"/opt/bench/node_modules/better-sqlite3\"\);const db=new D\(\":memory:\"\);.*db\.close\(\);console\.log\(\"ok\"\)'$",
         r"^cat ~/\.claude/settings\.json$", r"^timeout 60 sh -c 'cd /app && tar czf /logs/agent/story\.tgz\.partial \.story && mv -f /logs/agent/story\.tgz\.partial /logs/agent/story\.tgz'$", r"^chmod 0600 /opt/bench/codex-home/auth\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/agent/codex-home/sessions && if \[ -d /opt/bench/codex-home/sessions \]; then cp -R /opt/bench/codex-home/sessions/\. /logs/agent/codex-home/sessions/; fi'$",
         r"^\[ -s /logs/agent/claude-code\.txt \] && \[ -f /logs/agent/story-live/last-snapshot \] && echo READY$",
     ]
@@ -319,7 +328,7 @@ class StrictEnv:
     def __init__(self, table: dict[str, tuple[int, str]] | None = None):
         self.table = {"claude --version": (0, "2.1.267 (Claude Code)\n"), "node --version": (0, "v22.23.2\n"), "command -v claude": (0, ""), "sha256sum": (0, "SHA\n"), "storybloq --version": (0, "9.9.9\n"), "codex --version": (0, "codex-cli 0.153.4\n"),
                       '"$HOME" "$PATH"': (0, "/root\n/usr/local/bin:/usr/bin:/bin\n"), "pwd": (0, "/app\n"), "cd /app && ([ -e .story ]": (0, "GIT=yes\nv22.1.0\n"),
-                      "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.cjs": (0, "T-001\n"), "for p in": (0, "")}
+                      "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.cjs": (0, "T-001\n"), "for p in": (0, ""), 'const D=require("/opt/bench/node_modules/better-sqlite3")': (0, "ok\n")}
         self.table.update(table or {})
         self.calls: list[dict] = []
         self.uploads: list[tuple[Path, str]] = []
@@ -429,6 +438,13 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     assert targets[3:5] == ["/opt/bench/package.json", "/opt/bench/package-lock.json"]
     assert "/opt/bench/storybloq.tgz" in targets and "/opt/bench/bridge.tgz" in targets
     assert Path(next(s for s, t in env.uploads if t == "/opt/bench/package.json")) == tmp_path / "install" / "A2" / "package.json"
+    # the native addon the bridge needs is placed from the manifest-pinned prebuild after npm ci and must load
+    pb = "/opt/bench/better-sqlite3-v12.11.1-node-v127-linux-x64.tar.gz"
+    assert pb in [t for _s, t in env.uploads]
+    cmds = env.cmds()
+    assert cmds.index(next(c for c in cmds if c.startswith("cd /opt/bench && npm ci"))) < cmds.index(next(c for c in cmds if c.startswith(f"[ -d /opt/bench/node_modules/better-sqlite3 ] && tar -xzf {pb}")))
+    probe = next(c for c in cmds if c.startswith("/opt/node/bin/node -e 'const D=require(\"/opt/bench/node_modules/better-sqlite3\")"))
+    assert 'new D(":memory:")' in probe and "SELECT 1" in probe and "db.close()" in probe
     assert any(c.startswith("cd /opt/bench && npm ci --ignore-scripts") and "| tail" not in c for c in env.cmds())
     assert a.runtime_env["PATH"] == "/opt/bench/node_modules/.bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
     assert "$" not in a.runtime_env["PATH"]
@@ -599,6 +615,20 @@ async def test_install_failures_are_infra(tmp_path):
     a = build_auto(tmp_path / "c", "A1")
     (tmp_path / "c" / "install" / "A1" / "package-lock.json").write_text("{ }")
     with pytest.raises(InfraError, match="package-lock.json differs"):
+        await a.install(StrictEnv())
+    a = build_auto(tmp_path / "p", "A2")
+    (tmp_path / "p" / "install" / "A2" / "prebuilds" / "better-sqlite3-v12.11.1-node-v127-linux-x64.tar.gz").write_bytes(b"other")
+    with pytest.raises(InfraError, match="prebuild .* differs"):
+        await a.install(StrictEnv())
+    a = build_auto(tmp_path / "q", "A2")
+    with pytest.raises(InfraError, match="does not load on the pinned runtime"):
+        await a.install(StrictEnv({"const D=require(\"/opt/bench/node_modules/better-sqlite3\")": (1, "Could not locate the bindings file")}))
+    a = build_auto(tmp_path / "r", "A2")
+    with pytest.raises(InfraError, match="does not load on the pinned runtime"):
+        await a.install(StrictEnv({"const D=require(\"/opt/bench/node_modules/better-sqlite3\")": (0, "")}))  # exit 0 without the ok line is still a failure
+    a = build_auto(tmp_path / "s", "A2")
+    a.manifest.data["install"]["A2"]["prebuilds"][0]["path"] = "node_modules/../etc"
+    with pytest.raises(InfraError, match="not an in-project node_modules path"):
         await a.install(StrictEnv())
     a = build_auto(tmp_path / "d", "A1")
     env = StrictEnv()

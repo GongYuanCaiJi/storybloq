@@ -128,7 +128,55 @@ def lock_native_binary(proj: Path, lock: dict, claude_version: str) -> dict:
     return {"package": NATIVE_PACKAGE, "file": "claude", "sha256": digest, "tarball_integrity": integrity}
 
 
-def lock_install_projects(out: Path, artifacts: dict, codex_version: str | None, arms: list[str]) -> dict:
+NODE_ABI = {"22": "127", "20": "115", "24": "137"}  # Node major -> module ABI (process.versions.modules)
+
+# Packages whose npm install script builds or downloads a native addon. npm ci runs with
+# --ignore-scripts in the container, so the addon is pinned here instead: the published prebuild
+# for the exact version, Node ABI and linux-x64 is downloaded at prepare time, hashed into the
+# manifest and extracted into the package directory in the container. Any other package with an
+# install script is refused.
+PREBUILD_RECIPES = {
+    "better-sqlite3": lambda version, abi: (f"https://github.com/WiseLibs/better-sqlite3/releases/download/v{version}/better-sqlite3-v{version}-node-v{abi}-linux-x64.tar.gz", "build/Release/better_sqlite3.node"),
+}
+
+
+def pin_prebuilds(proj: Path, lock: dict, node_version: str) -> list[dict]:
+    import urllib.request
+
+    major = node_version.split(".")[0]
+    abi = NODE_ABI.get(major)
+    if not abi:
+        raise SystemExit(f"no known module ABI for Node {node_version}; extend NODE_ABI")
+    out: list[dict] = []
+    for key, entry in (lock.get("packages") or {}).items():
+        if not entry.get("hasInstallScript"):
+            continue
+        pkg = key.rsplit("node_modules/", 1)[-1]
+        parts = key.split("/")
+        if not key.startswith("node_modules/") or any(seg in ("", ".", "..") for seg in parts) or parts[-1] != pkg or pkg in PREBUILD_RECIPES and parts[-2] != "node_modules":
+            raise SystemExit(f"lock key {key!r} is not an in-project node_modules path; refusing")
+        recipe = PREBUILD_RECIPES.get(pkg)
+        if not recipe:
+            raise SystemExit(f"{key}@{entry.get('version')} has an install script and no pinned prebuild recipe; refusing (scripts never run in the container)")
+        url, member = recipe(entry["version"], abi)
+        d = proj / "prebuilds"
+        d.mkdir(exist_ok=True)
+        fname = f"{pkg}-v{entry['version']}-node-v{abi}-linux-x64.tar.gz"
+        if (d / fname).exists() and any(o["file"] == f"prebuilds/{fname}" for o in out):
+            pass  # same version pinned at two lock paths shares one tarball
+        else:
+            urllib.request.urlretrieve(url, d / fname)
+        with tarfile.open(d / fname, "r:gz") as tf:
+            names = tf.getnames()
+        if member not in names:
+            raise SystemExit(f"{fname} lacks {member}: {names}")
+        # path: the lockfile key, i.e. where npm ci places this copy relative to the project root;
+        # nested copies and several locked versions each get their own binding.
+        out.append({"package": pkg, "version": entry["version"], "path": key, "abi": abi, "arch": "linux-x64", "url": url, "file": f"prebuilds/{fname}", "sha256": sha256(d / fname), "member": member})
+    return out
+
+
+def lock_install_projects(out: Path, artifacts: dict, codex_version: str | None, arms: list[str], node_version: str = "") -> dict:
     """One locked project per TREATMENT arm holding exactly that arm's dependencies and tarballs.
     A0 is scheduled but installs nothing (harbor's own Claude Code agent only)."""
     projects = {}
@@ -159,7 +207,7 @@ def lock_install_projects(out: Path, artifacts: dict, codex_version: str | None,
                 raise SystemExit(f"lockfile resolved @openai/codex {got!r}, expected {codex_version!r}")
         projects[arm] = {
             "dir": str(proj), "package_json_sha256": sha256(proj / "package.json"), "package_lock_sha256": sha256(proj / "package-lock.json"),
-            "tarballs": {n: f"{n}.tgz" for n in needed},
+            "tarballs": {n: f"{n}.tgz" for n in needed}, "prebuilds": pin_prebuilds(proj, lock, node_version),
         }
     return projects
 
@@ -256,7 +304,7 @@ def main() -> None:
         artifacts["bridge"] = pack(Path(a.bridge).expanduser(), out, "bridge", a.allow_dirty)
     if a.lenses:
         artifacts["lenses"] = pack(Path(a.lenses).expanduser(), out, "lenses", a.allow_dirty)
-    install = lock_install_projects(out, artifacts, a.codex_version, arms)
+    install = lock_install_projects(out, artifacts, a.codex_version, arms, a.node_version)
     install["claude"] = lock_claude_project(out, a.claude_code_version)
     node = fetch_node(out, a.node_version)
     tasks = snapshot_tasks(Path(a.tasks_repo).expanduser(), Path(a.seed_file), out, a.pull_images)

@@ -38,6 +38,16 @@ def freeze(data: dict, prep_bytes: bytes, bench_root: Path = BENCH_ROOT) -> dict
     claude = (data.get("install") or {}).get("claude") or {}
     if not (claude.get("package_lock_sha256") and (claude.get("native") or {}).get("sha256")):
         raise SystemExit("manifest needs the locked claude install project with its native binary hash")
+    for arm, proj in (data.get("install") or {}).items():
+        if arm == "claude":
+            continue
+        pbs = proj.get("prebuilds")
+        if pbs is None:
+            raise SystemExit(f"install project {arm} records no prebuilds list (re-run prepare.py)")
+        for pb in pbs:
+            f = Path(proj["dir"]) / pb["file"]
+            if not f.exists() or hashlib.sha256(f.read_bytes()).hexdigest() != pb["sha256"]:
+                raise SystemExit(f"install project {arm}: prebuild {pb['file']} missing or changed since prepare")
     adapter = {rel: hashlib.sha256((bench_root / rel).read_bytes()).hexdigest() for rel in ADAPTER_FILES}
     prices_path = bench_root / "report" / "prices.json"
     prices = json.loads(prices_path.read_text())

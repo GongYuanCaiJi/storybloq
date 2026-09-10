@@ -105,7 +105,12 @@ checksum-verified Node linux-x64 tarball (`prepare.py --node-version`) extracted
 lock-hashed bytes land and no lifecycle script runs) for the pinned
 `@anthropic-ai/claude-code`. Its postinstall would only hardlink the linux-x64 platform
 package's binary into place; instead the manifest records that binary's SHA-256 and the
-container verifies the installed file and links it as `claude` directly. Harbor's own bootstrap installer (a Bun binary) is never used:
+container verifies the installed file and links it as `claude` directly. The same rule covers the
+treatment-arm install projects: no lifecycle script runs, so a dependency whose install script
+would build or fetch a native addon (`better-sqlite3`, needed by codex-bridge) has its published
+linux-x64 prebuild for the pinned Node ABI downloaded at prepare time, hashed into the manifest
+(`install.<arm>.prebuilds`), placed into the package directory after `npm ci` and
+load-checked with the pinned `node`; any other package with an install script makes prepare refuse. Harbor's own bootstrap installer (a Bun binary) is never used:
 the Terminal-Bench images are linux/amd64 only and it segfaults under qemu on Apple Silicon.
 Install method, node version and tarball hash are recorded in `versions.json`.
 
@@ -156,7 +161,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 72 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 77 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 
