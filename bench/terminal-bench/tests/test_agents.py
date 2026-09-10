@@ -612,6 +612,41 @@ async def test_run_refuses_a_foreign_hook_in_the_effective_config_before_launch(
 
 
 @pytest.mark.asyncio
+async def test_pre_start_hang_cut_by_the_task_timeout_still_writes_the_marker(tmp_path):
+    """harbor cancels the agent on its timeout; a hang BEFORE started.json must still be an infra exclusion."""
+    from agents.baseline import StorybloqBaseline
+
+    a = build_auto(tmp_path, "A1")
+    env = StrictEnv()
+    await a.install(env)
+    env.hang_on = "claude mcp add storybloq"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(a.run("x", env, None), timeout=0.3)
+    cmds = env.cmds()
+    payload = json.loads(shlex.split(next(c for c in cmds if "infra-failure.json" in c))[2])
+    assert payload["reason"] == "pre-start-timeout" and "claude mcp add storybloq" in payload["detail"]
+    assert not any("started.json" in c or "harbor_claude_code_instruction_" in c for c in cmds)
+    (tmp_path / "b").mkdir()
+    b = StorybloqBaseline(tmp_path / "b" / "l", manifest=str(make_manifest(tmp_path / "b")), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    env = StrictEnv()
+    await b.install(env)
+    env.hang_on = "versions.json"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(b.run("x", env, None), timeout=0.3)
+    cmds = env.cmds()
+    assert json.loads(shlex.split(next(c for c in cmds if "infra-failure.json" in c))[2])["reason"] == "pre-start-timeout"
+    assert not any("started.json" in c for c in cmds)
+    # after started.json the same cancellation is NOT pre-start: no marker
+    c = build_auto(tmp_path / "c", "A1")
+    env = StrictEnv()
+    await c.install(env)
+    env.hang_on = "harbor_claude_code_instruction_"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(c.run("x", env, None), timeout=0.3)
+    assert not any("infra-failure.json" in x for x in env.cmds())
+
+
+@pytest.mark.asyncio
 async def test_run_cleanup_on_real_cancellation_after_copier_start(tmp_path):
     a = build_auto(tmp_path, "A1")
     env = StrictEnv()

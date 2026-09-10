@@ -24,6 +24,7 @@ from agents.common import (
     check_home_after_install,
     install_claude_from_artifacts,
     record_infra_failure,
+    record_pre_start_cancellation,
     record_started,
     run_bounded,
     write_file_command,
@@ -79,6 +80,7 @@ class StorybloqBaseline(ClaudeCode):
             await sh.must(write_file_command((logs / "versions.json").as_posix(), json.dumps(versions, sort_keys=True)), "config")
             await record_started(sh, logs)
         except asyncio.CancelledError:
+            await record_pre_start_cancellation(sh, logs)  # a pre-start hang cut by the task timeout is pre-start too
             raise
         except Exception as exc:  # noqa: BLE001  anything before claude starts is pre-start
             await run_bounded(record_infra_failure(sh, logs, exc), 15)

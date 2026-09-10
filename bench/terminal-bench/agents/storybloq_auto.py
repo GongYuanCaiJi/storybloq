@@ -29,6 +29,7 @@ from agents.common import (
     parse_semver,
     preflight_task_state,
     record_infra_failure,
+    record_pre_start_cancellation,
     record_started,
     run_bounded,
     sha256_file,
@@ -236,6 +237,7 @@ class StorybloqAuto(ClaudeCode):
                 rendered = render_instruction(f"/story auto {self.ticket_id}\n\nThe ticket {self.ticket_id} holds the task.\n" + instruction)
                 await record_started(sh, logs, env)  # last pre-start step: a failure here is still pre-start
             except asyncio.CancelledError:
+                await record_pre_start_cancellation(sh, logs)  # a pre-start hang cut by the task timeout is pre-start too
                 raise
             except Exception as exc:  # noqa: BLE001  anything before claude starts is pre-start
                 await run_bounded(record_infra_failure(sh, logs, exc), 15)

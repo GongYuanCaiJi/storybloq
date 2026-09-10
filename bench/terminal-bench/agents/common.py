@@ -176,6 +176,18 @@ async def record_infra_failure(sh: Shell, logs_dir: PurePosixPath, exc: BaseExce
     await write_json(sh, logs_dir / INFRA_MARKER, payload)
 
 
+async def record_pre_start_cancellation(sh: Shell, logs_dir: PurePosixPath) -> None:
+    """A pre-start step that hangs until harbor's task timeout ends in CancelledError, not an
+    exception: write the marker anyway (bounded), naming the command that never returned, so a
+    pre-start hang is an infra exclusion like every other pre-start failure. Never raises."""
+    last = sh.calls[-1]["command"][:300] if sh.calls else "(no command)"
+    exc = InfraError("pre-start-timeout", f"cancelled before claude started; last command: {last}")
+    try:
+        await run_bounded(record_infra_failure(sh, logs_dir, exc), 15)
+    except BaseException:  # noqa: BLE001  the caller re-raises the cancellation regardless
+        pass
+
+
 async def record_started(sh: Shell, logs_dir: PurePosixPath, env: dict[str, str] | None = None) -> None:
     await sh.must(f"date -u +%Y-%m-%dT%H:%M:%SZ > {shlex.quote((logs_dir / STARTED_MARKER).as_posix())}", "config", env, timeout=10)
 

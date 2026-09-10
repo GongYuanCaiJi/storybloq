@@ -94,8 +94,9 @@ skills, MCP config, Codex state or a foreign hook are pre-start infra errors. Th
 configuration under `CLAUDE_CONFIG_DIR` is asserted again before launch. A hook command passes
 only as a single plain invocation of storybloq with an audited subcommand: no shell operators,
 substitutions, quotes or redirections anywhere in the string), `agent/started.json` (written right before claude is
-launched), `agent/infra-failure.json` (written on a PRE-START failure; the only thing the
-report accepts as an infra exclusion), `agent/compliance-error.json` (A0 isolation violated
+launched), `agent/infra-failure.json` (written on a PRE-START failure, including a pre-start hang cut by
+the task timeout, reason `pre-start-timeout`; the only thing the report accepts as an infra
+exclusion), `agent/compliance-error.json` (A0 isolation violated
 after the run; the row stays in the denominator, flagged), `agent/claude-code.txt`
 (stream-json), `agent/sessions/` (Claude transcripts incl. subagents), `agent/codex-home/`
 (Codex rollouts, A2/A4), `agent/story-live/` (incremental copy of `.story/`, each snapshot published by atomic rename
@@ -121,7 +122,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 66 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 67 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 
