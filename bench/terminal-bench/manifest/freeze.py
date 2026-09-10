@@ -32,6 +32,11 @@ def freeze(data: dict, prep_bytes: bytes, bench_root: Path = BENCH_ROOT) -> dict
         for name, v in tasks.items():
             if dir_hash(tdir / name) != v.get("snapshot_sha256"):
                 raise SystemExit(f"{section}: snapshot {name} changed since prepare")
+    node = data.get("node") or {}
+    if not (node.get("version") and node.get("sha256") and Path(node.get("path", "")).exists() and hashlib.sha256(Path(node["path"]).read_bytes()).hexdigest() == node["sha256"]):
+        raise SystemExit("manifest needs a checksum-verified node artifact (prepare.py --node-version)")
+    if not (data.get("install") or {}).get("claude"):
+        raise SystemExit("manifest needs the locked claude install project")
     adapter = {rel: hashlib.sha256((bench_root / rel).read_bytes()).hexdigest() for rel in ADAPTER_FILES}
     prices_path = bench_root / "report" / "prices.json"
     prices = json.loads(prices_path.read_text())

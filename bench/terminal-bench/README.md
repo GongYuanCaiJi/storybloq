@@ -48,21 +48,31 @@ export UV_CACHE_DIR=/Volumes/Sharge/cpm-bench/uv-cache
 PY=/Volumes/Sharge/cpm-bench/venv/tb-env/bin/python
 $PY manifest/prepare.py --out /Volumes/Sharge/cpm-bench/artifacts/<date> --storybloq ../.. \
    --bridge ~/Developer/codex-claude-bridge --tasks-repo <terminal-bench-2 checkout> \
-   --arms A0,A1,A2 --claude-code-version <x.y.z> --codex-version <x.y.z> \
+   --arms A0,A1,A2 --claude-code-version <x.y.z> --codex-version <x.y.z> --node-version <x.y.z> \
    --executor-model claude-sonnet-5 --reviewer-model gpt-6-astra --pull-images
 $PY manifest/freeze.py .../prepare-manifest.json .../run-manifest.json   # prints the manifest SHA-256 (file bytes)
-$PY -m harbor run --path .../tasks --agent agents.storybloq_auto:StorybloqAuto \
+PYTHONPATH=$PWD /Volumes/Sharge/cpm-bench/venv/tb-env/bin/harbor run --path .../tasks --agent agents.storybloq_auto:StorybloqAuto \
    --ak manifest=.../run-manifest.json --ak arm=A1 --ak version=<claude code pin> \
    -m anthropic/claude-sonnet-5 --ae ANTHROPIC_API_KEY=... -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
    --agent-include-logs '**' 2>&1 | tee /Volumes/Sharge/cpm-bench/runs/<job>.log
-$PY report/build_report.py --job A1=/Volumes/Sharge/cpm-bench/runs/<job> ... \
+$PY report/build_report.py --job A1=/Volumes/Sharge/cpm-bench/runs/<job>/<YYYY-MM-DD__HH-MM-SS> ... \
    [--rerun A1=<job dir holding the single authorised reruns>] \
    [--annotate task:arm:attempt="why the harness and transcript costs differ"] \
    --prices report/prices.json --manifest .../run-manifest.json --out report.md
 ```
 
-Run from this directory so `agents` and `report` import. Everything the run stores lives on
-the SSD; nothing benchmark-related goes on the internal disk.
+Run from this directory with `PYTHONPATH=$PWD` (the harbor console script does not put the
+cwd on sys.path). Harbor writes each job under `<-o dir>/<timestamp>/` with one
+`<task>__<id>/` trial directory each; that timestamp directory is what `--job` takes.
+Everything the run stores lives on the SSD; nothing benchmark-related goes on the internal disk.
+
+Claude Code is installed from manifest artifacts, never resolved at run time: a
+checksum-verified Node linux-x64 tarball (`prepare.py --node-version`) extracted to
+`/opt/node`, and a locked install project (`install/claude`, `npm ci --ignore-scripts`, so only
+lock-hashed bytes land and no lifecycle script can fetch anything) for the pinned
+`@anthropic-ai/claude-code`. Harbor's own bootstrap installer (a Bun binary) is never used:
+the Terminal-Bench images are linux/amd64 only and it segfaults under qemu on Apple Silicon.
+Install method, node version and tarball hash are recorded in `versions.json`.
 
 `prepare.py` records the arm schedule (A0 installs nothing), locks one install project per
 treatment arm (exactly that arm's tarballs), materialises every task from the recorded git
@@ -102,7 +112,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 63 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 64 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 

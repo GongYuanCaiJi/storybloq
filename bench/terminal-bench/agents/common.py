@@ -180,6 +180,53 @@ async def record_started(sh: Shell, logs_dir: PurePosixPath, env: dict[str, str]
     await sh.must(f"date -u +%Y-%m-%dT%H:%M:%SZ > {shlex.quote((logs_dir / STARTED_MARKER).as_posix())}", "config", env, timeout=10)
 
 
+NODE_REMOTE = PurePosixPath("/opt/node")
+CLAUDE_REMOTE = PurePosixPath("/opt/claude")
+
+
+async def install_claude_from_artifacts(sh: Shell, environment: Any, root_exec: Callable[[str], Awaitable[Any]], manifest: "Manifest") -> dict[str, str]:
+    """Install the pinned Node runtime and the locked Claude Code project from manifest artifacts.
+    No network resolution: the node tarball is a checksum-verified file from the manifest, and
+    Claude Code comes from a package-lock whose integrity hashes pin every byte (npm ci).
+    Harbor's own bootstrap installer (a Bun binary) is never used: it segfaults under qemu on
+    the amd64 task images. Returns the versions observed; raises InfraError on any mismatch."""
+    node = manifest.require("node")
+    inst = manifest.install_project("claude")
+    pin = manifest.require("claude_code_version")
+    local_tgz = Path(node["path"])
+    if not local_tgz.exists() or sha256_file(local_tgz) != node["sha256"]:
+        raise InfraError("artifact", f"node tarball {local_tgz} missing or differs from manifest")
+    await root_exec(f"mkdir -p {NODE_REMOTE} {CLAUDE_REMOTE} && chmod 0777 {NODE_REMOTE} {CLAUDE_REMOTE}")
+    remote_tgz = f"{NODE_REMOTE}/node.tgz"
+    await environment.upload_file(local_tgz, remote_tgz)
+    r = await sh.must(f"sha256sum {remote_tgz} | cut -d' ' -f1", "artifact")
+    if r.stdout.strip() != node["sha256"]:
+        raise InfraError("artifact", f"uploaded node tarball sha {r.stdout.strip()[:12]} != manifest {node['sha256'][:12]}")
+    await root_exec(f"tar -xzf {remote_tgz} -C {NODE_REMOTE} --strip-components=1 && ln -sf {NODE_REMOTE}/bin/node /usr/local/bin/node && ln -sf {NODE_REMOTE}/bin/npm /usr/local/bin/npm && ln -sf {NODE_REMOTE}/bin/npx /usr/local/bin/npx")
+    r = await sh.must("node --version", "node")
+    if r.stdout.strip() != f"v{node['version']}":
+        raise InfraError("node", f"node --version {r.stdout.strip()!r} != pinned v{node['version']}")
+    local_dir = Path(inst["dir"])
+    for fname, key in (("package.json", "package_json_sha256"), ("package-lock.json", "package_lock_sha256")):
+        if sha256_file(local_dir / fname) != inst.get(key):
+            raise InfraError("manifest", f"claude install/{fname} differs from the frozen manifest")
+        await environment.upload_file(local_dir / fname, f"{CLAUDE_REMOTE}/{fname}")
+        r = await sh.must(f"sha256sum {CLAUDE_REMOTE}/{fname} | cut -d' ' -f1", "artifact")
+        if r.stdout.strip() != inst[key]:
+            raise InfraError("artifact", f"uploaded {fname} sha differs from manifest")
+    # --ignore-scripts: the lockfile's integrity hashes cover every installed byte; lifecycle scripts could
+    # fetch or generate anything, so they never run. The pinned executable is then verified below.
+    r = await sh.run(f"cd {CLAUDE_REMOTE} && npm ci --ignore-scripts --no-audit --no-fund", timeout=900)
+    if r.return_code != 0:
+        raise InfraError("artifact", f"npm ci (claude) rc={r.return_code}: {(r.stderr or r.stdout)[-400:]}")
+    await root_exec(f"ln -sf {CLAUDE_REMOTE}/node_modules/.bin/claude /usr/local/bin/claude")
+    r = await sh.must("claude --version", "artifact")
+    got = parse_semver(r.stdout)
+    if got != pin:
+        raise InfraError("artifact", f"claude --version {r.stdout.strip()!r} != pin {pin}")
+    return {"claude_code_version": got, "claude_install_method": "artifact", "node_version": f"v{node['version']}", "node_sha256": node["sha256"]}
+
+
 async def ensure_clean_home(sh: Shell) -> None:
     r = await sh.must('for p in ~/.claude/skills ~/.claude/settings.json ~/.claude.json ~/.codex; do [ -e "$p" ] && echo "$p"; done; true', "dirty-home")
     if r.stdout.strip():

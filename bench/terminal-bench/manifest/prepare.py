@@ -4,7 +4,7 @@ record image digests. Writes prepare-manifest.json. Nothing here is immutable ye
   python manifest/prepare.py --out /Volumes/Sharge/cpm-bench/artifacts/<date> \
       --storybloq ~/Developer/CPM/storybloq --bridge ~/Developer/codex-claude-bridge \
       --tasks-repo /path/to/terminal-bench-2 --seed-file seed/pilot-tasks.json \
-      --claude-code-version 2.1.267 --codex-version 0.153.4 --executor-model claude-sonnet-5 \
+      --claude-code-version 2.1.267 --codex-version 0.153.4 --node-version 22.23.2 --executor-model claude-sonnet-5 \
       --reviewer-model gpt-6-astra [--pull-images] [--allow-dirty]
 
 `--out` must not exist yet: the snapshot is built fresh so no task from an earlier draw can
@@ -63,6 +63,40 @@ def pack(repo: Path, out: Path, name: str, allow_dirty: bool) -> dict:
     if name == "storybloq":
         entry["skill_sha256"] = files.get("src/skill/SKILL.md")
     return entry
+
+
+def fetch_node(out: Path, version: str) -> dict:
+    """Checksum-verified Node runtime tarball (linux-x64: the task images are amd64 only)."""
+    import urllib.request
+
+    if not EXACT_VERSION.match(version):
+        raise SystemExit("--node-version must be an exact x.y.z")
+    d = out / "node"
+    d.mkdir()
+    name = f"node-v{version}-linux-x64.tar.gz"
+    base = f"https://nodejs.org/dist/v{version}/"
+    urllib.request.urlretrieve(base + name, d / name)
+    sums = urllib.request.urlopen(base + "SHASUMS256.txt").read().decode()
+    expected = next((line.split()[0] for line in sums.splitlines() if line.split()[-1] == name), None)
+    if not expected:
+        raise SystemExit(f"{name} not in SHASUMS256.txt")
+    got = sha256(d / name)
+    if got != expected:
+        raise SystemExit(f"node tarball sha {got[:12]} != published {expected[:12]}")
+    return {"version": version, "arch": "linux-x64", "path": str(d / name), "sha256": got, "source": base + name}
+
+
+def lock_claude_project(out: Path, claude_version: str) -> dict:
+    """Locked install project for Claude Code itself; npm ci in the container pins every byte."""
+    proj = out / "install" / "claude"
+    proj.mkdir(parents=True)
+    (proj / "package.json").write_text(json.dumps({"name": "storybloq-bench-claude", "private": True, "dependencies": {"@anthropic-ai/claude-code": claude_version}}, indent=2) + "\n")
+    sh(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"], proj)
+    lock = json.loads((proj / "package-lock.json").read_text())
+    got = ((lock.get("packages") or {}).get("node_modules/@anthropic-ai/claude-code") or {}).get("version")
+    if got != claude_version:
+        raise SystemExit(f"lockfile resolved @anthropic-ai/claude-code {got!r}, expected {claude_version!r}")
+    return {"dir": str(proj), "package_json_sha256": sha256(proj / "package.json"), "package_lock_sha256": sha256(proj / "package-lock.json")}
 
 
 def lock_install_projects(out: Path, artifacts: dict, codex_version: str | None, arms: list[str]) -> dict:
@@ -172,6 +206,7 @@ def main() -> None:
     ap.add_argument("--arms", default="A0,A1,A2", help="arms in the frozen schedule (A0 installs nothing)")
     ap.add_argument("--claude-code-version", required=True)
     ap.add_argument("--codex-version")
+    ap.add_argument("--node-version", required=True, help="exact Node runtime version installed in every container (linux-x64 tarball, checksum-verified)")
     ap.add_argument("--executor-model", required=True)
     ap.add_argument("--reviewer-model")
     ap.add_argument("--reviewer-effort", default="medium")
@@ -193,13 +228,15 @@ def main() -> None:
     if a.lenses:
         artifacts["lenses"] = pack(Path(a.lenses).expanduser(), out, "lenses", a.allow_dirty)
     install = lock_install_projects(out, artifacts, a.codex_version, arms)
+    install["claude"] = lock_claude_project(out, a.claude_code_version)
+    node = fetch_node(out, a.node_version)
     tasks = snapshot_tasks(Path(a.tasks_repo).expanduser(), Path(a.seed_file), out, a.pull_images)
     smoke = snapshot_smoke(Path(a.tasks_repo).expanduser(), out, a.pull_images)
     harbor_version = sh([sys.executable, "-c", "import importlib.metadata as m; print(m.version('harbor'))"])
     manifest = {
         "kind": "prepare", "date": datetime.now(timezone.utc).isoformat(), "harbor_version": harbor_version,
         "storybloq_commit": artifacts["storybloq"]["commit"], "storybloq_dirty": artifacts["storybloq"]["dirty"],
-        "skill_sha256": artifacts["storybloq"]["skill_sha256"], "artifacts": artifacts, "install": install, "arms": arms,
+        "skill_sha256": artifacts["storybloq"]["skill_sha256"], "artifacts": artifacts, "install": install, "node": node, "arms": arms,
         "dataset": "terminal-bench@2.0", "task_repo_commit": tasks["repo_commit"], "tasks": tasks, "smoke": smoke,
         "claude_code_version": a.claude_code_version, "codex_version": a.codex_version,
         "executor_model": a.executor_model, "reviewer_model": a.reviewer_model, "reviewer_effort": a.reviewer_effort,

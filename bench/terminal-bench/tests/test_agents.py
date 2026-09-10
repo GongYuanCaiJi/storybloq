@@ -104,9 +104,18 @@ def make_manifest(tmp_path: Path, bench_root: Path = ROOT, *, arms=("A1", "A2"),
         (d / "package-lock.json").write_text("{}")
         tarballs = {"storybloq": "storybloq.tgz"} | ({"bridge": "bridge.tgz"} if arm == "A2" else {})
         install[arm] = {"dir": str(d), "package_json_sha256": hashlib.sha256(b"{}").hexdigest(), "package_lock_sha256": hashlib.sha256(b"{}").hexdigest(), "tarballs": tarballs}
+    cd = tmp_path / "install" / "claude"
+    cd.mkdir(parents=True)
+    (cd / "package.json").write_text('{"dependencies": {"@anthropic-ai/claude-code": "%s"}}' % claude)
+    (cd / "package-lock.json").write_text('{"lock": "%s"}' % claude)
+    install["claude"] = {"dir": str(cd), "package_json_sha256": hashlib.sha256((cd / "package.json").read_bytes()).hexdigest(), "package_lock_sha256": hashlib.sha256((cd / "package-lock.json").read_bytes()).hexdigest()}
+    node_tgz = tmp_path / "node" / "node-v22.23.2-linux-x64.tar.gz"
+    node_tgz.parent.mkdir(parents=True)
+    node_tgz.write_bytes(b"fake node runtime")
+    node = {"version": "22.23.2", "arch": "linux-x64", "path": str(node_tgz), "sha256": hashlib.sha256(node_tgz.read_bytes()).hexdigest()}
     data = {
         "kind": "run", "adapter_files": {rel: hashlib.sha256((bench_root / rel).read_bytes()).hexdigest() for rel in common.ADAPTER_FILES},
-        "artifacts": art, "install": install, "claude_code_version": claude, "codex_version": "0.153.4", "executor_model": model,
+        "artifacts": art, "install": install, "node": node, "claude_code_version": claude, "codex_version": "0.153.4", "executor_model": model,
         "reviewer_model": "gpt-6-astra", "reviewer_effort": "medium", "harbor_version": "0.22.0", "storybloq_commit": "c0ffee",
     }
     mp = tmp_path / "run-manifest.json"
@@ -248,11 +257,14 @@ class StrictEnv:
         r"^mkdir -p \$CLAUDE_CONFIG_DIR/debug", r"^export PATH=\"\$HOME/\.local/bin:\$PATH\"; harbor_claude_code_instruction_", r"^timeout 60 sh -c ", r"^printf '%s' .* > /logs/agent/collect-errors\.json$",
         r"^printf '%s' .* > /logs/agent/infra-failure\.json$", r"^if \[ -e /logs/agent/sessions/skills \]; then ls -A", r"^printf '%s' .* > /logs/agent/compliance-error\.json$",
         r"^command -v curl", r"^set -euo pipefail; if command -v apk",  # the parent's own claude install path (version mismatch case)
+        r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
+        r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
+        r"^cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund$", r"^ln -sf /opt/claude/node_modules/\.bin/claude /usr/local/bin/claude$", r'^export PATH="\$HOME/\.local/bin:\$PATH"; claude --version$',
         r"^\[ -s /logs/agent/claude-code\.txt \] && \[ -f /logs/agent/story-live/last-snapshot \] && echo READY$",
     ]
 
     def __init__(self, table: dict[str, tuple[int, str]] | None = None):
-        self.table = {"claude --version": (0, "2.1.267 (Claude Code)\n"), "command -v claude": (0, ""), "sha256sum": (0, "SHA\n"), "storybloq --version": (0, "9.9.9\n"), "codex --version": (0, "codex-cli 0.153.4\n"),
+        self.table = {"claude --version": (0, "2.1.267 (Claude Code)\n"), "node --version": (0, "v22.23.2\n"), "command -v claude": (0, ""), "sha256sum": (0, "SHA\n"), "storybloq --version": (0, "9.9.9\n"), "codex --version": (0, "codex-cli 0.153.4\n"),
                       '"$HOME" "$PATH"': (0, "/root\n/usr/local/bin:/usr/bin:/bin\n"), "pwd": (0, "/app\n"), "cd /app && ([ -e .story ]": (0, "GIT=yes\nv22.1.0\n"),
                       "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.py": (0, "T-001\n"), "for p in": (0, "")}
         self.table.update(table or {})
@@ -266,7 +278,7 @@ class StrictEnv:
         assert src.exists(), f"upload of a missing file: {src}"
         self.uploads.append((src, target_path))
         self.sha_answers[target_path] = hashlib.sha256(src.read_bytes()).hexdigest()
-        if target_path.endswith(".tgz"):  # "npm ci" outcome: the tarball's files land under node_modules/<pkg>/
+        if target_path.endswith(".tgz") and target_path.startswith("/opt/bench/"):  # "npm ci" outcome: the tarball's files land under node_modules/<pkg>/
             from agents.storybloq_auto import PACKAGE_OF
 
             pkg = PACKAGE_OF[Path(target_path).name[: -len(".tgz")]]
@@ -288,9 +300,10 @@ class StrictEnv:
         if m:
             target = m.group(1).strip("'")
             return SimpleNamespace(return_code=0, stdout=self.sha_answers.get(target, "SHA") + "\n", stderr="")
-        for key, (rc, out) in self.table.items():
-            if key in command:
-                return SimpleNamespace(return_code=rc, stdout=out, stderr="err" if rc else "")
+        matches = [k for k in self.table if k in command]
+        if matches:
+            rc, out = self.table[max(matches, key=len)]  # the most specific pattern wins
+            return SimpleNamespace(return_code=rc, stdout=out, stderr="err" if rc else "")
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
     def cmds(self) -> list[str]:
@@ -332,7 +345,8 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     env = StrictEnv()
     await a.install(env)
     targets = [t for _s, t in env.uploads]
-    assert targets[:2] == ["/opt/bench/package.json", "/opt/bench/package-lock.json"]
+    assert targets[:3] == ["/opt/node/node.tgz", "/opt/claude/package.json", "/opt/claude/package-lock.json"]  # runtime and claude first
+    assert targets[3:5] == ["/opt/bench/package.json", "/opt/bench/package-lock.json"]
     assert "/opt/bench/storybloq.tgz" in targets and "/opt/bench/bridge.tgz" in targets
     assert Path(next(s for s, t in env.uploads if t == "/opt/bench/package.json")) == tmp_path / "install" / "A2" / "package.json"
     assert any(c.startswith("cd /opt/bench && npm ci --ignore-scripts") and "| tail" not in c for c in env.cmds())
@@ -340,11 +354,66 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     assert "$" not in a.runtime_env["PATH"]
     assert a.runtime_env["CODEX_HOME"] == "/logs/agent/codex-home"
     assert a._versions["claude_code_version"] == "2.1.267" and a._versions["codex_version"] == "0.153.4"
+    assert a._versions["claude_install_method"] == "artifact" and a._versions["node_version"] == "v22.23.2"
+    assert a._versions["node_sha256"] == hashlib.sha256(b"fake node runtime").hexdigest()
+    root_cmds = [c["command"] for c in env.calls if c["user"] == "root"]
+    assert any(c.startswith("tar -xzf /opt/node/node.tgz") for c in root_cmds) and any(c.startswith("ln -sf /opt/claude/node_modules/.bin/claude") for c in root_cmds)
+    assert Path(next(s for s, t in env.uploads if t == "/opt/node/node.tgz")) == tmp_path / "node" / "node-v22.23.2-linux-x64.tar.gz"
+    assert Path(next(s for s, t in env.uploads if t == "/opt/claude/package-lock.json")) == tmp_path / "install" / "claude" / "package-lock.json"
+    order = [c["command"] for c in env.calls]
+    assert order.index(next(c for c in order if c.startswith("cd /opt/claude && npm ci"))) < order.index(next(c for c in order if c.startswith("cd /opt/bench && npm ci")))
+    assert not any("nodesource" in c or "npm install -g" in c or "curl" in c for c in order)  # nothing resolved over the network
+    assert "cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund" in order  # lifecycle scripts never run: only lock-hashed bytes land
     b = build_auto(tmp_path / "b", "A1")
     env = StrictEnv()
     await b.install(env)
     assert "/opt/bench/bridge.tgz" not in [t for _s, t in env.uploads]
     assert "CODEX_HOME" not in b.runtime_env
+
+
+@pytest.mark.asyncio
+async def test_install_from_artifacts_refuses_every_mismatch(tmp_path):
+    """Node tarball hash (host and container), node version, claude lock hash, npm ci failure and the claude version are all pre-start infra errors."""
+    from agents.common import install_claude_from_artifacts
+
+    async def run(sub, env, mutate=None):
+        sub.mkdir()
+        mp = make_manifest(sub)
+        m = common.Manifest.load(mp, ROOT)
+        if mutate:
+            mutate(m, sub)
+        sh = Shell(env.exec)
+
+        async def root(cmd):
+            await env.exec(cmd, user="root")
+
+        return await install_claude_from_artifacts(sh, env, root, m)
+
+    v = await run(tmp_path / "ok", StrictEnv())
+    assert v["claude_install_method"] == "artifact" and v["node_version"] == "v22.23.2" and v["claude_code_version"] == "2.1.267"
+    with pytest.raises(InfraError, match="node tarball .* differs"):
+        await run(tmp_path / "a", StrictEnv(), lambda m, sub: (sub / "node" / "node-v22.23.2-linux-x64.tar.gz").write_bytes(b"other bytes"))
+    env = StrictEnv()
+    real_upload = env.upload_file
+
+    async def corrupt_upload(src, dst):
+        await real_upload(src, dst)
+        if dst == "/opt/node/node.tgz":
+            env.sha_answers[dst] = "corrupt"
+
+    env.upload_file = corrupt_upload
+    with pytest.raises(InfraError, match="uploaded node tarball sha"):
+        await run(tmp_path / "b", env)
+    with pytest.raises(InfraError, match="node --version"):
+        await run(tmp_path / "c", StrictEnv({"node --version": (0, "v22.0.0\n")}))
+    with pytest.raises(InfraError, match="package-lock.json differs"):
+        await run(tmp_path / "d", StrictEnv(), lambda m, sub: (sub / "install" / "claude" / "package-lock.json").write_text("{ }"))
+    with pytest.raises(InfraError, match=r"npm ci \(claude\)"):
+        await run(tmp_path / "e", StrictEnv({"cd /opt/claude && npm ci": (1, "")}))
+    with pytest.raises(InfraError, match="claude --version"):
+        await run(tmp_path / "f", StrictEnv({"claude --version": (0, "2.1.266 (Claude Code)\n")}))
+    with pytest.raises(InfraError, match="manifest lacks node"):
+        await run(tmp_path / "g", StrictEnv(), lambda m, sub: m.data.pop("node"))
 
 
 @pytest.mark.asyncio
@@ -481,7 +550,7 @@ async def test_pre_start_markers_cover_parent_install_and_unexpected_errors(tmp_
 
     mp = make_manifest(tmp_path)
     a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
-    env = StrictEnv({"claude --version": (0, "2.1.266 (Claude Code)\n"), "command -v curl": (1, "")})  # harbor's own install path fails
+    env = StrictEnv({"tar -xzf /opt/node/node.tgz": (1, "")})  # the root extraction fails: harbor raises its own error class
     with pytest.raises(Exception):
         await a.install(env)
     marker = next(c for c in env.cmds() if "infra-failure.json" in c)

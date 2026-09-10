@@ -24,6 +24,7 @@ from agents.common import (
     check_env_allowlist,
     check_pins,
     ensure_clean_home,
+    install_claude_from_artifacts,
     parse_semver,
     preflight_task_state,
     record_infra_failure,
@@ -93,7 +94,8 @@ class StorybloqAuto(ClaudeCode):
     async def install(self, environment: BaseEnvironment) -> None:
         sh = self._shell(environment)
         try:
-            await super().install(environment)
+            self._install_versions = await install_claude_from_artifacts(sh, environment, lambda cmd: self.exec_as_root(environment, cmd), self.manifest)
+            await super().install(environment)  # finds the pinned claude and skips its bootstrap
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -152,6 +154,7 @@ class StorybloqAuto(ClaudeCode):
         if got != self.manifest.require("claude_code_version"):
             raise InfraError("artifact", f"claude --version {r.stdout.strip()!r} != pin {self.manifest.data.get('claude_code_version')}")
         versions["claude_code_version"] = got
+        versions.update(getattr(self, "_install_versions", {}))
         if self.uses_codex():
             r = await sh.must(f"{BIN}/codex --version", "artifact", env)
             got = parse_semver(r.stdout)
