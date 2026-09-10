@@ -636,6 +636,9 @@ Additional skill documentation, loaded on demand:
 
 - **`setup-flow.md`** -- Project detection and AI-Assisted Setup Flow (new project initialization)
 - **`session-guard.md`** -- Active session guard: exceptional verdicts (foreign takeover, expired-COMPACT recovery, unverifiable identity, collisions) and full whitelist semantics
+- **`session-guard-fallback.md`** -- Legacy session-guard path for a confirmed-absent guard tool (mode A) and multi-session conflicts with no `overallAction` (mode B)
+- **`duet-mode.md`** -- Duet mode: owner-paired manager/worker pairing, return-route proof before dispatch
+- **`bus-mode.md`** -- Storybloq Bus mode: polling and coordinating with the current task-bound bus endpoint
 - **`autonomous-mode.md`** -- Autonomous mode, review, plan, and guided execution tiers
 - **`reference.md`** -- Full CLI command and MCP tool reference
 - **`review-contract-template.md`** -- The REVIEW.md review contract template, written verbatim by `setup-flow.md`

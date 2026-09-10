@@ -284,10 +284,16 @@ describe("story skill continuation procedure (T-496)", () => {
       expect(size).toBeLessThanOrEqual(65000);
     });
 
-    it("SKILL.md dropped by at least 35,000 bytes from the pre-ticket baseline", () => {
-      const PRE_TICKET_BASELINE_BYTES = 99670; // measured on main before this ticket's split, see plan-t496.md
+    it("SKILL.md dropped by at least 34,000 bytes from the pre-ticket baseline", () => {
+      // ISS-1186 added three legitimate Support Files inventory lines after
+      // T-496 shipped, narrowing the drop from 35,271 to 34,888 bytes -- this
+      // floor is rounded DOWN to the nearest 1,000 below that measured value
+      // (the ceiling above rounds up; a floor rounds down), so it still proves
+      // a large reduction from the 99,670-byte pre-ticket baseline without
+      // blocking future accurate inventory content. Measured, not estimated.
+      const PRE_TICKET_BASELINE_BYTES = 99670; // measured on main before T-496's split, see plan-t496.md
       const size = readFileSync(SKILL_PATH).length;
-      expect(PRE_TICKET_BASELINE_BYTES - size).toBeGreaterThanOrEqual(35000);
+      expect(PRE_TICKET_BASELINE_BYTES - size).toBeGreaterThanOrEqual(34000);
     });
 
     it("session-guard.md is exactly 40,939 bytes (the untouched, relocated guard body)", () => {

@@ -1101,6 +1101,42 @@ describe("setup-skill", () => {
     expect(tsContent).toContain('"session-guard.md"');
   });
 
+  it("every real supportFiles entry has a Support Files inventory line in SKILL.md (ISS-1186)", async () => {
+    // Directional counterpart to the "no orphaned .md files" reachability
+    // scan: that test asserts inventoried/referenced-implies-reachable; this
+    // one asserts the reverse, installed-implies-inventoried. A file can drift
+    // out of sync in either direction independently, so both tests are needed.
+    const tsContent = await readFile(
+      join(PROJECT_ROOT, "src", "cli", "commands", "setup-skill.ts"),
+      "utf-8",
+    );
+    const match = tsContent.match(/const supportFiles = \[([^\]]*)\];/);
+    expect(match, "supportFiles array not found in setup-skill.ts").not.toBeNull();
+    const supportFiles = match![1]
+      .split(",")
+      .map((entry) => entry.trim().replace(/^"|"$/g, ""))
+      .filter(Boolean);
+    expect(supportFiles.length).toBeGreaterThan(1);
+
+    const skillContent = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    // Scoped to the Support Files section itself, not the whole file -- a
+    // bold-backticked filename mentioned anywhere else (a body reference, a
+    // code sample) must not satisfy this. Support Files is currently the
+    // last level-two section, but the slice still bounds itself to the next
+    // "## " heading (or EOF) rather than assuming that.
+    const sectionStart = skillContent.indexOf("## Support Files");
+    expect(sectionStart, "no Support Files section found in SKILL.md").toBeGreaterThan(-1);
+    const nextHeadingIdx = skillContent.indexOf("\n## ", sectionStart + 1);
+    const inventorySection =
+      nextHeadingIdx === -1 ? skillContent.slice(sectionStart) : skillContent.slice(sectionStart, nextHeadingIdx);
+    for (const file of supportFiles) {
+      expect(
+        inventorySection.includes(`**\`${file}\`**`),
+        `"${file}" is installed by setup-skill.ts's supportFiles array but has no Support Files inventory line in SKILL.md`,
+      ).toBe(true);
+    }
+  });
+
   it("setup-skill.ts handles subdirectory skills with copyDirRecursive", async () => {
     const tsContent = await readFile(
       join(PROJECT_ROOT, "src", "cli", "commands", "setup-skill.ts"),
