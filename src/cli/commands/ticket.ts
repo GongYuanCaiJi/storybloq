@@ -2,6 +2,7 @@ import { displayIdOf } from "../../core/resolver.js";
 import { nextTicket, nextTickets, blockedTickets } from "../../core/queries.js";
 import { nextTicketID, nextOrder, allocateTeamTicketId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
+import { checkBranchAllocationWarning } from "../../core/branch-allocation-warning.js";
 import { resolveAndNormalizeTicketRef, RefResolutionError } from "../../core/ref-normalization.js";
 import {
   clearClaimOnComplete,
@@ -326,8 +327,10 @@ export async function handleTicketCreate(
   }
 
   let createdTicket: Ticket | undefined;
+  let createdInState: ProjectState | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
+    createdInState = state;
     validatePhase(args.phase, { state });
     const resolvedBlockedBy = args.blockedBy.length > 0
       ? validateAndResolveBlockedBy(args.blockedBy, "", state)
@@ -375,10 +378,14 @@ export async function handleTicketCreate(
   });
 
   if (!createdTicket) throw new Error("Ticket not created");
+  const branchWarning = createdInState
+    ? checkBranchAllocationWarning(root, "ticket", createdInState, displayIdOf(createdTicket))
+    : null;
+  const warnings = branchWarning ? [branchWarning] : undefined;
   if (format === "json") {
-    return { output: JSON.stringify(successEnvelope(createdTicket), null, 2) };
+    return { output: JSON.stringify(successEnvelope(createdTicket), null, 2), ...(warnings && { warnings }) };
   }
-  return { output: `Created ticket ${displayIdOf(createdTicket)}: ${createdTicket.title}` };
+  return { output: `Created ticket ${displayIdOf(createdTicket)}: ${createdTicket.title}`, ...(warnings && { warnings }) };
 }
 
 /**

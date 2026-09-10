@@ -570,6 +570,8 @@ Renumbered items keep their old display id in `previousDisplayIds`, so existing 
 
 With `git-refs`, `team init` also adds `remote-ref-reservations` to `team.requiredFeatures`, so clients that do not declare that capability refuse to create items instead of allocating locally against a git-refs team and colliding. One caveat: current Mac app releases predate reservations while still declaring the capability, so until the Mac-side update ships, avoid creating items from the Mac app on git-refs teams. `storybloq team reserve tickets --count 5` reserves a batch of ids up front.
 
+`local` is unsafe specifically when seats create items on their own branches or worktrees (agent orchestration, per-feature branches) rather than one shared working copy (ISS-1190); `create` warns once per branch per 24h when it detects that shape on the local allocator, and `reconcile`/`team doctor` name the same `git-refs` fix when they find or flag a collision.
+
 ### Schema version and older clients
 
 `team init` stamps `schemaVersion: 3` in `.story/config.json`. CLI releases before 1.5.0 refuse a schemaVersion-3 project cleanly, for both reads and writes, with an upgrade message (`Config schemaVersion 3 exceeds max supported 2. Run: npm update -g @storybloq/storybloq`). The hard failure is deliberate: those clients do not understand team-mode data, and in mixed-version teams they previously produced silent partial reads instead of an error.

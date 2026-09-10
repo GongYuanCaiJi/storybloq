@@ -9,7 +9,7 @@
 import type { Argv } from "yargs";
 import type { CodexReviewKind } from "./commands/codex-review.js";
 import type { SetupClient } from "./commands/setup-skill.js";
-import { runReadCommand, runReadCommandWithRoot, runDeleteCommand, writeOutput } from "./run.js";
+import { runReadCommand, runReadCommandWithRoot, runDeleteCommand, writeOutput, applyHandlerWarnings } from "./run.js";
 import {
   addFormatOption,
   parseOutputFormat,
@@ -1151,7 +1151,7 @@ export function registerTicketCommand(yargs: Argv): Argv {
                 format,
                 eff.root,
               );
-              writeOutput(result.output);
+              writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {
@@ -1769,7 +1769,7 @@ export function registerIssueCommand(yargs: Argv): Argv {
                 format,
                 root,
               );
-              writeOutput(result.output);
+              writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {
@@ -2735,7 +2735,7 @@ export function registerNoteCommand(yargs: Argv): Argv {
                 format,
                 root,
               );
-              writeOutput(result.output);
+              writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {
@@ -4104,7 +4104,7 @@ export function registerLessonCommand(yargs: Argv): Argv {
                 format,
                 root,
               );
-              writeOutput(result.output);
+              writeOutput(applyHandlerWarnings(result.output, format, result.warnings ?? []));
               process.exitCode = result.exitCode ?? ExitCode.OK;
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {

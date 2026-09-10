@@ -53,7 +53,14 @@ const CEILINGS: Readonly<Record<string, number>> = {
   "reference.md": 35000,
   "federation-setup.md": 14000,
   "orchestrator-mode.md": 47000,
-  "duet-mode.md": 9000,
+  // Was 9000 (T-496 post-split measurement). The file was already at
+  // 11,102 measured bytes at HEAD before this ticket touched it (confirmed
+  // via `git show HEAD:.../duet-mode.md | wc -c`); ISS-1190's branch-seats
+  // warning line adds another 314. Same convention as setup-flow.md above:
+  // already over a design target, so the ceiling pins the current measured
+  // size (rounded up) rather than staying a target this file no longer
+  // meets. ISS-1146 is the tracked trim step.
+  "duet-mode.md": 12000,
   "triage-mode.md": 17000,
   "bus-mode.md": 31000,
   "session-guard-fallback.md": 117000,

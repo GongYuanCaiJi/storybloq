@@ -6,7 +6,9 @@ import {
 } from "../../core/project-loader.js";
 import { nextLessonID, allocateTeamLessonId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
+import { checkBranchAllocationWarning } from "../../core/branch-allocation-warning.js";
 import { resolveAndNormalizeLessonRef, RefResolutionError } from "../../core/ref-normalization.js";
+import type { ProjectState } from "../../core/project-state.js";
 import { buildLessonDigest } from "../../core/lessons.js";
 import { isTeamModeConfig } from "../../core/team-capabilities.js";
 import {
@@ -178,8 +180,10 @@ export async function handleLessonCreate(
   }
 
   let createdLesson: Lesson | undefined;
+  let createdInState: ProjectState | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
+    createdInState = state;
     const isTeam = state.config.team?.enabled === true;
     let id: string;
     let displayId: string | undefined;
@@ -246,7 +250,13 @@ export async function handleLessonCreate(
   });
 
   if (!createdLesson) throw new Error("Lesson not created");
-  return { output: formatLessonCreateResult(createdLesson, format) };
+  const branchWarning = createdInState
+    ? checkBranchAllocationWarning(root, "lesson", createdInState, displayIdOf(createdLesson))
+    : null;
+  return {
+    output: formatLessonCreateResult(createdLesson, format),
+    ...(branchWarning && { warnings: [branchWarning] }),
+  };
 }
 
 export async function handleLessonUpdate(

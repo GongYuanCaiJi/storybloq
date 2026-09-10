@@ -87,7 +87,7 @@ export interface ReadCommandPushes {
  * other JSON shape, is left untouched -- never corrupt a shape this wasn't
  * designed for). For markdown, the text is appended as a plain warning line.
  */
-function applyHandlerWarnings(output: string, format: OutputFormat, warnings: readonly string[]): string {
+export function applyHandlerWarnings(output: string, format: OutputFormat, warnings: readonly string[]): string {
   if (warnings.length === 0) return output;
   if (format !== "json") {
     return `${output}\n\nWarning: ${warnings.join("; ")}`;

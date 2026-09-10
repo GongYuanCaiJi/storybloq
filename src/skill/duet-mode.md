@@ -23,6 +23,8 @@ Runtime assignments live in `.story/duet-sessions/<arrangementId>/state.json`, o
 
 Before dispatch, persist an assignment with its ID, scope, allowed actions, acceptance criteria, manager return address, reply mode, and next gate. Carry its ID in every question and result. Arm the completion backstop for each dispatch. Every worker turn ends with a deliverable, a question, or the literal **"turn ending, continue needed"**. Workers with a sender deliver questions and results directly to the manager, then leave the same assignment ID in their final output. Give each result an immutable `reportId`, shared unchanged by its native message and final-output copies; reviews refer to that same report ID.
 
+**Seats on branches (ISS-1190).** If the worker creates items on its own branch/worktree, set `idAllocator: git-refs` before the first such dispatch (`storybloq team init && ...config set idAllocator git-refs`) -- local allocation mints the same next id on divergent branches. Name the allocator in the dispatch.
+
 The manager persists collection cursors and report identities, processes direct and collected copies once, and reviews evidence before resolving an assignment. A worker turn ending without a report triggers collection or a status demand; it does not resolve the assignment. Keep pending questions and owed/owing/resource-hold notes durable. Carry unresolved work through interruptions without redispatching it under a new ID.
 
 While the manager is active, 60 minutes without meaningful worker activity calls for one status demand per silent interval. Polling is not worker activity. This procedure has no watchdog or timed recovery promise while the manager is idle.

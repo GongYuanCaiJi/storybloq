@@ -10,6 +10,7 @@ import {
 import { clearSameSessionEarmark } from "../../core/earmarks.js";
 import { nextIssueID, allocateTeamIssueId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
+import { checkBranchAllocationWarning } from "../../core/branch-allocation-warning.js";
 import { loadCitationContext } from "../../core/ruling-loader.js";
 import { citationMapFor, resolveEntityCitations, resolveCitesRulingsInput } from "../../core/ruling.js";
 import {
@@ -298,6 +299,7 @@ export async function handleIssueCreate(
 
   let createdIssue: Issue | undefined;
   let deduplicated = false;
+  let createdInState: ProjectState | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
     if (args.dedupeKey) {
@@ -328,6 +330,7 @@ export async function handleIssueCreate(
       ? validateAndResolveRelatedTickets(args.relatedTickets, state)
       : [];
 
+    createdInState = state;
     const isTeam = state.config.team?.enabled === true;
     let id: string;
     let displayId: string | undefined;
@@ -370,6 +373,10 @@ export async function handleIssueCreate(
   });
 
   if (!createdIssue) throw new Error("Issue not created");
+  const branchWarning = !deduplicated && createdInState
+    ? checkBranchAllocationWarning(root, "issue", createdInState, displayIdOf(createdIssue))
+    : null;
+  const warnings = branchWarning ? [branchWarning] : undefined;
   if (format === "json") {
     const envelope = successEnvelope(createdIssue) as unknown as Record<string, unknown>;
     return {
@@ -378,12 +385,13 @@ export async function handleIssueCreate(
         null,
         2,
       ),
+      ...(warnings && { warnings }),
     };
   }
   if (deduplicated) {
     return { output: `Issue ${displayIdOf(createdIssue)} already exists for dedupe key ${args.dedupeKey}.` };
   }
-  return { output: `Created issue ${displayIdOf(createdIssue)}: ${createdIssue.title}` };
+  return { output: `Created issue ${displayIdOf(createdIssue)}: ${createdIssue.title}`, ...(warnings && { warnings }) };
 }
 
 export async function handleIssueUpdate(

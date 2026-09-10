@@ -3,6 +3,7 @@ import type { ArrangementCompactResult, ArrangementRotateResult, DuetRoute, Duet
 import { arrangementCapacity, type ArrangementCapacity } from "./arrangement-compaction.js";
 import { assignmentIdOf, isCompactedAssignment } from "../models/duet.js";
 import { displayIdOf } from "./resolver.js";
+import { ENABLE_GIT_REFS_REMEDY } from "./branch-allocation-warning.js";
 import type { OutputFormat, ErrorCode } from "../models/types.js";
 import type { FederationState, FederationNodeEntry } from "../federation/state.js";
 import type { Config } from "../models/config.js";
@@ -2991,7 +2992,9 @@ export function formatReconcileResult(
   format: OutputFormat,
 ): string {
   if (format === "json") {
-    return JSON.stringify(result.ok ? successEnvelope(result.plan) : { ok: false, errors: result.errors }, null, 2);
+    if (!result.ok) return JSON.stringify({ ok: false, errors: result.errors }, null, 2);
+    const remedy = result.plan.renames.length > 0 ? ENABLE_GIT_REFS_REMEDY : undefined;
+    return JSON.stringify(successEnvelope({ ...result.plan, ...(remedy && { remedy }) }), null, 2);
   }
   if (!result.ok) {
     const lines = ["# Reconcile Failed", ""];
@@ -3016,6 +3019,9 @@ export function formatReconcileResult(
       lines.push(`- ${escapeMarkdownInline(w.message)}`);
     }
   }
+  // ISS-1190: the same one-line remedy the create-time warning and team
+  // doctor print, whenever this collision-finding run actually found one.
+  lines.push("", `${escapeMarkdownInline(ENABLE_GIT_REFS_REMEDY)}`);
   return lines.join("\n");
 }
 

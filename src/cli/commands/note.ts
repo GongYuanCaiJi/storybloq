@@ -5,7 +5,10 @@ import {
 } from "../../core/project-loader.js";
 import { nextNoteID, allocateTeamNoteId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
+import { checkBranchAllocationWarning } from "../../core/branch-allocation-warning.js";
 import { resolveAndNormalizeNoteRef, RefResolutionError } from "../../core/ref-normalization.js";
+import { displayIdOf } from "../../core/resolver.js";
+import type { ProjectState } from "../../core/project-state.js";
 import {
   formatNoteList,
   formatNote,
@@ -138,8 +141,10 @@ export async function handleNoteCreate(
   }
 
   let createdNote: Note | undefined;
+  let createdInState: ProjectState | undefined;
 
   await withProjectLock(root, { strict: true }, async ({ state }) => {
+    createdInState = state;
     const isTeam = state.config.team?.enabled === true;
     let id: string;
     let displayId: string | undefined;
@@ -173,7 +178,13 @@ export async function handleNoteCreate(
   });
 
   if (!createdNote) throw new Error("Note not created");
-  return { output: formatNoteCreateResult(createdNote, format) };
+  const branchWarning = createdInState
+    ? checkBranchAllocationWarning(root, "note", createdInState, displayIdOf(createdNote))
+    : null;
+  return {
+    output: formatNoteCreateResult(createdNote, format),
+    ...(branchWarning && { warnings: [branchWarning] }),
+  };
 }
 
 export async function handleNoteUpdate(
