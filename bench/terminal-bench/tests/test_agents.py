@@ -69,15 +69,56 @@ def shell(table=None) -> tuple[Shell, FakeExec]:
     return Shell(fx), fx
 
 
-def test_env_allowlist_refuses_stray_credentials():
-    check_env_allowlist({"ANTHROPIC_API_KEY": "x"}, "A1")
-    check_env_allowlist({"ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "y"}, "A2")
-    with pytest.raises(InfraError, match="env-allowlist"):
-        check_env_allowlist({"OPENAI_API_KEY": "y"}, "A1")  # not allowed without codex
-    with pytest.raises(InfraError, match="env-allowlist"):
-        check_env_allowlist({"GITHUB_TOKEN": "t"}, "A1")
-    with pytest.raises(InfraError, match="env-allowlist"):
-        check_env_allowlist({"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "A2")
+def test_env_allowlist_is_subscription_only():
+    """Owner's decision: subscriptions, never API keys. Exactly the OAuth pair passes; keys and every
+    other client variable are refused; both halves of the pair are required."""
+    check_env_allowlist(dict(OAUTH), "A1")
+    check_env_allowlist(dict(OAUTH), "A2")
+    for bad in ({"ANTHROPIC_API_KEY": "x", **OAUTH}, {"OPENAI_API_KEY": "y", **OAUTH}, {"GITHUB_TOKEN": "t", **OAUTH}, {"CODEX_HOME": "/x", **OAUTH}, {"RB_CONFIG_PATH": "/x", **OAUTH}):
+        with pytest.raises(InfraError, match="env-allowlist"):
+            check_env_allowlist(bad, "A2")
+    with pytest.raises(InfraError, match="CLAUDE_CODE_OAUTH_TOKEN missing"):
+        check_env_allowlist({"CLAUDE_FORCE_OAUTH": "1"}, "A1")
+    with pytest.raises(InfraError, match="CLAUDE_FORCE_OAUTH=1 missing"):
+        check_env_allowlist({"CLAUDE_CODE_OAUTH_TOKEN": "t"}, "A1")
+    with pytest.raises(InfraError, match="CLAUDE_FORCE_OAUTH=1 missing"):
+        check_env_allowlist({"CLAUDE_CODE_OAUTH_TOKEN": "t", "CLAUDE_FORCE_OAUTH": "0"}, "A1")
+    with pytest.raises(InfraError, match="CLAUDE_CODE_OAUTH_TOKEN missing"):
+        check_env_allowlist({}, "A1")
+
+
+def test_codex_auth_login_file_is_validated_uploaded_and_removed_before_collection(tmp_path):
+    """A2 needs the ChatGPT login file: shape and mode checked on the host without logging values; in the
+    container it lands under CODEX_HOME (0600) before the bridge is registered and is removed first in cleanup."""
+    from agents.common import validate_codex_auth
+    from agents.storybloq_auto import StorybloqAuto
+
+    ok = codex_login(tmp_path)
+    assert validate_codex_auth(str(ok)) == ok
+    with pytest.raises(InfraError, match="codex_auth"):
+        validate_codex_auth(None)
+    with pytest.raises(InfraError, match="not a file"):
+        validate_codex_auth(str(tmp_path / "missing.json"))
+    (tmp_path / "loose").mkdir()
+    loose = codex_login(tmp_path / "loose")
+    loose.chmod(0o644)
+    with pytest.raises(InfraError, match="mode 0600"):
+        validate_codex_auth(str(loose))
+    for i, over in enumerate(({"auth_mode": "apikey"}, {"tokens": {"access_token": ""}}, {"tokens": None})):
+        (tmp_path / f"bad{i}").mkdir()
+        with pytest.raises(InfraError, match="ChatGPT subscription login"):
+            validate_codex_auth(str(codex_login(tmp_path / f"bad{i}", **over)))
+    (tmp_path / "nj").mkdir()
+    nj = tmp_path / "nj" / "codex-auth.json"; nj.write_text("{nope"); nj.chmod(0o600)
+    with pytest.raises(InfraError, match="not JSON"):
+        validate_codex_auth(str(nj))
+    # A2 refuses to construct without it; A1 ignores it
+    (tmp_path / "c").mkdir()
+    mp = make_manifest(tmp_path / "c")
+    with pytest.raises(InfraError, match="codex_auth"):
+        StorybloqAuto(tmp_path / "c" / "l", manifest=str(mp), arm="A2", version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
+    assert build_auto(tmp_path / "d", "A1").codex_auth is None
+
 
 
 # ----- manifest fixture ------------------------------------------------------------
@@ -256,7 +297,7 @@ class StrictEnv:
         r"^chmod \+x /opt/bench", r'^printf "%s\\n%s\\n" "\$HOME" "\$PATH"$', r"^for p in ~/\.claude", r"^pwd$", r"^cd /app && \(\[ -e \.story \]",
         r"^mkdir -p /logs/agent/sessions$", r"^/opt/bench/node_modules/\.bin/storybloq setup --client claude$", r"^mkdir -p /logs/agent/sessions/skills && cp -R",
         r"^claude mcp remove storybloq .*claude mcp add storybloq -s user -- /opt/bench/node_modules/\.bin/storybloq --mcp$",
-        r"^printf '%s' .* > /opt/bench/reviewbridge\.json && mkdir -p /logs/agent/codex-home$", r"^claude mcp add codex-bridge -s user -e RB_CONFIG_PATH=/opt/bench/reviewbridge\.json -e CODEX_HOME=/logs/agent/codex-home -- node /opt/bench/node_modules/codex-claude-bridge/dist/index\.js$",
+        r"^printf '%s' .* > /opt/bench/reviewbridge\.json && mkdir -p /opt/bench/codex-home && chmod 0700 /opt/bench/codex-home$", r"^claude mcp add codex-bridge -s user -e RB_CONFIG_PATH=/opt/bench/reviewbridge\.json -e CODEX_HOME=/opt/bench/codex-home -- node /opt/bench/node_modules/codex-claude-bridge/dist/index\.js$",
         r"^sha256sum /logs/agent/sessions/skills/story/SKILL\.md", r"^cat /logs/agent/sessions/settings\.json$", r"^claude mcp list", r"^cd /app && /opt/bench/node_modules/\.bin/storybloq init --name bench-task$",
         r"^cd /app && /opt/bench/node_modules/\.bin/storybloq config set-overrides --json ", r"^printf '%s' .* > /tmp/instruction\.md$", r"^cd /app && /opt/node/bin/node /opt/bench/mkticket\.cjs /tmp/instruction\.md$",
         r"^nohup /opt/node/bin/node /opt/bench/telemetry-copier\.cjs /app /logs/agent/story-live", r"^printf '%s' .* > /logs/agent/versions\.json$", r"^date -u .* > /logs/agent/started\.json$",
@@ -266,7 +307,8 @@ class StrictEnv:
         r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
         r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
         r"^cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund$", r"^chmod 0755 /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude && ln -sf /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude /usr/local/bin/claude$", r'^export PATH="\$HOME/\.local/bin:\$PATH"; claude --version$',
-        r"^cat ~/\.claude/settings\.json$", r"^\[ -s /logs/agent/claude-code\.txt \] && \[ -f /logs/agent/story-live/last-snapshot \] && echo READY$",
+        r"^cat ~/\.claude/settings\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/story-stage && cd /app && tar czf /logs/story-stage/story\.tgz \.story && ln /logs/story-stage/story\.tgz /logs/agent/story\.tgz && rm -f /logs/story-stage/story\.tgz'$", r"^chmod 0600 /opt/bench/codex-home/auth\.json$", r"^timeout 60 sh -c 'mkdir -p /logs/agent/codex-home/sessions && if \[ -d /opt/bench/codex-home/sessions \]; then cp -R /opt/bench/codex-home/sessions/\. /logs/agent/codex-home/sessions/; fi'$",
+        r"^\[ -s /logs/agent/claude-code\.txt \] && \[ -f /logs/agent/story-live/last-snapshot \] && echo READY$",
     ]
 
     def __init__(self, table: dict[str, tuple[int, str]] | None = None):
@@ -318,6 +360,20 @@ class StrictEnv:
         return [c["command"] for c in self.calls]
 
 
+OAUTH = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-test", "CLAUDE_FORCE_OAUTH": "1"}
+
+
+def codex_login(tmp_path: Path, **over) -> Path:
+    """A ChatGPT login file shaped like ~/.codex/auth.json (values are fakes)."""
+    f = tmp_path / "codex-auth.json"
+    data = {"auth_mode": "chatgpt", "OPENAI_API_KEY": None, "last_refresh": "2026-09-08T03:12:00Z",
+            "tokens": {"access_token": "acc.fake", "refresh_token": "ref.fake", "id_token": "id.fake", "account_id": "acct"}}
+    data.update(over)
+    f.write_text(json.dumps(data))
+    f.chmod(0o600)
+    return f
+
+
 def build_auto(tmp_path, arm="A1", **kw):
     from agents.storybloq_auto import StorybloqAuto
 
@@ -325,6 +381,9 @@ def build_auto(tmp_path, arm="A1", **kw):
     mp = make_manifest(tmp_path)
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
+    kw.setdefault("extra_env", dict(OAUTH))
+    if arm in ("A2", "A4"):
+        kw.setdefault("codex_auth", str(codex_login(tmp_path)))
     return StorybloqAuto(logs, manifest=str(mp), arm=arm, version=kw.pop("version", "2.1.267"), model_name=kw.pop("model_name", "anthropic/claude-sonnet-5"), **kw)
 
 
@@ -343,7 +402,7 @@ def test_constructors_enforce_pins(tmp_path):
         StorybloqAuto(tmp_path / "l", manifest=str(mp), arm="A9", version="2.1.267", model_name="anthropic/claude-sonnet-5")
     with pytest.raises(InfraError, match="env-allowlist"):
         StorybloqAuto(tmp_path / "l", manifest=str(mp), arm="A1", version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env={"OPENAI_API_KEY": "k"})
-    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     assert a.manifest.sha256 == hashlib.sha256(mp.read_bytes()).hexdigest()
 
 
@@ -360,7 +419,7 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     assert any(c.startswith("cd /opt/bench && npm ci --ignore-scripts") and "| tail" not in c for c in env.cmds())
     assert a.runtime_env["PATH"] == "/opt/bench/node_modules/.bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
     assert "$" not in a.runtime_env["PATH"]
-    assert a.runtime_env["CODEX_HOME"] == "/logs/agent/codex-home"
+    assert a.runtime_env["CODEX_HOME"] == "/opt/bench/codex-home"
     assert a._versions["claude_code_version"] == "2.1.267" and a._versions["codex_version"] == "0.153.4"
     assert a._versions["claude_install_method"] == "artifact" and a._versions["node_version"] == "v22.23.2"
     assert a._versions["node_sha256"] == hashlib.sha256(b"fake node runtime").hexdigest()
@@ -441,7 +500,7 @@ async def test_clean_home_gate_runs_before_any_install_and_post_install_home_is_
     # A0 installs nothing, so nothing may appear, not even the housekeeping file
     (tmp_path / "d").mkdir()
     mp = make_manifest(tmp_path / "d")
-    d = StorybloqBaseline(tmp_path / "d" / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    d = StorybloqBaseline(tmp_path / "d" / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = _home_env("/root/.claude/settings.json\n", HOUSEKEEPING_SETTINGS)
     with pytest.raises(InfraError, match="dirty-home-after-install"):
         await d.install(env)
@@ -551,7 +610,7 @@ async def test_run_configures_propagates_env_and_launches_parent(tmp_path):
     cmds = env.cmds()
     launch = next(c for c in env.calls if "harbor_claude_code_instruction_" in c["command"])
     assert launch["env"]["PATH"].startswith("/opt/bench/node_modules/.bin:")  # env reached the real claude launch
-    assert launch["env"]["CODEX_HOME"] == "/logs/agent/codex-home" and launch["env"]["RB_CONFIG_PATH"] == "/opt/bench/reviewbridge.json"
+    assert launch["env"]["CODEX_HOME"] == "/opt/bench/codex-home" and launch["env"]["RB_CONFIG_PATH"] == "/opt/bench/reviewbridge.json"
     assert launch["env"]["CLAUDE_CONFIG_DIR"] == "/logs/agent/sessions"
     instr = launch["env"][next(k for k in launch["env"] if k.startswith("HARBOR_CLAUDE_CODE_INSTRUCTION_"))]
     assert instr == "/story auto T-001\n\nThe ticket T-001 holds the task.\nFix it.  \nline two\n\n\n\nDo the work in this directory. Do not ask questions; there is no user.\n"
@@ -633,7 +692,7 @@ async def test_pre_start_hang_cut_by_the_task_timeout_still_writes_the_marker(tm
     assert payload["reason"] == "pre-start-timeout" and "claude mcp add storybloq" in payload["detail"]
     assert not any("started.json" in c or "harbor_claude_code_instruction_" in c for c in cmds)
     (tmp_path / "b").mkdir()
-    b = StorybloqBaseline(tmp_path / "b" / "l", manifest=str(make_manifest(tmp_path / "b")), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    b = StorybloqBaseline(tmp_path / "b" / "l", manifest=str(make_manifest(tmp_path / "b")), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv()
     await b.install(env)
     env.hang_on = "versions.json"
@@ -650,6 +709,62 @@ async def test_pre_start_hang_cut_by_the_task_timeout_still_writes_the_marker(tm
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(c.run("x", env, None), timeout=0.3)
     assert not any("infra-failure.json" in x for x in env.cmds())
+
+
+@pytest.mark.asyncio
+async def test_a2_login_file_never_enters_the_collection_tree(tmp_path):
+    """CODEX_HOME lives outside /logs/agent; the login file is uploaded there (0600) before the bridge is
+    registered; collection copies ONLY codex-home/sessions into /logs/agent. Neither a failed cleanup nor a
+    reviewer refreshing the login can put credentials into what harbor collects, by construction."""
+    a = build_auto(tmp_path, "A2")
+    env = StrictEnv()
+    await a.install(env)
+    env.hang_on = "harbor_claude_code_instruction_"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(a.run("do it\n", env, None), timeout=0.3)
+    cmds = env.cmds()
+    assert (Path(a.codex_auth), "/opt/bench/codex-home/auth.json") in env.uploads
+    assert not any(t.startswith("/logs/") and "auth" in t for _s, t in env.uploads)
+    assert cmds.index("chmod 0600 /opt/bench/codex-home/auth.json") < cmds.index(next(c for c in cmds if c.startswith("claude mcp add codex-bridge")))
+    launch = next(c for c in cmds if "harbor_claude_code_instruction_" in c)
+    assert "CODEX_HOME=/opt/bench/codex-home" in launch or a.runtime_env["CODEX_HOME"] == "/opt/bench/codex-home"
+    copy = next(c for c in cmds if "cp -R /opt/bench/codex-home/sessions/." in c)
+    assert "/logs/agent/codex-home/sessions/" in copy and "auth" not in copy
+    assert not any("/logs/agent/codex-home" in c and "sessions" not in c for c in cmds)  # nothing else under the collected codex-home
+    assert not any("acc.fake" in c or "sk-ant-oat" in c for c in cmds)
+    assert a._versions["auth_mode"] == "subscription"
+    # even if the sessions copy step fails, the run's outcome and the other cleanup steps are unaffected (bounded, best-effort)
+    b = build_auto(tmp_path / "b", "A2")
+    env = StrictEnv({"cp -R /opt/bench/codex-home/sessions/.": (1, "")})
+    await b.install(env)
+    env.hang_on = "harbor_claude_code_instruction_"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(b.run("do it\n", env, None), timeout=0.3)
+    assert any("story.tgz" in c for c in env.cmds())
+
+
+@pytest.mark.asyncio
+async def test_story_archive_is_published_by_hard_link_from_a_same_mount_stage(tmp_path):
+    """No mv or cp ever writes story.tgz into the collection tree: the archive is built under /logs/story-stage
+    (same filesystem, not collected) and published with ln, which is atomic and refuses EXDEV."""
+    a = build_auto(tmp_path, "A1")
+    env = StrictEnv()
+    await a.install(env)
+    env.hang_on = "harbor_claude_code_instruction_"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(a.run("do it\n", env, None), timeout=0.3)
+    tar = next(c for c in env.cmds() if "story.tgz" in c)
+    assert "tar czf /logs/story-stage/story.tgz .story && ln /logs/story-stage/story.tgz /logs/agent/story.tgz && rm -f /logs/story-stage/story.tgz" in tar
+    assert not any(("mv " in c or "cp " in c) and "story.tgz" in c for c in env.cmds())
+    assert not any("tar czf /logs/agent/" in c for c in env.cmds())  # nothing is ever written in place under the collection tree
+    # a failed publication (EXDEV or a cut) leaves the other cleanup steps running and nothing under /logs/agent
+    b = build_auto(tmp_path / "b", "A1")
+    env = StrictEnv({"ln /logs/story-stage/story.tgz": (1, "ln: failed to create hard link: Invalid cross-device link")})
+    await b.install(env)
+    env.hang_on = "harbor_claude_code_instruction_"
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(b.run("do it\n", env, None), timeout=0.3)
+    assert any("story-status.json" in c for c in env.cmds()) and any("story-sessions.json" in c for c in env.cmds())
 
 
 @pytest.mark.asyncio
@@ -699,7 +814,7 @@ async def test_baseline_isolation_violation_is_compliance_not_infra(tmp_path):
     from agents.baseline import StorybloqBaseline
 
     mp = make_manifest(tmp_path)
-    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv({"ls -A": (0, "story it's $(echo x) `y`\n"), "harbor_claude_code_instruction_": (1, "")})
     with pytest.raises(Exception) as ei:  # the ORIGINAL failure (claude exit 1) propagates
         await a.run("Fix it.  \n", env, None)
@@ -721,7 +836,7 @@ async def test_pre_start_markers_cover_parent_install_and_unexpected_errors(tmp_
     from agents.baseline import StorybloqBaseline
 
     mp = make_manifest(tmp_path)
-    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv({"tar -xzf /opt/node/node.tgz": (1, "")})  # the root extraction fails: harbor raises its own error class
     with pytest.raises(Exception):
         await a.install(env)
@@ -806,7 +921,7 @@ async def test_baseline_marker_write_failure_keeps_original_exception(tmp_path):
     from agents.baseline import StorybloqBaseline
 
     mp = make_manifest(tmp_path)
-    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv({"ls -A": (0, "story\n"), "harbor_claude_code_instruction_": (1, ""), "compliance-error.json": (1, "")})
     orig = env.exec
 
@@ -829,7 +944,7 @@ async def test_baseline_post_run_check_is_bounded(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bl, "POST_RUN_CHECK_TIMEOUT", 0.05)
     mp = make_manifest(tmp_path)
-    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5")
+    a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv()
     env.hang_on = "ls -A"
     await asyncio.wait_for(a.run("x", env, None), timeout=2)  # returns despite the hung check

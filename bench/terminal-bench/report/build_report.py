@@ -138,6 +138,7 @@ class ArmSummary:
     mean_rounds: float | None
     no_review: int
     flagged: int
+    rate_limited: int = 0
 
 
 def summarize(arm: str, costed: list[Costed], compliant_only: bool = False) -> ArmSummary:
@@ -168,6 +169,7 @@ def summarize(arm: str, costed: list[Costed], compliant_only: bool = False) -> A
         cost_given_success=cgs, unknown_cost_rows=unknown,
         mean_wall_clock=(statistics.mean(wc) if wc else None), mean_rounds=(statistics.mean(rounds) if rounds else None),
         no_review=sum(1 for c in valid if c.row.statuses.get("compliance") == "no-review"), flagged=flagged,
+        rate_limited=sum(1 for c in valid if c.row.statuses.get("rate_limit") == "rate-limited"),
     )
 
 
@@ -186,10 +188,10 @@ def render(header: dict[str, str], summaries: list[ArmSummary], compliant: list[
     if errors:
         lines += ["", "## BUILD ERRORS (tables below are not valid until these are resolved)", ""] + [f"- {e}" for e in errors]
     lines += ["", "## Per arm (denominator = selected trials that started)", "",
-              "| Arm | n | passes | pass rate | cost/task USD | wall clock s | rounds | flagged | no-review | infra excluded |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+              "| Arm | n | passes | pass rate | cost/task USD | wall clock s | rounds | flagged | no-review | infra excluded | rate-limited |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in summaries:
-        lines.append(f"| {s.arm} | {s.denominator} | {s.passes} | {_f(s.pass_rate, '{:.2f}')} | {_f(s.cost_per_task)} | {_f(s.mean_wall_clock, '{:.0f}')} | {_f(s.mean_rounds, '{:.1f}')} | {s.flagged} | {s.no_review} | {s.infra_excluded} |")
+        lines.append(f"| {s.arm} | {s.denominator} | {s.passes} | {_f(s.pass_rate, '{:.2f}')} | {_f(s.cost_per_task)} | {_f(s.mean_wall_clock, '{:.0f}')} | {_f(s.mean_rounds, '{:.1f}')} | {s.flagged} | {s.no_review} | {s.infra_excluded} | {s.rate_limited} |")
     lines += ["", "## Cost per PASSED task (total arm spend incl. failures / passes)", "",
               "| Arm | cost/passed USD | lower bound (known spend only) | cost given success | unknown-cost rows |", "|---|---|---|---|---|"]
     for s in summaries:
@@ -305,6 +307,7 @@ def build(jobs: list[tuple[Path, str, int]], prices_path: Path, manifest_path: P
     compliant = [summarize(a, costed, compliant_only=True) for a in arm_names]
     header = {k: str(manifest.get(k)) for k in ("dataset", "task_repo_commit", "harbor_version", "storybloq_commit", "skill_sha256", "claude_code_version", "codex_version", "executor_model", "reviewer_model", "frozen_at")}
     header["manifest_sha256"] = manifest_sha
+    header["auth"] = "subscription (CLAUDE_CODE_OAUTH_TOKEN, ChatGPT login file); cost is ESTIMATED AT API LIST PRICE from transcript token counts, never reconciled against a bill"
     header["section"] = f"{section} ({len(scheduled_tasks)} task{'s' if len(scheduled_tasks) != 1 else ''}: {', '.join(scheduled_tasks)})"
     header["prices"] = f"{prices_path.name} dated {json.loads(prices_path.read_text()).get('date', 'UNDATED')} (sha {prices_sha[:12]})"
     return render(header, summaries, compliant, costed, errors), errors

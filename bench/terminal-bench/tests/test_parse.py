@@ -212,7 +212,12 @@ def test_story_truncated_archive_falls_back_to_live(tmp_path):
     st.write_text("{not json")
     s = parse_story(t / "agent")
     assert any(d.startswith("session-state-unreadable") for d in s.diagnostics)
-    r = parse_trial(t, "A2", INSTRUCTION)  # never raises
+    from report.parse import CredentialLeak
+
+    with pytest.raises(CredentialLeak, match="story.tgz"):  # a partial archive cannot be cleared of credentials; the report refuses
+        parse_trial(t, "A2", INSTRUCTION)
+    (t / "agent" / "story.tgz").unlink()  # the adapter never leaves one: story.tgz is written outside /logs/agent and moved in whole
+    r = parse_trial(t, "A2", INSTRUCTION)  # never raises once the collected set is inspectable
     assert r.statuses["compliance"] == "no-review"
 
 

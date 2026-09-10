@@ -18,6 +18,7 @@ from agents.common import (
     Manifest,
     Shell,
     assert_effective_config,
+    AUTH_MODE,
     check_env_allowlist,
     check_pins,
     ensure_clean_home,
@@ -75,7 +76,7 @@ class StorybloqBaseline(ClaudeCode):
         sh = self._shell(environment)
         logs = self.environment_logs_dir
         try:
-            versions = {"manifest_sha256": self.manifest.sha256, "arm": self.ARM, "harbor_version": self.manifest.data.get("harbor_version"),
+            versions = {"manifest_sha256": self.manifest.sha256, "arm": self.ARM, "auth_mode": AUTH_MODE, "harbor_version": self.manifest.data.get("harbor_version"),
                         "executor_model": self.manifest.data.get("executor_model"), **getattr(self, "_install_versions", {})}
             await sh.must(write_file_command((logs / "versions.json").as_posix(), json.dumps(versions, sort_keys=True)), "config")
             await record_started(sh, logs)

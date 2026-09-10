@@ -21,7 +21,9 @@ from agents.common import (
     bounded_cleanup,
     capture_base_env,
     capture_workdir,
+    AUTH_MODE,
     check_env_allowlist,
+    validate_codex_auth,
     check_pins,
     ensure_clean_home,
     check_home_after_install,
@@ -45,7 +47,9 @@ ARM_OVERRIDES = {
 ARM_ARTIFACTS = {"A1": ("storybloq",), "A2": ("storybloq", "bridge"), "A3": ("storybloq", "lenses"), "A4": ("storybloq", "bridge", "lenses")}
 PACKAGE_OF = {"storybloq": "@storybloq/storybloq", "bridge": "codex-claude-bridge", "lenses": "@storybloq/lenses"}
 REMOTE = PurePosixPath("/opt/bench")
-NODE = "/opt/node/bin/node"  # the pinned runtime the adapter installs; task images need not ship python
+NODE = "/opt/node/bin/node"
+CODEX_HOME_REMOTE = "/opt/bench/codex-home"
+STAGE = "/logs/story-stage"  # same mount as /logs/agent, not collected by harbor  # login file and rollouts live here; only sessions/ is copied out for collection  # the pinned runtime the adapter installs; task images need not ship python
 GATE_POLL_SECONDS = 5
 GATE_POLL_ROUNDS = 120
 BIN = REMOTE / "node_modules" / ".bin"
@@ -56,7 +60,7 @@ class StorybloqAuto(ClaudeCode):
     def name() -> str:
         return "storybloq-auto"
 
-    def __init__(self, logs_dir: Path, manifest: str | None = None, arm: str = "", gate_cancel_after_start: bool = False, *args: Any, **kwargs: Any):
+    def __init__(self, logs_dir: Path, manifest: str | None = None, arm: str = "", gate_cancel_after_start: bool = False, codex_auth: str | None = None, *args: Any, **kwargs: Any):
         super().__init__(logs_dir, *args, **kwargs)
         if arm not in ARM_OVERRIDES:
             raise InfraError("manifest", f"unknown arm {arm!r}")
@@ -65,6 +69,7 @@ class StorybloqAuto(ClaudeCode):
         check_pins(self.manifest, arm=arm, claude_version_kwarg=self._version, model_name=self.model_name)
         self.gate_cancel_after_start = bool(gate_cancel_after_start) and str(gate_cancel_after_start).lower() != "false"
         check_env_allowlist(self.extra_env, arm)
+        self.codex_auth: Path | None = validate_codex_auth(codex_auth) if self.uses_codex() else None
         self.workdir: str | None = None
         self.ticket_id: str | None = None
         self.runtime_env: dict[str, str] = {}
@@ -90,7 +95,7 @@ class StorybloqAuto(ClaudeCode):
         env = {"CLAUDE_CONFIG_DIR": self._config_dir(), "PATH": f"{BIN}:{base['HOME']}/.local/bin:{base['PATH']}"}
         if self.uses_codex():
             env["RB_CONFIG_PATH"] = (REMOTE / "reviewbridge.json").as_posix()
-            env["CODEX_HOME"] = (self.environment_logs_dir / "codex-home").as_posix()
+            env["CODEX_HOME"] = CODEX_HOME_REMOTE  # outside /logs/agent: the login file is never in harbor's collection tree
         return env
 
     # ----- install -----------------------------------------------------------------
@@ -150,7 +155,7 @@ class StorybloqAuto(ClaudeCode):
         if r.stdout.strip() != self.manifest.artifact("storybloq")["version"]:
             raise InfraError("artifact", f"storybloq --version {r.stdout.strip()} != {self.manifest.artifact('storybloq')['version']}")
         versions: dict[str, Any] = {
-            "manifest_sha256": self.manifest.sha256, "arm": self.arm, "harbor_version": self.manifest.data.get("harbor_version"),
+            "manifest_sha256": self.manifest.sha256, "arm": self.arm, "auth_mode": AUTH_MODE, "harbor_version": self.manifest.data.get("harbor_version"),
             "storybloq_version": r.stdout.strip(), "storybloq_commit": self.manifest.data.get("storybloq_commit"),
             "executor_model": self.manifest.data.get("executor_model"),
         }
@@ -174,7 +179,7 @@ class StorybloqAuto(ClaudeCode):
         self._versions = versions
 
     # ----- run ---------------------------------------------------------------------
-    async def _configure(self, sh: Shell, env: dict[str, str]) -> dict[str, Any]:
+    async def _configure(self, sh: Shell, env: dict[str, str], environment: BaseEnvironment) -> dict[str, Any]:
         cfg = shlex.quote(self._config_dir())
         await sh.must(f"mkdir -p {cfg}", "config", env)
         await sh.must(f"{BIN}/storybloq setup --client claude", "config", env, timeout=300)
@@ -182,7 +187,13 @@ class StorybloqAuto(ClaudeCode):
         await sh.must(f"claude mcp remove storybloq -s user >/dev/null 2>&1; claude mcp add storybloq -s user -- {BIN}/storybloq --mcp", "config", env)
         if self.uses_codex():
             conf = json.dumps({"model": self.manifest.require("reviewer_model"), "codex_path": (BIN / "codex").as_posix(), "reasoning_effort": self.manifest.data.get("reviewer_effort", "medium")})
-            await sh.must(write_file_command(env["RB_CONFIG_PATH"], conf) + f" && mkdir -p {shlex.quote(env['CODEX_HOME'])}", "config", env)
+            await sh.must(write_file_command(env["RB_CONFIG_PATH"], conf) + f" && mkdir -p {shlex.quote(env['CODEX_HOME'])} && chmod 0700 {shlex.quote(env['CODEX_HOME'])}", "config", env)
+            # Subscription auth for the reviewer: the ChatGPT login file lands under CODEX_HOME (0600)
+            # and is removed again before harbor collects /logs/agent (see _cleanup_steps).
+            auth_remote = f"{env['CODEX_HOME']}/auth.json"
+            self._created.add("codex_auth")
+            await environment.upload_file(self.codex_auth, auth_remote)
+            await sh.must(f"chmod 0600 {shlex.quote(auth_remote)}", "config", env)
             await sh.must(
                 f"claude mcp add codex-bridge -s user -e RB_CONFIG_PATH={shlex.quote(env['RB_CONFIG_PATH'])} -e CODEX_HOME={shlex.quote(env['CODEX_HOME'])} -- node {REMOTE}/node_modules/codex-claude-bridge/dist/index.js",
                 "config", env,
@@ -210,13 +221,21 @@ class StorybloqAuto(ClaudeCode):
         logs = self.environment_logs_dir.as_posix()
         wd = shlex.quote(self.workdir or ".")
         steps: list[tuple[str, str]] = []
+        if "codex_auth" in self._created:
+            # Only the rollout telemetry is copied into the collection tree; CODEX_HOME itself (with the
+            # login file, refreshed or not) stays outside /logs/agent by construction.
+            steps.append(("codex-sessions", f"mkdir -p {logs}/codex-home/sessions && if [ -d {CODEX_HOME_REMOTE}/sessions ]; then cp -R {CODEX_HOME_REMOTE}/sessions/. {logs}/codex-home/sessions/; fi"))
         if "copier" in self._created:
             steps.append(("copier", "kill $(cat /tmp/copier.pid) 2>/dev/null; true"))
         if "story" in self._created:
             steps += [
                 ("status", f"cd {wd} && {BIN}/storybloq status --format json > {logs}/story-status.json"),
                 ("sessions", f"cd {wd} && {BIN}/storybloq session list --format json > {logs}/story-sessions.json"),
-                ("tar", f"cd {wd} && tar czf {logs}/story.tgz .story"),
+                # Built in a staging dir on the SAME filesystem as the collection tree but outside it, then
+                # published by hard link: link(2) is atomic and fails with EXDEV instead of copying, so a cut
+                # never leaves a partial archive under /logs/agent (the scanner rejects any archive it
+                # cannot read to the end).
+                ("tar", f"mkdir -p {STAGE} && cd {wd} && tar czf {STAGE}/story.tgz .story && ln {STAGE}/story.tgz {logs}/story.tgz && rm -f {STAGE}/story.tgz"),
             ]
         return steps
 
@@ -228,7 +247,7 @@ class StorybloqAuto(ClaudeCode):
             try:
                 self.workdir = await capture_workdir(sh)
                 preflight = await preflight_task_state(sh, self.workdir)
-                measured = await self._configure(sh, env)
+                measured = await self._configure(sh, env, environment)
                 self.ticket_id = await self._prepare_task(sh, env, instruction)
                 versions = {**self._versions, **measured, "preflight": preflight, "ticket_id": self.ticket_id, "workdir": self.workdir, "runtime_env": {k: v for k, v in env.items()}}
                 await sh.must(write_file_command((logs / "versions.json").as_posix(), json.dumps(versions, sort_keys=True)), "config", env)

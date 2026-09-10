@@ -384,6 +384,85 @@ def _story_state_complete(story: StoryState) -> bool:
     return story.source is not None and terminal and not any(d.startswith(bad) for d in story.diagnostics)
 
 
+LEAK_PATTERNS = (b"sk-ant-oat", b"CLAUDE_CODE_OAUTH_TOKEN=", b'"refresh_token"', b'"access_token"')
+
+
+class CredentialLeak(RuntimeError):
+    """A collected artifact carries a subscription credential. The report refuses to build."""
+
+
+SCAN_CHUNK = 8 * 1024 * 1024
+SCAN_OVERLAP = max(len(p) for p in LEAK_PATTERNS) - 1  # a pattern straddling two chunks is still seen whole
+
+
+def _stream_leak(fh: Any) -> bool:
+    """Incremental scan of a binary stream, whole file, with overlap across chunk boundaries."""
+    tail = b""
+    while True:
+        chunk = fh.read(SCAN_CHUNK)
+        if not chunk:
+            return False
+        if any(pat in tail + chunk for pat in LEAK_PATTERNS):
+            return True
+        tail = chunk[-SCAN_OVERLAP:] if SCAN_OVERLAP else b""
+
+
+def scan_credential_leak(agent_dir: Path) -> None:
+    """Defense in depth behind keeping credentials outside the collection tree: the Codex login file
+    must not have been collected and no collected byte, including every member of every collected
+    tar archive, may contain an OAuth token, the variable assignment or a token field. Every file
+    and member is read to its end. Fails CLOSED: a file or archive that cannot be read completely
+    is a finding. Raises CredentialLeak naming files only, never content."""
+    if not agent_dir.exists():
+        return
+    hits: list[str] = []
+    for f in sorted(agent_dir.rglob("*")):
+        if f.is_symlink() or not f.is_file():
+            continue
+        rel = str(f.relative_to(agent_dir))
+        if rel.startswith("codex-home/") and f.name.startswith("auth.json"):
+            hits.append(rel)
+            continue
+        try:
+            with f.open("rb") as fh:
+                leaked = _stream_leak(fh)
+        except OSError as exc:
+            hits.append(f"{rel} (unreadable: {type(exc).__name__})")
+            continue
+        if leaked:
+            hits.append(rel)
+            continue
+        if f.suffix in (".tgz", ".gz", ".tar") or f.name.endswith(".tar.gz"):
+            try:
+                with tarfile.open(f, "r:*") as tf:
+                    for m in tf:
+                        if m.name.rsplit("/", 1)[-1].startswith("auth.json"):
+                            hits.append(f"{rel}:{m.name}")
+                            continue
+                        if not m.isfile():
+                            continue
+                        ex = tf.extractfile(m)
+                        if ex is not None and _stream_leak(ex):
+                            hits.append(f"{rel}:{m.name}")
+            except (OSError, tarfile.TarError, EOFError) as exc:
+                hits.append(f"{rel} (archive not completely inspectable: {type(exc).__name__})")
+    if hits:
+        raise CredentialLeak("credential material in collected artifacts: " + ", ".join(hits[:20]))
+
+
+RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "usage limit", "usage_limit", "429", "overloaded")
+
+
+def rate_limited(stream: dict[str, Any] | None) -> bool:
+    """Subscription runs are rate-limit bound: a 429 or usage-limit stop is a protocol event."""
+    if not stream:
+        return False
+    if stream.get("api_error_status") == 429:
+        return True
+    text = " ".join(str(stream.get(k) or "") for k in ("result", "terminal_reason", "error")).lower()
+    return stream.get("is_error") is True and any(m in text for m in RATE_LIMIT_MARKERS)
+
+
 def parse_stream_result(claude_txt: Path, diags: list[str]) -> dict[str, Any] | None:
     """Final {"type":"result"} event from claude-code.txt, or None when absent (timeout)."""
     if not claude_txt.exists():
@@ -460,6 +539,7 @@ def missing_row(task: str, arm: str, attempt: int = 1) -> Row:
 
 def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attempt: int = 1) -> Row:
     agent_dir = trial_dir / "agent"
+    scan_credential_leak(agent_dir)
     diags: list[str] = []
     result = _read_json(trial_dir / "result.json", diags, "result")
     if not isinstance(result, dict):
@@ -548,6 +628,8 @@ def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attem
 
     stream = parse_stream_result(agent_dir / "claude-code.txt", diags)
     harness_cost = float(stream["total_cost_usd"]) if stream is not None and isinstance(stream.get("total_cost_usd"), (int, float)) and not isinstance(stream.get("total_cost_usd"), bool) else None
+    if rate_limited(stream):
+        statuses["rate_limit"] = "rate-limited"  # protocol event: the subscription throttled the run; the row stays a started trial
 
     heads = sorted({d.split(":", 1)[0] for d in diags})
     if heads:

@@ -41,13 +41,44 @@ def sha256_file(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+AUTH_MODE = "subscription"  # the owner's decision (2026-09-10): subscriptions, never API keys
+OAUTH_ENV = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_FORCE_OAUTH"}
+
+
 def check_env_allowlist(extra_env: dict[str, str], arm: str) -> None:
-    allowed = {"ANTHROPIC_API_KEY"} | ({"OPENAI_API_KEY"} if arm in ("A2", "A4") else set())
+    """Subscription auth only: exactly CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and
+    CLAUDE_FORCE_OAUTH=1 (harbor then drops any API key so the CLI uses the token). Any *_API_KEY,
+    any other CLAUDE_/CODEX_/RB_/*_TOKEN variable is refused. Codex (A2/A4) authenticates with the
+    ChatGPT login file passed as --ak codex_auth=<path>, never with an environment variable."""
     for k in extra_env:
-        if k in allowed:
+        if k in OAUTH_ENV:
             continue
         if FORBIDDEN_ENV_RE.search(k):
-            raise InfraError("env-allowlist", f"{k} is not an allowed credential or client variable")
+            raise InfraError("env-allowlist", f"{k} is not allowed: subscription auth uses only CLAUDE_CODE_OAUTH_TOKEN and CLAUDE_FORCE_OAUTH")
+    if not (extra_env.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip():
+        raise InfraError("env-allowlist", "CLAUDE_CODE_OAUTH_TOKEN missing (--ae CLAUDE_CODE_OAUTH_TOKEN=<claude setup-token>)")
+    if (extra_env.get("CLAUDE_FORCE_OAUTH") or "").strip().lower() not in ("1", "true", "yes"):
+        raise InfraError("env-allowlist", "CLAUDE_FORCE_OAUTH=1 missing (--ae CLAUDE_FORCE_OAUTH=1)")
+
+
+def validate_codex_auth(path: str | None) -> Path:
+    """The ChatGPT login file for the in-container Codex reviewer: a regular file, mode 0600, JSON
+    with auth_mode chatgpt and a non-empty tokens.access_token. Values are never logged."""
+    if not path:
+        raise InfraError("codex-auth", "A2/A4 need --ak codex_auth=<path to the ChatGPT login file (~/.codex/auth.json)>")
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise InfraError("codex-auth", f"{p} is not a file")
+    if p.stat().st_mode & 0o077:
+        raise InfraError("codex-auth", f"{p} must be mode 0600")
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        raise InfraError("codex-auth", f"{p} is not JSON") from None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict) or not (tokens.get("access_token") or "").strip() or data.get("auth_mode") != "chatgpt":
+        raise InfraError("codex-auth", f"{p} is not a ChatGPT subscription login (auth_mode chatgpt with tokens.access_token)")
+    return p
 
 
 def parse_semver(text: str) -> str | None:

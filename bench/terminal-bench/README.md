@@ -41,6 +41,33 @@ column reports. Per task the arm order is drawn from the seed; runs are sequenti
 smoke task and is excluded from the pilot frame. Any change to a hashed file after the
 freeze requires a new manifest; affected arms rerun and the report lists both.
 
+## Authentication (subscriptions, never API keys)
+
+The owner's decision: model calls run on the Claude and ChatGPT subscriptions. The adapter's env
+allow-list accepts exactly `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and
+`CLAUDE_FORCE_OAUTH=1` (harbor then drops any API key so the CLI uses the token) and refuses every
+`*_API_KEY` and every other `CLAUDE_*`, `CODEX_*`, `RB_*` or `*_TOKEN` variable. A2/A4 pass the
+ChatGPT login file with `--ak codex_auth=~/.codex/auth.json` (regular file, mode 0600, `auth_mode`
+chatgpt); it is uploaded to the container's `CODEX_HOME` at `/opt/bench/codex-home` (0700), which is
+OUTSIDE harbor's collection tree; only `codex-home/sessions/` (rollouts) is copied into `/logs/agent`
+at cleanup, so no auth file, refreshed or not, can be collected. Credentials live in `/Volumes/Sharge/cpm-bench/.env` (mode 600, gitignored), sourced
+only in the launch shell and never printed:
+
+```
+CLAUDE_CODE_OAUTH_TOKEN=<output of claude setup-token>
+CLAUDE_FORCE_OAUTH=1
+CODEX_AUTH=/Users/<owner>/.codex/auth.json
+```
+
+The report parser refuses to build when any collected artifact (every file and every tar member
+read to its end; anything not completely inspectable fails closed, so `story.tgz` is built in a
+same-mount staging directory outside the collection tree and published by hard link, never by mv or cp) carries the Codex login file, an OAuth token (`sk-ant-oat`),
+the variable assignment or a token field. Cost is therefore ESTIMATED AT API LIST PRICE
+from transcript token counts and is never reconciled against a bill; the harness figure it is
+reconciled against is Claude Code's own estimate. Subscription runs are rate-limit bound: a 429,
+overloaded or usage-limit stop is recorded as a protocol event (`rate_limit: rate-limited`, counted
+per arm) and the row stays a started trial; the owner decides whether such rows are rerun.
+
 ## Run
 
 ```
@@ -53,7 +80,8 @@ $PY manifest/prepare.py --out /Volumes/Sharge/cpm-bench/artifacts/<date> --story
 $PY manifest/freeze.py .../prepare-manifest.json .../run-manifest.json   # prints the manifest SHA-256 (file bytes)
 PYTHONPATH=$PWD /Volumes/Sharge/cpm-bench/venv/tb-env/bin/harbor run --path .../tasks --agent agents.storybloq_auto:StorybloqAuto \
    --ak manifest=.../run-manifest.json --ak arm=A1 --ak version=<claude code pin> \
-   -m anthropic/claude-sonnet-5 --ae ANTHROPIC_API_KEY=... -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
+   -m anthropic/claude-sonnet-5 --ae CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" --ae CLAUDE_FORCE_OAUTH=1 \
+   [--ak codex_auth="$CODEX_AUTH"]  -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
    --agent-include-logs '**' 2>&1 | tee /Volumes/Sharge/cpm-bench/runs/<job>.log
 $PY report/build_report.py --job A1=/Volumes/Sharge/cpm-bench/runs/<job>/<YYYY-MM-DD__HH-MM-SS> ... \
    [--rerun A1=<job dir holding the single authorised reruns>] \
@@ -85,7 +113,7 @@ prices, and never overwrites a frozen manifest.
 
 ## What is recorded per trial
 
-`agent/versions.json` (manifest hash, versions, measured SKILL.md SHA-256, ticket id,
+`agent/versions.json` (manifest hash, versions, `auth_mode` subscription, measured SKILL.md SHA-256, ticket id,
 WORKDIR, preflight, runtime env, `home_after_install`: what the installs left in the real
 home. The clean-home isolation gate runs before any install; a second gate after the installs
 permits exactly one file on treatment arms, `~/.claude/settings.json` as written by storybloq's
@@ -123,7 +151,7 @@ annotated mismatch stays visible with both figures and the explanation.
 ## Tests
 
 ```
-$PY -m pytest -q          # 68 tests, no container; adapters run with their real constructors against a strict fake environment
+$PY -m pytest -q          # 72 tests, no container; adapters run with their real constructors against a strict fake environment
 $PY tests/mutants.py      # m1..m10 against report/parse.py: baseline must pass, every mutant must be KILLED by a test failure
 ```
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -332,3 +333,85 @@ def test_dir_hash_sees_mode_and_symlinks(tmp_path):
     (d / "link").unlink()
     (d / "link").write_text("echo hi\n")  # regular file with the same content as the symlink target
     assert dir_hash(d) != h2
+
+
+def test_credential_leak_scan_refuses_collected_tokens(tmp_path):
+    from report.parse import CredentialLeak, scan_credential_leak, rate_limited
+
+    agent = tmp_path / "agent"
+    (agent / "codex-home" / "sessions").mkdir(parents=True)
+    (agent / "claude-code.txt").write_text('{"type":"result","total_cost_usd":0.1}\n')
+    scan_credential_leak(agent)  # clean
+    (agent / "codex-home" / "auth.json").write_text("{}")
+    with pytest.raises(CredentialLeak, match="codex-home/auth.json"):
+        scan_credential_leak(agent)
+    (agent / "codex-home" / "auth.json").unlink()
+    (agent / "codex-home" / "auth.json.bak").write_text("{}")
+    with pytest.raises(CredentialLeak, match="auth.json.bak"):
+        scan_credential_leak(agent)
+    (agent / "codex-home" / "auth.json.bak").unlink()
+    for needle in ("sk-ant-oat01-abc", "CLAUDE_CODE_OAUTH_TOKEN=x", '"refresh_token": "r"', '"access_token": "a"'):
+        (agent / "sessions.log").write_text("noise " + needle + " noise")
+        with pytest.raises(CredentialLeak, match="sessions.log"):
+            scan_credential_leak(agent)
+    (agent / "sessions.log").unlink()
+    scan_credential_leak(tmp_path / "absent")  # nothing collected: nothing to refuse
+    # archives are inspected member by member: a token inside story.tgz is a leak; a login file inside it too
+    import io
+    import tarfile as _tar
+
+    def tgz(dst, members):
+        with _tar.open(dst, "w:gz") as tf:
+            for name, payload in members.items():
+                info = _tar.TarInfo(name)
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+
+    tgz(agent / "story.tgz", {".story/sessions/s1/state.json": b'{"v":1}'})
+    scan_credential_leak(agent)
+    tgz(agent / "story.tgz", {".story/sessions/s1/state.json": b'{"note":"sk-ant-oat01-inside"}'})
+    with pytest.raises(CredentialLeak, match=r"story\.tgz:\.story/sessions/s1/state\.json"):
+        scan_credential_leak(agent)
+    tgz(agent / "story.tgz", {".story/codex/auth.json": b"{}"})
+    with pytest.raises(CredentialLeak, match=r"story\.tgz:\.story/codex/auth\.json"):
+        scan_credential_leak(agent)
+    (agent / "story.tgz").write_bytes(b"not a tar at all")  # an archive that cannot be inspected fails closed
+    with pytest.raises(CredentialLeak, match="archive not completely inspectable"):
+        scan_credential_leak(agent)
+    tgz(agent / "story.tgz", {".story/a.json": b"1" * 20000})
+    whole = (agent / "story.tgz").read_bytes()
+    (agent / "story.tgz").write_bytes(whole[: len(whole) // 2])  # truncated mid-stream: always closed, a live directory is no evidence
+    (agent / "story-live").mkdir()
+    with pytest.raises(CredentialLeak, match="archive not completely inspectable"):
+        scan_credential_leak(agent)
+    (agent / "story.tgz").unlink()
+    # whole-file scanning: a token far beyond the chunk size, and one straddling a chunk boundary, are both found
+    from report.parse import SCAN_CHUNK
+
+    (agent / "big.log").write_bytes(b"a" * (SCAN_CHUNK + 4096) + b"sk-ant-oat01-late")
+    with pytest.raises(CredentialLeak, match="big.log"):
+        scan_credential_leak(agent)
+    (agent / "big.log").write_bytes(b"b" * (SCAN_CHUNK - 5) + b"sk-ant-oat01-straddle" + b"b" * 100)
+    with pytest.raises(CredentialLeak, match="big.log"):
+        scan_credential_leak(agent)
+    tgz(agent / "story.tgz", {".story/big.json": b"c" * (SCAN_CHUNK - 3) + b'"refresh_token"' + b"c" * 10})
+    (agent / "big.log").unlink()
+    with pytest.raises(CredentialLeak, match=r"story\.tgz:\.story/big\.json"):
+        scan_credential_leak(agent)
+    (agent / "story.tgz").unlink()
+    # an unreadable file fails closed too
+    (agent / "locked.txt").write_text("x")
+    (agent / "locked.txt").chmod(0)
+    try:
+        if os.geteuid() != 0:
+            with pytest.raises(CredentialLeak, match="locked.txt \\(unreadable"):
+                scan_credential_leak(agent)
+    finally:
+        (agent / "locked.txt").chmod(0o644)
+    # rate-limit detection on the stream result event
+    assert rate_limited({"is_error": True, "api_error_status": 429, "result": "x"})
+    assert rate_limited({"is_error": True, "result": "You have hit your usage limit", "api_error_status": 400})
+    assert rate_limited({"is_error": True, "terminal_reason": "rate_limit"})
+    assert not rate_limited({"is_error": False, "result": "429 mentioned in prose"})
+    assert not rate_limited({"is_error": True, "api_error_status": 401, "result": "Invalid API key"})
+    assert not rate_limited(None)
