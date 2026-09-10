@@ -270,9 +270,12 @@ describe("setup-skill", () => {
     );
 
     // And the re-trigger rule must carry the same contract, not the superseded
-    // set-comparison-and-restart wording.
-    const guardSection = content.slice(content.indexOf("## Step 0.5"), content.indexOf("## How to Handle Arguments"));
-    const retrigger = guardSection.slice(guardSection.indexOf("Re-trigger rule for the Step 2 reconciliation"));
+    // set-comparison-and-restart wording. T-496 relocated the full guard body
+    // (byte-for-byte) to session-guard.md; SKILL.md's stub carries only a
+    // one-line pointer to it, so this detail is asserted against the moved
+    // text, not against SKILL.md itself.
+    const guardBody = await readFile(join(PROJECT_ROOT, "src", "skill", "session-guard.md"), "utf-8");
+    const retrigger = guardBody.slice(guardBody.indexOf("Re-trigger rule for the Step 2 reconciliation"));
     const bounded = retrigger.slice(0, retrigger.indexOf("Re-trigger rule for start"));
     expect(bounded).toMatch(/classification FINGERPRINT/i);
     expect(bounded).toMatch(/status payload ALREADY HELD/i);
@@ -288,12 +291,11 @@ describe("setup-skill", () => {
 
     // And the rescan has to be authorized, or Step 2 prescribes a call the
     // whitelist forbids -- the same prescribed-and-forbidden shape as ISS-900.
-    const guard = content.slice(content.indexOf("## Step 0.5"), content.indexOf("## How to Handle Arguments"));
-    expect(guard, "the second guard call is prescribed but not authorized").toMatch(
+    expect(guardBody, "the second guard call is prescribed but not authorized").toMatch(
       /Re-trigger rule for the Step 2 reconciliation/i,
     );
-    expect(guard).toMatch(/ownership counts as unresolved again/i);
-    expect(guard).toMatch(/the only rescan authorized here/i);
+    expect(guardBody).toMatch(/ownership counts as unresolved again/i);
+    expect(guardBody).toMatch(/the only rescan authorized here/i);
   });
 
   it("SKILL.md defines task-aware continuation and foreign-task relay", async () => {
@@ -306,6 +308,13 @@ describe("setup-skill", () => {
     // attached to it.
     expect(content).toContain("storybloq_session_guard");
 
+    // T-496 relocated the full guard body (byte-for-byte) to session-guard.md;
+    // SKILL.md's stub carries only the ordinary path plus one-line pointers
+    // for the exceptional verdicts. Every assertion below that needs the full
+    // guard detail (the prelude, the whitelist, and every verdict's own
+    // bullet) reads the moved text, not SKILL.md itself.
+    const guardBody = await readFile(join(PROJECT_ROOT, "src", "skill", "session-guard.md"), "utf-8");
+
     /**
      * The tool-absent branch requires that a TARGETED discovery call for the
      * guard already failed. If the prelude only ever targets `storybloq_status`,
@@ -313,7 +322,7 @@ describe("setup-skill", () => {
      * it nor discover it, so mode A is unreachable and every invocation stops
      * before argument routing.
      */
-    const prelude = content.slice(content.indexOf("**Guard prelude"), content.indexOf("**Whitelist semantics"));
+    const prelude = guardBody.slice(guardBody.indexOf("**Guard prelude"), guardBody.indexOf("**Whitelist semantics"));
     expect(prelude.length, "could not locate the guard prelude").toBeGreaterThan(200);
     expect(prelude).toMatch(/query: "storybloq_session_guard"/);
     // Both required tools, not just the guard: deleting the status lookup would
@@ -324,14 +333,14 @@ describe("setup-skill", () => {
     // Bounded to each action's OWN bullet in the "Act on `overallAction`" list.
     // A whole-file substring search passes as long as the word appears anywhere,
     // so it cannot see an action whose instruction drifted or went missing.
-    const sectionStart = content.indexOf("2. Act on `overallAction`");
-    const sectionEnd = content.indexOf("**If `storybloq_session_guard` is confirmed absent**");
+    const sectionStart = guardBody.indexOf("2. Act on `overallAction`");
+    const sectionEnd = guardBody.indexOf("**If `storybloq_session_guard` is confirmed absent**");
     // Both markers asserted before slicing: a missing marker silently yields an
     // empty or whole-file slice, and every bullet assertion below would then be
     // testing something other than the section it names.
-    expect(sectionStart, "no `Act on overallAction` heading in SKILL.md").toBeGreaterThan(-1);
+    expect(sectionStart, "no `Act on overallAction` heading in session-guard.md").toBeGreaterThan(-1);
     expect(sectionEnd, "no tool-absent marker to bound the section").toBeGreaterThan(sectionStart);
-    const actOn = content.slice(sectionStart, sectionEnd);
+    const actOn = guardBody.slice(sectionStart, sectionEnd);
 
     const bulletFor = (action: string): string => {
       const start = actOn.indexOf(`**\`${action}\`**`);
@@ -511,7 +520,7 @@ describe("setup-skill", () => {
      * two conditions, or widening it to arbitrary reads would otherwise leave
      * these tests green while the fallback contract became unreachable or unsafe.
      */
-    const whitelist = content.slice(content.indexOf("**Whitelist semantics"), content.indexOf("1. Call `storybloq_session_guard`"));
+    const whitelist = guardBody.slice(guardBody.indexOf("**Whitelist semantics"), guardBody.indexOf("1. Call `storybloq_session_guard`"));
     expect(whitelist.length, "could not locate the whitelist paragraph").toBeGreaterThan(200);
     expect(whitelist).toMatch(/One READ of the installed `session-guard-fallback\.md`/);
     expect(whitelist, "the exception must name BOTH cases that need it").toMatch(/`overallAction: null`/);
@@ -554,7 +563,7 @@ describe("setup-skill", () => {
     // Only the OUTCOME is historical. Calling the new direct-to-CLI route "the
     // route this skill has always taken" misstates the executable contract and
     // contradicts ISS-900, which records why the old route dead-ends.
-    const guardText = content.slice(content.indexOf("## Step 0.5"), content.indexOf("## How to Handle Arguments"));
+    const guardText = guardBody;
     expect(guardText, "the failure branch does not distinguish outcome from route").toMatch(
       /preserves the fail-open OUTCOME[\s\S]{0,160}different ROUTE/i,
     );
@@ -580,11 +589,13 @@ describe("setup-skill", () => {
     expect(fallback).toContain("Same owner, COMPACT");
     expect(fallback).toContain("Different live owner");
 
-    expect(content).toContain("codex_app__send_message_to_thread");
-    expect(content).toContain("the user's exact message");
-    expect(content).toContain("Sent to T-020's running task.");
-    expect(content).toContain("manual-switch instruction");
-    expect(content).not.toContain("take over (only safe if the owning instance is gone)");
+    // Codex owner-response relay (item 3): full detail moved to
+    // session-guard.md; SKILL.md's stub carries only a one-line pointer to it.
+    expect(guardBody).toContain("codex_app__send_message_to_thread");
+    expect(guardBody).toContain("the user's exact message");
+    expect(guardBody).toContain("Sent to T-020's running task.");
+    expect(guardBody).toContain("manual-switch instruction");
+    expect(guardBody).not.toContain("take over (only safe if the owning instance is gone)");
   });
 
   it("SKILL.md documents the bounded code-review landing policy", async () => {
@@ -660,17 +671,34 @@ describe("setup-skill", () => {
     }
   });
 
-  it("no orphaned .md files in src/skill/ (every file is SKILL.md or referenced from it)", async () => {
+  it("no orphaned .md files in src/skill/ (every file is reachable, transitively, from SKILL.md)", async () => {
+    // T-496 introduced a two-hop reference: SKILL.md's Step 0.5 stub points
+    // at session-guard.md, and session-guard.md (the verbatim original guard
+    // body) is what names session-guard-fallback.md onward for modes A/B.
+    // Direct containment in SKILL.md alone no longer proves reachability, so
+    // this walks the reference graph instead of checking one hop.
     const { readdirSync } = await import("node:fs");
     const skillDir = join(PROJECT_ROOT, "src", "skill");
     const allFiles = readdirSync(skillDir).filter(f => f.endsWith(".md"));
-    const content = await readFile(join(skillDir, "SKILL.md"), "utf-8");
+
+    const reachable = new Set<string>(["SKILL.md"]);
+    const queue = ["SKILL.md"];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      const content = await readFile(join(skillDir, current), "utf-8");
+      for (const file of allFiles) {
+        if (!reachable.has(file) && content.includes(file)) {
+          reachable.add(file);
+          queue.push(file);
+        }
+      }
+    }
 
     for (const file of allFiles) {
       if (file === "SKILL.md") continue;
       expect(
-        content.includes(file),
-        `"${file}" exists in src/skill/ but is not referenced from SKILL.md`,
+        reachable.has(file),
+        `"${file}" exists in src/skill/ but is not reachable, even transitively, from SKILL.md`,
       ).toBe(true);
     }
   });
@@ -1066,6 +1094,11 @@ describe("setup-skill", () => {
     // the allow-list it would simply not be installed, and the setup flow would
     // report a missing file instead of writing a review contract.
     expect(tsContent).toContain('"review-contract-template.md"');
+    // T-496 (ISS-1144 guard pattern): session-guard.md is the on-demand
+    // reference the Step 0.5 stub points to. Left out of the allow-list it
+    // would simply not be installed, and every exceptional-verdict pointer
+    // in the stub would dangle.
+    expect(tsContent).toContain('"session-guard.md"');
   });
 
   it("setup-skill.ts handles subdirectory skills with copyDirRecursive", async () => {
