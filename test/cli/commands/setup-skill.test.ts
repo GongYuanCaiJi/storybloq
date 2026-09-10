@@ -598,8 +598,8 @@ describe("setup-skill", () => {
     expect(guardBody).not.toContain("take over (only safe if the owning instance is gone)");
   });
 
-  it("SKILL.md documents the bounded code-review landing policy", async () => {
-    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+  it("settings.md documents the bounded code-review landing policy (T-460 Leg C step 1)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "settings.md"), "utf-8");
     const autonomous = await readFile(join(PROJECT_ROOT, "src", "skill", "autonomous-mode.md"), "utf-8");
     expect(content).toContain('"maxReviewRounds": "number (default: 12');
     expect(autonomous).toContain("Code-review landing cap");
@@ -970,20 +970,61 @@ describe("setup-skill", () => {
   // Settings command
   // -------------------------------------------------------------------------
 
-  it("SKILL.md has /story settings command in argument handler", async () => {
+  it("SKILL.md has /story settings command in argument handler, pointing at settings.md", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     expect(content).toContain("/story settings");
     expect(content).toContain("## Settings");
+    expect(content).toContain("settings.md");
   });
 
-  it("SKILL.md has config schema reference (no source code digging needed)", async () => {
-    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+  it("settings.md has the config schema reference (no source code digging needed) (T-460 Leg C step 1)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "settings.md"), "utf-8");
     expect(content).toContain("### Config Schema Reference");
     expect(content).toContain("WRITE_TESTS");
     expect(content).toContain("VERIFY");
     expect(content).toContain("maxTicketsPerSession");
     expect(content).toContain("reviewBackends");
     expect(content).toContain("Do NOT search source code");
+  });
+
+  it("only the /story settings route in How to Handle Arguments names settings.md (T-460 Leg C step 1)", async () => {
+    const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
+    const start = content.indexOf("## How to Handle Arguments");
+    const end = content.indexOf("\n## ", start + 1);
+    expect(start).toBeGreaterThan(-1);
+    const section = end === -1 ? content.slice(start) : content.slice(start, end);
+    const routeLines = section.split("\n").filter((l) => l.trim().startsWith("- `/story"));
+    expect(routeLines.length).toBeGreaterThan(1);
+    const settingsRouteLines = routeLines.filter((l) => l.includes("settings.md"));
+    expect(settingsRouteLines).toHaveLength(1);
+    expect(settingsRouteLines[0]).toContain("/story settings");
+  });
+
+  it("settings.md's body (after its heading and intro line) is byte-for-byte identical to the pre-split fixture (T-460 Leg C step 1)", () => {
+    // Proves the T-460 Leg C step 1 relocation moved the Settings section
+    // verbatim -- zero rewording -- the same preservation-proof pattern T-496
+    // used for session-guard.md. The fixture is the exact pre-split body
+    // (current-main SKILL.md lines 424-631, before this ticket's edit); only
+    // the new heading + one-line intro precede it in settings.md.
+    //
+    // The split point is derived from the EXACT expected header text, not
+    // from settings.length - fixture.length: deriving it from the fixture's
+    // own length turns this into a suffix check that an empty fixture (or
+    // arbitrary content inserted between the intro and the body, absorbed
+    // into a now-larger "header") would pass vacuously. Asserting the fixture
+    // is non-empty and the header is an EXACT prefix match closes both gaps.
+    const settings = readFileSync(join(PROJECT_ROOT, "src", "skill", "settings.md"));
+    const fixture = readFileSync(
+      join(PROJECT_ROOT, "test", "core", "fixtures", "t460-settings-section-presplit.txt"),
+    );
+    expect(fixture.length, "fixture must not be empty").toBeGreaterThan(0);
+    const expectedHeader =
+      "# Settings (/story settings)\n\n" +
+      "Full `/story settings` flow: read `.story/config.json`, present current settings, walk the user through changes via `AskUserQuestion`, apply via `storybloq config set-overrides`, and the complete config schema reference. Loaded on demand from SKILL.md; not part of every `/story` session.\n\n";
+    const headerBytes = Buffer.byteLength(expectedHeader, "utf-8");
+    expect(settings.subarray(0, headerBytes).toString("utf-8")).toBe(expectedHeader);
+    const body = settings.subarray(headerBytes);
+    expect(body.equals(fixture)).toBe(true);
   });
 
   // -------------------------------------------------------------------------
