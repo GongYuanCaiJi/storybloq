@@ -1,5 +1,7 @@
 import { computeIssueFlow, formatIssueFlow, ISSUE_FLOW_SEMANTICS } from "./issue-flow.js";
-import type { DuetRoute, DuetView } from "./duet-coordination.js";
+import type { ArrangementCompactResult, ArrangementRotateResult, DuetRoute, DuetView } from "./duet-coordination.js";
+import { arrangementCapacity, type ArrangementCapacity } from "./arrangement-compaction.js";
+import { assignmentIdOf, isCompactedAssignment } from "../models/duet.js";
 import { displayIdOf } from "./resolver.js";
 import type { OutputFormat, ErrorCode } from "../models/types.js";
 import type { FederationState, FederationNodeEntry } from "../federation/state.js";
@@ -1640,13 +1642,17 @@ export function formatArrangement(
   citedRulings: readonly CitationResolution[] = [],
   coordination?: DuetView,
 ): string {
+  // ISS-1191: capacity is reported on every read, so a pen sees the wall
+  // approaching instead of discovering it as a refused write.
+  const capacity = arrangementCapacity(arrangement);
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ ...arrangement, citedRulings: citedRulingsForJson(citedRulings), ...(coordination && { state: coordination.state, route: coordination.route }) }), null, 2);
+    return JSON.stringify(successEnvelope({ ...arrangement, capacity, citedRulings: citedRulingsForJson(citedRulings), ...(coordination && { state: coordination.state, route: coordination.route }) }), null, 2);
   }
   const parties = arrangement.parties.map((p) => `${p.role} (${p.client})`).join(", ");
   const lines: string[] = [
     `# Arrangement ${escapeMarkdownInline(arrangement.id)} [${arrangement.lifecycle}]`,
     "",
+    `Capacity: ${capacity.bytes} of ${capacity.max} bytes (${capacity.pct}%); checkpoint ${capacity.checkpointBytes}`,
     `Bounds: ${escapeMarkdownInline(arrangement.bounds.join(", "))}`,
     `Parties: ${escapeMarkdownInline(parties)}`,
     `Unreachability (irreversible): ${arrangement.unreachability.onIrreversibleWork}`,
@@ -1662,7 +1668,10 @@ function duetCoordinationLines(view: DuetView): string[] {
   if (view.state) {
     lines.push(`Coordination session: ${safe(view.state.start.sessionId)}; revision: ${view.state.revision}`, `Handshake nonce: ${safe(view.state.nonce)}`);
     for (const assignment of view.state.assignments.slice(0, 20)) {
-      lines.push(`- ${safe(assignment.input.id)}: ${safe(assignment.status)}; ${safe(assignment.input.scope.slice(0, 240))}`);
+      // ISS-1191: a compacted assignment kept its identity and status, not
+      // its scope text -- say so rather than printing an empty scope.
+      const detail = isCompactedAssignment(assignment) ? "compacted resolved history" : safe(assignment.input.scope.slice(0, 240));
+      lines.push(`- ${safe(assignmentIdOf(assignment))}: ${safe(assignment.status)}; ${detail}`);
     }
     if (view.state.assignments.length > 20) lines.push(`(${view.state.assignments.length - 20} more assignments)`);
     lines.push("Full runtime, events, obligations and cursors: arrangement get with format json. Route readiness does not grant write authority.");
@@ -1672,6 +1681,46 @@ function duetCoordinationLines(view: DuetView): string[] {
 
 export function formatDuetCoordination(view: DuetView, format: OutputFormat): string {
   return format === "json" ? JSON.stringify(successEnvelope(view), null, 2) : formatArrangement(view.arrangement, format, [], view);
+}
+
+/** ISS-1191: what `storybloq arrangement compact` reports. */
+export function formatArrangementCompactResult(result: ArrangementCompactResult, format: OutputFormat): string {
+  const { view, changed, before, after } = result;
+  if (format === "json") {
+    return JSON.stringify(successEnvelope({ id: view.arrangement.id, changed, before, after, route: view.route }), null, 2);
+  }
+  if (!changed) {
+    return `Arrangement ${escapeMarkdownInline(view.arrangement.id)} is already compact: ${before.bytes} of ${before.max} bytes (${before.pct}%).`;
+  }
+  return [
+    `Compacted arrangement ${escapeMarkdownInline(view.arrangement.id)}.`,
+    `Before: ${before.bytes} bytes (${before.pct}%), checkpoint ${before.checkpointBytes}`,
+    `After: ${after.bytes} bytes (${after.pct}%), checkpoint ${after.checkpointBytes}`,
+    `Communication: ${escapeMarkdownInline(sanitizeDisplayText(view.route.status))}`,
+  ].join("\n");
+}
+
+/** ISS-1191: what `storybloq arrangement rotate` reports. */
+export function formatArrangementRotateResult(result: ArrangementRotateResult, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(successEnvelope({
+      id: result.predecessor.id,
+      successor: result.successorId,
+      alreadyRotated: result.alreadyRotated,
+      carriedAssignments: result.carriedAssignments,
+      carriedEarmarks: result.carriedEarmarks,
+    }), null, 2);
+  }
+  const successor = escapeMarkdownInline(result.successorId);
+  if (result.alreadyRotated) {
+    return `Arrangement ${escapeMarkdownInline(result.predecessor.id)} was already rotated; its successor is ${successor}.`;
+  }
+  return [
+    `Rotated ${escapeMarkdownInline(result.predecessor.id)} into ${successor}.`,
+    `Carried assignments: ${result.carriedAssignments.length === 0 ? "none" : escapeMarkdownInline(result.carriedAssignments.join(", "))}`,
+    `Carried earmarks: ${result.carriedEarmarks.length === 0 ? "none" : escapeMarkdownInline(result.carriedEarmarks.join(", "))}`,
+    `History stays in the closed arrangement; coordinate against ${successor} from now on.`,
+  ].join("\n");
 }
 
 export function formatArrangementList(
@@ -1938,12 +1987,31 @@ function formatEarmarkLine(earmark: Earmark): string {
   );
 }
 
-export function formatEarmarkGetResult(ref: string, earmark: Earmark | null, format: OutputFormat): string {
+/**
+ * ISS-1191: the earmark's authorizing arrangement carries a hard 64 KiB
+ * cap, so its capacity is reported here too -- the pen reads this surface
+ * far more often than `arrangement get`. `capacity` is null (with a reason)
+ * whenever the arrangement cannot be resolved in the root being read, which
+ * is the normal case for a federated node read: never a fabricated number.
+ */
+export function formatEarmarkGetResult(
+  ref: string,
+  earmark: Earmark | null,
+  format: OutputFormat,
+  capacity?: { capacity: ArrangementCapacity | null; reason?: string },
+): string {
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ ref, earmark }), null, 2);
+    return JSON.stringify(successEnvelope({ ref, earmark, ...(capacity && { capacity: capacity.capacity, ...(capacity.reason !== undefined && { capacityReason: capacity.reason }) }) }), null, 2);
   }
   if (!earmark) return `${escapeMarkdownInline(sanitizeDisplayText(ref))} has no earmark.`;
-  return `Earmark on ${escapeMarkdownInline(sanitizeDisplayText(ref))}: ${formatEarmarkLine(earmark)}`;
+  const lines = [`Earmark on ${escapeMarkdownInline(sanitizeDisplayText(ref))}: ${formatEarmarkLine(earmark)}`];
+  if (capacity?.capacity) {
+    const c = capacity.capacity;
+    lines.push(`Arrangement capacity: ${c.bytes} of ${c.max} bytes (${c.pct}%); checkpoint ${c.checkpointBytes}`);
+  } else if (capacity?.reason) {
+    lines.push(`Arrangement capacity: unavailable (${escapeMarkdownInline(sanitizeDisplayText(capacity.reason))})`);
+  }
+  return lines.join("\n");
 }
 
 export function formatEarmarkActionResult(

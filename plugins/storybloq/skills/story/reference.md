@@ -328,6 +328,20 @@ Supersede a ruling: link an existing one with --with, or record a new supersedin
 storybloq ruling supersede <id> (--with <id> | --text <text> --attribution <source> --date <YYYY-MM-DD>) [--scope-tag <tag>] [--format json|md]
 ```
 
+### arrangement compact
+Compact a duet arrangement's coordination checkpoint: resolved assignments keep their last event, overflow moves to an archive list. Pen only
+
+```
+storybloq arrangement compact <id> [--client-task-id <id>] [--format json|md]
+```
+
+### arrangement rotate
+Close a duet arrangement at capacity and carry its open assignments, verified session and earmarks into a fresh successor. Pen only
+
+```
+storybloq arrangement rotate <id> [--client-task-id <id>] [--format json|md]
+```
+
 ### validate
 Reference, schema, source-provenance, and loader-independent JSON checks
 

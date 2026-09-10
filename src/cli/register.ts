@@ -98,6 +98,8 @@ import {
   handleArrangementGet,
   handleArrangementCreate,
   handleArrangementUpdate,
+  handleArrangementCompact,
+  handleArrangementRotate,
 } from "./commands/arrangement.js";
 import { ARRANGEMENT_LIFECYCLE, ARRANGEMENT_ROLES, type ArrangementParty } from "../models/arrangement.js";
 import { handleDuetCoordinate, parseDuetOperation } from "./commands/duet.js";
@@ -2892,6 +2894,44 @@ export function registerNoteCommand(yargs: Argv): Argv {
 // ---------------------------------------------------------------------------
 
 /**
+ * ISS-1191: the root discovery, format parsing and error classification the
+ * capacity-maintenance subcommands share with every other arrangement
+ * subcommand, factored out rather than pasted a third and fourth time.
+ */
+async function runArrangementMaintenance(
+  argv: { format?: string },
+  run: (format: ReturnType<typeof parseOutputFormat>, root: string) => Promise<{ output: string; exitCode?: number }>,
+): Promise<void> {
+  const format = parseOutputFormat(argv.format as string);
+  const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+  if (!root) {
+    writeOutput(formatError("not_found", "No .story/ project found.", format));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  try {
+    const result = await run(format, root);
+    writeOutput(result.output);
+    process.exitCode = result.exitCode ?? ExitCode.OK;
+  } catch (err: unknown) {
+    if (err instanceof CliValidationError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const { ProjectLoaderError } = await import("../core/errors.js");
+    if (err instanceof ProjectLoaderError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    writeOutput(formatError("io_error", message, format));
+    process.exitCode = ExitCode.USER_ERROR;
+  }
+}
+
+/**
  * ISS-1078 ([R1-FIX 8]): parses the `key=value,key=value,...` fields of one
  * `--party` entry, tolerating a comma INSIDE a value when the value is
  * double-quoted (`modelTier="opus, fallback sonnet"`). Grammar:
@@ -3224,7 +3264,39 @@ export function registerArrangementCommand(yargs: Argv): Argv {
             }
           },
         )
-        .demandCommand(1, "Specify an arrangement subcommand: list, get, create, update, coordinate")
+        // ISS-1191: capacity maintenance. Both are CLI only and both are
+        // pen-authorized, exactly like `coordinate`.
+        .command(
+          "compact <id>",
+          "Compact an arrangement's coordination checkpoint (reduces resolved assignments)",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Arrangement ID (e.g. a-[canonical])" })
+                .option("client-task-id", { type: "string", describe: "Caller's client task id; must match the arrangement's pen" }),
+            ),
+          async (argv) => {
+            await runArrangementMaintenance(argv, (format, root) =>
+              handleArrangementCompact(argv.id as string, { clientTaskId: argv.clientTaskId as string | undefined }, format, root),
+            );
+          },
+        )
+        .command(
+          "rotate <id>",
+          "Close an arrangement and carry its open work forward into a fresh successor",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Arrangement ID (e.g. a-[canonical])" })
+                .option("client-task-id", { type: "string", describe: "Caller's client task id; must match the arrangement's pen" }),
+            ),
+          async (argv) => {
+            await runArrangementMaintenance(argv, (format, root) =>
+              handleArrangementRotate(argv.id as string, { clientTaskId: argv.clientTaskId as string | undefined }, format, root),
+            );
+          },
+        )
+        .demandCommand(1, "Specify an arrangement subcommand: list, get, create, update, compact, rotate, coordinate")
         .strict(),
     () => {},
   );

@@ -3,6 +3,7 @@ import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
 import { isArrangementConflicted } from "../../core/arrangement-authority.js";
 import { canPlaceEarmark, describeEarmarkHolder } from "../../core/earmarks.js";
 import { arrangementCoversNodeItem } from "../../core/arrangement-bounds.js";
+import { arrangementCapacity, type ArrangementCapacity } from "../../core/arrangement-compaction.js";
 import { withOrchestratorAndItemLocks } from "../../core/orchestrator-item-lock.js";
 import { resolveSessionSelector } from "../../autonomous/session-selector.js";
 import { ownerTaskForCurrentClient } from "../../autonomous/client-profile.js";
@@ -210,7 +211,22 @@ export function handleEarmarkGet(ref: string, ctx: CommandContext): CommandResul
   const target = resolveEarmarkTarget(ref, ctx.state);
   const item = loadTargetItem(target, ctx.state);
   const earmark = item.earmark ?? null;
-  return { output: formatEarmarkGetResult(ref, earmark, ctx.format) };
+  return { output: formatEarmarkGetResult(ref, earmark, ctx.format, earmark === null ? undefined : arrangementCapacityFor(ctx.root, earmark.arrangementId)) };
+}
+
+/**
+ * ISS-1191: the capacity of the arrangement this earmark is authorized by.
+ * Arrangements are owned by the root that holds them, and a federated read
+ * runs against a NODE root while the authorizing arrangement lives on the
+ * orchestrator -- so an unresolvable arrangement reports a reason, never a
+ * fabricated capacity.
+ */
+function arrangementCapacityFor(root: string, arrangementId: string): { capacity: ArrangementCapacity | null; reason?: string } {
+  const arrangement = loadArrangementsSafe(root).arrangements.find((a) => a.id === arrangementId);
+  if (!arrangement) {
+    return { capacity: null, reason: `arrangement ${arrangementId} is not readable from this root` };
+  }
+  return { capacity: arrangementCapacity(arrangement) };
 }
 
 // --- Write handlers ---

@@ -36,6 +36,23 @@ A Claude Code session does not resume itself across a turn boundary: a turn that
 
 Every dispatch prompt states the worker obligation verbatim so the rule travels with the work rather than living only in this file.
 
+## Capacity
+
+An arrangement file is capped at 65,536 bytes, and what fills it is the coordination checkpoint's assignments, not receipts: each event stores its own full input payload alongside the assignment's, so roughly 12 to 14 assignments reach the wall on their own.
+
+Compaction runs automatically on every coordination write. A `resolved` assignment keeps its identity, timing, dispatch session and its LAST event; `assigned`, `needs-attention` and `needs-review` assignments keep everything, byte for byte. Once the projected file passes 80 percent of the cap, resolved records beyond the newest five move into a `compactedAssignments` archive carrying their id and resolution time. An archived id can never be reused for new work.
+
+Compaction leaves the existing runtime file untouched, but it permanently reduces the RECOVERY checkpoint: after compaction, `recover` rebuilds the runtime from the reduced record, so a resolved assignment's scope, acceptance criteria and earlier events are no longer recoverable once the runtime file is gone. Preserve anything a later reader will need (evidence paths, decisions) outside the checkpoint before compacting a long-running arrangement.
+
+`arrangement get` and `earmark get` both report `capacity` (`bytes`, `max`, `pct`, `checkpointBytes`), so the wall is visible before it refuses a write.
+
+Two commands, both CLI only and both pen-authorized:
+
+- `storybloq arrangement compact <id>` compacts the checkpoint explicitly. It refuses when the arrangement has unresolved conflicts, when the runtime is unreadable, or when a readable runtime diverges from the checkpoint; a changed checkpoint moves its CAS revision, so a pen holding the older revision gets the ordinary stale-revision refusal.
+- `storybloq arrangement rotate <id>` is the escape hatch when compaction can no longer shrink the file. It requires a verified return route, then creates a successor with the same parties, bounds and gates, carries the open assignments, the verified session and the earmarks forward, and closes the original with `continuedBy` pointing at the successor. History stays in the closed file, which then refuses coordination and any further lifecycle change. Rotation does not support node-qualified bounds.
+
+A refused write names both commands and the exact byte counts.
+
 ## Codex
 
 For separately created desktop tasks, discover the callable equivalents of `send_message_to_thread`, `wait_threads`, `read_thread`, and task listing in each task independently. Common full identifiers include `mcp__codex_app__send_message_to_thread` and `mcp__codex_app__wait_threads`; invoke only identifiers actually present. Exact discovery may use a deferred-tool search or the runtime's callable inventory, such as `ALL_TOOLS`. Never infer availability from another task's inventory.

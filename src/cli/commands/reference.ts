@@ -268,6 +268,18 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--with", "--text", "--attribution", "--date", "--scope-tag"],
   },
   {
+    name: "arrangement compact",
+    description: "Compact a duet arrangement's coordination checkpoint: resolved assignments keep their last event, overflow moves to an archive list. Pen only",
+    usage: "storybloq arrangement compact <id> [--client-task-id <id>] [--format json|md]",
+    flags: ["--client-task-id"],
+  },
+  {
+    name: "arrangement rotate",
+    description: "Close a duet arrangement at capacity and carry its open assignments, verified session and earmarks into a fresh successor. Pen only",
+    usage: "storybloq arrangement rotate <id> [--client-task-id <id>] [--format json|md]",
+    flags: ["--client-task-id"],
+  },
+  {
     name: "validate",
     description: "Reference, schema, source-provenance, and loader-independent JSON checks",
     usage: "storybloq validate [--integrity-only] [--format json|md]",
