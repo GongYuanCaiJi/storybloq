@@ -2620,8 +2620,22 @@ export function formatRecap(
   }
 
   if (actions.highSeverityIssues.length > 0) {
-    for (const i of actions.highSeverityIssues) {
+    // T-320 commit 4: show at most the first five (already sorted
+    // critical-before-high, then discoveredDate, then displayId by
+    // buildRecap); report anything past that as a per-severity overflow line
+    // rather than silently dropping it.
+    const shown = actions.highSeverityIssues.slice(0, 5);
+    for (const i of shown) {
       lines.push(`- **${i.severity} issue:** ${displayIdOf(i)} -- ${escapeMarkdownInline(i.title)}`);
+    }
+    const omitted = actions.highSeverityIssues.slice(5);
+    if (omitted.length > 0) {
+      const criticalOmitted = omitted.filter((i) => i.severity === "critical").length;
+      const highOmitted = omitted.filter((i) => i.severity === "high").length;
+      const parts: string[] = [];
+      if (criticalOmitted > 0) parts.push(`${criticalOmitted} critical`);
+      if (highOmitted > 0) parts.push(`${highOmitted} high`);
+      lines.push(`- *(${omitted.length} more issue${omitted.length === 1 ? "" : "s"} omitted: ${parts.join(", ")})*`);
     }
   }
 
