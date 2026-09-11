@@ -747,6 +747,21 @@ const MATRIX: Coverage[] = [
       expect(superseding.scopeTags).toEqual(["gamma", "delta"]);
     },
   },
+  {
+    // T-502: `health --only` is a read-only selector, so unlike every row
+    // above there is no stored field to inspect. What it proves instead is
+    // the array behaviour itself: the comma expression selects exactly those
+    // two checks in the fixed order, and a bare flag is rejected rather than
+    // silently meaning "all", which would hide a typo'd value.
+    key: "health --only",
+    check: (dir) => {
+      const res = run(dir, "health", "--only", "cli-version,cross-session-inbound", "--format", "json");
+      expect(res.code, res.out).toBe(0);
+      const ids = (JSON.parse(res.out) as { checks: Array<{ id: string }> }).checks.map((c) => c.id);
+      expect(ids).toEqual(["cli-version", "cross-session-inbound"]);
+      expectRejected(run(dir, "health", "--only", "--format", "json"));
+    },
+  },
 ];
 
 describe("ISS-886 registration coverage matrix", () => {

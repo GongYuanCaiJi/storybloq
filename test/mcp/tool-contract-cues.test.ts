@@ -350,13 +350,20 @@ describe("tool description contract (T-460)", () => {
     // already in `storybloq reference` and four field descriptions were
     // dropped to their names. The remaining growth is field surface, so the
     // budget is raised from 61,500 to 62,500 as a deliberate act.
-    // This ceiling leaves ~500 bytes of headroom and fails once an edit gives
+    // T-502 adds storybloq_health: one tool, three optional fields, measured
+    // at 62,587 after its description was cut to the one sentence not already
+    // in `storybloq reference` and settings.md plus the relay instruction, and
+    // two of its three field descriptions were dropped. What remains is field
+    // surface -- `only` cannot be a free string without letting a client ask
+    // for a check that does not exist, and the enum IS the surface. So the
+    // budget is raised from 62,500 to 63,500 as a deliberate act.
+    // This ceiling leaves ~900 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
     // above are what protect against over-trimming, and a floor would fail an
     // honest future trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(62_500);
+    expect(bytes).toBeLessThan(63_500);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -385,6 +392,10 @@ describe("tool description contract (T-460)", () => {
     // storybloq_session_intel (76 -> 77), registered in the full AND the
     // degraded set because the no-project case is where an agent most needs
     // to know its context pressure; no _list tool, nothing to enumerate.
-    expect(result.tools.length).toBe(77);
+    // T-502 adds storybloq_health (77 -> 78), registered in the full AND the
+    // degraded set for the same reason: a user with no `.story/` yet is
+    // exactly the one running a stale CLI with no review bridge. No _list
+    // tool; the five check ids are a closed enum in the schema.
+    expect(result.tools.length).toBe(78);
   });
 });

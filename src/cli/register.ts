@@ -22,7 +22,7 @@ import {
   resolveCliNodeRoot,
   CliValidationError,
 } from "./helpers.js";
-import { arrayOptions, arrayPositional } from "./array-options.js";
+import { arrayOption, arrayOptions, arrayPositional } from "./array-options.js";
 
 // Shared comma/empty/trim/emptyAfterSplit combinations. See array-options.ts for
 // what each axis means and ISS-886 for why they are declared per registration.
@@ -4617,6 +4617,76 @@ export function registerNodeCommand(yargs: Argv): Argv {
         .demandCommand(1, "Specify a node subcommand: add, remove, update, list")
         .strict(),
     () => {},
+  );
+}
+
+// ---------------------------------------------------------------------------
+// health
+// ---------------------------------------------------------------------------
+
+/**
+ * T-502: `storybloq health`. Runs with OR WITHOUT a `.story/` project, so a
+ * missing root is not an error here the way it is for `selftest`: the
+ * no-project case is exactly when a newcomer most needs the answer.
+ *
+ * `projectDir` is `process.cwd()`, the invocation directory, because that is
+ * where Claude Code resolves project settings and `.mcp.json` from. The
+ * discovered ledger root supplies config only.
+ */
+export function registerHealthCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "health",
+    "Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging",
+    (y) =>
+      arrayOption(
+        addFormatOption(y).option("refresh", {
+          type: "boolean",
+          default: false,
+          describe: "Force the registry lookup even when the 24 hour cache is fresh",
+        }),
+        "only",
+        {
+          // Comma-split so `--only cli-version,codex-bridge` works the way a
+          // user expects; a bare `--only` is rejected, because omitting the
+          // flag is already the way to run everything and a bare flag that
+          // silently meant "all" would hide a typo'd value.
+          comma: "split",
+          emptyAfterSplit: "reject",
+          empty: "drop",
+          trim: "always",
+          requireValue: "Pass at least one check id, or omit --only to run them all.",
+          describe: "Run only these checks (usage-window, cli-version, codex-bridge, skill-version, cross-session-inbound)",
+        },
+      ),
+    async (argv) => {
+      const format = parseOutputFormat(argv.format);
+      const { HEALTH_CHECK_IDS } = await import("../core/health/types.js");
+      const requested: string[] = (Array.isArray(argv.only) ? (argv.only as unknown[]) : [])
+        .filter((v): v is string => typeof v === "string");
+      const unknown = requested.filter((id) => !(HEALTH_CHECK_IDS as readonly string[]).includes(id));
+      if (unknown.length > 0) {
+        writeOutput(
+          formatError(
+            "invalid_input",
+            `Unknown check id: ${unknown.join(", ")}. Valid ids: ${HEALTH_CHECK_IDS.join(", ")}.`,
+            format,
+          ),
+        );
+        process.exitCode = ExitCode.USER_ERROR;
+        return;
+      }
+      const projectDir = process.cwd();
+      const ledgerRoot = (await import("../core/project-root-discovery.js")).discoverProjectRoot() ?? null;
+      const { handleHealth } = await import("./commands/health.js");
+      const result = await handleHealth({ ledgerRoot, projectDir }, format, {
+        ...(requested.length > 0 ? { only: requested as never } : {}),
+        refresh: argv.refresh === true,
+      });
+      writeOutput(result.output);
+      // Deliberately always OK: a tooling report is information, not a gate,
+      // so scripts and hooks can call it without arming a failure.
+      process.exitCode = ExitCode.OK;
+    },
   );
 }
 

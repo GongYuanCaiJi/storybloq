@@ -19,6 +19,12 @@ export interface HealthRunInput {
   readonly cliVersion: string;
   /** Test seam only; production builds the default adapters. */
   readonly deps?: HealthDeps;
+  /**
+   * Test seam: replace individual default adapters. Kept separate from `deps`
+   * so a surface test can inject ONE effect (a throwing settings reader, say)
+   * without having to restate the other nine.
+   */
+  readonly depsOverride?: Partial<HealthDeps>;
 }
 
 export function resolveHealthClient(env: Readonly<Record<string, string | undefined>>): HealthClient {
@@ -29,7 +35,8 @@ export async function runHealthCheck(
   input: HealthRunInput,
   opts: RunHealthOptions = {},
 ): Promise<HealthResult> {
-  const deps = input.deps ?? defaultHealthDeps({ ledgerRoot: input.ledgerRoot });
+  const base = input.deps ?? defaultHealthDeps({ ledgerRoot: input.ledgerRoot });
+  const deps = input.depsOverride ? { ...base, ...input.depsOverride } : base;
   return runHealth(
     {
       ledgerRoot: input.ledgerRoot,

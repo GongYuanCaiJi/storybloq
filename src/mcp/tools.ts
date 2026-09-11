@@ -5,7 +5,7 @@
  *   loadProject(root) → build CommandContext → call handler → classify result
  */
 import { z } from "zod";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { NODE_NAME_REGEX } from "../models/federation-config.js";
 import { CROSS_NODE_REF_REGEX } from "../models/ticket.js";
@@ -16,6 +16,7 @@ import { resolveNodePath } from "../federation/resolver.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS, OwnerGoneCandidateTakeoverSchema, OwnerGoneCandidateCancelSchema } from "../autonomous/session-types.js";
 import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 import { evaluateSessionGuard } from "../core/session-guard.js";
+import { HEALTH_CHECK_IDS } from "../core/health/types.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired, withSessionLock } from "../autonomous/session.js";
 import { citationsForReviewTarget } from "../autonomous/cited-rulings.js";
 import { withStalenessNote } from "../autonomous/binary-staleness.js";
@@ -456,7 +457,18 @@ function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { 
   return { root: resolved.root };
 }
 
-export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void {
+/**
+ * The values an entry point captures ONCE and hands to the registrars. Today
+ * that is the server's launch directory, which is the directory Claude Code
+ * resolves project settings and `.mcp.json` from. It is a parameter and not a
+ * module-level capture so two servers in one process can differ and so no
+ * import-time side effect decides it.
+ */
+export interface RegistrationContext {
+  readonly launchDir: string;
+}
+
+export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?: RegistrationContext): void {
   // ISS-892: every registration below goes through the strict shim, so an
   // argument the tool does not implement is an error naming the key rather than a
   // silently dropped one. Shadowing the parameter is deliberate: there is no
@@ -611,6 +623,7 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string): void
   registerSessionGuardTool(server, pinnedRoot);
   registerSessionMilestoneTool(server, pinnedRoot);
   registerSessionIntelTool(server, pinnedRoot);
+  registerHealthTool(server, pinnedRoot, ctx?.launchDir ?? realpathSync(process.cwd()));
 
   server.registerTool("storybloq_validate", {
     description: "Reference integrity + schema checks. Works even when corrupt JSON blocks project loading.",
@@ -2339,6 +2352,50 @@ export function registerSessionIntelTool(server: McpServer, root: string | null)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: "text" as const, text: formatMcpError("io_error", message, args.format ?? "md") }], isError: true };
+    }
+  });
+}
+
+/**
+ * T-502: `storybloq_health`. Like `storybloq_session_intel` and for the same
+ * reason, this bypasses `runMcpReadTool`: that pipeline requires a STRING root
+ * and loads the ledger, and this tool must answer without a project at all --
+ * the no-project case is exactly where a newcomer most needs to be told their
+ * CLI is stale or their review bridge is missing. So it is registered in both
+ * the full and the degraded set and swapped out on init (the T-446 pattern),
+ * takes no banner, and does no `loadProject`.
+ *
+ * `projectDir` is passed in rather than read here. It is the server's LAUNCH
+ * directory, captured once by the entry point and handed down through a
+ * RegistrationContext: nothing is captured at import time, so two servers in
+ * one process can inspect two different directories, and an init cannot
+ * change the value.
+ */
+export function registerHealthTool(server: McpServer, ledgerRoot: string | null, projectDir: string) {
+  return server.registerTool("storybloq_health", {
+    // Trimmed first, as the T-460 ratchet intends: what remains is the one
+    // sentence that is not already in `storybloq reference` and settings.md,
+    // plus the relay instruction, which is the only part a client acts on.
+    description:
+      "Tooling check: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session message delivery. Works without .story/, read-only. Relay each advise message and its fix verbatim.",
+    inputSchema: {
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
+      only: z.array(z.enum(HEALTH_CHECK_IDS)).optional(),
+      refresh: z.boolean().optional().describe("Force the registry lookup past the 24h cache"),
+    },
+  }, async (args) => {
+    if (ledgerRoot) { try { touchMcpLiveness(ledgerRoot); } catch { /* best-effort */ } }
+    const format = args.format ?? "md";
+    try {
+      const { handleHealth } = await import("../cli/commands/health.js");
+      const result = await handleHealth({ ledgerRoot, projectDir }, format, {
+        ...(args.only ? { only: args.only } : {}),
+        ...(args.refresh !== undefined ? { refresh: args.refresh } : {}),
+      });
+      return { content: [{ type: "text" as const, text: result.output }] };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { content: [{ type: "text" as const, text: formatMcpError("io_error", message, format) }], isError: true };
     }
   });
 }
