@@ -4053,10 +4053,27 @@ export function registerLessonCommand(yargs: Argv): Argv {
         .command(
           "digest",
           "Compiled ranked digest of active lessons",
-          (y2) => addFormatOption(y2),
+          (y2) =>
+            arrayOptions(
+              addFormatOption(y2).option("limit", {
+                type: "number",
+                describe: "Cap the digest to the top N lessons by reinforcement (T-320)",
+              }),
+              {
+                select: {
+                  ...SPLIT_LIST,
+                  describe: "Filter to lessons matching phase:<id>, component:<name>, or item:<id> selectors (T-320)",
+                },
+              },
+            ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runReadCommand(format, (ctx) => handleLessonDigest(ctx));
+            await runReadCommand(format, (ctx) =>
+              handleLessonDigest(ctx, {
+                limit: argv.limit as number | undefined,
+                select: argv.select as string[] | undefined,
+              }),
+            );
           },
         )
         .command(

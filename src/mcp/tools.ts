@@ -1461,9 +1461,12 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleLessonGet(args.id, ctx)));
 
   server.registerTool("storybloq_lesson_digest", {
-    description: "Compiled ranked digest of active lessons -- primary read interface for context loading",
-    inputSchema: {},
-  }, () => runMcpReadTool(pinnedRoot, (ctx) => handleLessonDigest(ctx)));
+    description: "Compiled ranked digest of active lessons -- primary read interface for context loading. limit/select (T-320): limited one-line form; see `storybloq reference`.",
+    inputSchema: {
+      limit: z.number().int().nonnegative().optional().describe("Cap to top N by reinforcement"),
+      select: z.array(z.string()).optional().describe("phase:<id>/component:<name>/item:<id> selectors"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleLessonDigest(ctx, { limit: args.limit, select: args.select })));
 
   server.registerTool("storybloq_lesson_create", {
     description: "Create a new lesson. Concurrent creates get distinct sequential IDs.",

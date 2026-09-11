@@ -148,8 +148,9 @@ export function handleLessonGet(
 
 export function handleLessonDigest(
   ctx: CommandContext,
+  options?: { limit?: number; select?: string[] },
 ): CommandResult {
-  const digest = buildLessonDigest(ctx.state.activeLessons);
+  const digest = buildLessonDigest(ctx.state.activeLessons, options);
   return { output: formatLessonDigest(digest, ctx.format) };
 }
 

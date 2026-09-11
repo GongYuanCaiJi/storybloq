@@ -219,8 +219,10 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "lesson digest",
-    description: "Ranked digest of active lessons for context loading",
-    usage: "storybloq lesson digest [--format json|md]",
+    description:
+      "Ranked digest of active lessons. --limit/--select (T-320): one-line-per-lesson form; --select is phase:<id>/component:<name>/item:<id>, falls back to --limit.",
+    usage: "storybloq lesson digest [--format json|md] [--limit <n>] [--select <selector,...>]",
+    flags: ["--limit", "--select"],
   },
   {
     name: "lesson create",
@@ -585,7 +587,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_phase_create", description: "Create phase in roadmap", params: ["id", "name", "label", "description", "summary?", "after?", "atStart?"] },
   { name: "storybloq_lesson_list", description: "List lessons", params: ["status?", "tag?", "source?"] },
   { name: "storybloq_lesson_get", description: "Get lesson by ID", params: ["id"] },
-  { name: "storybloq_lesson_digest", description: "Ranked digest of active lessons for context loading" },
+  { name: "storybloq_lesson_digest", description: "Ranked digest of active lessons. limit/select (T-320); see CLI lesson digest.", params: ["limit?", "select?"] },
   { name: "storybloq_lesson_create", description: "Create lesson", params: ["title", "content", "context", "source", "tags?", "supersedes?"] },
   { name: "storybloq_lesson_update", description: "Update lesson", params: ["id", "title?", "content?", "context?", "tags?", "status?", "supersedes?"] },
   { name: "storybloq_lesson_reinforce", description: "Reinforce lesson: increment count and update lastValidated", params: ["id"] },

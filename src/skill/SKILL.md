@@ -189,8 +189,7 @@ Call these in order:
 2. **Session recap** -- call `storybloq_recap` MCP tool (shows changes since last snapshot)
 3. **Recent handovers** -- call `storybloq_handover_latest` MCP tool with `count: 3` (last 3 sessions' context -- ensures reasoning behind recent decisions is preserved, not just the latest session's state)
 4. **Development rules** -- read `RULES.md` if it exists in the project root
-5. **Lessons learned** -- call `storybloq_lesson_digest` MCP tool
-6. **Recent commits** -- run `git log --oneline -10`
+5. **Recent commits** -- run `git log --oneline -10` (T-320: lessons dropped from the default load; call `storybloq_lesson_digest` on demand)
 
 ## Step 2b: Empty Scaffold Check
 

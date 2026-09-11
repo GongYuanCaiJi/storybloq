@@ -504,6 +504,21 @@ const MATRIX: Coverage[] = [
     },
   },
   {
+    key: "lesson digest --select",
+    check: (dir) => {
+      expect(run(dir, "lesson", "create", "--title", "Matches", "--content", "c",
+        "--context", "x", "--source", "manual", "--tags", "cli-status").code).toBe(0);
+      expect(run(dir, "lesson", "create", "--title", "Excluded", "--content", "c",
+        "--context", "x", "--source", "manual", "--tags", "other").code).toBe(0);
+      const res = run(dir, "lesson", "digest", "--select", "component:cli-status", "--format", "json");
+      expect(res.code, res.out).toBe(0);
+      const parsed = JSON.parse(res.out) as { data: { digest: string } };
+      expect(parsed.data.digest).toContain("Matches");
+      expect(parsed.data.digest).not.toContain("Excluded");
+      expectRejected(run(dir, "lesson", "digest", "--select", "bogus:x", "--format", "json"));
+    },
+  },
+  {
     key: "lesson update --tags",
     check: (dir) => {
       expect(run(dir, "lesson", "create", "--title", "t", "--content", "c",

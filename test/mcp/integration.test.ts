@@ -325,6 +325,109 @@ describe("MCP integration -- real filesystem", () => {
     expect(result.isError).toBeUndefined();
     expect(result.text).toContain("Test Handover");
   });
+
+  /**
+   * T-320 commit 5: same real-registration pattern as callHandoverLatest
+   * above -- exercises the storybloq_lesson_digest zod inputSchema's new
+   * `limit`/`select` fields and their forwarding at the tools.ts
+   * registration site, which a direct handleLessonDigest call bypasses.
+   */
+  async function callLessonDigest(
+    root: string,
+    args: Record<string, unknown>,
+  ): Promise<{ isError?: boolean; text: string }> {
+    const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+    registerAllTools(server, root);
+    const client = new Client({ name: "lesson-digest-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: "storybloq_lesson_digest", arguments: args });
+    await client.close();
+    const content = result.content as { text: string }[];
+    return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+  }
+
+  async function writeLesson(root: string, id: string, title: string, tags: string[]): Promise<void> {
+    const lessonsDir = join(root, ".story", "lessons");
+    await mkdir(lessonsDir, { recursive: true });
+    await writeFile(
+      join(lessonsDir, `${id}.json`),
+      JSON.stringify(
+        {
+          id,
+          title,
+          content: "content",
+          context: "context",
+          source: "manual",
+          tags,
+          reinforcements: 0,
+          lastValidated: "2026-03-27",
+          createdDate: "2026-03-27",
+          updatedDate: "2026-03-27",
+          supersedes: null,
+          status: "active",
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+  }
+
+  it("storybloq_lesson_digest with select:[...] filters through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "Matches", ["cli-status"]);
+    await writeLesson(root, "L-002", "Excluded", ["other"]);
+    const result = await callLessonDigest(root, { select: ["component:cli-status"] });
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain("Matches");
+    expect(result.text).not.toContain("Excluded");
+  });
+
+  it("storybloq_lesson_digest with limit:N caps through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "First", ["a"]);
+    await writeLesson(root, "L-002", "Second", ["b"]);
+    const result = await callLessonDigest(root, { limit: 1 });
+    expect(result.isError).toBeUndefined();
+    const lines = result.text.split("\n").filter((l) => l.trim().length > 0);
+    expect(lines).toHaveLength(1);
+  });
+
+  it("storybloq_lesson_digest with neither flag returns the unchanged default digest through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "Only", ["a"]);
+    const result = await callLessonDigest(root, {});
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain("# Lessons Learned");
+  });
+
+  // Codex R1 finding 2: the zod inputSchema (int().nonnegative()) is what
+  // gives the MCP surface the same limit contract as the CLI's own
+  // buildLessonDigest-level validation -- proven through the real
+  // registration, since a hand-built call to handleLessonDigest bypasses the
+  // schema layer entirely.
+  it("storybloq_lesson_digest rejects a negative limit at the schema layer through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "Only", ["a"]);
+    const result = await callLessonDigest(root, { limit: -1 });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/greater than or equal to 0/i);
+  });
+
+  it("storybloq_lesson_digest rejects a fractional limit at the schema layer through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "Only", ["a"]);
+    const result = await callLessonDigest(root, { limit: 1.5 });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/integer/i);
+  });
+
+  it("storybloq_lesson_digest accepts limit:0 through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    await writeLesson(root, "L-001", "Only", ["a"]);
+    const result = await callLessonDigest(root, { limit: 0 });
+    expect(result.isError).toBeUndefined();
+  });
 });
 
 describe("MCP integration -- phase_create write pipeline", () => {

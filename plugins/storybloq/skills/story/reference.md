@@ -266,10 +266,10 @@ storybloq lesson get <id> [--format json|md]
 ```
 
 ### lesson digest
-Ranked digest of active lessons for context loading
+Ranked digest of active lessons. --limit/--select (T-320): one-line-per-lesson form; --select is phase:<id>/component:<name>/item:<id>, falls back to --limit.
 
 ```
-storybloq lesson digest [--format json|md]
+storybloq lesson digest [--format json|md] [--limit <n>] [--select <selector,...>]
 ```
 
 ### lesson create
@@ -712,7 +712,7 @@ The base tools below are registered in full mode (inside a .story/ project). The
 - **storybloq_phase_create** (id, name, label, description, summary?, after?, atStart?) - Create phase in roadmap
 - **storybloq_lesson_list** (status?, tag?, source?) - List lessons
 - **storybloq_lesson_get** (id) - Get lesson by ID
-- **storybloq_lesson_digest** - Ranked digest of active lessons for context loading
+- **storybloq_lesson_digest** (limit?, select?) - Ranked digest of active lessons. limit/select (T-320); see CLI lesson digest.
 - **storybloq_lesson_create** (title, content, context, source, tags?, supersedes?) - Create lesson
 - **storybloq_lesson_update** (id, title?, content?, context?, tags?, status?, supersedes?) - Update lesson
 - **storybloq_lesson_reinforce** (id) - Reinforce lesson: increment count and update lastValidated

@@ -357,6 +357,9 @@ describe("tool description contract (T-460)", () => {
     // surface -- `only` cannot be a free string without letting a client ask
     // for a check that does not exist, and the enum IS the surface. So the
     // budget is raised from 62,500 to 63,500 as a deliberate act.
+    // T-320 commit 5 then adds two optional fields (limit, select) to
+    // storybloq_lesson_digest after the same trim (its own measurement was
+    // 62,745 without T-502); the combined payload is re-measured at landing.
     // This ceiling leaves ~900 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
