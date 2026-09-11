@@ -18,8 +18,10 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "status",
-    description: "Project summary: phase statuses, ticket/issue counts, blockers",
-    usage: "storybloq status [--format json|md]",
+    description:
+      "Project summary: phase statuses, ticket/issue counts, blockers. --compact (T-320): JSON only, ignores --format. Reduces the payload: drops archivedNotes, deprecatedLessons, and issueFlow.semantics; reduces each session record (activeSessions/resumableSessions/expiredLeaseSessions) to sessionId, sourceDir, state, mode, ownerTask, leaseState, leaseExpiresAt, compactPending, dropping ticketId/ticketTitle; reduces bus to enabled, daemonState, deliveryMode, pendingMessages, unacknowledgedCritical, nextActions, dropping participants, wake, hookDelivery, deliveryCapabilities, and every other bus field. limitStops, sessionDiagnostics, arrangements/arrangementWarnings, and every other top-level field are kept whole.",
+    usage: "storybloq status [--format json|md] [--compact]",
+    flags: ["--compact"],
   },
   {
     name: "ticket list",
@@ -546,7 +548,7 @@ export const COMMANDS: readonly CommandEntry[] = [
 ];
 
 export const MCP_TOOLS: readonly McpToolEntry[] = [
-  { name: "storybloq_status", description: "Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata. clientTaskId (T-477) also enriches this session's own arrangementPresence/ownerIdentity onto its presence record as a side effect; omit to inherit the environment identity, same as storybloq_session_guard.", params: ["format?", "clientTaskId?"] },
+  { name: "storybloq_status", description: "Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata. clientTaskId (T-477) also enriches this session's own arrangementPresence/ownerIdentity onto its presence record as a side effect; omit to inherit the environment identity, same as storybloq_session_guard. compact (T-320): JSON only, ignores format -- see the CLI status entry above for the exact retained/dropped field list; this tool applies the same reduction.", params: ["format?", "clientTaskId?", "compact?"] },
   { name: "storybloq_phase_list", description: "All phases with derived status" },
   { name: "storybloq_phase_current", description: "First non-complete phase" },
   { name: "storybloq_phase_tickets", description: "Leaf tickets for a specific phase", params: ["phaseId"] },

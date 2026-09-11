@@ -14,10 +14,10 @@ storybloq init [--name <name>] [--type <type>] [--language <lang>] [--force] [--
 ```
 
 ### status
-Project summary: phase statuses, ticket/issue counts, blockers
+Project summary: phase statuses, ticket/issue counts, blockers. --compact (T-320): JSON only, ignores --format. Reduces the payload: drops archivedNotes, deprecatedLessons, and issueFlow.semantics; reduces each session record (activeSessions/resumableSessions/expiredLeaseSessions) to sessionId, sourceDir, state, mode, ownerTask, leaseState, leaseExpiresAt, compactPending, dropping ticketId/ticketTitle; reduces bus to enabled, daemonState, deliveryMode, pendingMessages, unacknowledgedCritical, nextActions, dropping participants, wake, hookDelivery, deliveryCapabilities, and every other bus field. limitStops, sessionDiagnostics, arrangements/arrangementWarnings, and every other top-level field are kept whole.
 
 ```
-storybloq status [--format json|md]
+storybloq status [--format json|md] [--compact]
 ```
 
 ### ticket list
@@ -675,7 +675,7 @@ storybloq node remove <name> [--format json|md]
 
 The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are always registered in full mode; when the Bus is disabled or uninitialized they return setup guidance pointing at `storybloq bus setup`, with no MCP restart required.
 
-- **storybloq_status** (format?, clientTaskId?) - Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata. clientTaskId (T-477) also enriches this session's own arrangementPresence/ownerIdentity onto its presence record as a side effect; omit to inherit the environment identity, same as storybloq_session_guard.
+- **storybloq_status** (format?, clientTaskId?, compact?) - Project summary: phase statuses, ticket/issue counts, blockers. Markdown is the default; JSON includes full active/resumable session ownership and lease metadata. clientTaskId (T-477) also enriches this session's own arrangementPresence/ownerIdentity onto its presence record as a side effect; omit to inherit the environment identity, same as storybloq_session_guard. compact (T-320): JSON only, ignores format -- see the CLI status entry above for the exact retained/dropped field list; this tool applies the same reduction.
 - **storybloq_phase_list** - All phases with derived status
 - **storybloq_phase_current** - First non-complete phase
 - **storybloq_phase_tickets** (phaseId) - Leaf tickets for a specific phase

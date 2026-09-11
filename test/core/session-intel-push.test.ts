@@ -10,10 +10,15 @@ import { markCompactPending, readPresenceRecord } from "../../src/core/session-i
 import { processEra } from "../../src/core/session-intel/process-era.js";
 import { handleSessionIntel, handleStopHookSample } from "../../src/cli/commands/session-intel.js";
 import { handleHandoverCreate } from "../../src/cli/commands/handover.js";
-import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
+import { runMcpReadTool, runMcpWriteTool, registerAllTools } from "../../src/mcp/tools.js";
 import { runReadCommandWithRoot } from "../../src/cli/run.js";
+import { registerStatusCommand } from "../../src/cli/register.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../../src/core/presence-enrichment.js";
 import type { SessionPresence } from "../../src/presence/types.js";
+import yargs from "yargs";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SID, assistantRecord, boundaryRecord, git, makeWorktreePair, writeTranscript } from "./session-intel-fixtures.js";
 
 /**
@@ -985,6 +990,73 @@ describe("usage advisory: one budget, one acquisition, a guarded commit", () => 
       expect(json.stdout).toEqual([]);
       expect(json.stderr).toHaveLength(2);
       expect(json.stderr[0]).toMatch(/^\[storybloq\] Your Claude Code auto-compact window/);
+    });
+  });
+});
+
+/**
+ * T-320 commit 3, pen byte-review round 1 finding: `compact` forces a JSON
+ * body regardless of `format` in the response BODY, but before this fix
+ * `format` itself still defaulted to "md" when the caller omitted
+ * `--format`/`format` -- so `emitCliBanner` (CLI) and
+ * `applyStatusPushesToMcpText` (MCP) took the MARKDOWN branch and prepended
+ * prose lines ahead of the compact JSON body whenever the advisory or
+ * pressure banner fired, corrupting it exactly when T-501's push is most
+ * likely to trigger. The fix resolves `format` to "json" whenever `compact`
+ * is set, at the CLI/MCP surface itself (register.ts / mcp/tools.ts), before
+ * it ever reaches the push pipeline. These tests go through the REAL
+ * registered command/tool (registerStatusCommand / registerAllTools), not a
+ * direct handleStatus/formatStatus call, since the bug lived in that
+ * resolution, not in formatStatus itself.
+ */
+describe("T-320 commit 3: --compact/compact forces json even when format is omitted, so a firing push cannot corrupt it", () => {
+  function primedWide(f: Fx, now = T0 + 5 * 60_000): void {
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 1_000_000 }));
+    primed(f, Math.ceil(0.7 * 0.925 * 1_000_000), now);
+  }
+
+  it("CLI: `status --compact` with no --format still emits parseable JSON on stdout, advisory on stderr", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      const out = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+      const errw = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+      const origCwd = process.cwd();
+      process.chdir(f.root);
+      try {
+        await registerStatusCommand(yargs().exitProcess(false)).parseAsync(["status", "--compact"]);
+      } finally {
+        process.chdir(origCwd);
+      }
+      const stdout = out.mock.calls.map((c) => String(c[0])).join("");
+      // A pre-fix regression prepends Markdown prose ahead of the JSON body,
+      // which fails this parse; the fix keeps stdout pure JSON.
+      const parsed = JSON.parse(stdout) as { data: Record<string, unknown> };
+      expect(parsed.data.activeSessions).toBeDefined();
+      expect(errw.mock.calls.map((c) => String(c[0])).join("")).toMatch(/^\[storybloq\] Your Claude Code auto-compact window/m);
+    });
+  });
+
+  async function callStatus(root: string, args: Record<string, unknown>): Promise<{ isError?: boolean; text: string }> {
+    const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+    registerAllTools(server, root);
+    const client = new Client({ name: "status-compact-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: "storybloq_status", arguments: args });
+    await client.close();
+    const content = result.content as { text: string }[];
+    return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+  }
+
+  it("MCP: storybloq_status with compact:true and no format still returns parseable JSON with the advisory as a sibling key", async () => {
+    await withFixture(async (f) => {
+      primedWide(f, Date.now());
+      const { text } = await callStatus(f.root, { compact: true });
+      // Same failure mode as the CLI case: a pre-fix regression prepends
+      // prose ahead of the JSON body here too, which fails this parse.
+      const parsed = JSON.parse(text) as { data: Record<string, unknown>; usageAdvisory?: unknown };
+      expect(parsed.data.activeSessions).toBeDefined();
+      expect(parsed.usageAdvisory).toBeDefined();
     });
   });
 });

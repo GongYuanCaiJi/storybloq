@@ -719,6 +719,101 @@ function issueLine(state: ProjectState): string {
   return flow === null ? `Issues: ${state.activeIssueCount} open` : formatIssueFlow(flow);
 }
 
+/**
+ * T-320 commit 3: the eight session fields Step 2's reconciliation reads
+ * (SKILL.md 1b's fingerprint plus `mode`/`leaseExpiresAt`). Drops
+ * `ticketId`/`ticketTitle`, which reconciliation never reads. Exported so the
+ * acceptance test (`scripts/priming-cost.ts`'s `reconcileFingerprints`, the
+ * harness's own transcription of that reconciliation logic) can run against
+ * this SAME reduction rather than a second, test-local one.
+ */
+export function reduceSessionForCompact(s: ActiveSessionSummary): Pick<ActiveSessionSummary, "sessionId" | "sourceDir" | "state" | "mode" | "ownerTask" | "leaseState" | "leaseExpiresAt" | "compactPending"> {
+  return {
+    sessionId: s.sessionId,
+    sourceDir: s.sourceDir,
+    state: s.state,
+    mode: s.mode,
+    ownerTask: s.ownerTask,
+    leaseState: s.leaseState,
+    leaseExpiresAt: s.leaseExpiresAt,
+    compactPending: s.compactPending,
+  };
+}
+
+/**
+ * T-320 commit 3: reduces `bus` to the six fields the ticket's amendment
+ * names, dropping `participants`, `wake`, `hookDelivery`, and
+ * `deliveryCapabilities` (named explicitly) plus `initialized`, `setupState`,
+ * `endpoints`, `openThreads`, `parkedThreads`, `undeliverable`, and
+ * `quarantined` (also outside the kept list). The error variant (bus runtime
+ * unreachable) carries none of those fields to begin with, so it passes
+ * through unchanged.
+ */
+function reduceBusForCompact(bus: BusStatusInput): unknown {
+  if (!bus) return bus;
+  if ("error" in bus) return bus;
+  return {
+    enabled: bus.enabled,
+    daemonState: bus.daemonState,
+    deliveryMode: bus.deliveryMode,
+    pendingMessages: bus.pendingMessages,
+    unacknowledgedCritical: bus.unacknowledgedCritical,
+    nextActions: bus.nextActions,
+  };
+}
+
+/**
+ * T-320 commit 3: the compact JSON payload. Only the single-project status
+ * shape is defined by the ticket (no federated/compact combination is
+ * specified), so `compact` has no effect on `formatFederatedStatus`. JSON
+ * only, by the ticket's own text -- callers reach this branch regardless of
+ * the `format` argument, since no Markdown compact rendering exists to keep
+ * byte-compatible.
+ */
+function buildCompactStatusData(
+  state: ProjectState,
+  activeSessions: readonly ActiveSessionSummary[],
+  resumableSessions: readonly ActiveSessionSummary[],
+  bus: BusStatusInput,
+  limitStops: readonly LimitStopSummary[],
+  sessionDiagnostics: readonly SessionScanDiagnostic[] | undefined,
+  expiredLeaseSessions: readonly ActiveSessionSummary[],
+  arrangements: StatusArrangements,
+) {
+  const phases = phasesWithStatus(state);
+  return {
+    project: state.config.project,
+    totalTickets: state.leafTicketCount,
+    completeTickets: state.completeLeafTicketCount,
+    openTickets: state.leafTicketCount - state.completeLeafTicketCount,
+    blockedTickets: state.blockedCount,
+    openIssues: state.activeIssueCount,
+    // No `semantics` here (unlike full status): the compact schema explicitly
+    // omits `issueFlow.semantics`.
+    issueFlow: statusIssueFlow(state),
+    activeNotes: state.activeNoteCount,
+    activeLessons: state.activeLessonCount,
+    handovers: state.handoverFilenames.length,
+    isEmptyScaffold: state.isEmptyScaffold,
+    phases: phases.map((p) => ({
+      id: p.phase.id,
+      name: p.phase.name,
+      status: p.status,
+      leafCount: p.leafCount,
+    })),
+    activeSessions: activeSessions.map(reduceSessionForCompact),
+    resumableSessions: resumableSessions.map(reduceSessionForCompact),
+    expiredLeaseSessions: expiredLeaseSessions.map(reduceSessionForCompact),
+    ...(sessionDiagnostics ? { sessionDiagnostics } : {}),
+    ...(bus ? { bus: reduceBusForCompact(bus) } : {}),
+    // Kept whole -- the ticket's amendment: the original text calling for a
+    // reduced `limitStops` was a slip.
+    limitStops,
+    arrangements: arrangements.items,
+    arrangementWarnings: arrangements.warnings,
+  };
+}
+
 export function formatStatus(
   state: ProjectState,
   format: OutputFormat,
@@ -740,7 +835,30 @@ export function formatStatus(
   // doing so would change this command's exit classification for a merely
   // degraded, non-blocking arrangement read.
   arrangements: StatusArrangements = { items: [], warnings: [] },
+  // T-320 commit 3, same APPENDED-LAST discipline. JSON only: when true, this
+  // returns the compact payload regardless of `format`, since the ticket
+  // defines no Markdown compact rendering. Omitting it (or passing `false`)
+  // leaves every prior positional caller byte-identical.
+  compact: boolean = false,
 ): string {
+  if (compact) {
+    return JSON.stringify(
+      successEnvelope(
+        buildCompactStatusData(
+          state,
+          activeSessions,
+          resumableSessions,
+          bus,
+          limitStops,
+          sessionDiagnostics,
+          expiredLeaseSessions,
+          arrangements,
+        ),
+      ),
+      null,
+      2,
+    );
+  }
   const phases = phasesWithStatus(state);
   const data = {
     project: state.config.project,

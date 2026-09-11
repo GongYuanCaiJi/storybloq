@@ -67,6 +67,8 @@ import {
   type ExchangeMeasurement,
   type ReplayContext,
 } from "../../scripts/priming-cost.js";
+import { reduceSessionForCompact } from "../../src/core/output-formatter.js";
+import type { ActiveSessionSummary } from "../../src/core/session-scan.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -427,6 +429,90 @@ describe("reconcileFingerprints", () => {
     const result = reconcileFingerprints(guard, status);
     expect(result.matched).toBe(false);
     expect(result.mismatchedFields["s1"]).toEqual(["state"]);
+  });
+});
+
+/**
+ * T-320 commit 3 acceptance: "the existing reconciliation logic run against
+ * compact status for matching, changed, duplicate, and unverifiable session
+ * populations gives the same verdicts as against full status." `output-formatter.ts`'s
+ * `reduceSessionForCompact` is the REAL reduction `formatStatus`'s compact
+ * branch applies (not a re-derivation here); `reconcileFingerprints` above is
+ * the existing reconciliation logic itself.
+ *
+ * Only the STATUS side is ever compact in production: `storybloq_session_guard`
+ * has no `compact` option and always returns full `ActiveSessionSummary`
+ * records, while `storybloq_status --compact` reduces its own. So each
+ * "compact" case below feeds the reducer's OUTPUT to only one side (guard
+ * stays full) and compares against the all-full baseline verdict -- a
+ * symmetric compact-vs-compact comparison would let a reducer regression that
+ * drops a fingerprint field from BOTH sides cancel out and pass unnoticed.
+ */
+describe("reconcileFingerprints: compact status sessions give the same verdict as full status sessions (T-320 commit 3)", () => {
+  function makeFullSession(overrides: Partial<ActiveSessionSummary> = {}): ActiveSessionSummary {
+    return {
+      sessionId: "s1",
+      sourceDir: "dirA",
+      state: "active",
+      mode: "autonomous",
+      ticketId: "T-900",
+      ticketTitle: "A ticket compact drops",
+      ownerTask: { client: "claude", id: "task-1" } as never,
+      leaseExpiresAt: null,
+      leaseState: "live",
+      compactPending: false,
+      ...overrides,
+    };
+  }
+
+  function tagged(s: ActiveSessionSummary, population: "activeSessions" | "resumableSessions" = "activeSessions") {
+    return { ...s, population };
+  }
+
+  function compactTagged(s: ActiveSessionSummary, population: "activeSessions" | "resumableSessions" = "activeSessions") {
+    return { ...reduceSessionForCompact(s), population };
+  }
+
+  it("matching: identical sessions match whether the status side is full or compact", () => {
+    const a = makeFullSession();
+    const b = makeFullSession();
+    const fullVerdict = reconcileFingerprints([tagged(a)], [tagged(b)]);
+    const guardFullStatusCompact = reconcileFingerprints([tagged(a)], [compactTagged(b)]);
+    expect(guardFullStatusCompact.matched).toBe(fullVerdict.matched);
+    expect(guardFullStatusCompact.matched).toBe(true);
+  });
+
+  it("changed: a state transition is caught identically with a full guard against a compact status", () => {
+    const before = makeFullSession();
+    const after = makeFullSession({ state: "compacted" });
+    const fullVerdict = reconcileFingerprints([tagged(before)], [tagged(after)]);
+    const guardFullStatusCompact = reconcileFingerprints([tagged(before)], [compactTagged(after)]);
+    expect(guardFullStatusCompact.matched).toBe(fullVerdict.matched);
+    expect(guardFullStatusCompact.matched).toBe(false);
+    expect(guardFullStatusCompact.mismatchedFields["s1"]).toEqual(fullVerdict.mismatchedFields["s1"]);
+    expect(guardFullStatusCompact.mismatchedFields["s1"]).toEqual(["state"]);
+  });
+
+  it("duplicate: the same dedupe survivor (population, then sourceDir) is picked identically with a full guard against a compact status", () => {
+    const resumableCopy = makeFullSession({ sourceDir: "z-dir" });
+    const activeCopy = makeFullSession({ sourceDir: "a-dir" });
+    const guardFull = [tagged(resumableCopy, "resumableSessions"), tagged(activeCopy, "activeSessions")];
+    const statusFull = [tagged(activeCopy, "activeSessions")];
+    const statusCompact = [compactTagged(activeCopy, "activeSessions")];
+    const fullVerdict = reconcileFingerprints(guardFull, statusFull);
+    const guardFullStatusCompact = reconcileFingerprints(guardFull, statusCompact);
+    expect(guardFullStatusCompact.matched).toBe(fullVerdict.matched);
+    expect(guardFullStatusCompact.matched).toBe(true);
+  });
+
+  it("unverifiable: a session present on only the status side reports the same presence mismatch whether that status entry is full or compact", () => {
+    const s = makeFullSession();
+    const fullVerdict = reconcileFingerprints([], [tagged(s)]);
+    const guardEmptyStatusCompact = reconcileFingerprints([], [compactTagged(s)]);
+    expect(guardEmptyStatusCompact.matched).toBe(fullVerdict.matched);
+    expect(guardEmptyStatusCompact.matched).toBe(false);
+    expect(guardEmptyStatusCompact.mismatchedFields["s1"]).toEqual(fullVerdict.mismatchedFields["s1"]);
+    expect(guardEmptyStatusCompact.mismatchedFields["s1"]).toEqual(["presence"]);
   });
 });
 

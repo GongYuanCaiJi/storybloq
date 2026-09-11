@@ -216,13 +216,26 @@ export function registerStatusCommand(yargs: Argv): Argv {
   return yargs.command(
     "status",
     "Project summary",
-    (y) => addFormatOption(y).option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" }),
+    (y) =>
+      addFormatOption(y)
+        .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" })
+        .option("compact", {
+          type: "boolean",
+          default: false,
+          describe: "T-320: reduced JSON payload (JSON only; ignores --format)",
+        }),
     async (argv) => {
-      const format = parseOutputFormat(argv.format);
+      const compact = argv.compact as boolean | undefined;
+      // T-320: compact is JSON regardless of --format, and that has to be
+      // decided HERE, before runReadCommand -- its usage-advisory/token-
+      // pressure pushes (emitCliBanner) append Markdown prose to stdout
+      // whenever they fire, which corrupts a compact body if format is
+      // still "md" at that point.
+      const format = compact ? "json" : parseOutputFormat(argv.format);
       const clientTaskId = argv["client-task-id"] as string | undefined;
       // T-501: status is the /story priming call and the only CLI surface
       // that shows (and consumes) the usage-cost advisory.
-      await runReadCommand(format, (ctx) => handleStatus(ctx, clientTaskId), { usageAdvisory: true });
+      await runReadCommand(format, (ctx) => handleStatus(ctx, clientTaskId, { compact }), { usageAdvisory: true });
     },
   );
 }

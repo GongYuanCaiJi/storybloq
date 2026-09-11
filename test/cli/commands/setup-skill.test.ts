@@ -236,7 +236,7 @@ describe("setup-skill", () => {
     // the default response is Markdown and step 1b reads array fields. Asserted
     // against the Step 2 slice, since the string appears elsewhere in the file.
     expect(step2, "Step 2 requests Markdown, from which no fingerprint can be built").toMatch(
-      /call `storybloq_status` with `\{ "format": "json" \}`/,
+      /call `storybloq_status` with `\{ "format": "json", "compact": true \}`/,
     );
     expect(step2).toMatch(/JSON is required, not a preference/i);
     expect(step2).toMatch(/Retain this exact payload/i);
@@ -300,7 +300,7 @@ describe("setup-skill", () => {
 
   it("SKILL.md defines task-aware continuation and foreign-task relay", async () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
-    expect(content).toContain('`storybloq_status` with `{ "format": "json" }`');
+    expect(content).toContain('`storybloq_status` with `{ "format": "json", "compact": true }`');
 
     // T-446: SKILL.md now calls `storybloq_session_guard` and acts on the
     // verdict instead of walking a prose matrix. Every action in the union must

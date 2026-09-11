@@ -24,7 +24,7 @@ import {
   formatInitResult,
   formatRecommendations,
 } from "../../src/core/output-formatter.js";
-import { makeTicket, makeIssue, makeState, makeRoadmap, makePhase } from "./test-factories.js";
+import { makeTicket, makeIssue, makeNote, makeLesson, makeState, makeRoadmap, makePhase } from "./test-factories.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "../../src/core/queries.js";
 import type { RecommendResult } from "../../src/core/recommend.js";
 import type { ValidationResult, ValidationFinding } from "../../src/core/validation.js";
@@ -1248,6 +1248,165 @@ describe("formatStatus positional compatibility (ISS-943, Codex round 4)", () =>
     expect(parsed.data.limitStops).toEqual(limitStops);
     expect(parsed.data.sessionDiagnostics).toEqual(diagnostics);
     expect(parsed.data.bus).toEqual(bus);
+  });
+});
+
+/**
+ * T-320 commit 3: `compact` is an additive, APPENDED-LAST boolean, same
+ * discipline as `expiredLeaseSessions` (ISS-943) and `arrangements` (T-473)
+ * before it. Omitting it (or passing `false`) must leave every existing
+ * caller byte-identical; the reduction only happens when it is explicitly
+ * `true`, and it renders JSON regardless of the `format` argument -- the
+ * ticket's amendment states compact status is JSON only, so there is no
+ * markdown compact form to keep in sync.
+ */
+describe("formatStatus compact mode (T-320 commit 3)", () => {
+  it("omitting compact (or passing false) is byte-identical to the pre-existing shape", () => {
+    const state = makeState();
+    const bare = formatStatus(state, "json");
+    const explicitFalse = formatStatus(
+      state,
+      "json",
+      [],
+      [],
+      undefined,
+      [],
+      undefined,
+      [],
+      { items: [], warnings: [] },
+      false,
+    );
+    expect(bare).toBe(explicitFalse);
+  });
+
+  it("compact:true renders JSON even when format is md", () => {
+    const state = makeState();
+    const out = formatStatus(state, "md", [], [], undefined, [], undefined, [], undefined, true);
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  it("compact:true drops archivedNotes, deprecatedLessons, and issueFlow.semantics", () => {
+    const state = makeState({
+      notes: [makeNote({ id: "N-1", status: "archived" })],
+      lessons: [makeLesson({ id: "L-1", status: "deprecated" })],
+      issues: [makeIssue({ id: "ISS-1", discoveredDate: "2026-01-01" })],
+    });
+    const parsed = JSON.parse(
+      formatStatus(state, "json", [], [], undefined, [], undefined, [], undefined, true),
+    ) as { data: Record<string, unknown> };
+    expect(parsed.data.archivedNotes).toBeUndefined();
+    expect(parsed.data.deprecatedLessons).toBeUndefined();
+    expect(parsed.data.activeNotes).toBe(0);
+    const issueFlow = parsed.data.issueFlow as { semantics?: unknown } | null;
+    if (issueFlow) expect(issueFlow.semantics).toBeUndefined();
+  });
+
+  it("compact:true reduces session entries to the eight-field set, dropping ticketId/ticketTitle", () => {
+    const state = makeState();
+    const session = {
+      sessionId: "sess-1",
+      sourceDir: "sess-1",
+      state: "active",
+      mode: "autonomous",
+      ticketId: "T-1",
+      ticketTitle: "Some ticket",
+      ownerTask: null,
+      leaseExpiresAt: null,
+      leaseState: "live",
+      compactPending: false,
+    } as never;
+    const parsed = JSON.parse(
+      formatStatus(state, "json", [session], [], undefined, [], undefined, [], undefined, true),
+    ) as { data: { activeSessions: Record<string, unknown>[] } };
+    const s = parsed.data.activeSessions[0]!;
+    expect(s.ticketId).toBeUndefined();
+    expect(s.ticketTitle).toBeUndefined();
+    expect(s).toMatchObject({
+      sessionId: "sess-1",
+      sourceDir: "sess-1",
+      state: "active",
+      mode: "autonomous",
+      leaseState: "live",
+      compactPending: false,
+    });
+  });
+
+  it("compact:true reduces bus to six fields, dropping participants/wake/hookDelivery/deliveryCapabilities", () => {
+    const state = makeState();
+    const bus = {
+      enabled: true,
+      initialized: true,
+      daemonState: "stopped",
+      setupState: "ready",
+      deliveryMode: "live",
+      participants: [{ id: "p1" }],
+      nextActions: ["do a thing"],
+      endpoints: 2,
+      pendingMessages: 3,
+      unacknowledgedCritical: 1,
+      openThreads: 0,
+      parkedThreads: 0,
+      undeliverable: 0,
+      quarantined: 0,
+      hookDelivery: { claude: true, codex: false },
+      deliveryCapabilities: {},
+      wake: {},
+    } as never;
+    const parsed = JSON.parse(
+      formatStatus(state, "json", [], [], bus, [], undefined, [], undefined, true),
+    ) as { data: { bus: Record<string, unknown> } };
+    expect(parsed.data.bus).toEqual({
+      enabled: true,
+      daemonState: "stopped",
+      deliveryMode: "live",
+      pendingMessages: 3,
+      unacknowledgedCritical: 1,
+      nextActions: ["do a thing"],
+    });
+  });
+
+  it("compact:true keeps limitStops whole (the ticket text calling for a reduction there was a slip)", () => {
+    const state = makeState();
+    const limitStop = {
+      key: "k1",
+      sessionType: "autonomous",
+      storybloqSessionId: "sess-1",
+      clientTaskId: "task-1",
+      status: "deferred",
+      limitType: "usage",
+      reasonCode: null,
+      mode: "headless",
+      nextAttemptAt: "2026-01-01T00:00:00.000Z",
+      wakeAttempts: 1,
+    } as never;
+    const parsed = JSON.parse(
+      formatStatus(state, "json", [], [], undefined, [limitStop], undefined, [], undefined, true),
+    ) as { data: { limitStops: unknown[] } };
+    expect(parsed.data.limitStops).toEqual([limitStop]);
+  });
+
+  it("compact:true keeps sessionDiagnostics and arrangements/arrangementWarnings unreduced", () => {
+    const state = makeState();
+    const diagnostics = [
+      {
+        kind: "state-unreadable",
+        category: "omission",
+        sourceDir: "broken",
+        sourcePath: "/p/.story/sessions/broken/state.json",
+        sessionId: null,
+        reason: "unreadable",
+      },
+    ] as never;
+    const arrangements = {
+      items: [{ route: null, id: "a-1", lifecycle: "active", bounds: ["T-1"], parties: [] }],
+      warnings: ["an advisory warning"],
+    } as never;
+    const parsed = JSON.parse(
+      formatStatus(state, "json", [], [], undefined, [], diagnostics, [], arrangements, true),
+    ) as { data: { sessionDiagnostics: unknown[]; arrangements: unknown[]; arrangementWarnings: unknown[] } };
+    expect(parsed.data.sessionDiagnostics).toEqual(diagnostics);
+    expect(parsed.data.arrangements).toEqual(arrangements.items);
+    expect(parsed.data.arrangementWarnings).toEqual(arrangements.warnings);
   });
 });
 

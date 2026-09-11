@@ -541,12 +541,20 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         .string()
         .optional()
         .describe("Omit to inherit the client's environment identity (CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID)."),
+      // T-320 commit 3: reduced payload, per the ticket's schema. JSON only --
+      // set regardless of `format`, since there is no Markdown compact form.
+      compact: z.boolean().optional().describe("Reduced JSON payload (T-320); ignores `format`"),
     },
   }, async (args) => {
-    const format = args.format ?? "md";
+    // T-320: compact is JSON regardless of `format`, and that has to be
+    // decided HERE, before runMcpReadTool -- its usage-advisory/token-
+    // pressure pushes (applyStatusPushesToMcpText) append Markdown prose to
+    // the text content whenever they fire, which corrupts a compact body if
+    // format is still "md" at that point.
+    const format = args.compact ? "json" : (args.format ?? "md");
     // T-501: status is the /story priming call, and the only surface that
     // attaches and consumes the usage-cost advisory.
-    const result = await runMcpReadTool(pinnedRoot, (ctx) => handleStatus(ctx, args.clientTaskId), undefined, format, { usageAdvisory: true });
+    const result = await runMcpReadTool(pinnedRoot, (ctx) => handleStatus(ctx, args.clientTaskId, { compact: args.compact }), undefined, format, { usageAdvisory: true });
     // ISS-570 G2: prepend update-available notice so /story's first MCP
     // call surfaces 'newer storybloq available' proactively. Synchronous
     // cache read; a background refresh is kicked off so the NEXT status
@@ -556,6 +564,8 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       const running = process.env.STORYBLOQ_VERSION ?? "0.0.0-dev";
       const info = readUpdateCacheSync(running);
       refreshUpdateCacheInBackground();
+      // format is never "md" when compact is true (forced above), so this
+      // condition alone already excludes a compact body from the banner.
       if (format === "md" && info?.updateAvailable && result.content[0]?.type === "text") {
         const banner = `A newer storybloq is available (v${info.latestVersion}). Run \`npm install -g @storybloq/storybloq@latest\` -- the CLI will auto-refresh the /story skill on next invocation.\n\n`;
         return {

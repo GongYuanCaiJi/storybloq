@@ -184,7 +184,16 @@ function enrichPresenceForCaller(root: string, explicitClientTaskId: string | nu
   }
 }
 
-export async function handleStatus(ctx: CommandContext, clientTaskId?: string | null): Promise<CommandResult> {
+export interface StatusOptions {
+  /** T-320 commit 3: compact JSON payload, per the ticket's schema. JSON only -- forwarded to `formatStatus` regardless of `ctx.format`. */
+  readonly compact?: boolean;
+}
+
+export async function handleStatus(
+  ctx: CommandContext,
+  clientTaskId?: string | null,
+  opts: StatusOptions = {},
+): Promise<CommandResult> {
   enrichPresenceForCaller(ctx.root, clientTaskId);
 
   const {
@@ -273,6 +282,7 @@ export async function handleStatus(ctx: CommandContext, clientTaskId?: string | 
       sessionDiagnostics,
       expiredLeaseSessions,
       arrangements,
+      opts.compact ?? false,
     ),
   };
 }
