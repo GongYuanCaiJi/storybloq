@@ -112,6 +112,44 @@ export const SessionIntelConfigSchema = z.object({
 
 export type SessionIntelConfigInput = z.infer<typeof SessionIntelConfigSchema>;
 
+/**
+ * T-502: `storybloq health`'s per-project switches. Booleans only, all
+ * optional, all defaulting to true, `.passthrough()` so a future sixth check
+ * added to a newer CLI's config never bricks an older reader (the
+ * statusWriter/sessionIntel precedent).
+ *
+ * No toggle is declared as a boolean, so a bad VALUE can never reject the
+ * config. This matters because `ConfigSchema` is PARSED, not safe-parsed, by
+ * the project loader: a rejection here would turn `"cliVersion": "false"` into
+ * a failure of every ordinary command, when the honest cost of that typo is
+ * one health check running by default. Same division of labour as
+ * `SessionIntelConfigSchema` and its hot-path reader: the schema is
+ * permissive and the reader applies the per-value fallback.
+ */
+/**
+ * Declared as `unknown`, not `boolean`, on purpose. The toggles must fall back
+ * per key instead of rejecting, and the two Zod ways of saying that are both
+ * worse here: `.catch()` makes a schema's input and output types diverge,
+ * which breaks `ConfigSchema`'s use as a `ZodType<Out, Def, Out>` in
+ * project-loader, and a plain `z.boolean()` would throw. The meaning of each
+ * value lives in `core/health/config.ts`'s resolver, which is the single
+ * place that turns anything-but-false into the documented default.
+ */
+const healthToggle = () => z.unknown().optional();
+
+export const HealthCheckConfigSchema = z.object({
+  enabled: healthToggle(),               // boolean, default true
+  checks: z.object({
+    usageWindow: healthToggle(),         // boolean, default true
+    cliVersion: healthToggle(),          // boolean, default true
+    codexBridge: healthToggle(),         // boolean, default true
+    skillVersion: healthToggle(),        // boolean, default true
+    crossSessionInbound: healthToggle(), // boolean, default true
+  }).passthrough().optional(),
+}).passthrough();
+
+export type HealthCheckConfigInput = z.infer<typeof HealthCheckConfigSchema>;
+
 export const ConfigSchema = z
   .object({
     version: z.number().int().min(1),
@@ -124,6 +162,7 @@ export const ConfigSchema = z
     limitResume: LimitResumeConfigSchema,
     statusWriter: StatusWriterConfigSchema.optional(),
     sessionIntel: SessionIntelConfigSchema.optional(),
+    healthCheck: HealthCheckConfigSchema.optional(),
     recipe: z.string().optional(),  // default "coding" applied in guide.ts handleStart
     // ISS-730: opt-in continuous cross-reference integrity check. When true,
     // loadProject runs a full validateProject pass and surfaces ERROR-level

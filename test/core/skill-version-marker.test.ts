@@ -12,11 +12,16 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFile, writeFile, mkdir, rm, chmod } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { shouldRefresh } from "../../src/core/skill-version-marker.js";
+import { fileURLToPath } from "node:url";
+import { shouldRefresh, readSkillMarker, SKILL_MARKER_FILE, SKILL_MARKER_MAX_BYTES } from "../../src/core/skill-version-marker.js";
+import { probeRead } from "./health/subprocess-probe.js";
+
+const MARKER_MODULE = fileURLToPath(new URL("../../src/core/skill-version-marker.ts", import.meta.url));
 
 // ISS-1091 (R4/round-3): the auto-refresh path (isSkillStale) must never
 // downgrade. shouldRefresh is the pure decision function, final round-3
@@ -641,5 +646,55 @@ describe("autoRefreshSkillIfStale with legacy hook sweep", () => {
     // Must not throw.
     const refreshed = await autoRefreshSkillIfStale("1.1.6");
     expect(refreshed).toBe(true);
+  });
+});
+
+// T-502: the marker read is bounded, so the shared self-heal path cannot hang
+// on a FIFO planted at the marker's name or slurp an oversized replacement.
+describe("readSkillMarker is bounded (T-502)", () => {
+  it("exposes a cap and a stable file name", () => {
+    expect(SKILL_MARKER_MAX_BYTES).toBe(65_536);
+    expect(SKILL_MARKER_FILE).toBe(".storybloq-version");
+  });
+
+  // In a CHILD under a SIGKILL deadline: a blocking-read regression would
+  // freeze the worker's event loop, so a Vitest timeout could never fire and
+  // the suite would hang instead of failing.
+  it("returns null for a FIFO at the marker path instead of blocking", { timeout: 40_000 }, () => {
+    const home = mkdtempSync(join(tmpdir(), "storybloq-marker-fifo-"));
+    try {
+      const dir = join(home, ".claude", "skills", "story");
+      mkdirSync(dir, { recursive: true });
+      const marker = join(dir, SKILL_MARKER_FILE);
+      if (spawnSync("mkfifo", [marker], { stdio: "ignore" }).status !== 0) return;
+      const probe = probeRead({
+        moduleFile: MARKER_MODULE,
+        exportName: "readSkillMarker",
+        path: "claude",
+        timeoutMs: 20_000,
+        env: { HOME: home },
+      });
+      expect(probe.timedOut).toBe(false);
+      expect(probe.status).toBe(0);
+      expect(probe.value).toBeNull();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for a marker over the cap", () => {
+    const home = mkdtempSync(join(tmpdir(), "storybloq-marker-big-"));
+    const originalHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const dir = join(home, ".claude", "skills", "story");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, SKILL_MARKER_FILE), "1".repeat(SKILL_MARKER_MAX_BYTES + 1));
+      expect(readSkillMarker("claude")).toBeNull();
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

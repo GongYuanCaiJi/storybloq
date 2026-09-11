@@ -21,8 +21,11 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { compareVersionStrings } from "./team-capabilities.js";
+import { readBoundedFile } from "./limit-config.js";
 
-const MARKER_FILE = ".storybloq-version";
+/** T-502: exported so the health check's default adapter reads the same file name. */
+export const SKILL_MARKER_FILE = ".storybloq-version";
+const MARKER_FILE = SKILL_MARKER_FILE;
 
 export type SkillInstallTarget = "claude" | "codex" | "codexCompat";
 
@@ -74,12 +77,23 @@ function markerPath(target: SkillInstallTarget = "claude"): string {
   return join(skillDir(target), MARKER_FILE);
 }
 
-/** Read the CLI version that last wrote the skill dir. null if missing. */
+/**
+ * Read the CLI version that last wrote the skill dir. null if missing.
+ *
+ * T-502: bounded (`readBoundedFile`), so the shared path cannot hang on a
+ * FIFO left at the marker's name or slurp an oversized replacement. The
+ * marker is a single version string; the 64 KiB cap is orders of magnitude
+ * above anything legitimate.
+ */
+export const SKILL_MARKER_MAX_BYTES = 65_536;
+
 export function readSkillMarker(target: SkillInstallTarget = "claude"): string | null {
   try {
     const p = markerPath(target);
     if (!existsSync(p)) return null;
-    const text = readFileSync(p, "utf-8").trim();
+    const body = readBoundedFile(p, SKILL_MARKER_MAX_BYTES);
+    if (body === null) return null;
+    const text = body.trim();
     return text.length > 0 ? text : null;
   } catch {
     return null;
