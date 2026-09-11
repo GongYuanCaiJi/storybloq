@@ -229,3 +229,46 @@ instruction, in a `review_effort_resolved` event, on the round record, and in
 
 Full level table, the `off` semantics, and the `light` landing rule are in
 `autonomous-mode.md`.
+
+### Health checks (/story health, T-502)
+
+`storybloq health` (MCP tool `storybloq_health`, skill route `/story health`) checks the tooling AROUND the project, not the ledger. It never edits a settings or config file, though a registry lookup may update the shared version cache; `--refresh` forces that lookup even when the cache is fresh. Every check is `ok`, `advise`, `skip`, or `error`, the run works to a 5 second soft budget, and a completed report exits 0 even when a check reports an error; only invalid arguments exit nonzero.
+
+Two roots matter. Config comes from the `.story/` root (may be absent). Settings and MCP registrations come from the INVOCATION directory: the CLI's working directory, or the directory the MCP server was launched in. That directory is always reported as `projectDir` in the JSON result and in the header line of the text report.
+
+A layer Storybloq cannot READ is never reported as absent. Where the unreadable layer could change the verdict, the check returns `skip` with `unreadable: <path>` instead, so a permission error can never be dressed up as advice. `cross-session-inbound` is the strictest case: all four of its layers must be determinate.
+
+The five checks, with the advice each one pins:
+
+| Check | When it advises | What it tells you to do |
+|-------|-----------------|-------------------------|
+| `usage-window` | Claude Code's `autoCompactWindow` is above `sessionIntel.recommendedWindowMax`, or a 1M-context model is running with no window observed | The same advisory `storybloq status` carries; see the auto-compact section above |
+| `cli-version` | A newer `@storybloq/storybloq` is published | "Update with `npm install -g @storybloq/storybloq@latest`, then run `storybloq setup`." |
+| `codex-bridge` | Codex is installed but the review backend is not registered for Claude Code | "Register it with `claude mcp add codex-bridge -s user -- npx -y codex-claude-bridge@latest`." |
+| `skill-version` | An installed `/story` skill is older than the running CLI | "Run `storybloq setup --client <claude\|codex\|all>` to refresh it." |
+| `cross-session-inbound` | Claude Code's `crossSessionInbound` is unset, or resolves to `hold` or `refuse` | Set it to `accept` in `~/.claude/settings.json`; remove it from, or set it to `accept` in, any repository file that tightens it; if managed settings set it, ask your admin |
+
+`cross-session-inbound` is a Claude Code setting, so it is skipped under Codex. It merges four layers (managed, user, project, project-local); every layer must be readable or the check skips. When unset, a session running without permission prompts holds messages from your other sessions for manual review, which stalls pen/worker messaging. A session started with a `--settings` flag can replace the user value but not a managed one, and repository files only ever tighten.
+
+`codex-bridge` resolves the registration by name across local, project, and user scope, highest precedence first, and only trusts a winner when no higher scope was unreadable. A server whose name looks like the bridge but whose launch command Storybloq does not recognise produces a `skip`, not a false `ok`.
+
+Turn checks off in `.story/config.json`. Omitted keys default to on; a non-boolean value falls back for that key alone rather than rejecting the file:
+
+```json
+{
+  "healthCheck": {
+    "enabled": true,
+    "checks": {
+      "usageWindow": true,
+      "cliVersion": true,
+      "codexBridge": true,
+      "skillVersion": true,
+      "crossSessionInbound": true
+    }
+  }
+}
+```
+
+Setting `enabled` to `false` skips every check with reason `disabled in .story/config.json`. There is also a global off switch in `~/.claude/storybloq/config.json` (`healthCheck.enabled = false`) for machines where the command should stay quiet everywhere.
+
+When the skill runs `/story health`: relay each `advise` message and its fix verbatim, list the `skip` reasons in one line, and then stop. Do not offer to make the changes; they are the user's files.

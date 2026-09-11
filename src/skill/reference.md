@@ -391,6 +391,13 @@ Run integration smoke test: create/update/delete cycle across all entity types
 storybloq selftest [--format json|md]
 ```
 
+### health
+Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging
+
+```
+storybloq health [--only <ids>] [--refresh] [--format json|md]
+```
+
 ### codex-review
 Run native Codex plan or code review for an autonomous session
 
@@ -714,6 +721,7 @@ The base tools below are registered in full mode (inside a .story/ project). The
 - **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction
 - **storybloq_ruling_supersede** (id, with?, text?, attribution?, date?, scopeTags?) - Supersede a ruling: link an existing one with `with`, or record a new superseding ruling
 - **storybloq_selftest** - Integration smoke test: create/update/delete cycle
+- **storybloq_health** (format?, only?, refresh?) - Tooling check: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session message delivery. Works without .story/, read-only
 - **storybloq_review_lenses_prepare** (stage, diff, changedFiles, ticketDescription?, reviewRound?, priorDeferrals?, sessionId?, target?) - Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, cited-ruling delivery, complete lens prompts
 - **storybloq_review_lenses_synthesize** (stage?, lensResults, activeLenses, skippedLenses, reviewRound?, reviewId?, diff?, changedFiles?, sessionId?, citedRulingsUndelivered?) - Run the @storybloq/lenses merger pipeline programmatically over raw lens outputs; returns the ReviewVerdict envelope (no merger agent). Echo prepare's citedRulingsUndelivered here; without a sessionId it is the only route a delivery hold has
 - **storybloq_review_lenses_judge** (reviewVerdict, convergenceHistory?) - Deterministic three-value verdict mapping over the synthesize ReviewVerdict plus convergence history (no judge agent)

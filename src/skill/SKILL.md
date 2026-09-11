@@ -115,14 +115,15 @@ This guard overrides every no-confirmation rule elsewhere.
 - `/story auto` -> start autonomous mode (read `autonomous-mode.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story auto T-183 T-184 ISS-077` -> start targeted autonomous mode with ONLY those items in order (read `autonomous-mode.md`; pass the IDs as `targetWork` array in the start call)
 - `/story review T-XXX` -> start review mode for a ticket (read `autonomous-mode.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
-- `/story plan T-XXX` -> start plan mode for a ticket (read `autonomous-mode.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
+- `/story plan T-XXX` -> start plan mode for a ticket (read `autonomous-mode.md`)
 - `/story handover` -> draft a session handover. Summarize the session's work, then call `storybloq_handover_create` with the drafted content and a descriptive slug
 - `/story snapshot` -> save project state (call `storybloq_snapshot` MCP tool)
 - `/story export` -> export project for sharing. Ask the user whether to export the current phase or the full project, then call `storybloq_export` with either `phase` or `all` set
 - `/story status` -> quick status check (call `storybloq_status` MCP tool)
+- `/story health` -> check tooling setup (call `storybloq_health` MCP tool; relay each advise message and its fix verbatim, list skip reasons in one line, then end)
 - `/story settings` -> manage project settings (read `settings.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story design` -> evaluate frontend design (read `design/design.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
-- `/story design <platform>` -> evaluate for specific platform: web, ios, macos, android (read `design/design.md` in the same directory as this skill file)
+- `/story design <platform>` -> evaluate for specific platform: web, ios, macos, android (read `design/design.md`)
 - `/story review-lenses` -> run multi-lens review on current diff (read `review-lenses/review-lenses.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`). Note: the autonomous guide invokes lenses automatically when `reviewBackends` includes `"lenses"` -- this command is for manual/debug use.
 - `/story federation` -> set up multi-repo orchestrator (read `federation-setup.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story orchestrate` -> drive the backlog as orchestrator/pen with tiered background agents (read `orchestrator-mode.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
@@ -285,6 +286,8 @@ Tip: You can also use these modes anytime:
 ```
 
 Show this once or twice, then never again.
+
+Run `/story health` to check your tooling (CLI version, review bridge, usage settings).
 
 **Part 3: AskUserQuestion**
 
