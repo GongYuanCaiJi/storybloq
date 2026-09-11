@@ -11,7 +11,7 @@ import { CliValidationError } from "../../../src/cli/helpers.js";
 import { initProject } from "../../../src/core/init.js";
 import { makeState } from "../../core/test-factories.js";
 import type { CommandContext } from "../../../src/cli/run.js";
-import { mkdtemp, writeFile, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, mkdir, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readPresenceRecord } from "../../../src/core/session-intel/presence-bridge.js";
@@ -80,6 +80,161 @@ describe("handleHandoverLatest", () => {
     const result = await handleHandoverLatest(ctx);
     expect(result.output).toContain("not_found");
     expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+  });
+
+  describe("T-320 brief/priming wiring", () => {
+    it("brief:true returns a structured digest instead of the raw body", async () => {
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      await writeFile(
+        join(handoversDir, "2026-03-19-session.md"),
+        "# Handover: session\n\n## Next\n- T-900: keep going\n",
+      );
+
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: ["2026-03-19-session.md"] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 1, { brief: true });
+      expect(result.output).toContain("T-900");
+      // The structured path never emits the raw body's exact heading line
+      // verbatim as a full-content dump the way the default path does --
+      // it renders through formatHandoverBrief instead.
+      expect(result.output).not.toContain("## Next\n- T-900: keep going");
+    });
+
+    it("priming:true returns the raw body verbatim for a small handover", async () => {
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      const body = "# Handover: session\n\n## Next\n- T-901: keep going\n";
+      await writeFile(join(handoversDir, "2026-03-19-session.md"), body);
+
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: ["2026-03-19-session.md"] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 1, { priming: true });
+      expect(result.output).toContain(body);
+    });
+
+    it("neither brief nor priming set keeps the default full-body path byte-identical", async () => {
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      await writeFile(join(handoversDir, "2026-03-19-session.md"), "# Session Notes\nHello world");
+
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: ["2026-03-19-session.md"] }),
+        handoversDir,
+      });
+      const withEmptyOpts = await handleHandoverLatest(ctx, 1, {});
+      const withNoOpts = await handleHandoverLatest(ctx, 1);
+      expect(withEmptyOpts.output).toEqual(withNoOpts.output);
+      expect(withNoOpts.output).toContain("Hello world");
+    });
+
+    it("returns not_found through the brief path when no handovers exist", async () => {
+      const ctx = makeCtx();
+      const result = await handleHandoverLatest(ctx, 1, { brief: true });
+      expect(result.output).toContain("not_found");
+      expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+    });
+
+    it("skips an oversized-filename symlink without throwing (admission gate runs before filesystem validation)", async () => {
+      // A raw filename under any real OS length limit (255 bytes) can still
+      // exceed FILENAME_ADMISSION_MAX_BYTES once JSON-escaped, if it is rich
+      // in characters JSON must escape (quotes here: each becomes \" -- two
+      // bytes). parseHandoverFilename's own lstat check throws on a symlink,
+      // so if the admission gate did not run FIRST, this would fail the
+      // whole request instead of just being skipped and counted.
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      const normalName = "2026-03-19-session.md";
+      const normalBody = "# Handover: session\n\n## Next\n- T-904: keep going\n";
+      await writeFile(join(handoversDir, normalName), normalBody);
+
+      const oversizedName = "x".repeat(50) + '"'.repeat(150) + ".md";
+      expect(Buffer.byteLength(JSON.stringify(oversizedName), "utf-8")).toBeGreaterThan(300);
+      await symlink(join(handoversDir, normalName), join(handoversDir, oversizedName));
+
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: [normalName, oversizedName] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 2, { brief: true });
+      expect(result.output).toContain("T-904");
+      expect(result.exitCode).toBeUndefined();
+    });
+
+    it("returns not_found through the brief path when a listed file is missing on disk", async () => {
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      // Listed in state but never written -- exercises buildHandoverBrief's
+      // own ENOENT branch, distinct from the top-level empty-list check above.
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: ["2026-03-19-ghost.md"] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 1, { priming: true });
+      expect(result.output).toContain("not_found");
+      expect(result.exitCode).toBe(ExitCode.USER_ERROR);
+    });
+
+    it("pen finding: one missing file out of a multi-file window survives, matching the default path's own count>1 tolerance", async () => {
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      await writeFile(
+        join(handoversDir, "2026-03-19-a.md"),
+        "# Handover: a\n\n## Next\n- T-906: keep going\n",
+      );
+      // "2026-03-18-ghost.md" is listed (as a state scan would list it) but
+      // was never written -- e.g. deleted between the scan and this call.
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: ["2026-03-19-a.md", "2026-03-18-ghost.md"] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 2, { priming: true });
+      expect(result.exitCode).toBeUndefined();
+      expect(result.output).toContain("T-906");
+      expect(result.output).toContain("no longer on disk");
+    });
+
+    it("Codex finding: an all-oversized window is NOT not_found -- the files exist, only their names were rejected", async () => {
+      // The admission check runs before any read, so no file needs to exist
+      // on disk for this name to be rejected (see the symlink test above).
+      const oversizedName = "a".repeat(310) + ".md";
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: [oversizedName] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 1, { brief: true });
+      expect(result.exitCode).toBeUndefined();
+      expect(result.output).toContain("skipped: filename too long");
+      expect(result.output).not.toContain("not_found");
+    });
+
+    it("Codex finding: a mixed oversized + missing window renders both counts, not not_found", async () => {
+      const oversizedName = "a".repeat(310) + ".md";
+      const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+      const handoversDir = join(tmpDir, "handovers");
+      await mkdir(handoversDir, { recursive: true });
+      const ctx = makeCtx({
+        state: makeState({ handoverFilenames: [oversizedName, "2026-03-19-ghost2.md"] }),
+        handoversDir,
+      });
+      const result = await handleHandoverLatest(ctx, 2, { brief: true });
+      expect(result.exitCode).toBeUndefined();
+      expect(result.output).toContain("skipped: filename too long");
+      expect(result.output).toContain("no longer on disk");
+    });
   });
 });
 

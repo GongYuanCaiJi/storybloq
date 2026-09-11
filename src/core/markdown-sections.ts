@@ -875,7 +875,16 @@ function indexNonFileBytes(omittedCount: number, ids: string[]): number {
   return byteLength(JSON.stringify({ omittedCount, ids }));
 }
 
-function buildIndex(
+/**
+ * Shapes a `ContinuationIndex` from a raw omitted-id list: caps to
+ * `INDEX_MAX_IDS` ids, then shrinks further until the non-file part (per
+ * T-320's amendment) fits `INDEX_NON_FILE_MAX_BYTES`. Exported (beyond this
+ * module's own per-handover eviction path) so a CROSS-handover budget walk
+ * (T-320 commit 2) can build a full, standalone index for a handover it
+ * demotes entirely -- covering every id that handover ever had, not just the
+ * ones this module's own per-handover selection evicted.
+ */
+export function buildIndex(
   omittedCount: number,
   candidateIds: string[],
   file: string,

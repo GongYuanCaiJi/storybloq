@@ -2,7 +2,10 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, rm, cp, writeFile, mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runMcpReadTool, runMcpWriteTool } from "../../src/mcp/tools.js";
+import { runMcpReadTool, runMcpWriteTool, registerAllTools } from "../../src/mcp/tools.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 // Handler imports
 import { handleStatus } from "../../src/cli/commands/status.js";
@@ -243,6 +246,84 @@ describe("MCP integration -- real filesystem", () => {
     // not_found is informational, not isError
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain("No handovers");
+  });
+
+  /**
+   * T-320: goes through the REAL registered tool (registerAllTools + a live
+   * MCP client over InMemoryTransport, callTool), not a hand-built closure --
+   * this is what actually exercises the `brief`/`priming` zod schema fields
+   * and their forwarding at the tools.ts registration site (mcp/tools.ts
+   * ~line 609), which a direct handleHandoverLatest call bypasses entirely.
+   */
+  async function callHandoverLatest(
+    root: string,
+    args: Record<string, unknown>,
+  ): Promise<{ isError?: boolean; text: string }> {
+    const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+    registerAllTools(server, root);
+    const client = new Client({ name: "handover-latest-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: "storybloq_handover_latest", arguments: args });
+    await client.close();
+    const content = result.content as { text: string }[];
+    return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+  }
+
+  it("storybloq_handover_latest with brief:true returns a structured digest through the real MCP registration (T-320)", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    await writeFile(
+      join(handoverDir, "2026-03-20-test.md"),
+      "# Handover: test\n\n## Next\n- T-902: keep going\n",
+    );
+    // storybloq_handover_latest has no `format` field in its schema (unlike
+    // storybloq_status) -- MCP responses render through the default "md" path.
+    const result = await callHandoverLatest(root, { brief: true });
+    expect(result.isError).toBeUndefined();
+    // formatRecordLine's structured rendering bolds the id; the raw default
+    // path never does, so this is a marker unique to the structured form.
+    expect(result.text).toContain("**T-902**");
+    expect(result.text).not.toContain("## Next\n- T-902: keep going");
+  });
+
+  it("storybloq_handover_latest with priming:true returns the raw body verbatim for a small handover through the real MCP registration (T-320/T-497)", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    const body = "# Handover: test\n\n## Next\n- T-903: keep going\n";
+    await writeFile(join(handoverDir, "2026-03-20-test.md"), body);
+    const result = await callHandoverLatest(root, { priming: true });
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain(body);
+  });
+
+  it("storybloq_handover_latest with priming:true downgrades an over-trigger body to structured through the real MCP registration -- a discriminating case, since a small body reads the same whether or not priming is actually forwarded", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    const filler = "x".repeat(12_100);
+    const body = `# Handover: test\n\n## Next\n- T-905: keep going\n\n${filler}\n`;
+    await writeFile(join(handoverDir, "2026-03-20-test.md"), body);
+    const result = await callHandoverLatest(root, { priming: true });
+    expect(result.isError).toBeUndefined();
+    // Structured-only marker (see the brief:true test above); if priming's
+    // schema field or its forwarding to handleHandoverLatest were dropped,
+    // this handover would fall through to the OLD default raw-body path and
+    // the filler (absent from the structured records) would appear verbatim.
+    expect(result.text).toContain("**T-905**");
+    expect(result.text).not.toContain(filler);
+  });
+
+  it("storybloq_handover_latest with neither flag returns the default raw-body path through the real MCP registration", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    await writeFile(join(handoverDir, "2026-03-20-test.md"), "# Test Handover\n\nThis is test content.");
+    const result = await callHandoverLatest(root, {});
+    expect(result.isError).toBeUndefined();
+    expect(result.text).toContain("Test Handover");
   });
 });
 

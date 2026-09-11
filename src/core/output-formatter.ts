@@ -18,6 +18,8 @@ import type { ValidationResult, ValidationFinding, ValidationLevel } from "./val
 import type { LedgerIntegrityResult } from "./ledger-integrity.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "./queries.js";
 import type { RecommendResult } from "./recommend.js";
+import type { HandoverBriefResult, HandoverBriefEntry } from "./handover-brief.js";
+import type { SectionRecord, TrajectoryEntry } from "./markdown-sections.js";
 import type { ReconcileResult } from "./reconcile.js";
 import type { DoctorResult } from "./team-doctor.js";
 import type { ActiveSessionSummary, SessionScanDiagnostic } from "./session-scan.js";
@@ -2212,6 +2214,77 @@ export function formatHandoverContent(
   }
   // MD mode: raw content as-is (it's already markdown)
   return content;
+}
+
+function formatRecordLine(record: SectionRecord): string {
+  const idPart = record.id ? `**${record.id}**` : `*(${record.kind})*`;
+  const rationalePart = record.rationale === "unknown" ? "" : ` -- ${record.rationale}`;
+  return `- ${idPart} ${record.label}${rationalePart}`;
+}
+
+function formatHandoverBriefEntryMd(entry: HandoverBriefEntry): string {
+  const lines: string[] = [`## ${entry.filename}`];
+  if (entry.form === "raw") {
+    lines.push("", entry.body);
+    return lines.join("\n");
+  }
+  if (entry.form === "index-only") {
+    lines.push(
+      "",
+      `(${entry.index.omittedCount} item(s) omitted; ids: ${entry.index.ids.join(", ") || "none"})`,
+    );
+    return lines.join("\n");
+  }
+  if (entry.records.length === 0) {
+    lines.push("", "(no continuation, blocked, owner-gated, or carried items)");
+  }
+  for (const record of entry.records) {
+    lines.push(formatRecordLine(record));
+  }
+  if (entry.index) {
+    lines.push(
+      `(${entry.index.omittedCount} more omitted; ids: ${entry.index.ids.join(", ") || "none"})`,
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatTrajectoryMd(trajectory: readonly TrajectoryEntry[]): string {
+  if (trajectory.length === 0) return "";
+  const lines = ["## Trajectory"];
+  for (const entry of trajectory) {
+    lines.push(
+      `- ${entry.id}: seen in ${entry.occurrenceCount} handover(s), latest ${entry.latest} (${entry.latestDisposition})`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * T-320 commit 2: renders `handover_latest`'s brief/priming result. JSON
+ * mode is the exact `{handovers, trajectory, skippedHandovers,
+ * missingHandovers}` shape from `buildHandoverBrief`, wrapped in the
+ * standard success envelope. MD mode groups each handover's records under
+ * its filename, falling back to the raw body for an entry priming kept
+ * unstructured, and appends a trajectory section when non-empty.
+ */
+export function formatHandoverBrief(
+  result: HandoverBriefResult,
+  format: OutputFormat,
+): string {
+  if (format === "json") {
+    return JSON.stringify(successEnvelope(result), null, 2);
+  }
+  const sections = result.handovers.map(formatHandoverBriefEntryMd);
+  const trajectorySection = formatTrajectoryMd(result.trajectory);
+  if (trajectorySection) sections.push(trajectorySection);
+  if (result.skippedHandovers > 0) {
+    sections.push(`(${result.skippedHandovers} handover(s) skipped: filename too long)`);
+  }
+  if (result.missingHandovers > 0) {
+    sections.push(`(${result.missingHandovers} handover(s) skipped: no longer on disk)`);
+  }
+  return sections.join("\n\n");
 }
 
 /** T-499: the continuation line after a handover that was stamped on the caller's presence record. */

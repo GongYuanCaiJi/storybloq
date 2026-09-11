@@ -1,10 +1,12 @@
 import { readHandover } from "../../core/handover-parser.js";
+import { buildHandoverBrief, isFilenameAdmitted } from "../../core/handover-brief.js";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   formatHandoverList,
   formatHandoverContent,
+  formatHandoverBrief,
   formatHandoverCreateResult,
   formatError,
   ExitCode,
@@ -24,9 +26,15 @@ export function handleHandoverList(ctx: CommandContext): CommandResult {
   return { output: formatHandoverList(ctx.state.handoverFilenames, ctx.format) };
 }
 
+export interface HandoverLatestOptions {
+  readonly brief?: boolean;
+  readonly priming?: boolean;
+}
+
 export async function handleHandoverLatest(
   ctx: CommandContext,
   count: number = 1,
+  opts: HandoverLatestOptions = {},
 ): Promise<CommandResult> {
   if (ctx.state.handoverFilenames.length === 0) {
     return {
@@ -37,6 +45,50 @@ export async function handleHandoverLatest(
   }
 
   const filenames = ctx.state.handoverFilenames.slice(0, count);
+
+  // T-320 commit 2: brief/priming are additive -- omitting both keeps the
+  // default path below byte-identical to today (always the full raw body).
+  if (opts.brief || opts.priming) {
+    // T-320: the admission gate runs BEFORE any filesystem validation -- an
+    // oversized filename must be skippable (and counted) without ever
+    // reaching parseHandoverFilename's lstat, which throws on a symlink and
+    // would otherwise fail the whole request instead of just dropping it.
+    for (const filename of filenames) {
+      if (isFilenameAdmitted(filename)) {
+        await parseHandoverFilename(filename, ctx.handoversDir);
+      }
+    }
+    try {
+      const result = await buildHandoverBrief(ctx.handoversDir, filenames, {
+        brief: opts.brief ?? false,
+        priming: opts.priming ?? false,
+      });
+      // buildHandoverBrief drops a listed-but-missing file (ENOENT) from the
+      // window itself rather than failing the whole request -- matching the
+      // default path's own tolerance for a missing file when count > 1.
+      // not_found applies only when NOTHING is left to report: an empty
+      // window AND no admission skips. If every filename was instead
+      // rejected for an oversized name (skippedHandovers > 0), that is a
+      // real, observable result (the files exist) and must render through
+      // formatHandoverBrief's own skipped-count message, not collapse into
+      // a misleading "not found".
+      if (result.handovers.length === 0 && result.skippedHandovers === 0) {
+        return {
+          output: formatError("not_found", "No handovers found", ctx.format),
+          exitCode: ExitCode.USER_ERROR,
+          errorCode: "not_found",
+        };
+      }
+      return { output: formatHandoverBrief(result, ctx.format) };
+    } catch (err: unknown) {
+      return {
+        output: formatError("io_error", `Cannot read handover: ${(err as Error).message}`, ctx.format),
+        exitCode: ExitCode.USER_ERROR,
+        errorCode: "io_error",
+      };
+    }
+  }
+
   const parts: string[] = [];
 
   for (const filename of filenames) {

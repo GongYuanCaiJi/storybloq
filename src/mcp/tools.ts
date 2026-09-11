@@ -611,9 +611,15 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     description: "Content of the most recent handover document(s)",
     inputSchema: {
       count: z.number().int().min(1).max(10).optional().describe("default: 1"),
+      brief: z.boolean().optional().describe(
+        "T-320: return a structured record digest (continuation/blocked/owner-gated/carried items plus a trajectory list) instead of full bodies, for every handover in the window",
+      ),
+      priming: z.boolean().optional().describe(
+        "T-320/T-497: return each handover's full body when it is at or under 12,000 bytes, otherwise the same structured digest brief uses. Combined with brief, brief wins",
+      ),
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
-    handleHandoverLatest(ctx, args.count ?? 1),
+    handleHandoverLatest(ctx, args.count ?? 1, { brief: args.brief, priming: args.priming }),
   ));
 
   server.registerTool("storybloq_blocker_list", {

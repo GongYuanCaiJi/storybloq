@@ -705,17 +705,36 @@ export function registerHandoverCommand(yargs: Argv): Argv {
           "Content of most recent handover(s)",
           (y2) =>
             addFormatOption(
-              y2.option("count", {
-                type: "number",
-                default: 1,
-                describe: "Number of recent handovers to return (default: 1)",
-              }),
+              y2
+                .option("count", {
+                  type: "number",
+                  default: 1,
+                  describe: "Number of recent handovers to return (default: 1)",
+                })
+                .option("brief", {
+                  type: "boolean",
+                  describe:
+                    "T-320: structured record digest (continuation/blocked/owner-gated/carried plus trajectory) instead of full bodies",
+                })
+                .option("priming", {
+                  type: "boolean",
+                  describe:
+                    "T-320/T-497: full body at or under 12,000 bytes per handover, else the same structured digest as --brief",
+                }),
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            const count = Math.max(1, Math.floor(argv.count as number));
+            const brief = argv.brief as boolean | undefined;
+            const priming = argv.priming as boolean | undefined;
+            let count = Math.max(1, Math.floor(argv.count as number));
+            // T-320: capped at 10 ONLY for brief/priming, matching
+            // storybloq_handover_latest's existing MCP schema (z.number()
+            // .max(10)) -- the cross-handover budget's H=14,200 is only sized
+            // for a window this small. The plain default path (neither flag)
+            // is untouched: it never had a count cap and must stay that way.
+            if (brief || priming) count = Math.min(10, count);
             await runReadCommand(format, (ctx) =>
-              handleHandoverLatest(ctx, count),
+              handleHandoverLatest(ctx, count, { brief, priming }),
             );
           },
         )
