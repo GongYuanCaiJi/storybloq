@@ -7,6 +7,7 @@ import {
   escapeMarkdownInline,
   escapeMarkdownDocument,
   fencedBlock,
+  stripRenderFence,
   formatStatus,
   formatFederatedStatus,
   formatPhaseList,
@@ -189,6 +190,53 @@ describe("fencedBlock", () => {
     // Should use 4 backticks as fence
     expect(result.startsWith("````")).toBe(true);
     expect(result.endsWith("````")).toBe(true);
+  });
+});
+
+describe("stripRenderFence (ISS-1192)", () => {
+  it("strips a whole-input 4-backtick fence with no info string", () => {
+    const result = stripRenderFence(fencedBlock("has ``` inside"));
+    expect(result).toEqual({ text: "has ``` inside", stripped: true });
+  });
+
+  it("round-trips: fencedBlock then stripRenderFence recovers the exact original, and is idempotent on the result", () => {
+    const original = "line one\nline two with ``` a fence\nline three";
+    const rendered = fencedBlock(original);
+    const first = stripRenderFence(rendered);
+    expect(first).toEqual({ text: original, stripped: true });
+    const second = stripRenderFence(first.text);
+    expect(second).toEqual({ text: original, stripped: false });
+  });
+
+  it("never strips a whole-input 3-backtick fence (named mutant: lowering the threshold to 3 must make this red)", () => {
+    const input = "```\nhello\n```";
+    expect(stripRenderFence(input)).toEqual({ text: input, stripped: false });
+  });
+
+  it("never strips a 4-backtick fence carrying an info string", () => {
+    const input = "````ts\nconst x = 1;\n````";
+    expect(stripRenderFence(input)).toEqual({ text: input, stripped: false });
+  });
+
+  it("never strips when there is text outside the fence", () => {
+    const input = "some prose\n````\nfenced\n````";
+    expect(stripRenderFence(input)).toEqual({ text: input, stripped: false });
+    const input2 = "````\nfenced\n````\nmore prose";
+    expect(stripRenderFence(input2)).toEqual({ text: input2, stripped: false });
+  });
+
+  it("trims only outer whitespace, preserving inner leading/trailing newlines", () => {
+    const input = "  \n````\n\nline one\n\n````\n  ";
+    expect(stripRenderFence(input)).toEqual({ text: "\nline one\n", stripped: true });
+  });
+
+  it("matches the closing fence at the end of input only, never an inner fence of the same length", () => {
+    // The content itself contains a line that is exactly 4 backticks; the true
+    // outer closer is the LAST such line, at the true end of input.
+    const input = "````\nfirst\n````\nsecond\n````";
+    const result = stripRenderFence(input);
+    expect(result.stripped).toBe(true);
+    expect(result.text).toBe("first\n````\nsecond");
   });
 });
 

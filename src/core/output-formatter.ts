@@ -310,6 +310,28 @@ export function fencedBlock(content: string, lang?: string): string {
 }
 
 /**
+ * ISS-1192: inverts `fencedBlock`. When the ENTIRE input, after trimming only
+ * outer whitespace, is one fenced block whose opening and closing fences are
+ * equal runs of 4+ backticks with no info string, returns the inner text
+ * (byte-identical to what was fenced). Otherwise returns the input unchanged.
+ *
+ * Never strips a 3-backtick fence (that is ordinary user content -- 3 is
+ * `fencedBlock`'s own minimum for content with no backticks at all, so a
+ * lower threshold here would eat legitimate user-authored fences). Never
+ * strips when the fence does not span the whole input, or when it carries an
+ * info string. The closing fence is matched only at the true end of input --
+ * greedy backtracking naturally finds the LAST `\n<fence>` in the string, so
+ * a same-length backtick run inside the content is never mistaken for the
+ * close.
+ */
+export function stripRenderFence(input: string): { text: string; stripped: boolean } {
+  const trimmed = input.trim();
+  const match = /^(`{4,})\n([\s\S]*)\n\1$/.exec(trimmed);
+  if (!match) return { text: input, stripped: false };
+  return { text: match[2] as string, stripped: true };
+}
+
+/**
  * T-476: markdown rendering for a citing item's resolved rulings.
  * `resolutions` defaults to empty everywhere it is threaded through, so an
  * existing caller that never resolves citations renders byte-identically to
@@ -2809,7 +2831,11 @@ export function formatReference(
   // it once at the top of the command reference rather than per command.
   lines.push("### JSON output envelope");
   lines.push("");
-  lines.push('Commands accepting `--format json` wrap their payload in a versioned envelope: `{"version": 1, "data": ...}` on success, `{"version": 1, "error": {"code": ..., "message": ...}}` on failure, plus a `warnings` array on partial loads (exit code 3). Pass `--raw` with `--format json` to emit the `data` payload verbatim: errors keep the envelope, partial-load warnings are dropped (the exit code still signals them), and commands whose JSON is not the standard envelope reject `--raw` naming their shape. A few commands predate the envelope and emit their own JSON instead: `gc`, `limit-status`, `conflicts list`, `conflicts show`, `resolve` and `team reserve` return an `{"ok", "data"}` object, and `team init` and `team setup` return a bare result object. `session list` and `session show` use a text/json axis with their own top-level shapes, and the `bus` subcommands speak the versioned Bus wire format. Every one of these names its own shape in its `--help` and does not accept `--raw` at all, so passing it is rejected during argument validation, before the command runs -- which matters because several of them mutate state.');
+  // ISS-1192: appended to the same paragraph (not a new one) to stay inside
+  // this file's byte-budget ceiling -- piping a `get`'s md rendering into
+  // `update --stdin` carries the render fence itself into a
+  // description/impact/content field, growing by one backtick per round trip.
+  lines.push('Commands accepting `--format json` wrap their payload in a versioned envelope: `{"version": 1, "data": ...}` on success, `{"version": 1, "error": {"code": ..., "message": ...}}` on failure, plus a `warnings` array on partial loads (exit code 3). Pass `--raw` with `--format json` to emit the `data` payload verbatim: errors keep the envelope, partial-load warnings are dropped (the exit code still signals them), and commands whose JSON is not the standard envelope reject `--raw` naming their shape. A few commands predate the envelope and emit their own JSON instead: `gc`, `limit-status`, `conflicts list`, `conflicts show`, `resolve` and `team reserve` return an `{"ok", "data"}` object, and `team init` and `team setup` return a bare result object. `session list` and `session show` use a text/json axis with their own top-level shapes, and the `bus` subcommands speak the versioned Bus wire format. Every one of these names its own shape in its `--help` and does not accept `--raw` at all, so passing it is rejected during argument validation, before the command runs -- which matters because several of them mutate state. JSON round-trips description/impact/content cleanly (ISS-1192) -- md\'s render fence grows each pass; `update` strips it and warns.');
   lines.push("");
   for (const cmd of commands) {
     lines.push(`### ${cmd.name}`);

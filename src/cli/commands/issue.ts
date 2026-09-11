@@ -19,6 +19,7 @@ import {
   formatError,
   successEnvelope,
   ExitCode,
+  stripRenderFence,
 } from "../../core/output-formatter.js";
 import {
   ISSUE_STATUSES,
@@ -420,6 +421,15 @@ export async function handleIssueUpdate(
     "issue",
     "status, title, severity, impact, resolution, components, relatedTickets, location, sourceRefs, order, phase, citesRuling, clearCitesRulings",
   );
+  // ISS-1192: same round-trip-growth fix as ticket.ts's description -- an
+  // agent that reads the md-rendered impact back and writes it verbatim
+  // carries the render fence into storage. Shared by CLI and MCP.
+  let impactFenceStripped = false;
+  if (updates.impact !== undefined) {
+    const stripped = stripRenderFence(updates.impact);
+    updates.impact = stripped.text;
+    impactFenceStripped = stripped.stripped;
+  }
   if (updates.status && !ISSUE_STATUSES.includes(updates.status as IssueStatus)) {
     throw new CliValidationError(
       "invalid_input",
@@ -510,10 +520,13 @@ export async function handleIssueUpdate(
   });
 
   if (!updatedIssue) throw new Error("Issue not updated");
+  const warnings = impactFenceStripped
+    ? ["outer render fence removed; use --format json for round trips"]
+    : undefined;
   if (format === "json") {
-    return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2) };
+    return { output: JSON.stringify(successEnvelope(updatedIssue), null, 2), ...(warnings && { warnings }) };
   }
-  return { output: `Updated issue ${displayIdOf(updatedIssue)}: ${updatedIssue.title}` };
+  return { output: `Updated issue ${displayIdOf(updatedIssue)}: ${updatedIssue.title}`, ...(warnings && { warnings }) };
 }
 
 export async function handleIssueMetaSet(

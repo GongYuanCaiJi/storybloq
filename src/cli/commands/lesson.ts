@@ -21,6 +21,7 @@ import {
   formatLessonDeleteResult,
   formatError,
   ExitCode,
+  stripRenderFence,
 } from "../../core/output-formatter.js";
 import {
   LESSON_STATUSES,
@@ -276,6 +277,17 @@ export async function handleLessonUpdate(
   if (updates.title !== undefined && !updates.title.trim()) {
     throw new CliValidationError("invalid_input", "Lesson title cannot be empty");
   }
+  // ISS-1192: same round-trip-growth fix as ticket.ts's description -- an
+  // agent that reads the md-rendered content back and writes it verbatim
+  // carries the render fence into storage. Shared by CLI and MCP. Applied
+  // before the empty check so the check validates what will actually be
+  // stored.
+  let contentFenceStripped = false;
+  if (updates.content !== undefined) {
+    const stripped = stripRenderFence(updates.content);
+    updates.content = stripped.text;
+    contentFenceStripped = stripped.stripped;
+  }
   if (updates.content !== undefined && !updates.content.trim()) {
     throw new CliValidationError("invalid_input", "Lesson content cannot be empty");
   }
@@ -317,7 +329,10 @@ export async function handleLessonUpdate(
   });
 
   if (!updatedLesson) throw new Error("Lesson not updated");
-  return { output: formatLessonUpdateResult(updatedLesson, format) };
+  const warnings = contentFenceStripped
+    ? ["outer render fence removed; use --format json for round trips"]
+    : undefined;
+  return { output: formatLessonUpdateResult(updatedLesson, format), ...(warnings && { warnings }) };
 }
 
 export async function handleLessonReinforce(

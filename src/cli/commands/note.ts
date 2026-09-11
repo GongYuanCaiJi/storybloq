@@ -17,6 +17,7 @@ import {
   formatNoteDeleteResult,
   formatError,
   ExitCode,
+  stripRenderFence,
 } from "../../core/output-formatter.js";
 import {
   NOTE_STATUSES,
@@ -200,6 +201,17 @@ export async function handleNoteUpdate(
   root: string,
 ): Promise<CommandResult> {
   assertUpdateHasFields(updates, "note", "content, title, tags, clearTags, status");
+  // ISS-1192: same round-trip-growth fix as ticket.ts's description -- an
+  // agent that reads the md-rendered content back and writes it verbatim
+  // carries the render fence into storage. Shared by CLI and MCP. Applied
+  // before the empty check so the check validates what will actually be
+  // stored.
+  let contentFenceStripped = false;
+  if (updates.content !== undefined) {
+    const stripped = stripRenderFence(updates.content);
+    updates.content = stripped.text;
+    contentFenceStripped = stripped.stripped;
+  }
   if (updates.content !== undefined && !updates.content.trim()) {
     throw new CliValidationError("invalid_input", "Note content cannot be empty");
   }
@@ -243,7 +255,10 @@ export async function handleNoteUpdate(
   });
 
   if (!updatedNote) throw new Error("Note not updated");
-  return { output: formatNoteUpdateResult(updatedNote, format) };
+  const warnings = contentFenceStripped
+    ? ["outer render fence removed; use --format json for round trips"]
+    : undefined;
+  return { output: formatNoteUpdateResult(updatedNote, format), ...(warnings && { warnings }) };
 }
 
 export async function handleNoteDelete(

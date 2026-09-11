@@ -461,6 +461,29 @@ describe("handleIssueUpdate", () => {
     expect(parsed.data.severity).toBe("low");
   });
 
+  it("strips a whole-input 4+ backtick render fence from impact and warns (ISS-1192)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-update-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    const inner = "impact line one\n```ts\ncode\n```\nline three";
+    const rendered = `\`\`\`\`\n${inner}\n\`\`\`\``;
+    const result = await handleIssueUpdate("ISS-001", { impact: rendered }, "json", dir);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.impact).toBe(inner);
+    expect(result.warnings).toEqual(["outer render fence removed; use --format json for round trips"]);
+  });
+
+  it("leaves a 3-backtick whole-impact fence untouched, with no warning", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "issue-update-"));
+    tmpDirs.push(dir);
+    await setupIssue(dir);
+    const input = "```\nhello\n```";
+    const result = await handleIssueUpdate("ISS-001", { impact: input }, "json", dir);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.data.impact).toBe(input);
+    expect(result.warnings).toBeUndefined();
+  });
+
   it("clearEarmarkForSession clears a same-session earmark atomically with the status write", async () => {
     const dir = await mkdtemp(join(tmpdir(), "issue-update-"));
     tmpDirs.push(dir);

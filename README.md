@@ -261,6 +261,8 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq lesson list` · `lesson get` · `lesson create` · `lesson update` · `lesson reinforce` | Reusable patterns and anti-patterns |
 | `storybloq lesson digest` | Compact summary of all active lessons for skill injection |
 
+`--format json` is the round-trip-safe format for editing a ticket description, issue impact, or note/lesson content: piping a `get`'s md rendering into `update --stdin` carries the render fence itself into storage (ISS-1192), since md wraps that field's content in code-fence backticks one longer than any run already inside it. `update` strips a whole-value 4+ backtick outer fence with no info string and warns when it does; `get --format json` never has this problem, since the field is a plain JSON string.
+
 ### Handovers, blockers, snapshots
 
 | Command | Description |

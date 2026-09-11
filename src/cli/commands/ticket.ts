@@ -32,6 +32,7 @@ import {
   formatError,
   successEnvelope,
   ExitCode,
+  stripRenderFence,
 } from "../../core/output-formatter.js";
 import {
   TICKET_STATUSES,
@@ -464,6 +465,16 @@ export async function handleTicketUpdate(
     "ticket",
     "status, title, type, phase, order, description, blockedBy, crossNodeBlockedBy, parentTicket, citesRuling, clearCitesRulings",
   );
+  // ISS-1192: an agent that reads the md-rendered description back and
+  // writes it verbatim carries the render fence into storage, growing by one
+  // backtick every round trip. Applies to both the CLI --stdin/--description
+  // path and MCP's ticket_update, which share this handler.
+  let descriptionFenceStripped = false;
+  if (updates.description !== undefined) {
+    const stripped = stripRenderFence(updates.description);
+    updates.description = stripped.text;
+    descriptionFenceStripped = stripped.stripped;
+  }
   if (updates.status && !TICKET_STATUSES.includes(updates.status as TicketStatus)) {
     throw new CliValidationError(
       "invalid_input",
@@ -630,10 +641,13 @@ export async function handleTicketUpdate(
   });
 
   if (!updatedTicket) throw new Error("Ticket not updated");
+  const warnings = descriptionFenceStripped
+    ? ["outer render fence removed; use --format json for round trips"]
+    : undefined;
   if (format === "json") {
-    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2) };
+    return { output: JSON.stringify(successEnvelope(updatedTicket), null, 2), ...(warnings && { warnings }) };
   }
-  return { output: `Updated ticket ${displayIdOf(updatedTicket)}: ${updatedTicket.title}` };
+  return { output: `Updated ticket ${displayIdOf(updatedTicket)}: ${updatedTicket.title}`, ...(warnings && { warnings }) };
 }
 
 export async function handleTicketMetaSet(
