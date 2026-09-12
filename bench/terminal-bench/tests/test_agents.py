@@ -648,7 +648,10 @@ async def test_run_configures_propagates_env_and_launches_parent(tmp_path):
     assert launch["env"]["CODEX_HOME"] == "/opt/bench/codex-home" and launch["env"]["RB_CONFIG_PATH"] == "/opt/bench/reviewbridge.json"
     assert launch["env"]["CLAUDE_CONFIG_DIR"] == "/logs/agent/sessions"
     instr = launch["env"][next(k for k in launch["env"] if k.startswith("HARBOR_CLAUDE_CODE_INSTRUCTION_"))]
-    assert instr == "/story auto T-001\n\nThe ticket T-001 holds the task.\nFix it.  \nline two\n\n\n\nDo the work in this directory. Do not ask questions; there is no user.\n"
+    # ISS-1198: A1-A4 render with their OWN suffix (agents/instruction-auto.txt), not A0's
+    # "do not ask questions; there is no user" one, which was found to discourage the guide.
+    from agents.storybloq_auto import AUTO_INSTRUCTION_SUFFIX
+    assert instr == f"/story auto T-001\n\nThe ticket T-001 holds the task.\nFix it.  \nline two\n\n\n\n{AUTO_INSTRUCTION_SUFFIX}\n"
     order = [next(i for i, c in enumerate(cmds) if k in c) for k in ("storybloq setup --client claude", "storybloq init --name bench-task", "/opt/node/bin/node /opt/bench/mkticket.cjs", "nohup /opt/node/bin/node /opt/bench/telemetry-copier.cjs", "versions.json", "started.json", "harbor_claude_code_instruction_", "story.tgz")]
     assert order == sorted(order)
     assert not any("| tail" in c for c in cmds)
@@ -1110,3 +1113,20 @@ def test_write_file_command_is_shell_safe():
     cmd = write_file_command("/logs/x.txt", "a 'b' $(echo c) `d` \\n")
     out = subprocess.run(["sh", "-c", cmd.replace("/logs/x.txt", "/dev/stdout")], capture_output=True, text=True)
     assert out.stdout == "a 'b' $(echo c) `d` \\n"
+
+
+def test_auto_arms_use_their_own_instruction_suffix_not_baseline_a0s():
+    """ISS-1198: A1-A4 need the guide invoked, which the shared A0 suffix ("do not ask questions;
+    there is no user") was found to discourage; storybloq_auto.py must render with its OWN
+    suffix, distinct from and never overwriting agents/baseline.py's byte-identical A0 one."""
+    from agents.baseline import INSTRUCTION_SUFFIX, render_instruction
+    from agents.storybloq_auto import AUTO_INSTRUCTION_SUFFIX, render_auto_instruction
+
+    assert AUTO_INSTRUCTION_SUFFIX != INSTRUCTION_SUFFIX
+    assert "there is no user" not in AUTO_INSTRUCTION_SUFFIX.lower()  # honest, but not a stop-sign
+    assert "storybloq_autonomous_guide" in AUTO_INSTRUCTION_SUFFIX
+    assert "no human" in AUTO_INSTRUCTION_SUFFIX.lower()  # still honest: no one is there to ask
+    task = "Fix the parser."
+    assert render_auto_instruction(task) == f"{task}\n\n{AUTO_INSTRUCTION_SUFFIX}\n"
+    assert render_instruction(task) == f"{task}\n\n{INSTRUCTION_SUFFIX}\n"  # A0's path untouched
+    assert render_auto_instruction(task) != render_instruction(task)

@@ -12,7 +12,7 @@ from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from agents.baseline import BENCH_ROOT, render_instruction
+from agents.baseline import BENCH_ROOT
 from agents.common import (
     InfraError,
     Manifest,
@@ -37,6 +37,22 @@ from agents.common import (
     sha256_file,
     write_file_command,
 )
+
+# A1-A4's own instruction suffix, distinct from agents/instruction.txt (A0's, byte-identical,
+# untouched). ISS-1198: the shared "Do not ask questions; there is no user" framing was found to
+# be a plausible cause of the guide never being invoked -- a local repro with a milder suffix,
+# otherwise identical conditions (model, skill, MCP, a clean session_guard verdict), DID invoke
+# storybloq_autonomous_guide, while the real smoke trials with the shared suffix never did. This
+# suffix stays honest (there really is no human) but names the expected workflow explicitly and
+# tells the model how to proceed past a would-be question, instead of only telling it to stop
+# asking -- adapter-side per the accepted ruling, since A0's needs (just solve it, no workflow)
+# and A1-A4's (invoke the guide) have diverged.
+AUTO_INSTRUCTION_SUFFIX = (BENCH_ROOT / "agents" / "instruction-auto.txt").read_text(encoding="utf-8").strip()
+
+
+def render_auto_instruction(instruction: str) -> str:
+    """Task text byte for byte, then a blank line and the A1-A4 suffix. Nothing stripped."""
+    return f"{instruction}\n\n{AUTO_INSTRUCTION_SUFFIX}\n"
 
 ARM_OVERRIDES = {
     "A1": {"reviewBackends": ["agent"], "maxTicketsPerSession": 1},
@@ -286,7 +302,7 @@ class StorybloqAuto(ClaudeCode):
                 # The parent's run() merges self._resolved_env_vars into the claude process env, so
                 # hooks and MCP servers see the same PATH/CODEX_HOME/RB_CONFIG_PATH as the assertions did.
                 self._resolved_env_vars.update(env)
-                rendered = render_instruction(f"/story auto {self.ticket_id}\n\nThe ticket {self.ticket_id} holds the task.\n" + instruction)
+                rendered = render_auto_instruction(f"/story auto {self.ticket_id}\n\nThe ticket {self.ticket_id} holds the task.\n" + instruction)
                 await record_started(sh, logs, env)  # last pre-start step: a failure here is still pre-start
             except asyncio.CancelledError:
                 await record_pre_start_cancellation(sh, logs)  # a pre-start hang cut by the task timeout is pre-start too
