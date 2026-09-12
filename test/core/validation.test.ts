@@ -606,4 +606,21 @@ describe("stale_earmark (T-475, AM-a/AM-b)", () => {
     const result = validateProject(state, NOW);
     expect(result.findings.some((f) => f.code === "stale_earmark")).toBe(false);
   });
+
+  it("T-498: fires handover_no_carried_forward only when the aux flag says so", () => {
+    const state = makeState({ tickets: [], roadmap: makeRoadmap([]) });
+
+    const fired = validateProject(state, NOW, { handoverNewestMarkedWithoutCarriedForward: true });
+    expect(fired.findings.some((f) => f.code === "handover_no_carried_forward")).toBe(true);
+    expect(fired.findings.find((f) => f.code === "handover_no_carried_forward")?.level).toBe("info");
+
+    const silentFalse = validateProject(state, NOW, { handoverNewestMarkedWithoutCarriedForward: false });
+    expect(silentFalse.findings.some((f) => f.code === "handover_no_carried_forward")).toBe(false);
+
+    const silentAbsent = validateProject(state, NOW, {});
+    expect(silentAbsent.findings.some((f) => f.code === "handover_no_carried_forward")).toBe(false);
+
+    const silentDefault = validateProject(state, NOW);
+    expect(silentDefault.findings.some((f) => f.code === "handover_no_carried_forward")).toBe(false);
+  });
 });

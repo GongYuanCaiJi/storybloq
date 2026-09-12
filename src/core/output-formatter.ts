@@ -2347,6 +2347,13 @@ export function formatHandoverContent(
   return content;
 }
 
+export function formatHandoverTemplate(content: string, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(successEnvelope({ content }), null, 2);
+  }
+  return content;
+}
+
 function formatRecordLine(record: SectionRecord): string {
   const idPart = record.id ? `**${record.id}**` : `*(${record.kind})*`;
   const rationalePart = record.rationale === "unknown" ? "" : ` -- ${record.rationale}`;

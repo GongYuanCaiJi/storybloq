@@ -78,6 +78,12 @@ const TOP_LEVEL_FENCE_MAX_INDENT = 3;
 const NESTED_FENCE_MAX_INDENT = 11;
 
 const ID_TOKEN_REGEX = /\b(?:T|ISS|N|L)-\d+\b/;
+const ID_TOKEN_FULL_MATCH_REGEX = new RegExp(`^${ID_TOKEN_REGEX.source}$`);
+
+/** Whether `s` is, in its entirety, a well-formed ticket/issue/note/lesson id token (T-123, ISS-45, ...). */
+export function isIdToken(s: string): boolean {
+  return ID_TOKEN_FULL_MATCH_REGEX.test(s);
+}
 
 const DECISION_CUE_TOKENS = [
   "decided",

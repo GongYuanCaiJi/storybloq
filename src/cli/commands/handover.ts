@@ -1,5 +1,15 @@
 import { readHandover } from "../../core/handover-parser.js";
 import { buildHandoverBrief, isFilenameAdmitted } from "../../core/handover-brief.js";
+import {
+  HANDOVER_TEMPLATE_MARKER,
+  computeCarriedForward,
+  parseCarriedForwardSection,
+  parseOverrideBody,
+  renderHandoverTemplate,
+  type CarriedForwardEntry,
+  type OverrideLine,
+} from "../../core/handover-template.js";
+import type { TrajectoryEntry } from "../../core/markdown-sections.js";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -7,6 +17,7 @@ import {
   formatHandoverList,
   formatHandoverContent,
   formatHandoverBrief,
+  formatHandoverTemplate,
   formatHandoverCreateResult,
   formatError,
   ExitCode,
@@ -149,6 +160,92 @@ export async function handleHandoverGet(
       errorCode: "io_error",
     };
   }
+}
+
+export interface HandoverTemplateOptions {
+  /** Body of an `Override:` line, without the `Override: ` prefix (e.g. "recommended=T-1 worked=T-2 because=owner said so"). */
+  readonly override?: string;
+}
+
+/**
+ * T-498 Commit 1: scaffolds a new handover document -- category headings, a
+ * `Carried forward` section derived from the standing `count:10 brief:true`
+ * trajectory (with the earlier-of-two-dates preservation rule against
+ * whatever the CURRENT newest handover already recorded), an optional
+ * validated `Override:` line, and the `<!-- storybloq-handover v1 -->`
+ * marker. Read-only: never writes a file (pipe the output into `handover
+ * create --stdin` to actually save it).
+ */
+export async function handleHandoverTemplate(
+  ctx: CommandContext,
+  opts: HandoverTemplateOptions = {},
+): Promise<CommandResult> {
+  let override: OverrideLine | null = null;
+  if (opts.override !== undefined) {
+    override = parseOverrideBody(opts.override);
+    if (override === null) {
+      throw new CliValidationError(
+        "invalid_input",
+        "Invalid --override grammar. Expected: recommended=<id> worked=<id> because=<text>",
+      );
+    }
+  }
+
+  const filenames = ctx.state.handoverFilenames;
+  let previousCarried: CarriedForwardEntry[] = [];
+  let trajectory: readonly TrajectoryEntry[] = [];
+  const currentLabels = new Map<string, string>();
+
+  if (filenames.length > 0) {
+    const newest = filenames[0] as string;
+    // Same admission + symlink/traversal rejection every other handover read
+    // path runs before touching the file -- an oversized name is skipped
+    // (matching the brief/priming tolerance), but a rejected name (path
+    // traversal, symlink) throws and is NOT silently treated as "no prior
+    // carried state."
+    if (isFilenameAdmitted(newest)) {
+      await parseHandoverFilename(newest, ctx.handoversDir);
+      try {
+        const raw = await readHandover(ctx.handoversDir, newest);
+        if (raw.includes(HANDOVER_TEMPLATE_MARKER)) {
+          previousCarried = parseCarriedForwardSection(raw);
+        }
+      } catch (err: unknown) {
+        // ENOENT (listed but deleted since the state scan) is the one
+        // tolerated case -- proceed with no prior carried state, same as a
+        // brand-new project. Anything else (permission error, etc.) is a
+        // real I/O failure and must not be reported as a successful,
+        // silently-empty scaffold.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+    }
+
+    const windowFilenames = filenames.slice(0, 10);
+    for (const filename of windowFilenames) {
+      if (isFilenameAdmitted(filename)) {
+        await parseHandoverFilename(filename, ctx.handoversDir);
+      }
+    }
+    // No blanket catch here: buildHandoverBrief already tolerates a missing
+    // (ENOENT) window entry internally (see handleHandoverLatest's brief
+    // path) -- any error it does throw is a real failure and must propagate
+    // as io_error, not collapse into a falsely-successful empty scaffold.
+    const result = await buildHandoverBrief(ctx.handoversDir, windowFilenames, {
+      brief: true,
+      priming: false,
+    });
+    trajectory = result.trajectory;
+    const first = result.handovers[0];
+    if (first && first.form === "structured") {
+      for (const record of first.records) {
+        if (record.id) currentLabels.set(record.id, record.label);
+      }
+    }
+  }
+
+  const carriedForward = computeCarriedForward(trajectory, previousCarried, currentLabels);
+  const content = renderHandoverTemplate({ carriedForward, override });
+  return { output: formatHandoverTemplate(content, ctx.format) };
 }
 
 // --- Create ---

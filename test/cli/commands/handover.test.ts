@@ -4,6 +4,7 @@ import {
   handleHandoverLatest,
   handleHandoverGet,
   handleHandoverCreate,
+  handleHandoverTemplate,
   normalizeSlug,
 } from "../../../src/cli/commands/handover.js";
 import { ExitCode } from "../../../src/core/output-formatter.js";
@@ -486,5 +487,124 @@ describe("ISS-1185: handleHandoverCreate's stamped-root diagnostic", () => {
       processEra.reset();
       wt.cleanup();
     }
+  });
+});
+
+describe("handleHandoverTemplate", () => {
+  it("renders a scaffold with no prior handovers", async () => {
+    const ctx = makeCtx();
+    const result = await handleHandoverTemplate(ctx);
+    expect(result.output).toContain("<!-- storybloq-handover v1 -->");
+    expect(result.output).toContain("## Carried forward");
+    expect(result.output).toContain("- (nothing carried forward)");
+  });
+
+  it("carries an open continuation id forward with its first-seen date", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+    const handoversDir = join(tmpDir, "handovers");
+    await mkdir(handoversDir, { recursive: true });
+    await writeFile(
+      join(handoversDir, "2026-06-01-session.md"),
+      "# Handover: session\n\n## Next\n- T-910: still going\n",
+    );
+
+    const ctx = makeCtx({
+      state: makeState({ handoverFilenames: ["2026-06-01-session.md"] }),
+      handoversDir,
+    });
+    const result = await handleHandoverTemplate(ctx);
+    expect(result.output).toContain("T-910: still going (carried since 2026-06-01)");
+  });
+
+  it("preserves an earlier carried-since date recorded by the previous template run", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+    const handoversDir = join(tmpDir, "handovers");
+    await mkdir(handoversDir, { recursive: true });
+    // The newest handover already carries the marker and an earlier date for
+    // T-910 than the trajectory's own firstSeenInWindow would derive here.
+    await writeFile(
+      join(handoversDir, "2026-06-10-session.md"),
+      [
+        "<!-- storybloq-handover v1 -->",
+        "",
+        "# Session Handover",
+        "",
+        "## Next",
+        "- T-910: still going",
+        "",
+        "## Carried forward",
+        "",
+        "- T-910: still going (carried since 2026-01-01)",
+        "",
+      ].join("\n"),
+    );
+
+    const ctx = makeCtx({
+      state: makeState({ handoverFilenames: ["2026-06-10-session.md"] }),
+      handoversDir,
+    });
+    const result = await handleHandoverTemplate(ctx);
+    expect(result.output).toContain("T-910: still going (carried since 2026-01-01)");
+  });
+
+  it("renders a validated override line", async () => {
+    const ctx = makeCtx();
+    const result = await handleHandoverTemplate(ctx, {
+      override: "recommended=T-1 worked=T-2 because=owner said so",
+    });
+    expect(result.output).toContain("Override: recommended=T-1 worked=T-2 because=owner said so");
+  });
+
+  it("rejects a malformed override grammar", async () => {
+    const ctx = makeCtx();
+    await expect(
+      handleHandoverTemplate(ctx, { override: "recommended=T-1 worked=T-2" }),
+    ).rejects.toThrow(CliValidationError);
+  });
+
+  it("returns valid JSON when format is json", async () => {
+    const ctx = makeCtx({ format: "json" });
+    const result = await handleHandoverTemplate(ctx);
+    const parsed = JSON.parse(result.output);
+    expect(parsed.version).toBe(1);
+    expect(parsed.data.content).toContain("<!-- storybloq-handover v1 -->");
+  });
+
+  it("Codex finding: rejects a symlinked newest handover instead of reading through it", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+    const handoversDir = join(tmpDir, "handovers");
+    await mkdir(handoversDir, { recursive: true });
+    const secretPath = join(tmpDir, "secret.md");
+    await writeFile(secretPath, "outside the handovers directory");
+    await symlink(secretPath, join(handoversDir, "2026-06-01-session.md"));
+
+    const ctx = makeCtx({
+      state: makeState({ handoverFilenames: ["2026-06-01-session.md"] }),
+      handoversDir,
+    });
+    await expect(handleHandoverTemplate(ctx)).rejects.toThrow(CliValidationError);
+  });
+
+  it("Codex finding: a real read failure inside buildHandoverBrief's own window propagates instead of rendering a falsely-empty scaffold", async () => {
+    const tmpDir = await mkdtemp(join(tmpdir(), "handover-test-"));
+    const handoversDir = join(tmpDir, "handovers");
+    await mkdir(handoversDir, { recursive: true });
+    // A valid newest handover (so the newest-handover readHandover call
+    // above succeeds and is not what this test exercises) ...
+    await writeFile(
+      join(handoversDir, "2026-06-02-session.md"),
+      "# Handover: session\n\n## Next\n- T-911: still going\n",
+    );
+    // ... plus a directory second in the window where a handover file is
+    // expected: not ENOENT (tolerated), so buildHandoverBrief must
+    // propagate it as a real failure, not collapse into a successful
+    // "(nothing carried forward)" render.
+    await mkdir(join(handoversDir, "2026-06-01-session.md"));
+
+    const ctx = makeCtx({
+      state: makeState({ handoverFilenames: ["2026-06-02-session.md", "2026-06-01-session.md"] }),
+      handoversDir,
+    });
+    await expect(handleHandoverTemplate(ctx)).rejects.toThrow();
   });
 });

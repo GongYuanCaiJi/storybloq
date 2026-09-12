@@ -60,6 +60,7 @@ import {
   handleHandoverLatest,
   handleHandoverGet,
   handleHandoverCreate,
+  handleHandoverTemplate,
 } from "./commands/handover.js";
 import { handleBlockerList, handleBlockerAdd, handleBlockerClear } from "./commands/blocker.js";
 import {
@@ -857,7 +858,26 @@ export function registerHandoverCommand(yargs: Argv): Argv {
             }
           },
         )
-        .demandCommand(1, "Specify a handover subcommand: list, latest, get, create")
+        .command(
+          "template",
+          "Scaffold a new handover document (category headings, Carried forward, marker)",
+          (y2) =>
+            addFormatOption(
+              y2.option("override", {
+                type: "string",
+                describe:
+                  "Override line body: recommended=<id> worked=<id> because=<text>",
+              }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const override = argv.override as string | undefined;
+            await runReadCommand(format, (ctx) =>
+              handleHandoverTemplate(ctx, { override }),
+            );
+          },
+        )
+        .demandCommand(1, "Specify a handover subcommand: list, latest, get, create, template")
         .strict(),
     () => {},
   );

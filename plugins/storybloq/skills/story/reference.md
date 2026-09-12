@@ -195,6 +195,13 @@ Create a new handover document
 storybloq handover create [--content <md>] [--stdin] [--slug <slug>] [--format json|md]
 ```
 
+### handover template
+Scaffold a new handover document (category headings, Carried forward, marker)
+
+```
+storybloq handover template [--override <body>] [--format json|md]
+```
+
 ### blocker list
 List all roadmap blockers
 

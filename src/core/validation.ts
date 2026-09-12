@@ -56,6 +56,15 @@ export interface ValidationAux {
    * fail-open the reachability check exists to close.
    */
   readonly citingEntityLoadComplete?: boolean;
+  /**
+   * T-498: whether the NEWEST handover file carries the
+   * `<!-- storybloq-handover v1 -->` marker but has no `Carried forward`
+   * heading. Pre-computed by the CLI/MCP boundary (the one file read this
+   * check needs) -- `validateProject` itself does no I/O, same shape as the
+   * ruling side-store fields above. A legacy handover with no marker at all
+   * never sets this, regardless of its heading content.
+   */
+  readonly handoverNewestMarkedWithoutCarriedForward?: boolean;
 }
 
 // --- Main Validation ---
@@ -501,6 +510,20 @@ export function validateProject(
       state,
       findings,
     );
+  }
+
+  // T-498: a marked handover (opted into the v1 scaffold contract) is
+  // expected to carry a Carried forward heading, even an empty one. An
+  // unmarked/legacy handover makes no such promise and never fires this --
+  // the aux flag is only ever true when the marker was actually found.
+  if (aux.handoverNewestMarkedWithoutCarriedForward === true) {
+    findings.push({
+      level: "info",
+      code: "handover_no_carried_forward",
+      message:
+        "The newest handover carries the storybloq-handover v1 marker but has no Carried forward section.",
+      entity: null,
+    });
   }
 
   const errorCount = findings.filter((f) => f.level === "error").length;

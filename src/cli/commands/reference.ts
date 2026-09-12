@@ -162,6 +162,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--content", "--stdin", "--slug"],
   },
   {
+    name: "handover template",
+    description: "Scaffold a new handover document (category headings, Carried forward, marker)",
+    usage: "storybloq handover template [--override <body>] [--format json|md]",
+    flags: ["--override"],
+  },
+  {
     name: "blocker list",
     description: "List all roadmap blockers",
     usage: "storybloq blocker list [--format json|md]",
