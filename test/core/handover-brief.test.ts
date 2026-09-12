@@ -192,6 +192,117 @@ describe("buildHandoverBrief: cross-handover budget (newest never demoted)", () 
     expect(structuredBytes).toBeLessThanOrEqual(14_200);
   });
 
+  it("T-498 commit 2: continuationCandidates on handovers[0] does not change handovers 1-9's demotion boundary or consume the 14,200-byte structured budget", async () => {
+    // Reuses the EXACT fixture from the test above ("keeps the newest
+    // handover in structured form..."), byte for byte. Measured empirically
+    // (a scratch tsx script against this same fixture, pre-T-498) BEFORE any
+    // T-498 commit 2 code touched budget accounting: demotedCount = 2 (the
+    // two OLDEST handovers, indices 8 and 9, demote to index-only; indices
+    // 0-7 stay structured) and structuredBytes = 13,092 (under the
+    // 14,200-byte cap). This test pins both numbers and proves they are
+    // UNCHANGED now that `continuationCandidates` is threaded onto
+    // handovers[0] -- the plan's named mutant (c) is exactly a regression
+    // that would move continuationCandidates' bytes INTO this sum instead
+    // of its own separate 800-byte reserve, which would change one or both
+    // of these pinned numbers.
+    const files: Record<string, string> = {};
+    const filenames: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const name = `h${String(i).padStart(2, "0")}.md`;
+      filenames.push(name);
+      const bullets = Array.from({ length: 10 }, (_, j) =>
+        `- T-${100 * (i + 1) + j}: keep going. because this is a long rationale sentence padding out the record. `,
+      ).join("\n");
+      files[name] = `# Handover: ${name}\n\n## Next\n${bullets}\n`;
+    }
+    const dir = await makeHandoversDir(files);
+
+    const result = await buildHandoverBrief(dir, filenames, { brief: true, priming: false });
+    expect(result.handovers).toHaveLength(10);
+
+    const forms = result.handovers.map((h) => h.form);
+    const demotedCount = forms.filter((f) => f === "index-only").length;
+    expect(demotedCount).toBe(2);
+    expect(forms.slice(0, 8).every((f) => f === "structured")).toBe(true);
+    expect(forms.slice(8)).toEqual(["index-only", "index-only"]);
+
+    const structuredBytes = result.handovers.reduce((sum, h) => {
+      if (h.form === "raw") return sum;
+      const body = h.form === "structured" ? { records: h.records, index: h.index } : { index: h.index };
+      return sum + Buffer.byteLength(JSON.stringify({ filename: h.filename, form: h.form, ...body }), "utf-8");
+    }, 0);
+    expect(structuredBytes).toBe(13_092);
+    expect(structuredBytes).toBeLessThanOrEqual(14_200);
+
+    // continuationCandidates itself: present only on handovers[0], and its
+    // own JSON-serialized bytes fit its separate 800-byte reserve.
+    const first = result.handovers[0]!;
+    expect(first.form).toBe("structured");
+    if (first.form !== "structured") throw new Error("unreachable");
+    expect(first.continuationCandidates).toBeDefined();
+    const candidatesBytes = Buffer.byteLength(JSON.stringify(first.continuationCandidates), "utf-8");
+    expect(candidatesBytes).toBeLessThanOrEqual(800);
+
+    // None of handovers[1..9] carry continuationCandidates -- decision 1
+    // scopes it to the newest handover only.
+    for (const h of result.handovers.slice(1)) {
+      if (h.form === "structured") {
+        expect(h.continuationCandidates).toBeUndefined();
+      }
+    }
+  });
+
+  it("T-498 commit 2 (Codex round 1 finding: the wider fixture above has too much slack to actually exercise mutant (c)): a tighter fixture where the demotion boundary sits close enough to 14,200 that charging continuationCandidates' bytes into the shared budget would force an additional demotion", async () => {
+    // Same construction as the wider fixture, sized (9 bullets/handover, a
+    // doubled rationale sentence) so the retained structured total leaves
+    // only 617 bytes of margin under 14,200 -- less than handovers[0]'s own
+    // measured continuationCandidates size (666 bytes on this exact
+    // fixture). Both numbers were measured empirically (a scratch tsx
+    // script against this exact fixture) BEFORE this test was written:
+    // demotedCount = 1 (only the oldest handover, index 9, demotes) and
+    // structuredBytes = 13,583. A regression that charged
+    // continuationCandidates against the shared 14,200-byte budget instead
+    // of its own separate reserve would push handovers[0]'s effective cost
+    // from ~1,600 to ~2,266 bytes, consuming the 617-byte margin and forcing
+    // at least one more handover to demote -- which would change
+    // `demotedCount` and fail this test.
+    const files: Record<string, string> = {};
+    const filenames: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const name = `h${String(i).padStart(2, "0")}.md`;
+      filenames.push(name);
+      const bullets = Array.from({ length: 9 }, (_, j) =>
+        `- T-${100 * (i + 1) + j}: keep going. ` +
+        "because this is a long rationale sentence padding out the record. ".repeat(2),
+      ).join("\n");
+      files[name] = `# Handover: ${name}\n\n## Next\n${bullets}\n`;
+    }
+    const dir = await makeHandoversDir(files);
+
+    const result = await buildHandoverBrief(dir, filenames, { brief: true, priming: false });
+    const forms = result.handovers.map((h) => h.form);
+    const demotedCount = forms.filter((f) => f === "index-only").length;
+    expect(demotedCount).toBe(1);
+    expect(forms.slice(0, 9).every((f) => f === "structured")).toBe(true);
+    expect(forms[9]).toBe("index-only");
+
+    const structuredBytes = result.handovers.reduce((sum, h) => {
+      if (h.form === "raw") return sum;
+      const body = h.form === "structured" ? { records: h.records, index: h.index } : { index: h.index };
+      return sum + Buffer.byteLength(JSON.stringify({ filename: h.filename, form: h.form, ...body }), "utf-8");
+    }, 0);
+    expect(structuredBytes).toBe(13_583);
+    expect(14_200 - structuredBytes).toBeLessThan(800);
+
+    const first = result.handovers[0]!;
+    if (first.form !== "structured") throw new Error("unreachable");
+    const candidatesBytes = Buffer.byteLength(JSON.stringify(first.continuationCandidates), "utf-8");
+    // The margin left in the shared budget is smaller than what
+    // continuationCandidates itself costs -- exactly the condition under
+    // which mutant (c) would visibly change demotedCount/structuredBytes.
+    expect(candidatesBytes).toBeGreaterThan(14_200 - structuredBytes);
+  });
+
   it("lets an older, smaller entry stay structured after an earlier larger one demotes (no false starvation from a strict suffix rule)", async () => {
     // Entry 0 (newest) is huge -- forced full regardless of budget. Entries
     // 1..8 are each independently large enough that entry 0 alone should not

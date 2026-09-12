@@ -26,10 +26,12 @@ import { readHandover } from "./handover-parser.js";
 import {
   parseHandoverMarkdown,
   selectBoundedRecords,
+  selectContinuationCandidates,
   buildTrajectory,
   buildIndex,
   type SectionRecord,
   type ContinuationIndex,
+  type ContinuationCandidatesResult,
   type TrajectoryEntry,
   type TrajectoryHandoverInput,
 } from "./markdown-sections.js";
@@ -76,6 +78,12 @@ export interface StructuredEntry {
   form: "structured";
   records: SectionRecord[];
   index: ContinuationIndex | null;
+  /**
+   * T-498 design decision 1: line-one candidates for the NEWEST handover
+   * only (`handovers[0]`), own separately-reserved 800-byte budget -- added
+   * after the cross-handover budget decision below, never drawn from it.
+   */
+  continuationCandidates?: ContinuationCandidatesResult;
 }
 
 export interface IndexOnlyEntry {
@@ -111,6 +119,8 @@ interface PreparedStructured {
   full: { records: SectionRecord[]; index: ContinuationIndex | null };
   indexOnly: ContinuationIndex;
   occurrences: TrajectoryHandoverInput;
+  /** Full, unbounded parse output -- the input `selectContinuationCandidates` needs, since its 800-byte budget is independent of the 1,600-byte display cap already applied to `full.records`. */
+  allRecords: SectionRecord[];
 }
 
 type Prepared = { filename: string; kind: "raw"; body: string } | { filename: string; kind: "structured"; data: PreparedStructured };
@@ -223,7 +233,13 @@ export async function buildHandoverBrief(
     prepared.push({
       filename,
       kind: "structured",
-      data: { filename, full, indexOnly, occurrences: { filename, orderedIdOccurrences: parsed.orderedIdOccurrences } },
+      data: {
+        filename,
+        full,
+        indexOnly,
+        occurrences: { filename, orderedIdOccurrences: parsed.orderedIdOccurrences },
+        allRecords: parsed.records,
+      },
     });
   }
 
@@ -233,10 +249,19 @@ export async function buildHandoverBrief(
   const budgeted = allocateCrossHandoverBudget(structuredPrepared);
   let budgetedIdx = 0;
 
-  const handovers: HandoverBriefEntry[] = prepared.map((p) => {
+  const firstPrepared = prepared[0];
+  const firstCandidates: ContinuationCandidatesResult | undefined =
+    firstPrepared && firstPrepared.kind === "structured"
+      ? selectContinuationCandidates(firstPrepared.data.allRecords, firstPrepared.filename)
+      : undefined;
+
+  const handovers: HandoverBriefEntry[] = prepared.map((p, i) => {
     if (p.kind === "raw") return { filename: p.filename, form: "raw", body: p.body };
     const entry = budgeted[budgetedIdx] as HandoverBriefEntry;
     budgetedIdx++;
+    if (i === 0 && entry.form === "structured" && firstCandidates) {
+      return { ...entry, continuationCandidates: firstCandidates };
+    }
     return entry;
   });
 

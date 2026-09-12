@@ -365,6 +365,15 @@ describe("tool description contract (T-460)", () => {
     // (`format` described as "default: md", `withActionability` undescribed);
     // measured at 63,633 on main with T-502 and T-320 present, so the budget
     // is raised from 63,500 to 64,000 as a deliberate act.
+    // T-498 commit 2 adds one optional `format` field ("default: md") to
+    // storybloq_handover_latest, so a caller can request the JSON envelope
+    // (continuationCandidates/trajectory included) instead of the Markdown
+    // rendering that field has no representation for, and the same field to
+    // storybloq_handover_get so a caller (recovery code, not a human) can
+    // machine-detect a not_found/io_error result via {version, error} vs
+    // {version, data} instead of string-sniffing Markdown error text;
+    // measured at 63,795, still under the existing 64,000 ceiling, no raise
+    // needed.
     // This ceiling leaves ~370 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues

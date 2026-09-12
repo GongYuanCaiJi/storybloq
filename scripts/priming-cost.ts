@@ -25,6 +25,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../src/mcp/tools.js";
+import { parseHandoverMarkdown, type SectionRecord } from "../src/core/markdown-sections.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -944,6 +945,197 @@ async function stepHandoverLatest(ctx: ReplayContext): Promise<{ report: StepRep
     },
     bodies,
   };
+}
+
+// --- T-498 commit 2: the FUTURE two-call Step 2 shape (code + tests only;
+// SKILL.md is not flipped to this until commit 3) ---------------------------
+
+export interface HandoverBriefEntryLike {
+  readonly filename: string;
+  readonly form: "raw" | "structured" | "index-only";
+  readonly body?: string;
+  readonly records?: SectionRecord[];
+}
+
+export interface HandoverPrimingAndBriefResult {
+  readonly report: StepReport;
+  /** The newest handover's raw body, when `priming:true` returned it (small-handover case); null when it fell back to structured form instead. */
+  readonly primingBody: string | null;
+  readonly briefHandovers: readonly HandoverBriefEntryLike[];
+  readonly trajectory: unknown;
+}
+
+/**
+ * T-498 design decision 1/2: models the future Step 2 -- `count:1
+ * priming:true` (the latest handover, raw when small enough) PLUS `count:10
+ * brief:true` (the ten-handover structured window with trajectory) -- as its
+ * own harness function, ground-truthed against a fixture exactly like
+ * ISS-1154 Commit B's `stepContinuationCheck`. Replaces
+ * `stepHandoverLatest`'s single `count: 3` call for cost-measurement
+ * purposes only; the live skill text still drives the old shape until
+ * commit 3.
+ */
+export async function stepHandoverPrimingAndBrief(
+  ctx: ReplayContext,
+): Promise<HandoverPrimingAndBriefResult> {
+  // Codex round 1 finding: storybloq_handover_latest's MCP schema had no
+  // format option, so brief/priming ALWAYS rendered Markdown (via
+  // runMcpReadTool's "md" default) -- JSON.parse below would have thrown
+  // against a real server. Fixed by adding format:"json" to the tool's
+  // schema (src/mcp/tools.ts); requesting it explicitly here makes this
+  // harness's byte/call counts and parsing genuinely match what commit 3's
+  // skill text will get if it requests the same format.
+  const priming = await callTool(ctx, "storybloq_handover_latest", { count: 1, priming: true, format: "json" });
+  const brief = await callTool(ctx, "storybloq_handover_latest", { count: 10, brief: true, format: "json" });
+
+  const primingData = (JSON.parse(priming.text) as { data: { handovers: HandoverBriefEntryLike[] } }).data;
+  const briefData = (
+    JSON.parse(brief.text) as { data: { handovers: HandoverBriefEntryLike[]; trajectory: unknown } }
+  ).data;
+
+  const newest = primingData.handovers[0];
+  const primingBody = newest && newest.form === "raw" ? (newest.body ?? null) : null;
+
+  const bytes = priming.measurement.totalBytes + brief.measurement.totalBytes;
+  const calls = priming.measurement.calls + brief.measurement.calls;
+
+  return {
+    report: {
+      bytes,
+      calls,
+      includedInTotal: true,
+      primingBytes: priming.measurement.totalBytes,
+      briefBytes: brief.measurement.totalBytes,
+      primingHadRawBody: primingBody !== null,
+    },
+    primingBody,
+    briefHandovers: briefData.handovers,
+    trajectory: briefData.trajectory,
+  };
+}
+
+export type RecoveryTier = "raw-body" | "handover-get" | "disclosed";
+
+export interface EvidenceRecoveryResult {
+  readonly report: StepReport;
+  /** Full ordered records for the handover, EVERY disposition -- null only on tier 3 (disclosed), where no evidence could be recovered at all. */
+  readonly records: SectionRecord[] | null;
+  readonly tier: RecoveryTier;
+}
+
+/**
+ * T-498 design decision 1 (shared by decision 2's reconciliation): the
+ * 3-tier recovery for a handover whose continuation candidates were
+ * omitted, OR whose retained rationale reads the literal "unknown"
+ * sentinel. Cheapest tier first:
+ *   1. `rawBodyIfLoaded` -- the SAME raw body a `priming:true` call already
+ *      put in context (zero extra calls). Re-parses it directly.
+ *   2. One `storybloq_handover_get` read, only when tier 1 does not apply.
+ *   3. Disclosed failure -- `records: null` -- only when tier 2 itself
+ *      throws (the get fails or the handover is genuinely gone).
+ * Returns the FULL, unfiltered-by-disposition record list either way: the
+ * line-one consumer filters to `disposition === "continuation"` itself;
+ * the reconciliation consumer (decision 2) uses every disposition as-is.
+ */
+export async function recoverHandoverEvidence(
+  ctx: ReplayContext,
+  filename: string,
+  rawBodyIfLoaded: string | null,
+): Promise<EvidenceRecoveryResult> {
+  if (rawBodyIfLoaded !== null) {
+    const records = parseHandoverMarkdown(rawBodyIfLoaded, filename).records;
+    return {
+      report: { bytes: 0, calls: 0, includedInTotal: true, tier: "raw-body" },
+      records,
+      tier: "raw-body",
+    };
+  }
+
+  // Codex round 2/3 findings: neither a rejected call nor isError:true
+  // covers every failure -- a not_found result is a USER error (not an
+  // INFRASTRUCTURE_ERROR_CODES entry), so it resolves normally with isError
+  // left unset, and its Markdown text ("Error [not_found]: ...") would
+  // otherwise be mis-parsed as recovered content. Requesting format:"json"
+  // gets the same {version, error:{code,message}} vs {version, data}
+  // discriminant every other JSON-mode read tool already uses, covering
+  // infrastructure AND user errors alike without string-sniffing an error
+  // prefix in Markdown text.
+  let measurement: { totalBytes: number; calls: number };
+  let text: string;
+  try {
+    ({ measurement, text } = await callTool(ctx, "storybloq_handover_get", { filename, format: "json" }));
+  } catch (err) {
+    const partialBytes = err instanceof CallToolFailure ? err.partialBytes : 0;
+    const partialCalls = err instanceof CallToolFailure ? err.partialCalls : 0;
+    return {
+      report: {
+        bytes: partialBytes,
+        calls: partialCalls,
+        includedInTotal: true,
+        tier: "disclosed",
+        reason: (err as Error).message,
+      },
+      records: null,
+      tier: "disclosed",
+    };
+  }
+
+  // Codex round 4 finding: a malformed response (bad JSON, or JSON missing
+  // the expected shape) must not lose the exchange's already-measured cost
+  // -- `measurement` is captured above, outside this try, specifically so
+  // this catch can still report it instead of falling back to 0/0.
+  try {
+    const parsed = JSON.parse(text) as { data?: { content: string } } | { error?: { code: string; message: string } };
+    if (!("data" in parsed) || parsed.data === undefined) {
+      const reason = "error" in parsed && parsed.error ? `[${parsed.error.code}] ${parsed.error.message}` : text;
+      return {
+        report: {
+          bytes: measurement.totalBytes,
+          calls: measurement.calls,
+          includedInTotal: true,
+          tier: "disclosed",
+          reason,
+        },
+        records: null,
+        tier: "disclosed",
+      };
+    }
+    const records = parseHandoverMarkdown(parsed.data.content, filename).records;
+    return {
+      report: { bytes: measurement.totalBytes, calls: measurement.calls, includedInTotal: true, tier: "handover-get" },
+      records,
+      tier: "handover-get",
+    };
+  } catch (err) {
+    return {
+      report: {
+        bytes: measurement.totalBytes,
+        calls: measurement.calls,
+        includedInTotal: true,
+        tier: "disclosed",
+        reason: (err as Error).message,
+      },
+      records: null,
+      tier: "disclosed",
+    };
+  }
+}
+
+/**
+ * Design decision 1's two independent recovery triggers: an observable
+ * omission (a whole-handover index-only demotion, or a per-handover cap
+ * loss reported as a nonzero count), OR a retained record whose rationale
+ * reads the literal "unknown" sentinel -- `tryAdmit`'s own shrink path can
+ * produce that with NO omission signal at all (round 4 finding 3).
+ */
+export function needsEvidenceRecovery(params: {
+  readonly indexOnly: boolean;
+  readonly omittedCount: number;
+  readonly records: readonly { readonly rationale: string }[];
+}): boolean {
+  if (params.indexOnly) return true;
+  if (params.omittedCount > 0) return true;
+  return params.records.some((r) => r.rationale === "unknown");
 }
 
 async function stepRulesMd(root: string, normalize: Normalizer): Promise<StepReport> {

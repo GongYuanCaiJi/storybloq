@@ -802,6 +802,192 @@ function tryAdmit(selected: SectionRecord[], candidate: SectionRecord): SectionR
   return shrinkLabelToFit(selected, rationaleDropped);
 }
 
+// ---------------------------------------------------------------------------
+// T-498 Commit 2: document-order continuation candidates
+// ---------------------------------------------------------------------------
+
+/**
+ * T-498 design decision 1: the CROSS-handover budget's own 800-byte reserve
+ * for `handovers[0]`'s continuation candidates -- a NEW, SEPARATE cap from
+ * `CAP_BYTES` (1,600), never drawn from the 14,200-byte cross-handover
+ * structured budget. `CONTINUATION_CAP_RECORDS` reuses `CAP_RECORDS`: the
+ * plan names a new BYTE reserve, not a new record-count ceiling.
+ */
+const CONTINUATION_CAP_BYTES = 800;
+const CONTINUATION_CAP_RECORDS = CAP_RECORDS;
+
+export interface ContinuationCandidate {
+  readonly id: string | null;
+  readonly kind: SectionKind;
+  readonly label: string;
+  readonly rationale: string;
+}
+
+export interface ContinuationCandidatesResult {
+  readonly candidates: ContinuationCandidate[];
+  readonly omittedContinuationCount: number;
+  readonly omittedContinuationIds: string[];
+}
+
+function toContinuationCandidate(r: SectionRecord): ContinuationCandidate {
+  return { id: r.id, kind: r.kind, label: r.label, rationale: r.rationale };
+}
+
+/**
+ * The full envelope this budget promises: the admitted candidates PLUS the
+ * omission-disclosure fields, which cost real bytes too (round-2-style
+ * finding this module already learned from `fitsEnvelope`: a bound on the
+ * pieces alone is not a bound on what the caller actually receives).
+ */
+function continuationEnvelopeFits(
+  candidates: SectionRecord[],
+  omittedContinuationCount: number,
+  omittedContinuationIds: string[],
+): boolean {
+  return (
+    byteLength(
+      JSON.stringify({
+        candidates: candidates.map(toContinuationCandidate),
+        omittedContinuationCount,
+        omittedContinuationIds,
+      }),
+    ) <= CONTINUATION_CAP_BYTES
+  );
+}
+
+function continuationCandidatesFit(candidates: SectionRecord[]): boolean {
+  return continuationEnvelopeFits(candidates, 0, []);
+}
+
+/** Same binary-search shrink as `shrinkLabelToFit`, scoped to the continuation-candidate envelope. */
+function shrinkContinuationLabelToFit(
+  selected: SectionRecord[],
+  record: SectionRecord,
+): SectionRecord | null {
+  let lo = 0;
+  let hi = byteLength(record.label);
+  let best: string | null = null;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const label = truncateUtf8(record.label, mid);
+    if (continuationCandidatesFit([...selected, { ...record, label }])) {
+      best = label;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return best === null ? null : { ...record, label: best };
+}
+
+/** Same shrink-then-cap approach as `tryAdmit` (try as-is, drop rationale, shrink label), scoped to `CONTINUATION_CAP_BYTES`/`CONTINUATION_CAP_RECORDS`. */
+function tryAdmitContinuation(
+  selected: SectionRecord[],
+  candidate: SectionRecord,
+): SectionRecord | null {
+  if (selected.length + 1 > CONTINUATION_CAP_RECORDS) return null;
+
+  if (continuationCandidatesFit([...selected, candidate])) return candidate;
+
+  const rationaleDropped =
+    candidate.rationale === "unknown" ? candidate : { ...candidate, rationale: "unknown" };
+  if (continuationCandidatesFit([...selected, rationaleDropped])) return rationaleDropped;
+
+  return shrinkContinuationLabelToFit(selected, rationaleDropped);
+}
+
+function continuationOmittedIdsFrom(
+  omittedOriginalIndices: number[],
+  records: readonly SectionRecord[],
+): string[] {
+  const ids = omittedOriginalIndices
+    .map((i) => records[i]?.id)
+    .filter((x): x is string => x !== null && x !== undefined);
+  return ids.slice(0, INDEX_MAX_IDS);
+}
+
+/**
+ * T-498 design decision 1: the document-order, continuation-disposition-only
+ * primitive that line one's resolution logic needs -- distinct from
+ * `selectBoundedRecords`'s display-shaped, reserve-then-reorder output.
+ * Reads from the SAME pre-`selectBoundedRecords` ordered `records[]`
+ * `parseHandoverMarkdown` already builds (per "What already exists": that
+ * list is in true document order and is not itself reshuffled).
+ *
+ * No reserve pass: for THIS purpose, "first in the source" is the whole
+ * priority, so every continuation-disposition record is tried for admission
+ * in document order, one single pass, with items after a capacity-exhausted
+ * point evicted from the end (mirroring `fitIndex`) only when the FULL
+ * envelope -- omission fields included -- still does not fit.
+ */
+export function selectContinuationCandidates(
+  records: readonly SectionRecord[],
+  _file: string,
+): ContinuationCandidatesResult {
+  const continuationEntries = records
+    .map((r, i) => ({ r, i }))
+    .filter((x) => x.r.disposition === "continuation");
+
+  const selected: SectionRecord[] = [];
+  const selectedOriginalIndices: number[] = [];
+  const admitted = new Set<number>();
+
+  for (const { r, i } of continuationEntries) {
+    const result = tryAdmitContinuation(selected, r);
+    if (result === null) continue;
+    selected.push(result);
+    selectedOriginalIndices.push(i);
+    admitted.add(i);
+  }
+
+  const omittedOriginalIndices = continuationEntries
+    .map((x) => x.i)
+    .filter((i) => !admitted.has(i));
+
+  if (omittedOriginalIndices.length === 0) {
+    return {
+      candidates: selected.map(toContinuationCandidate),
+      omittedContinuationCount: 0,
+      omittedContinuationIds: [],
+    };
+  }
+
+  const working = [...selected];
+  const workingIndices = [...selectedOriginalIndices];
+  const omitted = [...omittedOriginalIndices];
+  let omittedIds = continuationOmittedIdsFrom(omitted, records);
+
+  while (
+    working.length > 0 &&
+    !continuationEnvelopeFits(working, omitted.length, omittedIds)
+  ) {
+    working.pop();
+    const evicted = workingIndices.pop() as number;
+    omitted.push(evicted);
+    omittedIds = continuationOmittedIdsFrom(omitted, records);
+  }
+
+  // The candidate-eviction loop above only pops `working`, so it cannot help
+  // once `working` is already empty. A parser-accepted id can still be
+  // arbitrarily long, so `omittedContinuationIds` alone (even capped to
+  // `INDEX_MAX_IDS` entries) can exceed the 800-byte envelope on its own --
+  // shrink the disclosed id list itself until the envelope fits, mirroring
+  // `buildIndex`'s own trim-to-fit. `omittedContinuationCount` is left
+  // untouched: it is a plain count, not user-controlled text, and stays
+  // accurate regardless of how many ids end up disclosed.
+  while (omittedIds.length > 0 && !continuationEnvelopeFits(working, omitted.length, omittedIds)) {
+    omittedIds = omittedIds.slice(0, -1);
+  }
+
+  return {
+    candidates: working.map(toContinuationCandidate),
+    omittedContinuationCount: omitted.length,
+    omittedContinuationIds: omittedIds,
+  };
+}
+
 export function selectBoundedRecords(
   candidates: SectionRecord[],
   file: string,

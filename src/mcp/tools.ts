@@ -618,9 +618,17 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       priming: z.boolean().optional().describe(
         "T-320/T-497: return each handover's full body when it is at or under 12,000 bytes, otherwise the same structured digest brief uses. Combined with brief, brief wins",
       ),
+      // T-498: brief/priming's structured fields (records, index,
+      // continuationCandidates, trajectory) have no Markdown rendering for
+      // continuationCandidates -- a caller that needs to walk it (or wants
+      // the exact HandoverBriefResult shape for cost-measurement/
+      // reconciliation) requests "json" explicitly. Omitted, this stays
+      // byte-identical to every existing caller (Markdown, as before).
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
     handleHandoverLatest(ctx, args.count ?? 1, { brief: args.brief, priming: args.priming }),
+    undefined, args.format ?? "md",
   ));
 
   server.registerTool("storybloq_blocker_list", {
@@ -797,8 +805,16 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     description: "Content of a specific handover document by filename",
     inputSchema: {
       filename: z.string().describe("e.g. 2026-03-20-session.md"),
+      // T-498: a not_found/io_error result is NOT classified as isError
+      // (not_found is a user error, not an INFRASTRUCTURE_ERROR_CODES
+      // entry) -- a caller that must machine-detect failure (recovery code,
+      // not a human reading Markdown) requests "json" to get the same
+      // {version, error:{code,message}} vs {version, data} discriminant
+      // every other JSON-mode read tool already uses, instead of string-
+      // sniffing an "Error [...]" prefix in Markdown text.
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleHandoverGet(args.filename, ctx)));
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleHandoverGet(args.filename, ctx), undefined, args.format ?? "md"));
 
   // --- T-084: Recap + Snapshot + Export ---
 

@@ -57,6 +57,9 @@ import {
   runReplaySequence,
   stepRecommend,
   stepContinuationCheck,
+  stepHandoverPrimingAndBrief,
+  recoverHandoverEvidence,
+  needsEvidenceRecovery,
   STEP_NAMES,
   type PrimingCostReport,
   type CapturedMessage,
@@ -1310,6 +1313,348 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
     // ISS-700's uncertain count (3) must survive ISS-800's later clean 0.
     expect((report as any).fallbackUnreadableHandoverCount).toBe(3);
     expect((report as any).status).toBeUndefined();
+  });
+});
+
+describe("stepHandoverPrimingAndBrief (T-498 commit 2: future two-call Step 2)", () => {
+  it("makes exactly two calls with the exact required argument shape, and reports the newest handover's raw body when priming returns it (Codex round 1 findings: request format:\"json\" explicitly -- storybloq_handover_latest has no format-less JSON path -- and assert the full argument shape, not just the tool name, so dropping count or brief:true would fail this test)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const calledCalls: { name: string; args: Record<string, unknown> }[] = [];
+
+    const primingPayload = {
+      handovers: [{ filename: "2026-06-01-session.md", form: "raw", body: "# Handover\n\n## Next\n- T-1: keep going\n" }],
+      trajectory: [],
+      skippedHandovers: 0,
+      missingHandovers: 0,
+    };
+    const briefPayload = {
+      handovers: [
+        { filename: "2026-06-01-session.md", form: "structured", records: [], index: null },
+      ],
+      trajectory: [{ id: "T-1", occurrenceCount: 1, firstSeenInWindow: "2026-06-01-session.md", latest: "2026-06-01-session.md", latestDisposition: "continuation" }],
+      skippedHandovers: 0,
+      missingHandovers: 0,
+    };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        calledCalls.push({ name, args });
+        const payload = args.priming ? primingPayload : briefPayload;
+        pushJsonExchange(log, nextId, "tools/call", { name, arguments: args }, JSON.stringify({ version: 1, data: payload }));
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await stepHandoverPrimingAndBrief(ctx);
+
+    expect(calledCalls).toEqual([
+      { name: "storybloq_handover_latest", args: { count: 1, priming: true, format: "json" } },
+      { name: "storybloq_handover_latest", args: { count: 10, brief: true, format: "json" } },
+    ]);
+    expect(result.report.calls).toBe(2);
+    expect(result.primingBody).toBe("# Handover\n\n## Next\n- T-1: keep going\n");
+    expect(result.briefHandovers).toHaveLength(1);
+    expect((result.trajectory as unknown[]).length).toBe(1);
+  });
+
+  it("reports a null primingBody when priming fell back to structured form (oversized handover)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const primingPayload = {
+      handovers: [{ filename: "2026-06-01-session.md", form: "structured", records: [], index: null }],
+      trajectory: [],
+      skippedHandovers: 0,
+      missingHandovers: 0,
+    };
+    const briefPayload = { handovers: [], trajectory: [], skippedHandovers: 0, missingHandovers: 0 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        const payload = args.priming ? primingPayload : briefPayload;
+        pushJsonExchange(log, nextId, "tools/call", { name, arguments: args }, JSON.stringify({ version: 1, data: payload }));
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await stepHandoverPrimingAndBrief(ctx);
+    expect(result.primingBody).toBeNull();
+    expect((result.report as any).primingHadRawBody).toBe(false);
+  });
+});
+
+describe("recoverHandoverEvidence (T-498 commit 2: 3-tier recovery)", () => {
+  it("tier 1: recovers from an already-loaded raw body with zero extra calls", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("tier 1 must cost zero calls -- handover_get must never fire when a raw body is already loaded");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const rawBody = "# Handover\n\n## Next\n- T-5: an omitted actionable continuation\n\n## Blocked\n\n- T-6: blocked thing\n";
+    const result = await recoverHandoverEvidence(ctx, "h.md", rawBody);
+
+    expect(result.tier).toBe("raw-body");
+    expect(result.report.calls).toBe(0);
+    expect(result.records).not.toBeNull();
+    expect(result.records!.some((r) => r.id === "T-5" && r.disposition === "continuation")).toBe(true);
+  });
+
+  it("tier 2: fires exactly one handover_get call only when no raw body was already loaded, and recovers records from it (Codex round 2/3 findings: request format:\"json\" explicitly -- storybloq_handover_get's Markdown text and its not_found error text are otherwise indistinguishable from real content -- and assert the requested format)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    let calls = 0;
+    const rawMarkdown = [
+      "# Handover",
+      "",
+      "## Owner rulings",
+      "",
+      "- T-7: gated decision",
+      "",
+      "## Next",
+      "",
+      "- T-8: an omitted actionable continuation, recovered via tier 2",
+      "",
+    ].join("\n");
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        calls++;
+        expect(name).toBe("storybloq_handover_get");
+        expect(args).toEqual({ filename: "h.md", format: "json" });
+        // With format:"json" requested, formatHandoverContent's json branch
+        // returns successEnvelope({filename, content}) -- the exact shape
+        // recoverHandoverEvidence discriminates on.
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "h.md", content: rawMarkdown } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await recoverHandoverEvidence(ctx, "h.md", null);
+
+    expect(calls).toBe(1);
+    expect(result.tier).toBe("handover-get");
+    expect(result.report.calls).toBe(1);
+    expect(result.records).not.toBeNull();
+    expect(result.records!.find((r) => r.id === "T-7")?.disposition).toBe("owner-gated");
+    expect(result.records!.find((r) => r.id === "T-8")?.disposition).toBe("continuation");
+  });
+
+  it("tier 3: discloses failure (records: null) only when tier 2 itself fails (a rejected call), never as an early exit", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("handover deleted or renamed");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await recoverHandoverEvidence(ctx, "h.md", null);
+
+    expect(result.tier).toBe("disclosed");
+    expect(result.records).toBeNull();
+  });
+
+  it("tier 3: also discloses failure when the client RESOLVES normally but the JSON envelope carries an infrastructure error (isError:true) (Codex round 2 finding: a tool-level error, unlike a rejected call, would otherwise be mis-parsed as recovered content)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        // Mirrors runMcpReadTool's isError:true branch: the call resolves
+        // (no throw), and with format:"json" requested even an infra error
+        // renders as a {version, error} envelope, not plain text.
+        const id = nextId.value++;
+        log.push({ seq: log.length, direction: "client-to-server", message: { method: "tools/call", params: { name, arguments: args }, jsonrpc: "2.0", id } });
+        log.push({
+          seq: log.length,
+          direction: "server-to-client",
+          message: {
+            result: {
+              content: [{ type: "text", text: JSON.stringify({ version: 1, error: { code: "io_error", message: "Cannot read handover: EACCES" } }) }],
+              isError: true,
+            },
+            jsonrpc: "2.0",
+            id,
+          },
+        });
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await recoverHandoverEvidence(ctx, "h.md", null);
+
+    expect(result.tier).toBe("disclosed");
+    expect(result.records).toBeNull();
+    // The exchange genuinely happened (one real request+response pair) --
+    // its cost is real even though it disclosed failure, same accounting
+    // discipline as the rejected-call tier-3 path above.
+    expect(result.report.calls).toBe(1);
+  });
+
+  it("tier 3: discloses failure for a genuinely missing handover -- not_found is a USER error (not in INFRASTRUCTURE_ERROR_CODES), so isError stays unset and only the {version, error} vs {version, data} envelope shape distinguishes it from real content (Codex round 3 finding)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        // not_found is NOT an infrastructure error code, so runMcpReadTool's
+        // isError:true branch never fires for it -- the call resolves as an
+        // ordinary "successful" MCP response, isError absent, carrying the
+        // handler's own error envelope as its text.
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, error: { code: "not_found", message: "Handover not found: h.md" } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await recoverHandoverEvidence(ctx, "h.md", null);
+
+    expect(result.tier).toBe("disclosed");
+    expect(result.records).toBeNull();
+    expect(result.report.calls).toBe(1);
+  });
+
+  it("tier 3: a malformed response (not valid JSON) still discloses failure WITHOUT losing the exchange's already-measured cost (Codex round 4 finding: the completed call's bytes must not collapse to 0 just because parsing it failed afterward)", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        // A genuinely malformed response (not the real server's shape at
+        // all) -- the request+response exchange still completed and cost
+        // real bytes, even though the text is not parseable JSON.
+        pushJsonExchange(log, nextId, "tools/call", { name, arguments: args }, "not valid json {{{");
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const result = await recoverHandoverEvidence(ctx, "h.md", null);
+
+    expect(result.tier).toBe("disclosed");
+    expect(result.records).toBeNull();
+    // The exchange genuinely completed -- its cost must be the measured
+    // exchange bytes, not 0, even though parsing it afterward failed.
+    expect(result.report.calls).toBe(1);
+    expect(result.report.bytes).toBeGreaterThan(0);
+  });
+
+  it("returns EVERY disposition, not just continuation (the reconciliation consumer's own requirement)", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = { callTool: async () => { throw new Error("unused"); } };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const rawBody = [
+      "# Handover",
+      "",
+      "## Owner rulings",
+      "",
+      "- T-8: an owner-gated decision, not a continuation",
+      "",
+    ].join("\n");
+    const result = await recoverHandoverEvidence(ctx, "h.md", rawBody);
+
+    expect(result.records!.some((r) => r.disposition === "owner-gated")).toBe(true);
+  });
+});
+
+describe("needsEvidenceRecovery (T-498 commit 2: two independent triggers)", () => {
+  it("fires on a whole-handover index-only demotion", () => {
+    expect(needsEvidenceRecovery({ indexOnly: true, omittedCount: 0, records: [] })).toBe(true);
+  });
+
+  it("fires on a nonzero per-handover omission count", () => {
+    expect(needsEvidenceRecovery({ indexOnly: false, omittedCount: 1, records: [] })).toBe(true);
+  });
+
+  it("fires on a retained record whose rationale reads the literal \"unknown\" sentinel, even with no omission signal at all", () => {
+    expect(
+      needsEvidenceRecovery({
+        indexOnly: false,
+        omittedCount: 0,
+        records: [{ rationale: "a real rationale" }, { rationale: "unknown" }],
+      }),
+    ).toBe(true);
+  });
+
+  it("does not fire when there is no omission and no retained \"unknown\" rationale", () => {
+    expect(
+      needsEvidenceRecovery({
+        indexOnly: false,
+        omittedCount: 0,
+        records: [{ rationale: "a real rationale" }],
+      }),
+    ).toBe(false);
   });
 });
 

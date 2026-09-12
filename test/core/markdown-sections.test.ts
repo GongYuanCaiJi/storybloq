@@ -4,6 +4,7 @@ import {
   splitFenceAwareSections,
   parseHandoverMarkdown,
   selectBoundedRecords,
+  selectContinuationCandidates,
   buildTrajectory,
   type SectionRecord,
 } from "../../src/core/markdown-sections.js";
@@ -980,5 +981,140 @@ describe("buildTrajectory", () => {
     expect(entry.occurrenceCount).toBe(1);
     expect(entry.latestDisposition).toBe("shipped");
     expect(entry.latest).toBe("newest.md");
+  });
+});
+
+describe("selectContinuationCandidates (T-498 commit 2)", () => {
+  it("filters to continuation-disposition records only, in document order", () => {
+    const records: SectionRecord[] = [
+      makeRecord({ id: "T-1", disposition: "blocked", label: "blocked one" }),
+      makeRecord({ id: "T-2", disposition: "continuation", label: "second" }),
+      makeRecord({ id: "T-3", disposition: "owner-gated", label: "gated one" }),
+      makeRecord({ id: "T-4", disposition: "continuation", label: "fourth" }),
+    ];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.candidates.map((c) => c.id)).toEqual(["T-2", "T-4"]);
+    expect(result.omittedContinuationCount).toBe(0);
+    expect(result.omittedContinuationIds).toEqual([]);
+  });
+
+  it("preserves document order even when a decision record appears after an item record", () => {
+    const records: SectionRecord[] = [
+      makeRecord({ id: null, kind: "decision", disposition: "continuation", label: "decided to defer" }),
+      makeRecord({ id: "T-5", kind: "item", disposition: "continuation", label: "keep going on T-5" }),
+    ];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.candidates.map((c) => c.label)).toEqual([
+      "decided to defer",
+      "keep going on T-5",
+    ]);
+  });
+
+  it("does not run a reserve pass -- an item is never reordered ahead of an earlier decision", () => {
+    // Unlike selectBoundedRecords, there is no reserve-first pass here: an
+    // actionable item record must not jump ahead of an earlier decision
+    // record just because it carries an id.
+    const records: SectionRecord[] = [
+      makeRecord({ id: null, kind: "decision", disposition: "continuation", label: "first, a decision" }),
+      makeRecord({ id: "T-9", kind: "item", disposition: "continuation", label: "second, an item" }),
+    ];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.candidates[0]!.kind).toBe("decision");
+    expect(result.candidates[1]!.kind).toBe("item");
+  });
+
+  it("stays within the 800-byte cap and discloses omissions when the cap binds", () => {
+    const records: SectionRecord[] = Array.from({ length: 20 }, (_, i) =>
+      makeRecord({
+        id: `T-${i}`,
+        kind: "item",
+        disposition: "continuation",
+        label: "x".repeat(100),
+        rationale: "y".repeat(200),
+      }),
+    );
+    const result = selectContinuationCandidates(records, "h.md");
+    const totalBytes = Buffer.byteLength(
+      JSON.stringify({
+        candidates: result.candidates,
+        omittedContinuationCount: result.omittedContinuationCount,
+        omittedContinuationIds: result.omittedContinuationIds,
+      }),
+      "utf-8",
+    );
+    expect(totalBytes).toBeLessThanOrEqual(800);
+    expect(result.omittedContinuationCount).toBeGreaterThan(0);
+    expect(result.omittedContinuationIds.length).toBeGreaterThan(0);
+  });
+
+  it("shrinks the disclosed omitted-ids list itself when a single parser-accepted id alone would exceed the 800-byte envelope (Codex round 1 finding: eviction loop stalled once candidates were already empty)", () => {
+    // ID_TOKEN_REGEX (`T|ISS|N|L`-`\d+`) has no length ceiling, so a
+    // pathologically long numeric suffix is a real, parser-accepted id, not
+    // a contrived one. A single omitted record with this id, on its own,
+    // exceeds 800 bytes -- so even after every candidate is evicted (working
+    // is empty), the envelope still must not fit unless the ids list itself
+    // is trimmed rather than left at its INDEX_MAX_IDS-capped length.
+    const hugeId = `T-${"9".repeat(900)}`;
+    const records: SectionRecord[] = [makeRecord({ id: hugeId, kind: "item", disposition: "continuation", label: "x" })];
+    const result = selectContinuationCandidates(records, "h.md");
+    const totalBytes = Buffer.byteLength(
+      JSON.stringify({
+        candidates: result.candidates,
+        omittedContinuationCount: result.omittedContinuationCount,
+        omittedContinuationIds: result.omittedContinuationIds,
+      }),
+      "utf-8",
+    );
+    expect(totalBytes).toBeLessThanOrEqual(800);
+    expect(result.candidates).toEqual([]);
+    expect(result.omittedContinuationCount).toBe(1);
+    expect(result.omittedContinuationIds).toEqual([]);
+  });
+
+  it("an id-less omitted decision contributes to the count but never to omittedContinuationIds", () => {
+    const items: SectionRecord[] = Array.from({ length: 15 }, (_, i) =>
+      makeRecord({
+        id: `T-${i}`,
+        kind: "item",
+        disposition: "continuation",
+        label: "x".repeat(100),
+        rationale: "y".repeat(200),
+      }),
+    );
+    const trailingDecision = makeRecord({
+      id: null,
+      kind: "decision",
+      disposition: "continuation",
+      label: "z".repeat(100),
+      rationale: "w".repeat(200),
+    });
+    const records = [...items, trailingDecision];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.omittedContinuationCount).toBeGreaterThan(result.omittedContinuationIds.length);
+  });
+
+  it("an actionable item is not dropped by any reserve pass, unlike the display primitive", () => {
+    // A shape where selectBoundedRecords's reserve pass would prioritize
+    // decision records; selectContinuationCandidates has no such pass, so a
+    // single early actionable item candidate must survive intact.
+    const records: SectionRecord[] = [
+      makeRecord({ id: "T-1", kind: "item", disposition: "continuation", label: "the actionable one" }),
+      ...Array.from({ length: 5 }, (_, i) =>
+        makeRecord({ id: null, kind: "decision", disposition: "continuation", label: `decision ${i}` }),
+      ),
+    ];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.candidates[0]!.id).toBe("T-1");
+  });
+
+  it("returns empty candidates and no omissions when there are no continuation-disposition records", () => {
+    const records: SectionRecord[] = [
+      makeRecord({ id: "T-1", disposition: "blocked" }),
+      makeRecord({ id: "T-2", disposition: "carried" }),
+    ];
+    const result = selectContinuationCandidates(records, "h.md");
+    expect(result.candidates).toEqual([]);
+    expect(result.omittedContinuationCount).toBe(0);
+    expect(result.omittedContinuationIds).toEqual([]);
   });
 });

@@ -494,8 +494,11 @@ describe("MCP integration -- real filesystem", () => {
       join(handoverDir, "2026-03-20-test.md"),
       "# Handover: test\n\n## Next\n- T-902: keep going\n",
     );
-    // storybloq_handover_latest has no `format` field in its schema (unlike
-    // storybloq_status) -- MCP responses render through the default "md" path.
+    // T-498: storybloq_handover_latest gained a `format` field (default
+    // "md") so a caller needing continuationCandidates/trajectory as data
+    // can request "json" explicitly (see the dedicated test below) -- an
+    // omitted format still renders through the same default "md" path as
+    // before this change.
     const result = await callHandoverLatest(root, { brief: true });
     expect(result.isError).toBeUndefined();
     // formatRecordLine's structured rendering bolds the id; the raw default
@@ -532,6 +535,26 @@ describe("MCP integration -- real filesystem", () => {
     expect(result.text).not.toContain(filler);
   });
 
+  it("storybloq_handover_latest with brief:true and format:\"json\" returns the full HandoverBriefResult envelope, continuationCandidates included, through the real MCP registration (T-498)", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    await writeFile(
+      join(handoverDir, "2026-03-20-test.md"),
+      "# Handover: test\n\n## Next\n- T-910: keep going on the thing\n",
+    );
+    const result = await callHandoverLatest(root, { count: 1, brief: true, format: "json" });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text) as {
+      version: number;
+      data: { handovers: { filename: string; form: string; continuationCandidates?: { candidates: { id: string }[] } }[] };
+    };
+    expect(parsed.version).toBe(1);
+    const first = parsed.data.handovers[0]!;
+    expect(first.form).toBe("structured");
+    expect(first.continuationCandidates?.candidates.map((c) => c.id)).toContain("T-910");
+  });
+
   it("storybloq_handover_latest with neither flag returns the default raw-body path through the real MCP registration", async () => {
     const root = await setupProject();
     const handoverDir = join(root, ".story", "handovers");
@@ -540,6 +563,52 @@ describe("MCP integration -- real filesystem", () => {
     const result = await callHandoverLatest(root, {});
     expect(result.isError).toBeUndefined();
     expect(result.text).toContain("Test Handover");
+  });
+
+  /**
+   * T-498: storybloq_handover_get also gained a `format` field, for the
+   * same reason -- recovery code (scripts/priming-cost.ts's
+   * recoverHandoverEvidence) needs to machine-detect a not_found/io_error
+   * result via {version, error} vs {version, data}, since not_found is a
+   * USER error (never isError:true) and its Markdown text is otherwise
+   * indistinguishable from real handover content.
+   */
+  async function callHandoverGet(
+    root: string,
+    args: Record<string, unknown>,
+  ): Promise<{ isError?: boolean; text: string }> {
+    const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+    registerAllTools(server, root);
+    const client = new Client({ name: "handover-get-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: "storybloq_handover_get", arguments: args });
+    await client.close();
+    const content = result.content as { text: string }[];
+    return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+  }
+
+  it("storybloq_handover_get with format:\"json\" returns a {version, data} envelope for an existing handover, through the real MCP registration (T-498)", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    await writeFile(join(handoverDir, "2026-03-20-test.md"), "# Test Handover\n\nContent here.");
+    const result = await callHandoverGet(root, { filename: "2026-03-20-test.md", format: "json" });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text) as { version: number; data: { filename: string; content: string } };
+    expect(parsed.version).toBe(1);
+    expect(parsed.data.filename).toBe("2026-03-20-test.md");
+    expect(parsed.data.content).toContain("Content here.");
+  });
+
+  it("storybloq_handover_get with format:\"json\" returns a {version, error} envelope (isError absent) for a missing handover, through the real MCP registration -- proving not_found is machine-detectable via the envelope shape alone, not isError (T-498, Codex round 3 finding)", async () => {
+    const root = await setupProject();
+    const handoverDir = join(root, ".story", "handovers");
+    await mkdir(handoverDir, { recursive: true });
+    const result = await callHandoverGet(root, { filename: "does-not-exist.md", format: "json" });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text) as { version: number; error: { code: string; message: string } };
+    expect(parsed.error.code).toBe("not_found");
   });
 
   /**
