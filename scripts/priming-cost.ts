@@ -128,13 +128,13 @@ export interface CapturedMessage {
   readonly message: Record<string, unknown>;
 }
 
-interface CapturingTransports {
+export interface CapturingTransports {
   readonly clientTransport: InMemoryTransport;
   readonly serverTransport: InMemoryTransport;
   readonly log: CapturedMessage[];
 }
 
-function createCapturingLinkedPair(): CapturingTransports {
+export function createCapturingLinkedPair(): CapturingTransports {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const log: CapturedMessage[] = [];
   let seq = 0;
