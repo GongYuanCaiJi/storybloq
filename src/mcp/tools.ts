@@ -17,6 +17,8 @@ import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS, OwnerGoneCandidateTake
 import { CLIENT_TASK_ID_PATTERN } from "../autonomous/client-profile.js";
 import { evaluateSessionGuard } from "../core/session-guard.js";
 import { HEALTH_CHECK_IDS } from "../core/health/types.js";
+import type { RegistrationContext } from "./registration-context.js";
+export type { RegistrationContext } from "./registration-context.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired, withSessionLock } from "../autonomous/session.js";
 import { citationsForReviewTarget } from "../autonomous/cited-rulings.js";
 import { withStalenessNote } from "../autonomous/binary-staleness.js";
@@ -455,17 +457,6 @@ function resolveEffectiveRootForWrite(pinnedRoot: string, nodeName?: string): { 
     return { content: [{ type: "text" as const, text: resolved.error }], isError: true };
   }
   return { root: resolved.root };
-}
-
-/**
- * The values an entry point captures ONCE and hands to the registrars. Today
- * that is the server's launch directory, which is the directory Claude Code
- * resolves project settings and `.mcp.json` from. It is a parameter and not a
- * module-level capture so two servers in one process can differ and so no
- * import-time side effect decides it.
- */
-export interface RegistrationContext {
-  readonly launchDir: string;
 }
 
 export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?: RegistrationContext): void {

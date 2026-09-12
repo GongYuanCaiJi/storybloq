@@ -21,7 +21,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { serverRegistryBinder } from "../autonomous/mcp-binding.js";
 
 import { discoverProjectRoot } from "../core/project-root-discovery.js";
-import { registerAllTools, registerHealthTool, registerSessionGuardTool, registerSessionIntelTool, type RegistrationContext } from "./tools.js";
+import { registerAllTools, registerHealthTool, registerSessionGuardTool, registerSessionIntelTool } from "./tools.js";
+import type { RegistrationContext } from "./registration-context.js";
 import { withStrictToolSchemas } from "./strict-schemas.js";
 import { initProject } from "../core/init.js";
 import { startInboxWatcher, stopInboxWatcher } from "../channel/inbox-watcher.js";
