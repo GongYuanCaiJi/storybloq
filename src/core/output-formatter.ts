@@ -3052,29 +3052,26 @@ export function formatReference(
   lines.push("");
   lines.push("## CLI Commands");
   lines.push("");
-  // ISS-910: the JSON envelope is part of every command's contract; document
-  // it once at the top of the command reference rather than per command.
   lines.push("### JSON output envelope");
   lines.push("");
-  // ISS-1192: appended to the same paragraph (not a new one) to stay inside
-  // this file's byte-budget ceiling -- piping a `get`'s md rendering into
-  // `update --stdin` carries the render fence itself into a
-  // description/impact/content field, growing by one backtick per round trip.
-  lines.push('Commands accepting `--format json` wrap their payload in a versioned envelope: `{"version": 1, "data": ...}` on success, `{"version": 1, "error": {"code": ..., "message": ...}}` on failure, plus a `warnings` array on partial loads (exit code 3). Pass `--raw` with `--format json` to emit the `data` payload verbatim: errors keep the envelope, partial-load warnings are dropped (the exit code still signals them), and commands whose JSON is not the standard envelope reject `--raw` naming their shape. A few commands predate the envelope and emit their own JSON instead: `gc`, `limit-status`, `conflicts list`, `conflicts show`, `resolve` and `team reserve` return an `{"ok", "data"}` object, and `team init` and `team setup` return a bare result object. `session list` and `session show` use a text/json axis with their own top-level shapes, and the `bus` subcommands speak the versioned Bus wire format. Every one of these names its own shape in its `--help` and does not accept `--raw` at all, so passing it is rejected during argument validation, before the command runs -- which matters because several of them mutate state. JSON round-trips description/impact/content cleanly (ISS-1192) -- md\'s render fence grows each pass; `update` strips it and warns.');
+  lines.push('`--format json` normally returns `{"version":1,"data":...}` or `{"version":1,"error":{"code":...,"message":...}}`. Partial loads add `warnings` and exit 3. `--raw` emits only `data`, retaining error envelopes but dropping partial-load warnings; the exit code still signals them. Exceptions: `gc`, `limit-status`, `conflicts list`, `conflicts show`, `resolve`, and `team reserve` return `{"ok","data"}`; `team init` and `team setup` return bare objects; `session list/show` use their own text/json shapes; Bus commands use their versioned wire format. Those exceptions reject `--raw` during argument validation, before execution. Each command names its shape in `--help`. Use JSON to round-trip description/impact/content: markdown render fences grow when fed back through `update --stdin`; updates strip them and warn (ISS-1192).');
+  lines.push("");
+  lines.push("Run `storybloq <command>`. Positional arguments appear after the command; ? marks optional flags. Use `<command> --help` for value types and choices, or `storybloq reference --format json` for full usage strings.");
   lines.push("");
   for (const cmd of commands) {
-    lines.push(`### ${cmd.name}`);
-    lines.push(cmd.description);
-    lines.push("");
-    lines.push("```");
-    lines.push(cmd.usage);
-    lines.push("```");
-    lines.push("");
+    const suffix = cmd.usage.slice(`storybloq ${cmd.name}`.length);
+    const positionals = suffix.split(/\s+\[?--/)[0]!.trim();
+    const flags = (cmd.flags ?? []).map(flag => flag + (cmd.usage.includes(`[${flag}`) ? "?" : ""));
+    const argumentsList = flags.length ? ` (${flags.join(", ")})` : "";
+    lines.push(`- **${cmd.name}${positionals ? ` ${positionals}` : ""}**${argumentsList} - ${cmd.description}`);
   }
+  lines.push("");
 
   lines.push("## MCP Tools");
   lines.push("");
-  lines.push("The base tools below are registered in full mode (inside a .story/ project). The five storybloq_bus_* tools are always registered in full mode; when the Bus is disabled or uninitialized they return setup guidance pointing at `storybloq bus setup`, with no MCP restart required.");
+  lines.push("The base tools below are registered in full mode (inside a .story/ project). The storybloq_bus_* tools are always registered in full mode; when the Bus is disabled or uninitialized they return setup guidance pointing at `storybloq bus setup`, with no MCP restart required.");
+  lines.push("");
+  lines.push("Arguments marked ? are optional in the registered schema; handlers may require combinations depending on the action. Use the client’s tool schema for types and constraints.");
   lines.push("");
   for (const tool of mcpTools) {
     const params = tool.params?.length ? ` (${tool.params.join(", ")})` : "";
@@ -3086,41 +3083,38 @@ export function formatReference(
   lines.push("");
   lines.push("With no .story/ project on the path, the MCP server starts degraded and registers only:");
   lines.push("");
-  lines.push("- **storybloq_session_guard** -- the ownership verdict, available here because the no-project case is exactly where the skill runs its Step 0.5 guard first (T-446)");
-  lines.push("- **storybloq_init** -- bootstrap a .story/ project, then dynamically register the full tool set");
-  lines.push("- **storybloq_status** -- returns setup guidance instead of a project summary");
+  lines.push("- **storybloq_session_guard** (clientTaskId?) -- the ownership verdict, available here because the no-project case is exactly where the skill runs its Step 0.5 guard first (T-446)");
+  lines.push("- **storybloq_session_intel** (format?, sessionId?, transcript?, callerModel?, full?, clientTaskId?) -- context usage and session facts without a project");
+  lines.push("- **storybloq_health** (format?, only?, refresh?) -- read-only tooling checks without a project");
+  lines.push("- **storybloq_init** (name, type?, language?) -- bootstrap a .story/ project, then dynamically register the full tool set");
+  lines.push("- **storybloq_status** (format?) -- returns setup guidance instead of a project summary");
   lines.push("");
   lines.push("Destructive, admin, and git-integration workflows (delete, reconcile, conflicts, resolve, merge-driver, team, gc, repair, config, feedback) are CLI-only in both modes; see the CLI Commands section above.");
 
   lines.push("");
   lines.push("## Review verdict artifacts");
   lines.push("");
-  lines.push("Every review round writes a JSON artifact to `.story/sessions/<sessionId>/telemetry/reviews/`. The filename is `<target>-<stage>-r<round>.json`, and `-g<generation>` is appended once a round belongs to a generation above the first. The generation is a SUFFIX so the `*-code-r*.json` glob external readers already use keeps matching; it is also carried in the payload, so no reader has to parse a filename to know it.");
-  lines.push("");
-  lines.push("A generation opens whenever the round numbering restarts -- a plan redirect out of code review, or a plan-review reject. Before generations existed, the restarted rounds reproduced existing filenames and were silently dropped; artifacts under one target can therefore still be a mixture of two generations that predate this field.");
+  lines.push("Review JSON lives in `.story/sessions/<sessionId>/telemetry/reviews/<target>-<stage>-r<round>.json`. Generations above the first append `-g<generation>` before `.json`, preserving the `*-code-r*.json` glob. Generation also appears in the payload. Redirects and plan-review rejects restart round numbering; old artifacts may mix pre-generation rounds whose colliding files were silently dropped.");
   lines.push("");
   lines.push("### Joining a round to what produced it");
   lines.push("");
-  lines.push("`backendRunId` carries the backend's own run id and `backendRunIdKind` says what that id is the id OF, which is what decides how precisely a round can be joined:");
+  lines.push("`backendRunIdKind` defines the scope of `backendRunId`; derive join quality from the ids rather than storing a potentially contradictory summary:");
   lines.push("");
-  lines.push("| `backendRunIdKind` | scope of the run id | join is `exact` when |");
+  lines.push("| Kind | Scope | Exact join requires |");
   lines.push("|---|---|---|");
-  lines.push("| `codex-session` | a thread spanning many turns | `backendTurnId` is also present |");
-  lines.push("| `agent-dispatch` | one dispatch, already a single turn | always -- the dispatch id is turn-precise |");
-  lines.push("| `lens-review` | one review invocation | always -- the review id is the invocation |");
+  lines.push("| `codex-session` | Thread spanning turns | `backendTurnId` too |");
+  lines.push("| `agent-dispatch` | One dispatch/turn | Run id alone |");
+  lines.push("| `lens-review` | One review invocation | Run id alone |");
   lines.push("");
-  lines.push("A `backendTurnId` without its parent `backendRunId` joins nothing and reads as `none`, and so does a record carrying neither. ABSENCE IS NEVER READ AS `exact`. Join quality is deliberately not a stored field: it is derived from these ids on every read, because a stored copy can contradict the ids it summarizes.");
+  lines.push("A turn id without its parent run id joins nothing (`none`), as does a record with neither. Absence is never `exact`. `reviewAttemptId` identifies a round across state, artifact, and event sinks; deduplicate best-effort events by it. `itemAttemptId` identifies one work-item attempt across its rounds.");
   lines.push("");
-  lines.push("`reviewAttemptId` identifies one round across all three of its sinks (the state record, this artifact, and the events log); `itemAttemptId` identifies one attempt at one work item across every round of it. Events are best-effort and may duplicate after a crash, so deduplicate by `reviewAttemptId`.");
-  lines.push("");
-  lines.push("`generation` has TWO readings and `itemAttemptId` is what tells them apart. Where `itemAttemptId` is present, the generation is attempt-scoped lineage: it advances when a redirect restarts the round numbering, so rounds of one attempt at different generations are different rounds and counting distinct generations counts replans. Where `itemAttemptId` is ABSENT, the round had no work item, there is no lineage for the number to describe, and the generation is only a filename discriminator. Rounds with no work item all share the `unknown` filename stem, so two unrelated sequences can meet at one path and one of them is advanced to avoid overwriting the other. Do not count generations as attempts on records that carry no `itemAttemptId`.");
+  lines.push("With `itemAttemptId`, `generation` tracks replans within that attempt: redirects advance it when numbering restarts. Without `itemAttemptId`, there was no work item; generation only prevents filename collisions among unrelated `unknown` targets. Never count those generations as attempts or replans.");
   lines.push("");
   lines.push("### Reading absent values");
   lines.push("");
-  lines.push("Every field in this spine is optional, and an absent one means the value was not recorded -- never that it was measured and came back empty. Absence does NOT date a record: a round written today omits `backendRunId` and `backendTurnId` when the backend supplied none, and omits `workItemId` and `itemAttemptId` when the round had no work item at all, so an absent field is not evidence that the record predates the field. Three cases are worth naming because they are easy to misread. An absent `normalizerVersion` means the severities may not be normalized at all, so a `blocking` severity is possible. An absent `artifactStatus` means the artifact's existence is UNKNOWN; it never means the artifact is missing, and it never means one exists. And `reviewerIdentity.evidence` distinguishes what was OBSERVED to run from what was merely CONFIGURED to run -- a pin recorded as `configured` is evidence of intent and never of execution, which is why `unknown`/`none` is a valid and preferred record rather than a guessed model name.");
+  lines.push("Fields are optional. Missing means unrecorded, not measured-empty or old: current records can omit backend ids when none were supplied, or work/item ids when no item existed. Missing `normalizerVersion` permits unnormalized severities such as `blocking`; missing `artifactStatus` means existence is unknown. `reviewerIdentity.evidence` distinguishes observed execution from configuration: `configured` proves intent only; prefer `unknown`/`none` to a guessed model.");
   lines.push("");
-  lines.push("`payloadConsistent` records whether a verdict agreed with the findings it carried. Reading its rate needs care: change-requesting verdicts with zero findings are now repaired before they become rounds, so they are counted in `reviewRepairAttempts` instead. Those are two separate populations and must never be summed.");
-
+  lines.push("`payloadConsistent` compares a verdict with its findings. Change-requesting verdicts with zero findings are repaired before becoming rounds and counted in `reviewRepairAttempts`; these populations must never be summed.");
   lines.push("");
   lines.push("## /story design");
   lines.push("");
@@ -3138,25 +3132,13 @@ export function formatReference(
   lines.push("");
   lines.push("## /story orchestrate");
   lines.push("");
-  lines.push("Drive a multi-repo federation (or a large single-repo backlog) as an orchestrator: durable state in storybloq, implementation in background agents a tier below the session model when the client offers one, adversarial review gates on the session model.");
+  lines.push("Drive a federation or large backlog with a durable ledger, lower-tier implementation agents where available, and independent review gates. Read `orchestrator-mode.md` for enrichment, sizing, the six-stage pipeline, workflow scripts, and rules.");
   lines.push("");
-  lines.push("```");
-  lines.push("/story orchestrate               # guard checks, explicit opt-in, then the wave loop");
-  lines.push("```");
-  lines.push("");
-  lines.push("Requires explicit opt-in via AskUserQuestion before any agents are dispatched, and refuses to start while any federation node has an active autonomous session (one pen per repo; the per-node check reads each node's `.story/sessions/` directly because orchestrator status does not scan node repos). The full procedure -- enrichment template, sizing convention, 6-stage pipeline, workflow-script skeleton, critical rules -- is in `orchestrator-mode.md`. Needs a client with background dynamic workflows or subagents; Claude can also use the Agent View-backed `storybloq dispatch` path. Codex users can orchestrate when exact callable subagent tools are present; product-managed Codex dispatch remains unshipped.");
-  lines.push("");
-  lines.push("`/story` surfaces this option proactively at context load when the client is capable and the actionable backlog is orchestrate-sized, so you do not have to know the command exists; it stays a recommendation, and selecting it still routes through the explicit opt-in.");
+  lines.push("`/story orchestrate` requires explicit opt-in via AskUserQuestion before dispatch and refuses to start while any federation node has an active autonomous session. The one-pen-per-repo check reads each node's `.story/sessions/` directly; orchestrator status does not scan node repos. Requires callable background workflows or subagents. Claude also supports Agent View-backed `storybloq dispatch`; product-managed Codex dispatch remains unshipped. `/story` may recommend orchestration for a capable client and substantial actionable backlog; selection still requires opt-in.");
   lines.push("");
   lines.push("## /story triage");
   lines.push("");
-  lines.push("Read-only triage of the open issue backlog: verifies each finding against the pinned current HEAD (reusing the same source-reference provenance checks as `storybloq validate`), flags already-fixed and duplicate issues, groups issues that share one verified root cause, and produces a prioritized recommendations report.");
-  lines.push("");
-  lines.push("```");
-  lines.push("/story triage                    # triage all open issues, report only");
-  lines.push("```");
-  lines.push("");
-  lines.push("Mutates no issue and no ticket: classifications and recommendations are report vocabulary, and closing or filing stays with the maintainer. The only optional write is saving the finished report as a handover (snapshot first), offered once and performed only on explicit confirmation. The full procedure -- integrity branching, alias correlation, evidence bars, report format -- is in `triage-mode.md`.");
+  lines.push("`/story triage` reads the open issue backlog against pinned HEAD, validates source provenance, identifies fixed/duplicate findings and shared root causes, and reports priorities. It changes no issue or ticket. Saving the report as a handover is offered once and requires explicit confirmation, with a snapshot first. Read `triage-mode.md` for integrity checks, alias correlation, evidence requirements, and the report format.");
   lines.push("");
   lines.push("## /story bus");
   lines.push("");
