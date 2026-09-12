@@ -25,7 +25,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { registerAllTools } from "../src/mcp/tools.js";
-import { parseHandoverMarkdown, type SectionRecord } from "../src/core/markdown-sections.js";
+import {
+  parseHandoverMarkdown,
+  type SectionRecord,
+  type ContinuationCandidate,
+  type ContinuationCandidatesResult,
+  type ContinuationIndex,
+  type TrajectoryEntry,
+} from "../src/core/markdown-sections.js";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -463,15 +470,18 @@ export function renderReadyToWorkTable(
 ): string {
   const lines: string[] = [
     "## Ready to Work (ranking)",
-    "| Item    | Type   | Title                            | Context        |",
-    "|---------|--------|-----------------------------------|----------------|",
+    "| Item    | Type   | Title                            | Context        | Actionable |",
+    "|---------|--------|-----------------------------------|----------------|------------|",
   ];
   const shown = rows.slice(0, 5);
   const diagnosticLines: string[] = [];
   for (const row of shown) {
     const entry = contextById.get(row.id);
     const context = entry?.context ?? "n/a";
-    lines.push(`| ${row.id} | ${row.kind} | ${row.title} | ${context} |`);
+    // T-498 Commit 3, design decision 4: every `recommendations` row is
+    // already partitioned-actionable by recommend() itself (ISS-1154) -- this
+    // column is a transparency/consistency signal, not a new classification.
+    lines.push(`| ${row.id} | ${row.kind} | ${row.title} | ${context} | actionable |`);
     if (entry?.diagnostic) diagnosticLines.push(`- ${row.id}: ${entry.diagnostic}`);
   }
   if (rows.length > shown.length) {
@@ -679,6 +689,7 @@ export const STEP_NAMES = [
   "git_log",
   "recommend",
   "continuation_check",
+  "trajectory",
   "context_column_lookup",
   "ready_to_work_table",
   "node_list",
@@ -917,44 +928,18 @@ async function stepRecap(ctx: ReplayContext): Promise<StepReport> {
   return { bytes: measurement.totalBytes, calls: measurement.calls, includedInTotal: true };
 }
 
-const HANDOVER_SEPARATOR = "\n\n---\n\n";
-
-async function stepHandoverLatest(ctx: ReplayContext): Promise<{ report: StepReport; bodies: string[] }> {
-  const { measurement, text } = await callTool(ctx, "storybloq_handover_latest", { count: 3 });
-  // handoverFilenames (and therefore these bodies) are ordered newest first.
-  // A live project can legitimately have fewer than 3 handovers -- never
-  // throw on an unexpected body count; report whatever actually came back.
-  // (Known limitation: splitting on the literal separator is ambiguous if a
-  // handover body itself happens to contain that exact 7-character string;
-  // there is no structural per-file boundary in the tool's response to split
-  // on instead.)
-  const bodies = text.length > 0 ? text.split(HANDOVER_SEPARATOR) : [];
-  const bodyContributions = bodies.map(
-    (b) => measuredBytes(b, ctx.normalize) - 2, // JSON.stringify's own wrapping quotes
-  );
-  const sumBodies = bodyContributions.reduce((a, b) => a + b, 0);
-  const overheadBytes = measurement.totalBytes - sumBodies;
-  return {
-    report: {
-      bytes: measurement.totalBytes,
-      calls: measurement.calls,
-      includedInTotal: true,
-      bodyCount: bodies.length,
-      bodies: bodyContributions,
-      overheadBytes,
-    },
-    bodies,
-  };
-}
-
-// --- T-498 commit 2: the FUTURE two-call Step 2 shape (code + tests only;
-// SKILL.md is not flipped to this until commit 3) ---------------------------
+// --- T-498 commit 3: the two-call Step 2 shape (live -- SKILL.md now drives
+// this directly; see stepHandoverPrimingAndBrief below) ---------------------
 
 export interface HandoverBriefEntryLike {
   readonly filename: string;
   readonly form: "raw" | "structured" | "index-only";
   readonly body?: string;
   readonly records?: SectionRecord[];
+  /** Structured entries only: the per-handover cap-loss signal (ISS-1154 Commit A/B). Absent/null when nothing was capped. */
+  readonly index?: ContinuationIndex | null;
+  /** Only ever present on `briefHandovers[0]` (Commit 2's `buildHandoverBrief` wiring). */
+  readonly continuationCandidates?: ContinuationCandidatesResult;
 }
 
 export interface HandoverPrimingAndBriefResult {
@@ -962,18 +947,17 @@ export interface HandoverPrimingAndBriefResult {
   /** The newest handover's raw body, when `priming:true` returned it (small-handover case); null when it fell back to structured form instead. */
   readonly primingBody: string | null;
   readonly briefHandovers: readonly HandoverBriefEntryLike[];
-  readonly trajectory: unknown;
+  readonly trajectory: readonly TrajectoryEntry[];
 }
 
 /**
- * T-498 design decision 1/2: models the future Step 2 -- `count:1
+ * T-498 design decision 1/2: models Step 2's two-call shape -- `count:1
  * priming:true` (the latest handover, raw when small enough) PLUS `count:10
  * brief:true` (the ten-handover structured window with trajectory) -- as its
  * own harness function, ground-truthed against a fixture exactly like
- * ISS-1154 Commit B's `stepContinuationCheck`. Replaces
- * `stepHandoverLatest`'s single `count: 3` call for cost-measurement
- * purposes only; the live skill text still drives the old shape until
- * commit 3.
+ * ISS-1154 Commit B's old `stepContinuationCheck`. Commit 3 flips SKILL.md's
+ * live Step 2 text to this same two-call shape, retiring the single
+ * `count: 3` call this function itself replaced back in commit 2.
  */
 export async function stepHandoverPrimingAndBrief(
   ctx: ReplayContext,
@@ -990,7 +974,7 @@ export async function stepHandoverPrimingAndBrief(
 
   const primingData = (JSON.parse(priming.text) as { data: { handovers: HandoverBriefEntryLike[] } }).data;
   const briefData = (
-    JSON.parse(brief.text) as { data: { handovers: HandoverBriefEntryLike[]; trajectory: unknown } }
+    JSON.parse(brief.text) as { data: { handovers: HandoverBriefEntryLike[]; trajectory: TrajectoryEntry[] } }
   ).data;
 
   const newest = primingData.handovers[0];
@@ -1011,6 +995,38 @@ export async function stepHandoverPrimingAndBrief(
     primingBody,
     briefHandovers: briefData.handovers,
     trajectory: briefData.trajectory,
+  };
+}
+
+/**
+ * T-498 Commit 3 round-2 byte-review finding F1/F2: SKILL.md's Trajectory
+ * block renders each `trajectory[]` entry with this exact line shape (a
+ * ten-handover-window-specific instantiation of `formatTrajectoryMd`'s
+ * shape in output-formatter.ts, not a second invented format), in the
+ * array's own order (newest id first, per `buildTrajectory`'s insertion
+ * order -- NOT "oldest first"). Every constructed block this harness
+ * renders is its own byte-accounted step (T-497's rule, the retired
+ * Continuation block's own convention); this is the Trajectory block's.
+ */
+export function renderTrajectoryMd(trajectory: readonly TrajectoryEntry[]): string {
+  if (trajectory.length === 0) return "";
+  const lines = ["## Trajectory (last 10 handovers)"];
+  for (const entry of trajectory) {
+    lines.push(
+      `- ${entry.id}: seen in ${entry.occurrenceCount} of the last 10 handovers, latest ${entry.latest} (${entry.latestDisposition})`,
+    );
+  }
+  return lines.join("\n");
+}
+
+export function stepTrajectory(trajectory: readonly TrajectoryEntry[], normalize: Normalizer): StepReport {
+  const text = renderTrajectoryMd(trajectory);
+  return {
+    bytes: measuredTextBytes(text, normalize),
+    calls: 0,
+    includedInTotal: true,
+    entryCount: trajectory.length,
+    text: normalize(text),
   };
 }
 
@@ -1220,75 +1236,76 @@ export async function stepRecommend(ctx: ReplayContext): Promise<RecommendStepRe
   };
 }
 
-export interface ContinuationStepResult {
-  report: StepReport;
-  resolvedId: string | null;
-}
-
 function idMatchesRow(row: { id: string; displayId?: string }, id: string): boolean {
   return row.id === id || row.displayId === id;
 }
 
-export async function stepContinuationCheck(
+// ---------------------------------------------------------------------------
+// T-498 Commit 3: line one -- resolves handovers[0].continuationCandidates
+// (Commit 2's primitive) via the SAME bounded-array-then-fallback
+// actionability walk the old heading-scanned Continuation check always used.
+// Replaces stepContinuationCheck (heading-scan + verbatim block), which is
+// retired along with SKILL.md's standalone "## Continuation from ..." block.
+// ---------------------------------------------------------------------------
+
+interface CandidateSkip {
+  readonly id: string | null;
+  readonly status: string;
+}
+
+interface WalkOutcome {
+  readonly resolved: ContinuationCandidate | null;
+  readonly skipped: CandidateSkip[];
+  readonly walkBytes: number;
+  readonly walkCalls: number;
+  readonly walkIncomplete: boolean;
+  readonly walkIncompleteReason?: string;
+  readonly fallbackUnreadableHandoverCount?: number | null;
+}
+
+/**
+ * Mutant (b) guard: an `excluded`-pool hit is already known non-actionable
+ * (zero calls) -- it is skipped, never treated as absent-from-both (which
+ * would spend a needless fallback `get`). Mutant (a)/(c) guard: every
+ * skipped candidate before the resolved one (or before exhaustion) is
+ * recorded in `skipped`, in order, so the caller can render an exact
+ * conflict note naming each one.
+ */
+async function walkCandidatesForActionability(
   ctx: ReplayContext,
-  newestHandoverBody: string,
-  recommendRows: readonly RecommendRow[] = [],
-  excludedRows: readonly ExcludedRow[] = [],
-): Promise<ContinuationStepResult> {
-  const section = findContinuationSection(newestHandoverBody);
-  if (!section) {
-    return {
-      report: { bytes: 0, calls: 0, includedInTotal: true, present: false },
-      resolvedId: null,
-    };
-  }
-
-  const constructedText = `## Continuation from ${section.slug}\n${section.content}`;
-  const constructedBytes = measuredTextBytes(constructedText, ctx.normalize);
-
-  // A "blocked" heading describes blocked work, not a promotion target -- the
-  // skill renders the section but never promotes an entity named in it.
-  if (section.keyword === "blocked") {
-    return {
-      report: {
-        bytes: constructedBytes,
-        calls: 0,
-        includedInTotal: true,
-        present: true,
-        constructedBytes,
-        constructedText: ctx.normalize(constructedText),
-        walkCalls: 0,
-        resolvedId: null,
-        suppressed: "blocked-heading section is rendered but never walked for promotion",
-      },
-      resolvedId: null,
-    };
-  }
-
-  const ids = extractEntityIds(section.content);
-  let resolvedId: string | null = null;
+  candidates: readonly ContinuationCandidate[],
+  recommendRows: readonly RecommendRow[],
+  excludedRows: readonly ExcludedRow[],
+): Promise<WalkOutcome> {
+  let resolved: ContinuationCandidate | null = null;
+  const skipped: CandidateSkip[] = [];
   const walkCalls: ExchangeMeasurement[] = [];
   let walkIncomplete = false;
   let walkIncompleteReason: string | undefined;
   let failedCallBytes = 0;
   let failedCallCount = 0;
-  // A fallback can fire once per id absent from both bounded arrays -- SKILL.md
-  // treats an unreadable or non-actionable fallback exactly like "anything
-  // else": the walk keeps going to the next id, it never stops the walk. So
-  // this tracks whatever uncertainty ANY fallback along the way disclosed,
-  // never just the last one: once a fallback reports a nonzero/null count,
-  // a later call's clean 0 must not paper over it.
   let fallbackUnreadableHandoverCount: number | null | undefined;
 
-  for (const id of ids) {
-    // Bounded-array lookups cost zero calls: an id in `recommendations` is
-    // already known actionable (recommend()'s own partition), and an id in
-    // `excluded` already carries its own known-non-actionable verdict.
+  for (const candidate of candidates) {
+    // A decision-kind candidate is id-less and usable immediately -- no
+    // actionability bar applies to it (design decision 3).
+    if (candidate.kind === "decision") {
+      resolved = candidate;
+      break;
+    }
+
+    const id = candidate.id;
+    if (id === null) {
+      skipped.push({ id: null, status: "item-with-no-id" });
+      continue;
+    }
+
     if (recommendRows.some((r) => idMatchesRow(r, id))) {
-      resolvedId = id;
+      resolved = candidate;
       break;
     }
     if (excludedRows.some((r) => idMatchesRow(r, id))) {
+      skipped.push({ id, status: "excluded" });
       continue;
     }
 
@@ -1303,53 +1320,337 @@ export async function stepContinuationCheck(
       walkCalls.push(measurement);
       const parsed = deriveEntityActionability(text);
       if (parsed.parseFailed) {
-        // An unreadable fallback response is "anything else" too -- SKILL.md
-        // keeps walking past it exactly like a failed (deleted/renamed) get.
-        // The exchange still genuinely happened (measured above), so the
-        // walk is flagged incomplete for disclosure without stopping it.
         walkIncomplete = true;
-        walkIncompleteReason ??= `continuation fallback response for ${id} could not be parsed: ${parsed.reason}`;
+        walkIncompleteReason ??= `line one fallback response for ${id} could not be parsed: ${parsed.reason}`;
+        skipped.push({ id, status: "unreadable" });
         continue;
       }
       if (fallbackUnreadableHandoverCount === undefined || fallbackUnreadableHandoverCount === 0) {
         fallbackUnreadableHandoverCount = parsed.unreadableHandoverCount;
       }
       if (parsed.status === "actionable") {
-        resolvedId = id;
+        resolved = candidate;
         break;
       }
+      skipped.push({ id, status: parsed.status ?? "unknown" });
     } catch (err) {
-      // Retain every exchange already observed, plus whatever the failing
-      // exchange itself genuinely cost (CallToolFailure carries that even
-      // though its interpretation failed). SKILL.md treats a failed
-      // (deleted/renamed) get the same as any other non-actionable
-      // verdict -- the walk continues to the next id rather than stopping.
       walkIncomplete = true;
-      walkIncompleteReason ??= `continuation walk failed on ${id}: ${(err as Error).message}`;
+      walkIncompleteReason ??= `line one walk failed on ${id}: ${(err as Error).message}`;
       if (err instanceof CallToolFailure) {
         failedCallBytes += err.partialBytes;
         failedCallCount += err.partialCalls;
       }
+      skipped.push({ id, status: "failed" });
       continue;
     }
   }
-  const walkBytes = walkCalls.reduce((a, m) => a + m.totalBytes, 0) + failedCallBytes;
-  const walkCallCount = walkCalls.length + failedCallCount;
 
-  const report: StepReport = {
-    bytes: constructedBytes + walkBytes,
-    calls: walkCallCount,
-    includedInTotal: true,
-    present: true,
-    constructedBytes,
-    constructedText: ctx.normalize(constructedText),
-    walkCalls: walkCallCount,
-    resolvedId,
-    ...(fallbackUnreadableHandoverCount !== undefined ? { fallbackUnreadableHandoverCount } : {}),
-    ...(walkIncomplete ? { status: "incomplete", reason: walkIncompleteReason } : {}),
+  return {
+    resolved,
+    skipped,
+    walkBytes: walkCalls.reduce((a, m) => a + m.totalBytes, 0) + failedCallBytes,
+    walkCalls: walkCalls.length + failedCallCount,
+    walkIncomplete,
+    walkIncompleteReason,
+    fallbackUnreadableHandoverCount,
   };
+}
 
-  return { report, resolvedId };
+function renderConflictNote(skipped: readonly CandidateSkip[]): string | undefined {
+  if (skipped.length === 0) return undefined;
+  return skipped.map((s) => `${s.id ?? "(id-less decision)"}: ${s.status}`).join("; ");
+}
+
+/**
+ * Codex round 1 finding 3: a recovered walk's own uncertainty must not
+ * silently replace or be replaced by the primary walk's -- both are real,
+ * both must survive to the final report. `walkIncomplete`/its reason are
+ * OR'd (either walk being uncertain makes the whole resolution uncertain,
+ * first reason wins); `fallbackUnreadableHandoverCount` keeps the same
+ * "earliest uncertain value wins" rule each individual walk already applies
+ * internally, but now across walk boundaries too.
+ */
+function mergeWalkUncertainty(...walks: readonly WalkOutcome[]): {
+  readonly walkIncomplete: boolean;
+  readonly walkIncompleteReason?: string;
+  readonly fallbackUnreadableHandoverCount?: number | null;
+} {
+  let walkIncomplete = false;
+  let walkIncompleteReason: string | undefined;
+  let fallbackUnreadableHandoverCount: number | null | undefined;
+  for (const w of walks) {
+    if (w.walkIncomplete) {
+      walkIncomplete = true;
+      walkIncompleteReason ??= w.walkIncompleteReason;
+    }
+    if (w.fallbackUnreadableHandoverCount !== undefined) {
+      if (fallbackUnreadableHandoverCount === undefined || fallbackUnreadableHandoverCount === 0) {
+        fallbackUnreadableHandoverCount = w.fallbackUnreadableHandoverCount;
+      }
+    }
+  }
+  return { walkIncomplete, walkIncompleteReason, fallbackUnreadableHandoverCount };
+}
+
+export interface LineOneStepResult {
+  readonly report: StepReport;
+  readonly resolvedCandidate: ContinuationCandidate | null;
+}
+
+/**
+ * T-498 Commit 3, design decisions 1 and 3: walk `handovers[0].continuation-
+ * Candidates` in document order via `walkCandidatesForActionability`. When
+ * nothing resolves and `omittedContinuationCount` is nonzero, recover before
+ * falling back (mutant (d)/(e) guard) via Commit 2's shared 3-tier
+ * `recoverHandoverEvidence`, filtering the recovered full-disposition record
+ * list down to `disposition === "continuation"` (the line-one-specific
+ * filter -- decision 2's reconciliation consumer uses the unfiltered result
+ * instead, see `stepReconciliationRecovery`), then re-walks the recovered
+ * candidates the SAME way. Only when both the primary walk and the
+ * recovered walk fail to resolve does this fall back to Ready to Work's top
+ * row (signaled by `resolvedCandidate: null`), disclosing `omittedContinuation-
+ * Ids` when the omission was never actually recovered.
+ */
+export async function stepLineOne(
+  ctx: ReplayContext,
+  primingBody: string | null,
+  briefHandovers: readonly HandoverBriefEntryLike[],
+  recommendRows: readonly RecommendRow[] = [],
+  excludedRows: readonly ExcludedRow[] = [],
+): Promise<LineOneStepResult> {
+  const newest = briefHandovers[0];
+  if (!newest || !newest.continuationCandidates) {
+    return {
+      report: { bytes: 0, calls: 0, includedInTotal: true, present: false },
+      resolvedCandidate: null,
+    };
+  }
+
+  const cc = newest.continuationCandidates;
+  const primary = await walkCandidatesForActionability(ctx, cc.candidates, recommendRows, excludedRows);
+
+  if (primary.resolved) {
+    return {
+      report: {
+        bytes: primary.walkBytes,
+        calls: primary.walkCalls,
+        includedInTotal: true,
+        present: true,
+        resolvedId: primary.resolved.id,
+        resolvedKind: primary.resolved.kind,
+        recovered: false,
+        conflictNote: renderConflictNote(primary.skipped),
+        ...(primary.fallbackUnreadableHandoverCount !== undefined
+          ? { fallbackUnreadableHandoverCount: primary.fallbackUnreadableHandoverCount }
+          : {}),
+        ...(primary.walkIncomplete ? { status: "incomplete", reason: primary.walkIncompleteReason } : {}),
+      },
+      resolvedCandidate: primary.resolved,
+    };
+  }
+
+  if (cc.omittedContinuationCount === 0) {
+    const uncertainty = mergeWalkUncertainty(primary);
+    return {
+      report: {
+        bytes: primary.walkBytes,
+        calls: primary.walkCalls,
+        includedInTotal: true,
+        present: true,
+        resolvedId: null,
+        usedFallback: true,
+        conflictNote: renderConflictNote(primary.skipped),
+        ...(uncertainty.fallbackUnreadableHandoverCount !== undefined
+          ? { fallbackUnreadableHandoverCount: uncertainty.fallbackUnreadableHandoverCount }
+          : {}),
+        ...(uncertainty.walkIncomplete ? { status: "incomplete", reason: uncertainty.walkIncompleteReason } : {}),
+      },
+      resolvedCandidate: null,
+    };
+  }
+
+  const recovery = await recoverHandoverEvidence(ctx, newest.filename, primingBody);
+
+  if (recovery.records === null) {
+    // Tier 3: recovery itself failed (the target handover could not be
+    // read at all) -- this is the ONLY branch that says "could not be
+    // recovered", and that disclosure is a genuinely incomplete outcome on
+    // its own, independent of whether the primary walk also struggled.
+    // Codex round 1 finding 3 / round 2 finding B: the primary walk's own
+    // uncertainty (an unreadable/failed fallback `get` before recovery was
+    // ever attempted) must still surface here too, in a field of its own --
+    // not spliced into `reason`, where it would silently overwrite the
+    // "could not be recovered" disclosure text.
+    const uncertainty = mergeWalkUncertainty(primary);
+    return {
+      report: {
+        bytes: primary.walkBytes + recovery.report.bytes,
+        calls: primary.walkCalls + recovery.report.calls,
+        includedInTotal: true,
+        present: true,
+        resolvedId: null,
+        usedFallback: true,
+        disclosed: true,
+        status: "incomplete",
+        recoveryTier: recovery.tier,
+        omittedContinuationIds: cc.omittedContinuationIds,
+        reason:
+          "N further continuation entries in the latest handover could not be recovered; treat this ranking as provisional",
+        conflictNote: renderConflictNote(primary.skipped),
+        ...(uncertainty.fallbackUnreadableHandoverCount !== undefined
+          ? { fallbackUnreadableHandoverCount: uncertainty.fallbackUnreadableHandoverCount }
+          : {}),
+        ...(uncertainty.walkIncomplete ? { walkIncompleteReason: uncertainty.walkIncompleteReason } : {}),
+      },
+      resolvedCandidate: null,
+    };
+  }
+
+  // Codex round 1 finding 4: only re-resolve candidates the primary walk
+  // never saw at all -- re-walking every recovered candidate (including
+  // ones already checked) would spend a second fallback `get` and log a
+  // second conflict-note entry for the same candidate. Dedupe by id where
+  // present; an id-less decision has no id to key on, so its label is the
+  // only available identity.
+  const alreadySeenKeys = new Set(cc.candidates.map((c) => c.id ?? `label:${c.label}`));
+  const recoveredCandidates: ContinuationCandidate[] = recovery.records
+    .filter((r) => r.disposition === "continuation")
+    .map((r) => ({ id: r.id, kind: r.kind, label: r.label, rationale: r.rationale }))
+    .filter((c) => !alreadySeenKeys.has(c.id ?? `label:${c.label}`));
+  const recoveredWalk = await walkCandidatesForActionability(ctx, recoveredCandidates, recommendRows, excludedRows);
+  const combinedSkipped = [...primary.skipped, ...recoveredWalk.skipped];
+  const combinedBytes = primary.walkBytes + recovery.report.bytes + recoveredWalk.walkBytes;
+  const combinedCalls = primary.walkCalls + recovery.report.calls + recoveredWalk.walkCalls;
+  const combinedUncertainty = mergeWalkUncertainty(primary, recoveredWalk);
+
+  if (recoveredWalk.resolved) {
+    return {
+      report: {
+        bytes: combinedBytes,
+        calls: combinedCalls,
+        includedInTotal: true,
+        present: true,
+        resolvedId: recoveredWalk.resolved.id,
+        resolvedKind: recoveredWalk.resolved.kind,
+        recovered: true,
+        recoveryTier: recovery.tier,
+        conflictNote: renderConflictNote(combinedSkipped),
+        ...(combinedUncertainty.fallbackUnreadableHandoverCount !== undefined
+          ? { fallbackUnreadableHandoverCount: combinedUncertainty.fallbackUnreadableHandoverCount }
+          : {}),
+        ...(combinedUncertainty.walkIncomplete
+          ? { status: "incomplete", reason: combinedUncertainty.walkIncompleteReason }
+          : {}),
+      },
+      resolvedCandidate: recoveredWalk.resolved,
+    };
+  }
+
+  // Codex round 1 finding 5: recovery SUCCEEDED here (records !== null) --
+  // it is the ACTIONABILITY walk over the recovered candidates that found
+  // nothing, a different outcome from tier 3's "could not be recovered".
+  // Falling back with that wording would misreport evidence that was, in
+  // fact, fully recovered and simply not actionable.
+  return {
+    report: {
+      bytes: combinedBytes,
+      calls: combinedCalls,
+      includedInTotal: true,
+      present: true,
+      resolvedId: null,
+      usedFallback: true,
+      recovered: true,
+      recoveryTier: recovery.tier,
+      note: "recovered evidence for the omitted continuation entries; none resolved actionable",
+      conflictNote: renderConflictNote(combinedSkipped),
+      ...(combinedUncertainty.fallbackUnreadableHandoverCount !== undefined
+        ? { fallbackUnreadableHandoverCount: combinedUncertainty.fallbackUnreadableHandoverCount }
+        : {}),
+      ...(combinedUncertainty.walkIncomplete
+        ? { status: "incomplete", reason: combinedUncertainty.walkIncompleteReason }
+        : {}),
+    },
+    resolvedCandidate: null,
+  };
+}
+
+export interface ReconciliationRecoveryResult {
+  readonly report: StepReport;
+  readonly perHandover: ReadonlyArray<{
+    readonly filename: string;
+    readonly recovered: boolean;
+    readonly tier: RecoveryTier | "not-needed";
+    readonly records: readonly SectionRecord[] | null;
+    readonly reason?: string;
+  }>;
+}
+
+/**
+ * T-498 Commit 3, design decision 2: before finalizing line one, the older
+ * handovers already loaded in the `brief` response (index 1-9) are checked
+ * across every disposition for a decision or abandoned-approach record. Any
+ * older handover that itself needs recovery (Commit 2's two independent
+ * triggers: an omission signal, or a retained record whose rationale reads
+ * the "unknown" sentinel) recovers via the SAME shared 3-tier helper line
+ * one's own candidate uses -- but UNFILTERED by disposition (mutant guard:
+ * reconciliation must see a non-continuation-disposition record too, e.g. an
+ * `owner-gated` decision). A handover that needs no recovery costs zero
+ * calls and is used exactly as already loaded (mutant (e) guard).
+ */
+export async function stepReconciliationRecovery(
+  ctx: ReplayContext,
+  olderHandovers: readonly HandoverBriefEntryLike[],
+): Promise<ReconciliationRecoveryResult> {
+  let bytes = 0;
+  let calls = 0;
+  const perHandover: Array<ReconciliationRecoveryResult["perHandover"][number]> = [];
+  // Codex round 2 finding A: a failed recovery (tier 3, `records === null`)
+  // must not be recorded as `recovered: true` -- that discarded the failure
+  // diagnostic, let `recoveredCount` count it as a success, and left the
+  // overall replay reporting complete despite missing reconciliation
+  // evidence. Track the first such failure to surface on the step's own
+  // report, alongside every handover's own `reason` when it failed.
+  let firstFailure: { filename: string; reason?: string } | undefined;
+
+  for (const h of olderHandovers) {
+    const records = h.records ?? [];
+    const indexOnly = h.form === "index-only";
+    const omittedCount = h.index?.omittedCount ?? 0;
+    if (!needsEvidenceRecovery({ indexOnly, omittedCount, records })) {
+      perHandover.push({ filename: h.filename, recovered: false, tier: "not-needed", records });
+      continue;
+    }
+    const recovery = await recoverHandoverEvidence(ctx, h.filename, null);
+    bytes += recovery.report.bytes;
+    calls += recovery.report.calls;
+    const recovered = recovery.records !== null;
+    const reason = recovered ? undefined : (recovery.report as { reason?: string }).reason;
+    if (!recovered) firstFailure ??= { filename: h.filename, reason };
+    perHandover.push({
+      filename: h.filename,
+      recovered,
+      tier: recovery.tier,
+      records: recovery.records,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+  }
+
+  return {
+    report: {
+      bytes,
+      calls,
+      includedInTotal: true,
+      checkedCount: olderHandovers.length,
+      recoveredCount: perHandover.filter((p) => p.recovered).length,
+      ...(firstFailure
+        ? {
+            status: "incomplete",
+            reason: `reconciliation recovery for ${firstFailure.filename} could not be recovered${firstFailure.reason ? `: ${firstFailure.reason}` : ""}`,
+          }
+        : {}),
+    },
+    perHandover,
+  };
 }
 
 function stepContextColumnLookup(rows: readonly RecommendRow[]): {
@@ -1509,7 +1810,7 @@ export async function runReplaySequence(
     steps.recap = recap;
 
     enter("handover_latest");
-    const handover = await stepHandoverLatest(ctx);
+    const handover = await stepHandoverPrimingAndBrief(ctx);
     steps.handover_latest = handover.report;
 
     enter("rules_md");
@@ -1542,23 +1843,34 @@ export async function runReplaySequence(
     if (recommend.status === "incomplete") anyIncomplete = true;
     steps.recommend = recommend;
 
-    // handoverFilenames (and therefore handover_latest's returned bodies) are
-    // ordered NEWEST FIRST -- bodies[0] is the most recent handover, the one
-    // the Continuation check scans. Both `recommendRows` and `excludedRows`
-    // are threaded through so a handover-named id already resolved by
-    // recommend()'s own partition costs zero further calls.
-    // stepContinuationCheck never throws: a mid-walk failure is caught inside
-    // it and reported as status:"incomplete" while retaining every exchange
-    // already observed before the failure.
+    // `briefHandovers[0]` is the newest handover, the one line one resolves
+    // against; `briefHandovers[1..]` are the older window decision 2's
+    // reconciliation check consults. Both `recommendRows` and `excludedRows`
+    // are threaded through so a candidate already resolved by recommend()'s
+    // own partition costs zero further calls.
     enter("continuation_check");
-    const { report: continuation } = await stepContinuationCheck(
+    const { report: lineOne, resolvedCandidate } = await stepLineOne(
       ctx,
-      handover.bodies[0] ?? "",
+      handover.primingBody,
+      handover.briefHandovers,
       recommendRows,
       excludedRows,
     );
-    if (continuation.status === "incomplete") anyIncomplete = true;
+    const reconciliation2 = await stepReconciliationRecovery(ctx, handover.briefHandovers.slice(1));
+    const continuation: StepReport = {
+      bytes: lineOne.bytes + reconciliation2.report.bytes,
+      calls: lineOne.calls + reconciliation2.report.calls,
+      includedInTotal: true,
+      lineOne,
+      reconciliationRecovery: reconciliation2.report,
+      resolvedCandidate,
+    };
+    if (lineOne.status === "incomplete") anyIncomplete = true;
+    if ((reconciliation2.report as { status?: string }).status === "incomplete") anyIncomplete = true;
     steps.continuation_check = continuation;
+
+    enter("trajectory");
+    steps.trajectory = stepTrajectory(handover.trajectory, normalize);
 
     enter("context_column_lookup");
     let contextLookup: { report: StepReport; contextById: Map<string, { context: string; diagnostic: string }> };

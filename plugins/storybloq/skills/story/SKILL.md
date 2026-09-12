@@ -116,7 +116,7 @@ This guard overrides every no-confirmation rule elsewhere.
 - `/story auto T-183 T-184 ISS-077` -> start targeted autonomous mode with ONLY those items in order (read `autonomous-mode.md`; pass the IDs as `targetWork` array in the start call)
 - `/story review T-XXX` -> start review mode for a ticket (read `autonomous-mode.md` in the same directory as this skill file; if not found, tell user to run `storybloq setup --client all`)
 - `/story plan T-XXX` -> start plan mode for a ticket (read `autonomous-mode.md`)
-- `/story handover` -> draft a session handover. Summarize the session's work, then call `storybloq_handover_create` with the drafted content and a descriptive slug
+- `/story handover` -> draft a session handover from `storybloq handover template`'s scaffold (optional `--override`), then call `storybloq_handover_create` with it and a descriptive slug
 - `/story snapshot` -> save project state (call `storybloq_snapshot` MCP tool)
 - `/story export` -> export project for sharing. Ask the user whether to export the current phase or the full project, then call `storybloq_export` with either `phase` or `all` set
 - `/story status` -> quick status check (call `storybloq_status` MCP tool)
@@ -187,7 +187,7 @@ Call these in order:
 1b. **Reconcile it against the guard verdict before doing anything with it.** FIRST apply the SAME deduplication the guard applied to the status populations, before comparing anything, and apply it the SAME WAY, because a different survivor is itself a false difference. The rule, stated here rather than referenced, since the fallback file is not readable on this path: take `activeSessions` first and `resumableSessions` second; within each, order by `sourceDir`; walk that order and keep the FIRST record for each full `sessionId`, dropping later ones. Where `sourceDir` is unavailable on an older payload, keep the server's order rather than inventing one. The guard's `sessions` are already deduplicated; comparing them against raw status would report a difference for every duplicate, twice, and end every such invocation as unverifiable. That would replace the transcribed deduplication with a fail-closed rule nothing supports. THEN compare a per-session FINGERPRINT, not just ids: `sessionId`, the surviving record's `sourceDir` where the payload carries one, which population it is in, `state`, `compactPending`, `leaseState`, and the normalized `ownerTask` client and id. `sourceDir` belongs in the fingerprint because it is what CHOSE the survivor: if a duplicate-id directory appears or disappears between the two observations and the old and new survivors happen to share every classification field, every other component matches while the surviving record -- and the directory an operator would address with `storybloq session list` -- has changed underneath the verdict. On the typed-guard path it must match. Omit it only for a legacy mode A payload that carries none, where there is no cross-observation survivor comparison to make. Those are the inputs the verdict was computed from, and a session can keep its id while every one of them changes -- an id-only check would call that a match and leave a `continue` standing over a session that is now foreign, or COMPACT, or expired. They are two separate observations of `.story/sessions/` with a gap between them, and the guard's verdict is what authorized you to get this far: if a session started in that gap, a stale `free` still reads as permission to route and mutate beside a live one, which is the ISS-554 hazard arriving through a race rather than through a rule. If the fingerprints MATCH, continue. If they DIFFER, call `storybloq_session_guard` once more and compare again against the status payload you already hold. If it now matches, act on that NEW verdict and continue from here -- do NOT restart Step 2 and do NOT call `storybloq_status` again: you already have a payload the verdict agrees with, and a third observation would reopen exactly the window this step closes. If it still does not match, stop and report the state as unverifiable: something is starting or ending sessions concurrently, and no single observation of it is trustworthy. Tell the user to run `storybloq session list`. This retry is once per INVOCATION and cannot be reset by re-entering Step 2 or by a new verdict; a second reconciliation failure ends the invocation.
 1c. **Usage-cost advisory (T-501).** When status carries a `usageAdvisory` (json) or an opening "Your Claude Code auto-compact window is ..." / "This session runs a 1M-context model ..." line (md), relay that message VERBATIM once in your summary, then continue: every turn re-sends the whole context, so allowing larger contexts can increase per-turn usage as the context grows. This line is shown once per session and only here, so your relay is the only version the user gets. Never change the setting for them; `settings.md` documents it under "Auto-compact window and usage".
 2. **Session recap** -- call `storybloq_recap` MCP tool (shows changes since last snapshot)
-3. **Recent handovers** -- call `storybloq_handover_latest` MCP tool with `count: 3` (last 3 sessions' context -- ensures reasoning behind recent decisions is preserved, not just the latest session's state)
+3. **Recent handovers** -- call `storybloq_handover_latest` twice: `count: 1, priming: true` (for line one's verbatim quote) and `count: 10, brief: true` (structured records plus trajectory)
 4. **Development rules** -- read `RULES.md` if it exists in the project root
 5. **Recent commits** -- run `git log --oneline -10` (lessons: call `storybloq_lesson_digest` on demand)
 
@@ -211,7 +211,7 @@ If a guide call reports an existing/resumable session that was absent from statu
 
 **Orchestrate gates (compute BEFORE composing Part 1).**
 
-Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (with `count: 10`) and evaluate BOTH gates below; then compute the Continuation check below; only then compose Part 1, and render Continuation (when present), Part 1, Part 2, Part 3 in that order. The gates decide whether the `/story orchestrate` working style is surfaced at all -- this is a recommendation, never an auto-start; selecting it still routes through the explicit opt-in in `orchestrator-mode.md` Step 1. This fixed order, the Continuation check, Parts 1-3, and the Part 3 resolution rule below all apply to the NORMAL summary only; the foreign/legacy/resumable session variant later in this section replaces all of them.
+Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (with `count: 10`) and evaluate BOTH gates below; then resolve line one below; only then compose Part 1, and render Line one and Trajectory (when present), Part 1, Part 2, Part 3 in that order. The gates decide whether the `/story orchestrate` working style is surfaced at all -- this is a recommendation, never an auto-start; selecting it still routes through the explicit opt-in in `orchestrator-mode.md` Step 1. This fixed order and Parts 1-3 apply to the NORMAL summary only; the foreign/legacy/resumable variant later in this section replaces them.
 
 - **Gate A -- capability (exact-name allowlist, fails closed).** Probe your own harness for background-orchestration tools by EXACT callable tool name or namespace-qualified identifier only. No fuzzy or keyword matching. The allowlist of names that signal capability is exactly `Workflow`, `Agent`, `Task`, `multi_agent_v1.spawn_agent`, `multi_agent_v1__spawn_agent`, and `spawn_agent` -- the documented multi-agent tool names across supported clients (`Workflow` for dynamic-workflow clients, `Agent` / `Task` for subagent clients, and the dotted or normalized `multi_agent_v1` spelling / exact `spawn_agent` for Codex subagent clients). Gate A passes only when at least one of those exact tool names is available to you in this session. A description, namespace, plugin, or skill that merely mentions agents does not pass. Any other or ambiguous tool surface fails closed: Gate A does not pass and the orchestrate option is simply not surfaced.
 
@@ -219,18 +219,22 @@ Execution order is fixed: first obtain the Part 2 `storybloq_recommend` result (
 
 Record whether both gates passed; Part 1 and Part 3 below branch on that single result.
 
-**Continuation check (compute before Part 1; renders first when present).**
+**Line one (compute before Part 1; renders first when present).**
 
-Scan the latest handover loaded in Step 2 item 3 for an actionable heading -- a heading matching next/open/remaining/todo/blocked, case-insensitively (the same pattern `storybloq_recommend`'s own handover-boost logic detects internally, described here in prose since that detector is not exported). Take the section from that heading to the next heading of equal or higher level.
+If the latest actionable continuation and the ranking disagree, the continuation wins. If the continuation's item is no longer actionable, say so and take the next actionable one. You may read an older handover to confirm; say which one and why.
 
-When such a section exists, render it FIRST, before Part 1 -- it is the prior session's own stated next step, not a suggestion, so it always leads:
+Walk `handovers[0].continuationCandidates` in order. A `decision` candidate is usable immediately. An `item` candidate resolves via the same bounded-array-then-fallback check Part 3 always used: `recommendations` hit -> actionable (zero calls); `excluded` hit -> skip; absent from both -> one `get` with `format: "json", withActionability: true`, its `actionability.status` deciding. The first resolved candidate is line one, rendered verbatim from the `priming` raw body when it covers it, else as structured label/rationale; skipped candidates are named in a conflict note. Disclose per Gate B: a nonzero/null `unreadableHandoverCount` from `recommend` or any fallback `get` here, including a reconciliation alternative's, makes the candidate provisional.
+
+Empty candidates with `omittedContinuationCount` 0 fall back to Ready to Work's top row. A nonzero count recovers first (raw-body re-scan, else one `handover_get`), resolves it the same way, else discloses: "N further continuation entries in the latest handover could not be recovered; treat this ranking as provisional", naming `omittedContinuationIds`.
+
+Before finalizing line one's candidate, check the older handovers (index 1-9) already loaded in the count: 10, brief: true response, across every disposition, not only continuation, for a decision or abandoned-approach record bearing on it. Adopt a correction only if nothing newer than the cited handover has revisited or reversed it, and say which handover and why nothing later supersedes it. An alternative item resolves through the same actionability check as any candidate; an alternative decision is accepted on the citation alone. Recover missing evidence the same way as line one's own candidate.
 
 ```
-## Continuation from <handover file or slug>
-<the section's content, listed verbatim -- do not summarize or re-rank it>
+## Trajectory (last 10 handovers)
+- <id>: seen in <occurrenceCount> of the last 10 handovers, latest <latest> (<latestDisposition>)
 ```
 
-Render the section verbatim regardless of what it names -- a blocked or stale item still belongs in the continuity record. Separately, for Part 3's purposes only: walk the section's ticket/issue ids in order. For each: a match in `recommendations` is always actionable (zero calls) -- it wins immediately. A match in `excluded` is already known non-actionable (zero calls) -- keep walking. Absent from both, fall back to exactly one `storybloq_ticket_get`/`storybloq_issue_get` call with `format: "json", withActionability: true` and read the returned `actionability.status` (the real, server-computed verdict): `"actionable"` wins, anything else keeps walking, same as a failed (deleted/renamed) `get`. A section whose heading itself is a "blocked" heading, or whose ids all fail this walk, or that names no id at all, yields no Part 3 candidate here -- Part 3 falls back to Ready to Work's top row in every one of those cases. When no handover exists, or none carries an actionable section, skip this block silently and open with Part 1 exactly as today. Disclosure (REQUIRED): if the loaded `recommend` result's `unreadableHandoverCount` is nonzero/`null`, or any fallback `get` above ran and its OWN `unreadableHandoverCount` was nonzero/`null`, disclose the uncertainty and treat that fallback status as provisional, not verified.
+Counts and first-seen dates are bounded by the ten-handover window; an item can be older. No handover at all: skip both blocks silently. Otherwise render Trajectory (one line per `trajectory[]` entry, in the array's own order) whenever brief's trajectory[] is non-empty regardless of line one; disclosures above still apply.
 
 **Part 1: Conversational intro (2-3 sentences)**
 
@@ -240,17 +244,17 @@ Open with the project name and progress. Mention what the last session accomplis
 
 You MUST show the following tables after the prose intro. Do not summarize them in paragraph form.
 
-**Ready to Work table (a ranking, not a plan)** -- call `storybloq_recommend` with `count: 10` for context-aware suggestions (the table still renders only the top 5 rows, with "(+N more)"; the full 10 rows feed the orchestrate backlog-size gate below). `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table. A Continuation above always takes priority over this ranking, never the other way around:
+**Ready to Work table (a ranking, not a plan)** -- call `storybloq_recommend` with `count: 10` for context-aware suggestions (the table still renders only the top 5 rows, with "(+N more)"; the full 10 rows feed the orchestrate backlog-size gate below). `storybloq_recommend` MIXES tickets and issues, so render as a neutral markdown table. The recommend table is the ranking and carries actionability. Do not open ticket or issue bodies to rank them; open the item you are about to work on.
 
 ```
 ## Ready to Work (ranking)
-| Item    | Type   | Title                            | Context        |
-|---------|--------|----------------------------------|----------------|
-| T-011   | ticket | Rate agreement conditions schema | foundation     |
-| ISS-042 | issue  | Auth token expiry bug            | severity: high |
+| Item | Type | Title | Context | Actionable |
+|---|---|---|---|---|
+| T-011 | ticket | Rate agreement conditions schema | foundation | yes |
+| ISS-042 | issue | Auth token expiry bug | severity: high | yes |
 ```
 
-Ticket rows show their phase in Context; issue rows show severity. Show up to 5 recommendations. If more exist, note "(+N more)". Note: tickets are filtered to unblocked ones, but issues are ranked by severity and have no blocker model, so a listed issue may be externally blocked -- verify it is actionable before starting.
+Ticket rows show their phase in Context; issue rows show severity. Tickets are filtered to unblocked ones, but issues are ranked by severity and have no blocker model, so a listed issue may be externally blocked -- verify it is actionable before starting.
 
 **Decisions Pending** (show only if there are TBD items in CLAUDE.md or undecided tech choices):
 
@@ -292,7 +296,7 @@ Run `/story health` to check your tooling.
 
 End with `AskUserQuestion`. Which variant depends on the orchestrate-gate result computed above.
 
-**Resolving "first recommended item" (agent-facing meta-rule, applies to every variant below, do NOT render as option text):** when the Continuation check above resolved an actionable candidate (per its own type-specific bar), that candidate IS "the first recommended item" in every option below -- never the Ready table's top row in that case. When the Continuation check found no actionable candidate (no section, no id, or every id failed the bar), "the first recommended item" is the Ready table's top row exactly as today, with that table's own existing external-blocker caveat unchanged.
+**Resolving "the first recommended item" (agent-facing, not rendered):** when line one resolved a candidate, it IS "the first recommended item" below -- an item keeps "Work on [ID + title]"; a decision has no id, so render "Follow up on: [decision label]" instead, still first, still `(Recommended)`. When line one resolved nothing, it's the Ready table's top row as today.
 
 Default state (the orchestrate gates did NOT both pass):
 - question: "What would you like to do?"
@@ -314,7 +318,7 @@ Note (agent-facing meta-rules, do NOT render as option text): "Orchestrate the b
 
 **Foreign/legacy/resumable session variant:**
 
-Render only a short intro, one compact session line, and the relevant question. Do not render the Continuation check, Ready to Work, Decisions Pending, Open Issues, Key Rules, or the first-session guide.
+Render only a short intro, one compact session line, and the relevant question. Do not render line one, Trajectory, Ready to Work, Decisions Pending, Open Issues, Key Rules, or the first-session guide.
 
 **Different live task with verified owner:**
 

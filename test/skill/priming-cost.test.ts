@@ -56,8 +56,11 @@ import {
   stepReconciliation,
   runReplaySequence,
   stepRecommend,
-  stepContinuationCheck,
+  stepLineOne,
+  stepReconciliationRecovery,
   stepHandoverPrimingAndBrief,
+  stepTrajectory,
+  renderTrajectoryMd,
   recoverHandoverEvidence,
   needsEvidenceRecovery,
   STEP_NAMES,
@@ -67,7 +70,9 @@ import {
   type ReplayContext,
   type RecommendRow,
   type ExcludedRow,
+  type HandoverBriefEntryLike,
 } from "../../scripts/priming-cost.js";
+import type { ContinuationCandidate, TrajectoryEntry } from "../../src/core/markdown-sections.js";
 import { reduceSessionForCompact } from "../../src/core/output-formatter.js";
 import type { ActiveSessionSummary } from "../../src/core/session-scan.js";
 
@@ -892,7 +897,10 @@ describe("runReplaySequence: partial progress survives a later crash", () => {
     // recap completed exactly once, matched to its OWN response by id, not
     // to the notification sitting between its request and reply.
     expect(steps.recap.calls).toBe(1);
-    expect(steps.handover_latest.calls).toBe(1);
+    // handover_latest now fires twice (priming + brief, T-498 Commit 3's
+    // two-call Step 2) -- both complete normally here since the injected
+    // notification targets recap, not handover_latest.
+    expect(steps.handover_latest.calls).toBe(2);
     expect((steps.lesson_digest as any).status).toBe("incomplete");
   });
 });
@@ -1022,11 +1030,31 @@ describe("stepRecommend: JSON payload parsing, zero sub-calls", () => {
   });
 });
 
-describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", () => {
-  it("resolves an id present in recommendations with zero calls, never reaching the fallback", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-100", ""].join("\n");
-    const log: CapturedMessage[] = [];
+function candidate(
+  id: string | null,
+  kind: "item" | "decision" = "item",
+  label = "label",
+  rationale = "unknown",
+): ContinuationCandidate {
+  return { id, kind, label, rationale };
+}
 
+function newestEntry(
+  candidates: ContinuationCandidate[],
+  omittedContinuationCount = 0,
+  omittedContinuationIds: string[] = [],
+): HandoverBriefEntryLike {
+  return {
+    filename: "newest.md",
+    form: "structured",
+    records: [],
+    continuationCandidates: { candidates, omittedContinuationCount, omittedContinuationIds },
+  };
+}
+
+describe("stepLineOne: candidate walk, fallback, and 3-tier recovery (T-498 commit 3)", () => {
+  it("resolves an item candidate present in recommendations with zero calls, never reaching the fallback", async () => {
+    const log: CapturedMessage[] = [];
     const mockClient = {
       callTool: async () => {
         throw new Error("recommendations hit must cost zero calls -- fallback must never fire");
@@ -1041,15 +1069,38 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
     };
 
     const recommendRows: RecommendRow[] = [{ id: "ISS-100", kind: "issue", title: "Issue 100", reason: "quick win" }];
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+    const newest = newestEntry([candidate("ISS-100")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], recommendRows, []);
 
-    expect(resolvedId).toBe("ISS-100");
+    expect(resolvedCandidate?.id).toBe("ISS-100");
     expect(report.calls).toBe(0);
-    expect((report as any).walkCalls).toBe(0);
+  });
+
+  it("a decision-kind candidate resolves immediately, no id, no actionability check, even ahead of an item candidate", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("a decision candidate must cost zero calls and must not fall through to the item behind it");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const decision = candidate(null, "decision", "switched to approach B", "approach A hit a blocker");
+    const item = candidate("T-1", "item");
+    const newest = newestEntry([decision, item]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
+
+    expect(resolvedCandidate).toEqual(decision);
+    expect(report.calls).toBe(0);
   });
 
   it("skips an id present in excluded with zero calls, then resolves the next id via exactly one fallback call reading actionability.status", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-200", "- ISS-300", ""].join("\n");
     const log: CapturedMessage[] = [];
     const nextId = { value: 1 };
     const called: string[] = [];
@@ -1081,19 +1132,18 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
       gitLogMode: "fixture",
     };
 
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], excludedRows);
+    const newest = newestEntry([candidate("ISS-200"), candidate("ISS-300")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], excludedRows);
 
     // ISS-200 costs zero calls (already known via excluded); only ISS-300
     // ever reaches the fallback get.
     expect(called).toEqual(["ISS-300"]);
-    expect(resolvedId).toBe("ISS-300");
+    expect(resolvedCandidate?.id).toBe("ISS-300");
     expect(report.calls).toBe(1);
-    expect((report as any).walkCalls).toBe(1);
     expect((report as any).fallbackUnreadableHandoverCount).toBe(0);
   });
 
   it("retains a fallback call's captured-but-unreadable bytes via CallToolFailure", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-400", ""].join("\n");
     const log: CapturedMessage[] = [];
     let nextId = 1;
 
@@ -1119,20 +1169,19 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
       gitLogMode: "fixture",
     };
 
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], []);
+    const newest = newestEntry([candidate("ISS-400")], 0, []);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
 
-    expect(resolvedId).toBeNull();
+    expect(resolvedCandidate).toBeNull();
     expect((report as any).status).toBe("incomplete");
     expect((report as any).reason).toMatch(/ISS-400/);
     expect(report.calls).toBe(1);
-    expect((report as any).walkCalls).toBe(1);
-    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+    expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
   });
 
-  it("keeps walking past a captured-but-unreadable fallback to resolve a later id via recommendations, disclosing the walk as incomplete without losing the resolved id", async () => {
+  it("keeps walking past a captured-but-unreadable fallback to resolve a later candidate via recommendations, disclosing the walk as incomplete without losing the resolved candidate", async () => {
     // SKILL.md: an unreadable fallback response is "anything else", the same
     // as a failed (deleted/renamed) get -- the walk must not stop there.
-    const handoverBody = ["## Open items", "", "- ISS-500", "- ISS-600", ""].join("\n");
     const log: CapturedMessage[] = [];
     let nextId = 1;
     const called: string[] = [];
@@ -1161,19 +1210,18 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
     };
 
     const recommendRows: RecommendRow[] = [{ id: "ISS-600", kind: "issue", title: "Issue 600", reason: "quick win" }];
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+    const newest = newestEntry([candidate("ISS-500"), candidate("ISS-600")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], recommendRows, []);
 
     expect(called).toEqual(["ISS-500"]);
-    expect(resolvedId).toBe("ISS-600");
+    expect(resolvedCandidate?.id).toBe("ISS-600");
     expect(report.calls).toBe(1);
-    expect((report as any).walkCalls).toBe(1);
     expect((report as any).status).toBe("incomplete");
     expect((report as any).reason).toMatch(/ISS-500/);
-    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+    expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
   });
 
-  it("retains a request-only (no-response) fallback failure's bytes via CallToolFailure, then resolves the next id via recommendations", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-900", "- T-999", ""].join("\n");
+  it("retains a request-only (no-response) fallback failure's bytes via CallToolFailure, then resolves the next candidate via recommendations", async () => {
     const log: CapturedMessage[] = [];
     let nextId = 1;
     const called: string[] = [];
@@ -1201,21 +1249,20 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
     };
 
     const recommendRows: RecommendRow[] = [{ id: "T-999", kind: "ticket", title: "Ticket 999", reason: "quick win" }];
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+    const newest = newestEntry([candidate("ISS-900"), candidate("T-999")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], recommendRows, []);
 
     expect(called).toEqual(["ISS-900"]);
-    expect(resolvedId).toBe("T-999");
+    expect(resolvedCandidate?.id).toBe("T-999");
     // A request-only failure costs real bytes (retained below) but is not a
     // completed call -- same convention as callTool's other no-response path.
     expect(report.calls).toBe(0);
-    expect((report as any).walkCalls).toBe(0);
     expect((report as any).status).toBe("incomplete");
     expect((report as any).reason).toMatch(/ISS-900/);
-    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+    expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
   });
 
   it("retains both a completed non-actionable fallback's bytes and a later request-only failure's bytes in the same walk, then resolves via recommendations", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-910", "- ISS-920", "- T-930", ""].join("\n");
     const log: CapturedMessage[] = [];
     const nextId = { value: 1 };
     const called: string[] = [];
@@ -1254,24 +1301,23 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
     };
 
     const recommendRows: RecommendRow[] = [{ id: "T-930", kind: "ticket", title: "Ticket 930", reason: "quick win" }];
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+    const newest = newestEntry([candidate("ISS-910"), candidate("ISS-920"), candidate("T-930")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], recommendRows, []);
 
     expect(called).toEqual(["ISS-910", "ISS-920"]);
-    expect(resolvedId).toBe("T-930");
+    expect(resolvedCandidate?.id).toBe("T-930");
     // Exactly one completed call (ISS-910); ISS-920's dangling request costs
     // real bytes but is not a completed call, matching callTool's own
     // no-response convention.
     expect(report.calls).toBe(1);
-    expect((report as any).walkCalls).toBe(1);
     expect((report as any).status).toBe("incomplete");
     expect((report as any).reason).toMatch(/ISS-920/);
     // Exact byte retention across BOTH the completed and the failed
     // exchange, independently summed from the raw log.
-    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+    expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
   });
 
   it("preserves the earliest uncertain unreadableHandoverCount across multiple fallback calls instead of letting a later clean one overwrite it", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-700", "- ISS-800", ""].join("\n");
     const log: CapturedMessage[] = [];
     const nextId = { value: 1 };
 
@@ -1305,14 +1351,560 @@ describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", (
       gitLogMode: "fixture",
     };
 
-    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], []);
+    const newest = newestEntry([candidate("ISS-700"), candidate("ISS-800")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
 
-    expect(resolvedId).toBe("ISS-800");
+    expect(resolvedCandidate?.id).toBe("ISS-800");
     expect(report.calls).toBe(2);
-    expect((report as any).walkCalls).toBe(2);
     // ISS-700's uncertain count (3) must survive ISS-800's later clean 0.
     expect((report as any).fallbackUnreadableHandoverCount).toBe(3);
     expect((report as any).status).toBeUndefined();
+  });
+
+  it("mutant (c) guard: the conflict note names each skipped candidate's id and status, in order, at zero cost", async () => {
+    const excludedRows: ExcludedRow[] = [
+      { id: "ISS-1", kind: "issue", title: "x", actionability: { status: "owner_gated", reason: "gated", source: "structured" } },
+      { id: "ISS-2", kind: "issue", title: "y", actionability: { status: "owner_gated", reason: "gated", source: "structured" } },
+    ];
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("no fallback expected -- both candidates are already excluded");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const newest = newestEntry([candidate("ISS-1"), candidate("ISS-2")]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], excludedRows);
+
+    expect(resolvedCandidate).toBeNull();
+    expect(report.calls).toBe(0);
+    expect((report as any).conflictNote).toBe("ISS-1: excluded; ISS-2: excluded");
+  });
+
+  it("empty candidates with zero omissions falls back silently, at zero cost, without ever attempting recovery", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("no recovery should ever be attempted when nothing was omitted");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const newest = newestEntry([], 0, []);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
+
+    expect(resolvedCandidate).toBeNull();
+    expect(report.calls).toBe(0);
+    expect((report as any).usedFallback).toBe(true);
+  });
+
+  it("mutant (d) guard, tier 1: recovers an omitted candidate from the already-loaded priming raw body (zero extra calls) and resolves it", async () => {
+    const primingBody = ["# Title", "", "## Next", "- T-1: first candidate", "- T-2: second candidate", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("tier-1 recovery must cost zero calls -- nothing here should ever fire a tool call");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    // T-1 is the only candidate that survived the 800-byte cap (simulated
+    // directly); T-2 was omitted, but its record is still present in the
+    // raw body the `priming` call already loaded.
+    const excludedRows: ExcludedRow[] = [
+      { id: "T-1", kind: "ticket", title: "x", actionability: { status: "owner_gated", reason: "gated", source: "structured" } },
+    ];
+    const recommendRows: RecommendRow[] = [{ id: "T-2", kind: "ticket", title: "Ticket 2", reason: "quick win" }];
+    const newest = newestEntry([candidate("T-1")], 1, ["T-2"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, primingBody, [newest], recommendRows, excludedRows);
+
+    expect(resolvedCandidate?.id).toBe("T-2");
+    expect((report as any).recovered).toBe(true);
+    expect((report as any).recoveryTier).toBe("raw-body");
+    expect(report.calls).toBe(0);
+  });
+
+  it("mutant (d) guard, tier 2: one handover_get call recovers an omitted candidate when no raw body was loaded", async () => {
+    const rawBody = ["# Title", "", "## Next", "- T-3: recovered candidate", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const called: string[] = [];
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        called.push(name);
+        expect(name).toBe("storybloq_handover_get");
+        expect(args.filename).toBe("newest.md");
+        expect(args.format).toBe("json");
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "newest.md", content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const recommendRows: RecommendRow[] = [{ id: "T-3", kind: "ticket", title: "Ticket 3", reason: "quick win" }];
+    const newest = newestEntry([], 1, ["T-3"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], recommendRows, []);
+
+    expect(called).toEqual(["storybloq_handover_get"]);
+    expect(resolvedCandidate?.id).toBe("T-3");
+    expect((report as any).recoveryTier).toBe("handover-get");
+    expect(report.calls).toBe(1);
+  });
+
+  it("mutant (d) guard, exhaustion: both recovery tiers failing falls back to disclosure naming the omitted ids, as the true last resort", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async ({ name }: { name: string }) => {
+        throw new Error(`mock connection drop calling ${name}`);
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const newest = newestEntry([], 1, ["T-9"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
+
+    expect(resolvedCandidate).toBeNull();
+    expect((report as any).usedFallback).toBe(true);
+    expect((report as any).disclosed).toBe(true);
+    expect((report as any).omittedContinuationIds).toEqual(["T-9"]);
+    expect((report as any).reason).toMatch(/could not be recovered/);
+  });
+
+  it("Codex round 1 finding 4 guard: recovery re-walk dedupes an already-seen candidate -- no duplicate fallback call or conflict-note entry", async () => {
+    const primingBody = ["# Title", "", "## Next", "- T-1: first candidate", "- T-2: second candidate", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const called: string[] = [];
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        called.push(String(args.id));
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ actionability: { status: "owner_gated", reason: "gated", source: "structured" }, unreadableHandoverCount: 0 }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    // T-1 is retained (not omitted) but absent from both recommend and
+    // excluded -- resolving it costs a real `get` call, which reports it
+    // not actionable. T-2 is only recovered via the raw-body re-scan.
+    // Without the finding-4 dedup fix, the recovered candidate list would
+    // include T-1 again (the raw body has no notion of "already walked"),
+    // spending a second `get` call on it and logging a second conflict-note
+    // entry for the same id.
+    const recommendRows: RecommendRow[] = [{ id: "T-2", kind: "ticket", title: "Ticket 2", reason: "quick win" }];
+    const newest = newestEntry([candidate("T-1")], 1, ["T-2"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, primingBody, [newest], recommendRows, []);
+
+    expect(called).toEqual(["T-1"]);
+    expect(resolvedCandidate?.id).toBe("T-2");
+    expect(report.calls).toBe(1);
+    expect((report as any).recovered).toBe(true);
+    expect((report as any).recoveryTier).toBe("raw-body");
+    expect((report as any).conflictNote).toBe("T-1: owner_gated");
+  });
+
+  it("Codex round 1 finding 3 guard: a failed primary lookup's uncertainty survives an uncertain recovered-walk resolution", async () => {
+    const primingBody = ["# Title", "", "## Next", "- T-1: first candidate", "- T-2: second candidate", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        if (args.id === "T-1") {
+          throw new Error("mock connection drop calling storybloq_ticket_get");
+        }
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ actionability: { status: "actionable", reason: "clear", source: "structured" }, unreadableHandoverCount: 2 }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    // Primary walk: T-1's fallback `get` throws (walkIncomplete, reason names
+    // T-1) and resolves nothing. Recovery then recovers T-2 from the raw
+    // body (T-1 is deduped out) and T-2 resolves actionable, but with a
+    // nonzero unreadableHandoverCount -- an uncertain resolution. Both
+    // uncertainties must survive to the combined report: the primary
+    // failure's status/reason, and the recovered walk's disclosed count.
+    const recommendRows: RecommendRow[] = [];
+    const newest = newestEntry([candidate("T-1")], 1, ["T-2"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, primingBody, [newest], recommendRows, []);
+
+    expect(resolvedCandidate?.id).toBe("T-2");
+    expect((report as any).recovered).toBe(true);
+    expect((report as any).recoveryTier).toBe("raw-body");
+    expect((report as any).status).toBe("incomplete");
+    expect((report as any).reason).toMatch(/T-1/);
+    expect((report as any).fallbackUnreadableHandoverCount).toBe(2);
+  });
+
+  it("Codex round 2 finding B guard: a failed primary lookup AND a failed recovery both survive, without one clobbering the other", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async ({ name }: { name: string }) => {
+        throw new Error(`mock connection drop calling ${name}`);
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    // T-1's fallback `get` throws (primary walk incomplete) and, since no
+    // priming raw body was loaded, recovering the omitted T-9 also throws
+    // (tier 3, genuinely unrecoverable). Before the fix, the tier-3
+    // disclosure spread the primary walk's own reason over the "could not
+    // be recovered" text whenever the primary was incomplete, and never
+    // marked the report incomplete at all when the primary walk was clean.
+    const newest = newestEntry([candidate("T-1")], 1, ["T-9"]);
+    const { report, resolvedCandidate } = await stepLineOne(ctx, null, [newest], [], []);
+
+    expect(resolvedCandidate).toBeNull();
+    expect((report as any).disclosed).toBe(true);
+    expect((report as any).status).toBe("incomplete");
+    expect((report as any).reason).toMatch(/could not be recovered/);
+    expect((report as any).omittedContinuationIds).toEqual(["T-9"]);
+    expect((report as any).walkIncompleteReason).toMatch(/T-1/);
+  });
+});
+
+describe("stepReconciliationRecovery: per-older-handover recovery trigger (T-498 commit 3, design decision 2)", () => {
+  it("mutant (e) guard: a fully-present older handover needs no recovery -- zero extra calls, tier not-needed", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("no recovery should fire for a fully-present handover");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const older: HandoverBriefEntryLike = {
+      filename: "older.md",
+      form: "structured",
+      records: [{ id: "T-1", label: "x", disposition: "continuation", rationale: "clear reason", kind: "item", file: "older.md" }],
+      index: null,
+    };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [older]);
+
+    expect(report.calls).toBe(0);
+    expect(perHandover[0]?.recovered).toBe(false);
+    expect(perHandover[0]?.tier).toBe("not-needed");
+  });
+
+  it("an index-only older handover triggers recovery via exactly one handover_get call", async () => {
+    const rawBody = ["# Title", "", "## Next", "- T-2: something", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        expect(name).toBe("storybloq_handover_get");
+        expect(args.filename).toBe("older.md");
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "older.md", content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const older: HandoverBriefEntryLike = { filename: "older.md", form: "index-only" };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [older]);
+
+    expect(report.calls).toBe(1);
+    expect(perHandover[0]?.recovered).toBe(true);
+    expect(perHandover[0]?.tier).toBe("handover-get");
+  });
+
+  it("a structured older handover with a per-handover cap loss (index.omittedCount > 0) triggers recovery", async () => {
+    const rawBody = ["# Title", "", "## Next", "- T-5: recovered", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "older.md", content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const older: HandoverBriefEntryLike = {
+      filename: "older.md",
+      form: "structured",
+      records: [{ id: "T-4", label: "x", disposition: "continuation", rationale: "clear", kind: "item", file: "older.md" }],
+      index: { omittedCount: 1, ids: ["T-5"], file: "older.md" },
+    };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [older]);
+
+    expect(report.calls).toBe(1);
+    expect(perHandover[0]?.recovered).toBe(true);
+  });
+
+  it("a retained record whose rationale reads the unknown sentinel triggers recovery even with no omission signal at all", async () => {
+    const rawBody = ["# Title", "", "## Next", "- T-6: recovered", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "older.md", content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const older: HandoverBriefEntryLike = {
+      filename: "older.md",
+      form: "structured",
+      records: [{ id: "T-6", label: "x", disposition: "continuation", rationale: "unknown", kind: "item", file: "older.md" }],
+      index: null,
+    };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [older]);
+
+    expect(report.calls).toBe(1);
+    expect(perHandover[0]?.recovered).toBe(true);
+  });
+
+  it("recovered records are NOT filtered by disposition -- reconciliation sees a non-continuation-disposition decision too", async () => {
+    const rawBody = ["# Title", "", "## Owner rulings", "- decided to use approach B instead", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: "older.md", content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const older: HandoverBriefEntryLike = { filename: "older.md", form: "index-only" };
+    const { perHandover } = await stepReconciliationRecovery(ctx, [older]);
+
+    const recovered = perHandover[0]?.records ?? [];
+    expect(recovered.some((r) => r.disposition === "owner-gated" && r.kind === "decision")).toBe(true);
+  });
+
+  it("multiple older handovers: only the ones that need recovery cost anything, totals are additive", async () => {
+    const rawBody = ["# Title", "", "## Next", "- T-8: recovered", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const called: string[] = [];
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        called.push((args as any).filename);
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ version: 1, data: { filename: (args as any).filename, content: rawBody } }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const fullyPresent: HandoverBriefEntryLike = {
+      filename: "fully-present.md",
+      form: "structured",
+      records: [{ id: "T-7", label: "x", disposition: "continuation", rationale: "clear", kind: "item", file: "fully-present.md" }],
+      index: null,
+    };
+    const needsRecovery: HandoverBriefEntryLike = { filename: "needs-recovery.md", form: "index-only" };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [fullyPresent, needsRecovery]);
+
+    expect(called).toEqual(["needs-recovery.md"]);
+    expect(report.checkedCount).toBe(2);
+    expect(report.recoveredCount).toBe(1);
+    expect(perHandover[0]?.recovered).toBe(false);
+    expect(perHandover[1]?.recovered).toBe(true);
+  });
+
+  it("Codex round 2 finding A guard: a failed older-handover recovery is NOT recorded as recovered, and marks the step incomplete", async () => {
+    const log: CapturedMessage[] = [];
+    const mockClient = {
+      callTool: async ({ name }: { name: string }) => {
+        throw new Error(`mock connection drop calling ${name}`);
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const needsRecovery: HandoverBriefEntryLike = { filename: "unreadable.md", form: "index-only" };
+    const { report, perHandover } = await stepReconciliationRecovery(ctx, [needsRecovery]);
+
+    // Before the fix, this branch hardcoded `recovered: true` regardless of
+    // whether recovery actually succeeded, discarding the failure and
+    // letting `recoveredCount` count it as a success.
+    expect(perHandover[0]?.recovered).toBe(false);
+    expect(perHandover[0]?.records).toBeNull();
+    expect(perHandover[0]?.reason).toBeTruthy();
+    expect(report.recoveredCount).toBe(0);
+    expect((report as any).status).toBe("incomplete");
+    expect((report as any).reason).toMatch(/unreadable\.md/);
+  });
+});
+
+describe("renderTrajectoryMd / stepTrajectory (T-498 commit 3 round 2 byte-review findings F1/F2)", () => {
+  const entries: TrajectoryEntry[] = [
+    { id: "T-11", occurrenceCount: 3, firstSeenInWindow: "h1.md", latest: "h1.md", latestDisposition: "continuation" },
+    { id: "ISS-4", occurrenceCount: 1, firstSeenInWindow: "h2.md", latest: "h2.md", latestDisposition: "owner-gated" },
+  ];
+
+  it("renders the exact F1 line shape, one line per entry, in the array's own order (not sorted, not reversed)", () => {
+    const text = renderTrajectoryMd(entries);
+    expect(text).toBe(
+      [
+        "## Trajectory (last 10 handovers)",
+        "- T-11: seen in 3 of the last 10 handovers, latest h1.md (continuation)",
+        "- ISS-4: seen in 1 of the last 10 handovers, latest h2.md (owner-gated)",
+      ].join("\n"),
+    );
+  });
+
+  it("F2 guard: renders nothing (zero bytes) when trajectory[] is empty", () => {
+    expect(renderTrajectoryMd([])).toBe("");
+    const report = stepTrajectory([], buildNormalizer("/mock-root"));
+    expect(report.bytes).toBe(0);
+    expect(report.calls).toBe(0);
+    expect(report.includedInTotal).toBe(true);
+  });
+
+  it("F2 guard: the constructed step's bytes are pinned to the exact rendered text, not a placeholder or guess", () => {
+    const report = stepTrajectory(entries, buildNormalizer("/mock-root"));
+    expect(report.bytes).toBe(byteLength(renderTrajectoryMd(entries)));
+    expect(report.calls).toBe(0);
   });
 });
 
@@ -1739,6 +2331,7 @@ describe("fixture replay", () => {
       "git_log",
       "recommend",
       "continuation_check",
+      "trajectory",
       "context_column_lookup",
       "ready_to_work_table",
       "node_list",
@@ -1754,6 +2347,13 @@ describe("fixture replay", () => {
     const step = report.steps.tool_discovery;
     expect(step.calls).toBe(0);
     expect(step.bytes).toBeGreaterThan(0);
+    expect(step.includedInTotal).toBe(true);
+  });
+
+  it("F2 guard: trajectory is a constructed, zero-call step with an exact pinned byte count on the standard fixture, included in the total", () => {
+    const step = report.steps.trajectory;
+    expect(step.calls).toBe(0);
+    expect(step.bytes).toBe(302);
     expect(step.includedInTotal).toBe(true);
   });
 
@@ -1789,38 +2389,22 @@ describe("fixture replay", () => {
     expect(report.steps.recap.calls).toBe(1);
   });
 
-  it("handover_latest: one call, three body sub-rows, an overhead row, additive", () => {
+  it("handover_latest: two calls (priming count:1 + brief count:10), additive, the newest handover's raw body loaded", () => {
     const step = report.steps.handover_latest as any;
-    expect(step.calls).toBe(1);
-    expect(step.bodyCount).toBe(3);
-    expect(Array.isArray(step.bodies)).toBe(true);
-    expect(step.bodies).toHaveLength(3);
-    for (const b of step.bodies) expect(b).toBeGreaterThan(0);
-    // handoverFilenames (and therefore these bodies) are ordered newest
-    // first: bodies[0] is "latest" (largest), bodies[2] is "kickoff" (smallest).
-    expect(step.bodies[2]).toBeLessThan(step.bodies[1]);
-    expect(step.bodies[1]).toBeLessThan(step.bodies[0]);
-    const sum = step.bodies.reduce((a: number, b: number) => a + b, 0);
-    expect(sum + step.overheadBytes).toBe(step.bytes);
+    expect(step.calls).toBe(2);
+    expect(step.primingHadRawBody).toBe(true);
+    expect(step.primingBytes).toBeGreaterThan(0);
+    expect(step.briefBytes).toBeGreaterThan(0);
+    expect(step.primingBytes + step.briefBytes).toBe(step.bytes);
   });
 
-  it("handover_latest: each body and the overhead row stay within its own pinned ceiling", () => {
-    // Identified by fixture handover (bodies[0]=latest/SENTINEL-C,
-    // bodies[1]=progress/SENTINEL-B, bodies[2]=kickoff/SENTINEL-A), not just
-    // the aggregate -- one body growing while another shrinks by the same
-    // amount would pass the aggregate ceiling alone.
+  it("handover_latest: priming and brief bytes each stay within their own pinned ceiling", () => {
     const step = report.steps.handover_latest as any;
-    const bodyCeilings = [2000, 1200, 600]; // [latest, progress, kickoff]
-    const table = step.bodies
-      .map((b: number, i: number) => `body[${i}]=${b} (ceiling ${bodyCeilings[i]})`)
-      .join(", ");
-    for (let i = 0; i < bodyCeilings.length; i++) {
-      if (step.bodies[i] > bodyCeilings[i]) {
-        throw new Error(`handover body[${i}] exceeds its pinned ceiling. ${table}`);
-      }
+    if (step.primingBytes > 3000) {
+      throw new Error(`handover_latest primingBytes ${step.primingBytes} exceeds its pinned 3000 ceiling`);
     }
-    if (step.overheadBytes > 400) {
-      throw new Error(`handover overheadBytes ${step.overheadBytes} exceeds its pinned 400 ceiling. ${table}`);
+    if (step.briefBytes > 5000) {
+      throw new Error(`handover_latest briefBytes ${step.briefBytes} exceeds its pinned 5000 ceiling`);
     }
   });
 
@@ -1877,19 +2461,20 @@ describe("fixture replay", () => {
     expect(step.excludedCount).toBe(1);
   });
 
-  it("continuation_check: resolves T-1002 via the recommendations array with zero calls", () => {
+  it("continuation_check: line one resolves T-1002 via the recommendations array with zero calls; reconciliation recovery costs the rest", () => {
     const step = report.steps.continuation_check as any;
-    expect(step.present).toBe(true);
-    expect(step.resolvedId).toBe("T-1002");
-    expect(step.walkCalls).toBe(0);
-    expect(step.calls).toBe(0);
-    expect(step.constructedBytes).toBeGreaterThan(0);
-    // No fallback call ran, so the step's own bytes equal the constructed
-    // section text exactly.
-    expect(step.bytes).toBe(step.constructedBytes);
-    // constructedBytes must be the raw-text byte count of the constructed
-    // block, not its JSON-message-escaped size.
-    expect(step.constructedBytes).toBe(byteLength(step.constructedText));
+    expect(step.lineOne.present).toBe(true);
+    expect(step.lineOne.resolvedId).toBe("T-1002");
+    expect(step.lineOne.calls).toBe(0);
+    expect(step.resolvedCandidate.id).toBe("T-1002");
+    // This 3-handover fixture has exactly 2 older handovers behind the
+    // newest; one of them needs recovery (Commit 2's two independent
+    // triggers), the other does not -- the combined step cost is entirely
+    // reconciliation recovery's, since line one itself cost zero calls.
+    expect(step.reconciliationRecovery.checkedCount).toBe(2);
+    expect(step.reconciliationRecovery.recoveredCount).toBe(1);
+    expect(step.calls).toBe(step.lineOne.calls + step.reconciliationRecovery.calls);
+    expect(step.bytes).toBe(step.lineOne.bytes + step.reconciliationRecovery.bytes);
   });
 
   it("context_column_lookup: zero cost, n/a plus a diagnostic for every one of the 6 actionable candidates", () => {
@@ -1952,15 +2537,20 @@ describe("fixture replay", () => {
 
     // No issue_get/ticket_get calls: recommend's own JSON payload already
     // carries the actionability partition (Gate B) and T-1002's presence in
-    // its recommendations array (the continuation walk), so ISS-1154 Commit
-    // B retires both sub-call walks entirely.
+    // its recommendations array (the line-one walk), so ISS-1154 Commit B's
+    // zero-call resolution still holds under T-498. `storybloq_handover_latest`
+    // now fires twice (priming + brief, T-498 Commit 3's two-call Step 2);
+    // the trailing `storybloq_handover_get` is decision 2's reconciliation
+    // recovery for the one older handover that needs it.
     expect(calls).toEqual([
       "storybloq_session_guard",
       "storybloq_status",
       "storybloq_recap",
       "storybloq_handover_latest",
+      "storybloq_handover_latest",
       "storybloq_lesson_digest",
       "storybloq_recommend",
+      "storybloq_handover_get",
     ]);
   });
 
@@ -2039,12 +2629,13 @@ describe("fixture replay", () => {
     reconciliation: { maxBytes: 0, calls: 0 },
     status: { maxBytes: 6000, calls: 1 },
     recap: { maxBytes: 2500, calls: 1 },
-    handover_latest: { maxBytes: 4000, calls: 1 },
+    handover_latest: { maxBytes: 7000, calls: 2 },
     rules_md: { maxBytes: 600, calls: 0 },
     lesson_digest: { maxBytes: 500, calls: 1 },
     git_log: { maxBytes: 900, calls: 0 },
     recommend: { maxBytes: 4000, calls: 1 },
-    continuation_check: { maxBytes: 1500, calls: 0 },
+    continuation_check: { maxBytes: 2000, calls: 1 },
+    trajectory: { maxBytes: 500, calls: 0 },
     context_column_lookup: { maxBytes: 0, calls: 0 },
     ready_to_work_table: { maxBytes: 1500, calls: 0 },
     node_list: { maxBytes: 0, calls: 0 },
@@ -2070,8 +2661,8 @@ describe("fixture replay", () => {
     }
   });
 
-  it("total bytes stay within a pinned ceiling and total calls equal exactly 6", () => {
-    expect(report.totals.calls).toBe(6);
+  it("total bytes stay within a pinned ceiling and total calls equal exactly 8", () => {
+    expect(report.totals.calls).toBe(8);
     if (report.totals.bytes > 20_000) {
       throw new Error(
         `totals.bytes ${report.totals.bytes} exceeds the pinned 20000 ceiling; ` +
@@ -2112,11 +2703,15 @@ describe("continuation walk suppresses promotion for a blocked-keyword heading",
 
       const { report } = await runEmitJson(dir);
       const step = report.steps.continuation_check as any;
-      expect(step.present).toBe(true);
-      expect(step.resolvedId).toBeNull();
-      expect(step.walkCalls).toBe(0);
-      expect(step.calls).toBe(0);
-      expect(step.constructedBytes).toBeGreaterThan(0);
+      // A "blocked"-disposition record is never a continuation candidate at
+      // all (design decision 1's `selectContinuationCandidates` is
+      // continuation-disposition-only) -- line one sees an empty candidate
+      // list and falls back silently, at zero cost, even though T-1002
+      // itself would otherwise clear the actionability bar.
+      expect(step.lineOne.present).toBe(true);
+      expect(step.lineOne.resolvedId).toBeNull();
+      expect(step.lineOne.calls).toBe(0);
+      expect(step.resolvedCandidate).toBeNull();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
