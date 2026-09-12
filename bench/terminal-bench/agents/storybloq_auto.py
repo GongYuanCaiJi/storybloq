@@ -95,6 +95,7 @@ class StorybloqAuto(ClaudeCode):
         self.runtime_env: dict[str, str] = {}
         self._versions: dict[str, Any] = {}
         self._created: set[str] = set()  # resources that need cleanup: "story", "copier"
+        self._git_version: str | None = None
 
     # ----- helpers -----------------------------------------------------------------
     def _shell(self, environment: BaseEnvironment) -> Shell:
@@ -146,6 +147,16 @@ class StorybloqAuto(ClaudeCode):
             if sha256_file(local_dir / fname) != inst.get(key):
                 raise InfraError("manifest", f"{self.arm} install/{fname} differs from the frozen manifest")
         await self.exec_as_root(environment, f"mkdir -p {REMOTE} && chmod 0777 {REMOTE}")
+        # git is a prerequisite of the A1-A4 environment, not the model's job: the guide's
+        # workflow needs a repo to review against, and a task image is not guaranteed to ship
+        # one. Installing it here keeps that cost off the trial (ISS-1198 follow-up finding: a
+        # real smoke trial paid an extra apt-get round-trip to install git itself before the
+        # guide could start, a nondeterministic cost A0 never pays and that a less resourceful
+        # model might not think to pay at all, turning an environment gap into a false gate
+        # failure). Idempotent: a no-op when the image already has git.
+        await self.exec_as_root(environment, "command -v git >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends git)")
+        r = await self.exec_as_root(environment, "git --version")
+        self._git_version = r.stdout.strip()
         uploads: list[tuple[Path, str, str]] = [(local_dir / "package.json", f"{REMOTE}/package.json", inst["package_json_sha256"]),
                                               (local_dir / "package-lock.json", f"{REMOTE}/package-lock.json", inst["package_lock_sha256"])]
         for name in self._artifacts():
@@ -205,7 +216,7 @@ class StorybloqAuto(ClaudeCode):
         versions: dict[str, Any] = {
             "manifest_sha256": self.manifest.sha256, "arm": self.arm, "auth_mode": AUTH_MODE, "harbor_version": self.manifest.data.get("harbor_version"),
             "storybloq_version": r.stdout.strip(), "storybloq_commit": self.manifest.data.get("storybloq_commit"),
-            "executor_model": self.manifest.data.get("executor_model"),
+            "executor_model": self.manifest.data.get("executor_model"), "git_version": self._git_version,
         }
         r = await sh.must("claude --version", "artifact", env)
         got = parse_semver(r.stdout)

@@ -308,6 +308,7 @@ class StrictEnv:
         r"^mkdir -p \$CLAUDE_CONFIG_DIR/debug", r"^export PATH=\"\$HOME/\.local/bin:\$PATH\"; harbor_claude_code_instruction_", r"^timeout 60 sh -c ", r"^printf '%s' .* > /logs/agent/collect-errors\.json$",
         r"^printf '%s' .* > /logs/agent/infra-failure\.json$", r"^tar czf /logs/agent/config-dir\.tgz\.partial -C /logs/agent/sessions \. && mv -f /logs/agent/config-dir\.tgz\.partial /logs/agent/config-dir\.tgz$",
         r"^command -v curl", r"^set -euo pipefail; if command -v apk",  # the parent's own claude install path (version mismatch case)
+        r"^command -v git >/dev/null 2>&1 \|\| \(apt-get update && apt-get install -y --no-install-recommends git\)$", r"^git --version$",
         r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
         r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
         r"^cd /opt/claude && npm ci --ignore-scripts --no-audit --no-fund$", r"^chmod 0755 /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude && ln -sf /opt/claude/node_modules/@anthropic-ai/claude-code-linux-x64/claude /usr/local/bin/claude$", r'^export PATH="\$HOME/\.local/bin:\$PATH"; claude --version$',
@@ -319,6 +320,7 @@ class StrictEnv:
 
     def __init__(self, table: dict[str, tuple[int, str]] | None = None):
         self.table = {"claude --version": (0, "2.1.267 (Claude Code)\n"), "node --version": (0, "v22.23.2\n"), "command -v claude": (0, ""), "sha256sum": (0, "SHA\n"), "storybloq --version": (0, "9.9.9\n"), "codex --version": (0, "codex-cli 0.153.4\n"),
+                      "git --version": (0, "git version 2.39.2\n"),
                       '"$HOME" "$PATH"': (0, "/root\n/usr/local/bin:/usr/bin:/bin\n"), "pwd": (0, "/app\n"), "cd /app && ([ -e .story ]": (0, "GIT=yes\nv22.1.0\n"),
                       "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK), "mkticket.cjs": (0, "T-001\n"), "for p in": (0, ""), 'const D=require("/opt/bench/node_modules/better-sqlite3")': (0, "ok\n")}
         self.table.update(table or {})
@@ -443,6 +445,7 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     assert a.runtime_env["CODEX_HOME"] == "/opt/bench/codex-home"
     assert a._versions["claude_code_version"] == "2.1.267" and a._versions["codex_version"] == "0.153.4"
     assert a._versions["claude_install_method"] == "artifact" and a._versions["node_version"] == "v22.23.2"
+    assert a._versions["git_version"] == "git version 2.39.2"
     assert a._versions["node_sha256"] == hashlib.sha256(b"fake node runtime").hexdigest()
     root_cmds = [c["command"] for c in env.calls if c["user"] == "root"]
     assert any(c.startswith("tar -xzf /opt/node/node.tgz") for c in root_cmds) and any(c.endswith(f"ln -sf {NATIVE_PATH} /usr/local/bin/claude") for c in root_cmds)
@@ -458,6 +461,48 @@ async def test_install_uploads_per_arm_project_and_verifies_bytes(tmp_path):
     await b.install(env)
     assert "/opt/bench/bridge.tgz" not in [t for _s, t in env.uploads]
     assert "CODEX_HOME" not in b.runtime_env
+
+
+@pytest.mark.asyncio
+async def test_git_is_installed_as_root_as_an_arm_prerequisite_not_the_models_job(tmp_path):
+    """ISS-1198 follow-up: a real smoke trial paid an apt-get round-trip mid-session to install git
+    itself before the guide could start -- an environment gap, not model work, and a less
+    resourceful model might not think to pay it at all. A1-A4 install git during setup, as root,
+    idempotently; A0/StorybloqBaseline never runs this step."""
+    a = build_auto(tmp_path, "A1")
+    env = StrictEnv()
+    await a.install(env)
+    git_cmds = [c for c in env.calls if "command -v git" in c["command"] or c["command"] == "git --version"]
+    assert len(git_cmds) == 2
+    assert all(c["user"] == "root" for c in git_cmds)
+    install_idx = next(i for i, c in enumerate(env.cmds()) if "command -v git" in c)
+    configure_idx = next(i for i, c in enumerate(env.cmds()) if c.startswith("mkdir -p /opt/bench &&"))
+    assert install_idx > configure_idx  # after REMOTE exists, before the rest of the bench install
+    assert a._versions["git_version"] == "git version 2.39.2"
+
+    from agents.baseline import StorybloqBaseline
+
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir(parents=True)
+    mp = make_manifest(baseline_dir)
+    logs = baseline_dir / "logs"
+    logs.mkdir()
+    base = StorybloqBaseline(logs, manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
+    env2 = StrictEnv()
+    await base.install(env2)
+    assert not any("git" in c["command"] for c in env2.calls)  # A0 never pays this cost
+
+
+@pytest.mark.asyncio
+async def test_git_install_failure_is_not_swallowed(tmp_path):
+    """A failed git install is a pre-start infra failure like any other exec_as_root command
+    here (e.g. the REMOTE mkdir just before it): it propagates rather than silently continuing,
+    and install()'s existing handler records it under infra-failure.json before re-raising."""
+    a = build_auto(tmp_path, "A1")
+    env = StrictEnv({"command -v git": (1, "")})
+    with pytest.raises(Exception, match="git"):
+        await a.install(env)
+    assert any(c["command"].startswith("printf") and "infra-failure.json" in c["command"] for c in env.calls)
 
 
 HOUSEKEEPING_SETTINGS = json.dumps({"hooks": {
