@@ -30,6 +30,22 @@ from report.seed import SMOKE_TASKS, dir_hash  # noqa: E402
 
 EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 
+# ISS-1200: regex-log's task.toml caps [agent] timeout_sec at 900s (harbor's own
+# agent_timeout_multiplier field, applied to that per-task value); a real storybloq-arm smoke
+# trial (r17) ran 1027.8s to a clean, completed finish and still tripped harbor's AgentTimeoutError.
+# A0 does no guide/review workflow and never approached the cap, so it keeps the harbor default.
+# A1-A4 get 2.5x (2250s) = 2x the r17 wall, rounded up, so the cap is not binding for them. Every
+# other timeout knob (verifier, agent setup, environment build) stays at the harbor default (1.0)
+# for every arm -- this multiplier maps to harbor JobConfig's agent_timeout_multiplier field only.
+AGENT_TIMEOUT_MULTIPLIER = {"A0": 1.0, "A1": 2.5, "A2": 2.5, "A3": 2.5, "A4": 2.5}
+AGENT_TIMEOUT_MULTIPLIER_NOTE = (
+    "Maps to harbor JobConfig's agent_timeout_multiplier field only (the [agent] timeout_sec cap "
+    "in each task's task.toml). timeout_multiplier (verifier default), verifier_timeout_multiplier, "
+    "agent_setup_timeout_multiplier and environment_build_timeout_multiplier all stay at harbor's "
+    "own default (1.0) for every arm. A1-A4 (2.5x = 2250s) = 2x the r17 regex-log smoke wall of "
+    "1027.8s, rounded up (ISS-1200); A0 (1.0x = 900s) unchanged."
+)
+
 
 def sh(cmd: list[str], cwd: Path | None = None) -> str:
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -299,6 +315,9 @@ def main() -> None:
         raise SystemExit(f"{out} exists; prepare into a fresh directory")
     out.mkdir(parents=True)
     arms = [s.strip() for s in a.arms.split(",") if s.strip()]
+    unknown = [arm for arm in arms if arm not in AGENT_TIMEOUT_MULTIPLIER]
+    if unknown:
+        raise SystemExit(f"no agent_timeout_multiplier recorded for arm(s) {unknown}")
     artifacts = {"storybloq": pack(Path(a.storybloq).expanduser(), out, "storybloq", a.allow_dirty)}
     if a.bridge:
         artifacts["bridge"] = pack(Path(a.bridge).expanduser(), out, "bridge", a.allow_dirty)
@@ -317,7 +336,13 @@ def main() -> None:
         "dataset": "terminal-bench@2.0", "task_repo_commit": tasks["repo_commit"], "tasks": tasks, "smoke": smoke,
         "claude_code_version": a.claude_code_version, "codex_version": a.codex_version,
         "executor_model": a.executor_model, "reviewer_model": a.reviewer_model, "reviewer_effort": a.reviewer_effort,
-        "protocol": {"max_turns": None, "max_budget_usd": None, "timeout_multiplier": 1.0, "attempts": 1, "retries": 0, "n_concurrent": 1, "reruns": "one rerun of a pre-start infra failure only"},
+        "protocol": {
+            "max_turns": None, "max_budget_usd": None,
+            "agent_timeout_multiplier": {arm: AGENT_TIMEOUT_MULTIPLIER[arm] for arm in arms},
+            "agent_timeout_multiplier_harbor_field": "agent_timeout_multiplier",
+            "agent_timeout_multiplier_note": AGENT_TIMEOUT_MULTIPLIER_NOTE,
+            "attempts": 1, "retries": 0, "n_concurrent": 1, "reruns": "one rerun of a pre-start infra failure only",
+        },
         "storage": {"ssd_root": str(out.parent)},
     }
     (out / "prepare-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

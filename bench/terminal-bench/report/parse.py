@@ -814,6 +814,14 @@ def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attem
         statuses["verifier"] = "missing"
     if statuses["infra"] != "ok":
         reward, passed, statuses["verifier"] = None, None, "skipped"  # nothing ran; a verifier result here is not a trial outcome
+    # ISS-1200: A1-A4 run 13-17 min against regex-log's 900s [agent] timeout_sec; a trial that
+    # solves and cleans up before harbor's own AgentTimeoutError finalizes it is not a real
+    # timeout. Both reward AND the full cleanup set (only A1-A4 write these) are required --
+    # a reward alone could belong to a verifier that ran without agent cleanup ever completing.
+    if arm != "A0" and statuses["agent"] == "timeout" and reward is not None and all(
+        (agent_dir / f).exists() for f in ("versions.json", "story.tgz", "story-status.json", "story-sessions.json")
+    ):
+        statuses["agent"] = "timeout-after-completion"
 
     ce = _read_json(agent_dir / "collect-errors.json", diags, "collect-errors")
     if isinstance(ce, list) and ce:

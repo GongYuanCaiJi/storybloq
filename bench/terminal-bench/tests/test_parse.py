@@ -45,6 +45,13 @@ def copy_fixture(tmp_path: Path) -> Path:
     return t
 
 
+def _write_empty_tgz(path: Path) -> None:
+    """A real, empty gzip tar: the credential scanner opens every .tgz as an archive, and a bare
+    text file (not a valid tar) fails closed as `not completely inspectable`."""
+    with tarfile.open(path, "w:gz"):
+        pass
+
+
 def test_claude_per_model_sums_last_usage_per_unit():
     c = parse_claude_sessions(FX / "agent" / "sessions")
     s = c.per_model["claude-sonnet-5"].as_dict()
@@ -414,6 +421,64 @@ def test_trial_row_timeout_without_result_event(tmp_path):
     assert r.statuses["agent"] == "timeout" and r.statuses["infra"] == "ok"
     assert r.statuses["verifier"] == "missing" and r.pass_ is None
     assert r.harness_cost_usd is None
+
+
+def test_trial_row_timeout_after_completion_reclassified(tmp_path):
+    """ISS-1200: A1-A4 run 13-17 min against regex-log's 900s cap; a trial that solved and
+    finished its FULL cleanup (versions.json, story.tgz, story-status.json, story-sessions.json)
+    before harbor's own AgentTimeoutError finalized it is not a real timeout."""
+    t = copy_fixture(tmp_path)
+    res = json.loads((t / "result.json").read_text())
+    res["exception_info"] = {"exception_type": "AgentTimeoutError", "exception_message": "Agent execution timed out after 900 seconds"}
+    (t / "result.json").write_text(json.dumps(res))  # verifier_result / reward 1.0 untouched from the fixture
+    _write_empty_tgz(t / "agent" / "story.tgz")
+    for name in ("story-status.json", "story-sessions.json"):
+        (t / "agent" / name).write_text("x")
+    r = parse_trial(t, "A2", INSTRUCTION)
+    assert r.statuses["agent"] == "timeout-after-completion"
+    assert r.reward == 1.0 and r.pass_ is True
+
+
+def test_trial_row_real_timeout_not_reclassified_missing_cleanup_file(tmp_path):
+    """The same AgentTimeoutError and reward, but the cleanup set is incomplete (no
+    story-sessions.json) -- this is a real timeout, not reclassified."""
+    t = copy_fixture(tmp_path)
+    res = json.loads((t / "result.json").read_text())
+    res["exception_info"] = {"exception_type": "AgentTimeoutError", "exception_message": "Agent execution timed out after 900 seconds"}
+    (t / "result.json").write_text(json.dumps(res))
+    _write_empty_tgz(t / "agent" / "story.tgz")
+    (t / "agent" / "story-status.json").write_text("x")  # story-sessions.json deliberately missing
+    r = parse_trial(t, "A2", INSTRUCTION)
+    assert r.statuses["agent"] == "timeout"
+
+
+def test_trial_row_real_timeout_not_reclassified_no_reward(tmp_path):
+    """The full cleanup set alone is not enough: without a reward, this stays a real timeout
+    (e.g. the verifier itself never ran to completion)."""
+    t = copy_fixture(tmp_path)
+    res = json.loads((t / "result.json").read_text())
+    res["exception_info"] = {"exception_type": "AgentTimeoutError", "exception_message": "Agent execution timed out after 900 seconds"}
+    res["verifier_result"] = None
+    (t / "result.json").write_text(json.dumps(res))
+    _write_empty_tgz(t / "agent" / "story.tgz")
+    for name in ("story-status.json", "story-sessions.json"):
+        (t / "agent" / name).write_text("x")
+    r = parse_trial(t, "A2", INSTRUCTION)
+    assert r.statuses["agent"] == "timeout" and r.reward is None
+
+
+def test_trial_row_a0_timeout_never_reclassified(tmp_path):
+    """A0 never produces the storybloq cleanup set at all, and per the ruling A0's cap stays at
+    the harbor default -- a timeout there is always a real timeout, never reclassified."""
+    t = copy_fixture(tmp_path)
+    res = json.loads((t / "result.json").read_text())
+    res["exception_info"] = {"exception_type": "AgentTimeoutError", "exception_message": "Agent execution timed out after 900 seconds"}
+    (t / "result.json").write_text(json.dumps(res))
+    _write_empty_tgz(t / "agent" / "story.tgz")
+    for name in ("story-status.json", "story-sessions.json"):
+        (t / "agent" / name).write_text("x")
+    r = parse_trial(t, "A0", INSTRUCTION)
+    assert r.statuses["agent"] == "timeout"
 
 
 def test_trial_row_infra_only_from_pre_start_marker(tmp_path):

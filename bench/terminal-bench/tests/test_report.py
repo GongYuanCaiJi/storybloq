@@ -70,6 +70,22 @@ def test_guide_not_invoked_flagged_counted_and_excluded_from_compliant_only():
     assert compliant.denominator == 1 and compliant.guide_not_invoked == 0
 
 
+def test_timeout_after_completion_not_flagged_real_timeout_still_flagged():
+    """ISS-1200: a trial that solved and cleaned up before harbor's own AgentTimeoutError
+    finalized it (agent status "timeout-after-completion") must not count toward `flagged` --
+    it gets its own counter instead. A row still literally stuck at "timeout" is a real error
+    and stays flagged, with its own counter too."""
+    cs = [
+        costed(row("a", "A1", compliance="ok"), 1.0),
+        costed(row("b", "A1", agent="timeout-after-completion", compliance="ok"), 1.0),
+        costed(row("c", "A1", passed=None, agent="timeout", compliance="ok"), 1.0),
+    ]
+    s = summarize("A1", cs)
+    assert s.denominator == 3
+    assert s.timeout_after_completion == 1 and s.real_timeout == 1
+    assert s.flagged == 1  # only the real timeout ("c"); "a" is clean, "b" is reclassified
+
+
 def test_zero_passes_is_undefined():
     s = summarize("A0", [costed(row("a", "A0", passed=False), 1.0)])
     assert s.passes == 0 and s.cost_per_passed == "undefined" and s.cost_per_task == 1.0

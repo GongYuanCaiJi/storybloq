@@ -33,13 +33,19 @@ refuses to construct. Treatment arms create ONE ticket from the task text and ru
 ## Protocol (frozen by the manifest hash)
 
 Identical across arms: task text, instruction suffix, executor model, no `--max-turns`, no
-`--max-budget-usd`, the task's own timeouts at multiplier 1.0, one attempt, no retries except
-a single rerun of a PRE-START infra failure. Estimand: equal wall-clock budget per the
-task's own timeout; treatment arms may spend more tokens and that spend is what the cost
-column reports. Per task the arm order is drawn from the seed; runs are sequential
-(`-n 1`), foreground, logs to a file. `regex-log` (from `terminal-bench-sample@2.0`) is the
-smoke task and is excluded from the pilot frame. Any change to a hashed file after the
-freeze requires a new manifest; affected arms rerun and the report lists both.
+`--max-budget-usd`, one attempt, no retries except a single rerun of a PRE-START infra failure.
+The task's own verifier, agent-setup and environment-build timeouts stay at harbor's default
+multiplier (1.0) for every arm. The AGENT timeout (each task's `[agent] timeout_sec`, harbor's
+`agent_timeout_multiplier`) is per-arm, frozen in the manifest's `protocol.agent_timeout_multiplier`
+(ISS-1200: a real storybloq-arm smoke trial finished cleanly at 1027.8s, past regex-log's 900s
+cap, and was still recorded as a timeout): A0 stays at 1.0 (900s) since it runs no guide/review
+workflow and never approaches the cap; A1-A4 run at 2.5 (2250s), 2x that trial's wall rounded up,
+so the cap is not binding for them. Estimand: equal wall-clock budget per arm's own timeout;
+treatment arms may spend more tokens and that spend is what the cost column reports. Per task
+the arm order is drawn from the seed; runs are sequential (`-n 1`), foreground, logs to a file.
+`regex-log` (from `terminal-bench-sample@2.0`) is the smoke task and is excluded from the pilot
+frame. Any change to a hashed file after the freeze requires a new manifest; affected arms
+rerun and the report lists both.
 
 ## Authentication (subscriptions, never API keys)
 
@@ -86,7 +92,8 @@ $PY manifest/freeze.py .../prepare-manifest.json .../run-manifest.json   # print
 PYTHONPATH=$PWD /Volumes/Sharge/cpm-bench/venv/tb-env/bin/harbor run --path .../tasks --agent agents.storybloq_auto:StorybloqAuto \
    --ak manifest=.../run-manifest.json --ak arm=A1 --ak version=<claude code pin> \
    -m anthropic/claude-sonnet-5 --ae CLAUDE_CODE_OAUTH_TOKEN="$CLAUDE_CODE_OAUTH_TOKEN" \
-   [--ak codex_auth="$CODEX_AUTH"]  -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
+   [--ak codex_auth="$CODEX_AUTH"] --agent-timeout-multiplier <manifest protocol.agent_timeout_multiplier[<arm>]> \
+   -n 1 -o /Volumes/Sharge/cpm-bench/runs/<job> \
    --agent-include-logs '**' 2>&1 | tee /Volumes/Sharge/cpm-bench/runs/<job>.log
 $PY report/build_report.py --job A1=/Volumes/Sharge/cpm-bench/runs/<job>/<YYYY-MM-DD__HH-MM-SS> ... \
    [--rerun A1=<job dir holding the single authorised reruns>] \
