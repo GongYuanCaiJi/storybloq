@@ -26,6 +26,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from report.parse import (  # noqa: E402
+    check_a0_isolation,
     cost_usd,
     parse_claude_sessions,
     parse_codex_home,
@@ -304,13 +305,116 @@ def test_trial_row_reward_domain(tmp_path):
     assert r.pass_ is False and r.reward == 0.0
 
 
+def make_config_dir_tgz(dest: Path, entries: list[tuple[str, str, bytes | None]]) -> None:
+    """entries: (name, kind, target) where kind is 'f' (regular file), 'd' (directory) or
+    'l' (symlink, target = the string it points at). Mirrors what `tar czf ... -C <dir> .`
+    produces for A0's collected CLAUDE_CONFIG_DIR: a leading `./` on every member."""
+    with tarfile.open(dest, "w:gz") as tf:
+        root = tarfile.TarInfo(".")
+        root.type = tarfile.DIRTYPE
+        tf.addfile(root)
+        for name, kind, target in entries:
+            info = tarfile.TarInfo(f"./{name}")
+            if kind == "f":
+                data = target or b""
+                info.type = tarfile.REGTYPE
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+            elif kind == "d":
+                info.type = tarfile.DIRTYPE
+                tf.addfile(info)
+            elif kind == "l":
+                info.type = tarfile.SYMTYPE
+                info.linkname = target or "/etc/hosts"
+                tf.addfile(info)
+            else:
+                raise ValueError(kind)
+
+
 def test_trial_row_a0_isolation_marker(tmp_path):
     t = copy_fixture(tmp_path)
+    # No artifact at all: unknown (can never be "ok" by default -- fails closed).
     r = parse_trial(t, "A0")
-    assert r.statuses["compliance"] == "ok" and r.reviewer_coverage == "n/a"
-    (t / "agent" / "compliance-error.json").write_text(json.dumps({"kind": "isolation"}))
+    assert r.statuses["compliance"] == "unknown" and r.reviewer_coverage == "n/a"
+    # The invariant is narrow -- did storybloq install itself -- not "the dir is pristine". A
+    # genuinely clean A0 trial's CLAUDE_CONFIG_DIR (verified against an actual successful run)
+    # normally holds all of this, none of it storybloq state: ok.
+    with tarfile.open(t / "agent" / "config-dir.tgz", "w:gz") as tf:
+        root = tarfile.TarInfo("."); root.type = tarfile.DIRTYPE; tf.addfile(root)
+        for name, kind, data in [
+            (".claude.json", "f", b'{"firstStartVersion":"2.1.267"}'),
+            (".last-cleanup", "f", b"2026-09-11T23:52:00Z\n"),
+            ("policy-limits.json", "f", b"{}"),
+            ("remote-settings.json", "f", b"{}"),
+            ("skills", "d", None),  # present but empty: not a violation
+            ("backups", "d", None), ("debug", "d", None), ("projects", "d", None), ("projects/-app", "d", None),
+            ("session-env", "d", None), ("sessions", "d", None), ("shell-snapshots", "d", None),
+        ]:
+            info = tarfile.TarInfo(f"./{name}")
+            if kind == "f":
+                info.type = tarfile.REGTYPE; info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+            else:
+                info.type = tarfile.DIRTYPE; tf.addfile(info)
+        transcript = tarfile.TarInfo("./projects/-app/8027d459.jsonl"); transcript.type = tarfile.REGTYPE; transcript.size = 0
+        tf.addfile(transcript, io.BytesIO(b""))
     r = parse_trial(t, "A0")
-    assert r.statuses["compliance"] == "isolation-violated" and r.statuses["infra"] == "ok"
+    assert r.statuses["compliance"] == "ok" and r.statuses["infra"] == "ok"
+    # A populated skills/ (storybloq's skill installed itself): violated.
+    with tarfile.open(t / "agent" / "config-dir.tgz", "w:gz") as tf:
+        d = tarfile.TarInfo("./skills"); d.type = tarfile.DIRTYPE; tf.addfile(d)
+        nested = tarfile.TarInfo("./skills/story/SKILL.md"); nested.type = tarfile.REGTYPE; nested.size = 0
+        tf.addfile(nested, io.BytesIO(b""))
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # settings.json at the top level (storybloq's hooks/MCP registration): violated.
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [(".claude.json", "f", b"{}"), ("settings.json", "f", b"{}")])
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # A symlinked skills -> an arbitrary populated directory produces no skills/... members at
+    # all (tar never follows a symlink into its target): violated regardless.
+    with tarfile.open(t / "agent" / "config-dir.tgz", "w:gz") as tf:
+        link = tarfile.TarInfo("./skills"); link.type = tarfile.SYMTYPE; link.linkname = "/some/populated/dir"
+        tf.addfile(link)
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # A storybloq MCP registration hiding inside .claude.json's mcpServers, with no settings.json
+    # and no populated skills/ at all: violated.
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [
+        (".claude.json", "f", json.dumps({"mcpServers": {"storybloq": {"command": "storybloq", "args": ["--mcp"]}}}).encode()),
+    ])
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # A non-storybloq mcpServers entry, or ordinary non-JSON-mcpServers .claude.json content, is
+    # still tolerated -- the check targets storybloq specifically, not any MCP config at all.
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [
+        (".claude.json", "f", json.dumps({"mcpServers": {"other-tool": {"command": "other-tool"}}}).encode()),
+    ])
+    assert parse_trial(t, "A0").statuses["compliance"] == "ok"
+    # A storybloq MCP registration hiding under a PROJECT-scoped entry (projects.<path>.mcpServers)
+    # rather than the top-level mcpServers: violated (round 33 finding).
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [
+        (".claude.json", "f", json.dumps({
+            "projects": {"/app": {"mcpServers": {"storybloq": {"command": "storybloq", "args": ["--mcp"]}}}}
+        }).encode()),
+    ])
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # A non-storybloq server whose free-form `env` value happens to contain the word "storybloq"
+    # (e.g. an unrelated PROJECT_NAME) is NOT a violation -- only identity/execution fields
+    # (name, command, args, url, type) are checked, never env (round 33 finding).
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [
+        (".claude.json", "f", json.dumps({
+            "mcpServers": {"other-tool": {"command": "other-tool", "env": {"PROJECT_NAME": "storybloq"}}}
+        }).encode()),
+    ])
+    assert parse_trial(t, "A0").statuses["compliance"] == "ok"
+    # .claude.json that fails to parse as JSON cannot be verified clean: violated, not skipped.
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [(".claude.json", "f", b"not json")])
+    assert parse_trial(t, "A0").statuses["compliance"] == "isolation-violated"
+    # An empty archive: nothing to flag either way: ok.
+    make_config_dir_tgz(t / "agent" / "config-dir.tgz", [])
+    assert parse_trial(t, "A0").statuses["compliance"] == "ok"
+    # A zero-byte or corrupt archive fails closed as unknown, never as a silent "ok" or a crash.
+    (t / "agent" / "config-dir.tgz").write_bytes(b"")
+    assert check_a0_isolation(t / "agent") == "unknown"
+    (t / "agent" / "config-dir.tgz").write_bytes(b"not a tar file")
+    assert check_a0_isolation(t / "agent") == "unknown"
 
 
 def test_trial_row_reviewer_coverage_missing_vs_verified_zero(tmp_path):

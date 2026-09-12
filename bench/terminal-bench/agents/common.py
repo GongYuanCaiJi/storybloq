@@ -22,10 +22,10 @@ ADAPTER_FILES = (
 )
 CLEANUP_STEP_TIMEOUT = 60
 CLEANUP_PHASE_TIMEOUT = 150
-POST_RUN_CHECK_TIMEOUT = 60
+POST_RUN_CHECK_TIMEOUT = 60  # bounds A0's post-run config-dir collection, and the pre-launch config gate
 INFRA_MARKER = "infra-failure.json"   # written by the adapter BEFORE claude ever starts
 STARTED_MARKER = "started.json"       # written immediately before the parent run() call
-COMPLIANCE_MARKER = "compliance-error.json"  # post-start violation; the row stays in the denominator
+CONFIG_DIR_ARTIFACT = "config-dir.tgz"  # A0's collected CLAUDE_CONFIG_DIR; isolation is checked host-side, see report/parse.py:check_a0_isolation
 
 
 class InfraError(RuntimeError):
@@ -423,15 +423,16 @@ def _mcp_connected(listing: str, name: str) -> bool:
     return False
 
 
-async def assert_effective_config(sh: Shell, config_dir: str, env: dict[str, str], *, expect_storybloq: bool, skill_sha256: str | None, expect_bridge: bool) -> dict[str, Any]:
+async def assert_effective_config(sh: Shell, config_dir: str, env: dict[str, str], *, skill_sha256: str | None, expect_bridge: bool) -> dict[str, Any]:
+    """Pre-launch gate for the treatment arms (A1/A2): the installed skill and storybloq's own
+    hook/MCP wiring are exactly what the manifest expects. A0's post-run isolation state is no
+    longer asserted live in-container (see baseline.py's config-dir collection and
+    report/parse.py's check_a0_isolation): six review rounds (25-30) on a shell/Node one-liner
+    kept surfacing narrower text-parsing, TOCTOU and portability gaps, none of which touched an
+    actual benchmark result, so the check moved to a host-side, tar-based, pure-Python pass over
+    collected artifacts after the fact -- exactly the model already used for the credential-leak
+    scanner."""
     q = shlex.quote(config_dir)
-    if not expect_storybloq:
-        # Exit status is meaningful: an absent skills dir is the clean case, a failing `ls` on a
-        # present one is an error (exit 3), and the existence tests never fail the command.
-        r = await sh.must(f'if [ -e {q}/skills ]; then ls -A {q}/skills || exit 3; fi; if [ -e {q}/settings.json ]; then echo SETTINGS; fi; if [ -e {q}/.claude.json ]; then echo CLAUDEJSON; fi', "config", env)
-        if r.stdout.strip():
-            raise InfraError("config", f"baseline config dir not empty: {r.stdout.strip()[:200]}")
-        return {"skills": "empty"}
     r = await sh.must(f"sha256sum {q}/skills/story/SKILL.md | cut -d' ' -f1", "config", env)
     measured = r.stdout.strip()
     if skill_sha256 and measured != skill_sha256:

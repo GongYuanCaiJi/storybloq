@@ -129,14 +129,32 @@ home. The clean-home isolation gate runs before any install; a second gate after
 permits exactly one file on treatment arms, `~/.claude/settings.json` as written by storybloq's
 CLI housekeeping (a single `hooks` key, every command a storybloq program), and nothing on A0;
 skills, MCP config, Codex state or a foreign hook are pre-start infra errors. The effective
-configuration under `CLAUDE_CONFIG_DIR` is asserted again before launch. A hook command passes
+configuration under `CLAUDE_CONFIG_DIR` is asserted again before launch (A1/A2 only). A0's
+post-run state is not asserted live in-container: `CLAUDE_CONFIG_DIR` is tar'd into
+`agent/config-dir.tgz` (best effort, bounded), and the report build checks it host-side
+(`report/parse.py:check_a0_isolation`, pure Python over the archive's own member metadata, no
+shell). The invariant is narrow -- did storybloq install itself, matching the pre-launch gate's
+own question for A1/A2 -- not "the directory is pristine": Claude Code's own per-trial
+bookkeeping under a redirected `CLAUDE_CONFIG_DIR` (`.claude.json`, `.last-cleanup`, `backups/`,
+`debug/`, `policy-limits.json`, `projects/` session transcripts, `remote-settings.json`,
+`session-env/`, `shell-snapshots/`, a `skills/` that is a real, empty directory) is expected and
+tolerated. Makes the row's `compliance` status `isolation-violated`: a populated `skills/`, a
+`skills` entry that is a symlink rather than a real directory (tar never follows it into whatever
+it points at, so that content is otherwise invisible here), a top-level `settings.json`, or a
+`storybloq` entry under `.claude.json`'s top-level or per-project `mcpServers` (Claude Code's own
+user-scope MCP config lives there, not only in `settings.json`, and can also be scoped under
+`projects.<path>.mcpServers`) -- matched against each server's identity/execution fields (name,
+`command`, `args`, `url`, `type`) only, never its free-form `env` or other config, so an unrelated
+server whose env happens to mention "storybloq" is not a false positive -- an unparseable or
+oversized `.claude.json` counts as a violation too, never a silent skip. A missing, empty, or
+unreadable archive is `unknown` (fails closed, never silently `ok`). A hook command passes
 only as a single plain invocation of one of the package's two bins (`storybloq`,
 `storybloq-presence`) with an audited subcommand: no shell operators,
 substitutions, quotes or redirections anywhere in the string), `agent/started.json` (written right before claude is
 launched), `agent/infra-failure.json` (written on a PRE-START failure, including a pre-start hang cut by
 the task timeout, reason `pre-start-timeout`; the only thing the report accepts as an infra
-exclusion), `agent/compliance-error.json` (A0 isolation violated
-after the run; the row stays in the denominator, flagged), `agent/claude-code.txt`
+exclusion), `agent/config-dir.tgz` (A0's collected `CLAUDE_CONFIG_DIR`; an isolation violation
+found there keeps the row in the denominator, flagged), `agent/claude-code.txt`
 (stream-json), `agent/sessions/` (Claude transcripts incl. subagents), `agent/codex-home/`
 (Codex rollouts, A2/A4), `agent/story-live/` (incremental copy of `.story/`, each snapshot published by atomic rename
 and `last-snapshot` stamped only after a successful copy),

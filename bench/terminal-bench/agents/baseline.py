@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -12,12 +13,10 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
 from agents.common import (
-    COMPLIANCE_MARKER,
+    CONFIG_DIR_ARTIFACT,
     POST_RUN_CHECK_TIMEOUT,
-    InfraError,
     Manifest,
     Shell,
-    assert_effective_config,
     AUTH_MODE,
     check_env_allowlist,
     check_pins,
@@ -89,26 +88,27 @@ class StorybloqBaseline(ClaudeCode):
         try:
             await super().run(render_instruction(instruction), environment, context)
         finally:
-            # Post-start negative assertion, bounded. A violation here is a COMPLIANCE failure of a
-            # trial that ran (it stays in the denominator, flagged); nothing in this block can
-            # replace the original outcome: every step is bounded and swallows its own errors.
-            await run_bounded(self._post_run_isolation_check(sh, logs), POST_RUN_CHECK_TIMEOUT + 15)
+            # Collection only, bounded and best-effort: nothing in this block can replace the
+            # original outcome. Whether the config dir stayed empty (isolation held) is decided
+            # host-side from this tar, in report/parse.py:check_a0_isolation -- not asserted live
+            # in-container. That in-container check went through six review rounds (25-30) on a
+            # shell/Node one-liner, each round closing one text-parsing, TOCTOU or portability gap
+            # only to expose a narrower one, none of it ever touching an actual benchmark result;
+            # a plain `tar` (byte-exact archive member names and types from a real stat/lstat tar
+            # already has to do, no shell text-parsing of a listing at all) plus a host-side pure
+            # Python check over the extracted archive removes every one of those classes at once.
+            await run_bounded(self._collect_config_dir(sh, logs), POST_RUN_CHECK_TIMEOUT + 15)
 
-    async def _post_run_isolation_check(self, sh: Shell, logs) -> None:
+    async def _collect_config_dir(self, sh: Shell, logs) -> None:
+        cfg = self._config_dir()
+        dest = (logs / CONFIG_DIR_ARTIFACT).as_posix()
+        partial = dest + ".partial"
         try:
-            await asyncio.wait_for(assert_effective_config(sh, self._config_dir(), {"CLAUDE_CONFIG_DIR": self._config_dir()}, expect_storybloq=False, skill_sha256=None, expect_bridge=False), POST_RUN_CHECK_TIMEOUT)
-            return
+            # Built under a same-directory .partial name then renamed: /logs/agent is a bind
+            # mount elsewhere in this adapter, where a cross-filesystem rename or hard link fails
+            # (EXDEV) but a same-directory rename is always atomic.
+            await asyncio.wait_for(sh.run(f"tar czf {shlex.quote(partial)} -C {shlex.quote(cfg)} . && mv -f {shlex.quote(partial)} {shlex.quote(dest)}"), POST_RUN_CHECK_TIMEOUT)
         except asyncio.CancelledError:
             raise
-        except InfraError as exc:
-            detail = str(exc)[:2000]
-        except asyncio.TimeoutError:
-            detail = f"isolation check exceeded {POST_RUN_CHECK_TIMEOUT}s"
-        except Exception as exc:  # noqa: BLE001
-            detail = f"isolation check failed: {type(exc).__name__}"
-        try:
-            await sh.run(write_file_command((logs / COMPLIANCE_MARKER).as_posix(), json.dumps({"kind": "isolation", "detail": detail})), timeout=10)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  best-effort: report/parse.py treats a missing/partial artifact as unknown, never as a pass
             pass

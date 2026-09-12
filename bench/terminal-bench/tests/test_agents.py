@@ -229,21 +229,13 @@ async def test_clean_home_workdir_base_env_and_preflight():
 async def test_effective_config_polarity_structural():
     cfg = "/logs/agent/sessions"
     env = {"CLAUDE_CONFIG_DIR": cfg}
-    sh, fx = shell({"ls -A": (0, "")})
-    assert await assert_effective_config(sh, cfg, env, expect_storybloq=False, skill_sha256=None, expect_bridge=False) == {"skills": "empty"}
-    assert all(c["env"].get("CLAUDE_CONFIG_DIR") == cfg for c in sh.calls)
-    sh, fx = shell({"ls -A": (0, "story\n")})
-    with pytest.raises(InfraError, match="config"):
-        await assert_effective_config(sh, cfg, env, expect_storybloq=False, skill_sha256=None, expect_bridge=False)
-    sh, fx = shell({"ls -A": (2, "")})  # the check itself failed: not a clean verdict
-    with pytest.raises(InfraError, match="config"):
-        await assert_effective_config(sh, cfg, env, expect_storybloq=False, skill_sha256=None, expect_bridge=False)
     ok = {"sha256sum": (0, "abc\n"), "cat /logs/agent/sessions/settings.json": (0, HOOKS_OK), "claude mcp list": (0, MCP_OK)}
     sh, fx = shell(ok)
-    assert (await assert_effective_config(sh, cfg, env, expect_storybloq=True, skill_sha256="abc", expect_bridge=True))["skill_sha256"] == "abc"
+    assert (await assert_effective_config(sh, cfg, env, skill_sha256="abc", expect_bridge=True))["skill_sha256"] == "abc"
+    assert all(c["env"].get("CLAUDE_CONFIG_DIR") == cfg for c in sh.calls)
     sh, fx = shell(ok)
     with pytest.raises(InfraError, match="SKILL.md"):
-        await assert_effective_config(sh, cfg, env, expect_storybloq=True, skill_sha256="other", expect_bridge=False)
+        await assert_effective_config(sh, cfg, env, skill_sha256="other", expect_bridge=False)
     # names present but hooks structurally invalid / mentioned outside a hook command
     for bad in ('{"hooks": {"PreCompact": "storybloq"}}', '{"hooks": {"PreCompact": [{"hooks": "storybloq"}]}}', '{"permissions": {"allow": ["storybloq"]}, "hooks": {}}', "not json",
                 '{"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": "storybloq snapshot", "disabled": true}]}]}}',
@@ -253,14 +245,14 @@ async def test_effective_config_polarity_structural():
                 '{"disableAllHooks": true, "hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": "storybloq snapshot"}]}]}}'):
         sh, fx = shell({**ok, "cat /logs/agent/sessions/settings.json": (0, bad)})
         with pytest.raises(InfraError, match="settings.json"):
-            await assert_effective_config(sh, cfg, env, expect_storybloq=True, skill_sha256="abc", expect_bridge=False)
+            await assert_effective_config(sh, cfg, env, skill_sha256="abc", expect_bridge=False)
     # server listed but not connected
     sh, fx = shell({**ok, "claude mcp list": (0, "storybloq: ... - ✓ Connected\ncodex-bridge: node ... - ✗ Failed to connect\n")})
     with pytest.raises(InfraError, match="codex-bridge MCP not connected"):
-        await assert_effective_config(sh, cfg, env, expect_storybloq=True, skill_sha256="abc", expect_bridge=True)
+        await assert_effective_config(sh, cfg, env, skill_sha256="abc", expect_bridge=True)
     sh, fx = shell({**ok, "claude mcp list": (0, "codex-bridge: node ... - ✓ Connected\n")})
     with pytest.raises(InfraError, match="storybloq MCP not connected"):
-        await assert_effective_config(sh, cfg, env, expect_storybloq=True, skill_sha256="abc", expect_bridge=True)
+        await assert_effective_config(sh, cfg, env, skill_sha256="abc", expect_bridge=True)
 
 
 @pytest.mark.asyncio
@@ -314,7 +306,7 @@ class StrictEnv:
         r"^cd /app && /opt/bench/node_modules/\.bin/storybloq config set-overrides --json ", r"^printf '%s' .* > /tmp/instruction\.md$", r"^cd /app && /opt/node/bin/node /opt/bench/mkticket\.cjs /tmp/instruction\.md$",
         r"^nohup /opt/node/bin/node /opt/bench/telemetry-copier\.cjs /app /logs/agent/story-live", r"^printf '%s' .* > /logs/agent/versions\.json$", r"^date -u .* > /logs/agent/started\.json$",
         r"^mkdir -p \$CLAUDE_CONFIG_DIR/debug", r"^export PATH=\"\$HOME/\.local/bin:\$PATH\"; harbor_claude_code_instruction_", r"^timeout 60 sh -c ", r"^printf '%s' .* > /logs/agent/collect-errors\.json$",
-        r"^printf '%s' .* > /logs/agent/infra-failure\.json$", r"^if \[ -e /logs/agent/sessions/skills \]; then ls -A", r"^printf '%s' .* > /logs/agent/compliance-error\.json$",
+        r"^printf '%s' .* > /logs/agent/infra-failure\.json$", r"^tar czf /logs/agent/config-dir\.tgz\.partial -C /logs/agent/sessions \. && mv -f /logs/agent/config-dir\.tgz\.partial /logs/agent/config-dir\.tgz$",
         r"^command -v curl", r"^set -euo pipefail; if command -v apk",  # the parent's own claude install path (version mismatch case)
         r"^node --version$", r"^mkdir -p /opt/node /opt/claude && chmod 0777 /opt/node /opt/claude$",
         r"^tar -xzf /opt/node/node\.tgz -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/node /usr/local/bin/node && ln -sf /opt/node/bin/npm /usr/local/bin/npm && ln -sf /opt/node/bin/npx /usr/local/bin/npx$",
@@ -853,20 +845,21 @@ async def test_gate_cancel_fails_when_readiness_never_appears(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_baseline_isolation_violation_is_compliance_not_infra(tmp_path):
+async def test_baseline_collects_config_dir_and_original_exception_propagates(tmp_path):
+    """A0 no longer asserts isolation live in-container (see report/parse.py:check_a0_isolation
+    for why): it just tar's CLAUDE_CONFIG_DIR, best-effort. Whatever that archive holds, the
+    ORIGINAL claude-exit-1 failure is what propagates, untouched."""
     from agents.baseline import StorybloqBaseline
 
     mp = make_manifest(tmp_path)
     a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
-    env = StrictEnv({"ls -A": (0, "story it's $(echo x) `y`\n"), "harbor_claude_code_instruction_": (1, "")})
+    env = StrictEnv({"harbor_claude_code_instruction_": (1, "")})
     with pytest.raises(Exception) as ei:  # the ORIGINAL failure (claude exit 1) propagates
         await a.run("Fix it.  \n", env, None)
     assert "infra:" not in str(ei.value)
     cmds = env.cmds()
-    marker = next(c for c in cmds if "compliance-error.json" in c)
-    payload = json.loads(shlex.split(marker)[2])
-    assert payload["kind"] == "isolation" and "$(echo x)" in payload["detail"]
-    assert shlex.split(marker)[0] == "printf"  # quoted argument, no shell substitution possible
+    collect = next(c for c in cmds if "config-dir.tgz" in c)
+    assert "tar czf" in collect and "config-dir.tgz.partial" in collect and "mv -f" in collect
     assert not any("infra-failure.json" in c for c in cmds) and any("started.json" in c for c in cmds)
     launch = next(c for c in env.calls if "harbor_claude_code_instruction_" in c["command"])
     instr = launch["env"][next(k for k in launch["env"] if k.startswith("HARBOR_CLAUDE_CODE_INSTRUCTION_"))]
@@ -960,20 +953,20 @@ async def test_run_bounded_drains_a_child_that_swallows_the_first_cancel():
 
 
 @pytest.mark.asyncio
-async def test_baseline_marker_write_failure_keeps_original_exception(tmp_path):
+async def test_baseline_collection_failure_keeps_original_exception(tmp_path):
     from agents.baseline import StorybloqBaseline
 
     mp = make_manifest(tmp_path)
     a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
-    env = StrictEnv({"ls -A": (0, "story\n"), "harbor_claude_code_instruction_": (1, ""), "compliance-error.json": (1, "")})
+    env = StrictEnv({"harbor_claude_code_instruction_": (1, ""), "config-dir.tgz": (1, "")})
     orig = env.exec
 
-    async def exec_failing_marker(command, **kw):
-        if "compliance-error.json" in command:
+    async def exec_failing_collect(command, **kw):
+        if "config-dir.tgz" in command:
             raise OSError("disk full")
         return await orig(command, **kw)
 
-    env.exec = exec_failing_marker
+    env.exec = exec_failing_collect
     with pytest.raises(Exception) as ei:
         await a.run("x", env, None)
     assert "disk full" not in str(ei.value) and "infra:" not in str(ei.value)
@@ -981,7 +974,7 @@ async def test_baseline_marker_write_failure_keeps_original_exception(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_baseline_post_run_check_is_bounded(tmp_path, monkeypatch):
+async def test_baseline_config_dir_collection_is_bounded(tmp_path, monkeypatch):
     from agents import baseline as bl
     from agents.baseline import StorybloqBaseline
 
@@ -989,10 +982,8 @@ async def test_baseline_post_run_check_is_bounded(tmp_path, monkeypatch):
     mp = make_manifest(tmp_path)
     a = StorybloqBaseline(tmp_path / "l", manifest=str(mp), version="2.1.267", model_name="anthropic/claude-sonnet-5", extra_env=dict(OAUTH))
     env = StrictEnv()
-    env.hang_on = "ls -A"
-    await asyncio.wait_for(a.run("x", env, None), timeout=2)  # returns despite the hung check
-    marker = next(c for c in env.cmds() if "compliance-error.json" in c)
-    assert "exceeded" in json.loads(shlex.split(marker)[2])["detail"]
+    env.hang_on = "config-dir.tgz"
+    await asyncio.wait_for(a.run("x", env, None), timeout=2)  # returns despite the hung collection
 
 
 def _copier_once(work: Path, dest: Path) -> subprocess.CompletedProcess:

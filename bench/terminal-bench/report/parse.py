@@ -8,7 +8,7 @@ Reads, per harbor trial dir:
   agent/versions.json                  manifest hash, versions, measured skill hash
   agent/infra-failure.json             adapter marker: pre-start infra failure (the ONLY exclusion)
   agent/started.json                   adapter marker: claude was launched
-  agent/compliance-error.json          post-start protocol violation (row stays in)
+  agent/config-dir.tgz                 A0's collected CLAUDE_CONFIG_DIR (isolation checked here, host-side)
   agent/collect-errors.json            bounded-cleanup failures
   result.json                          harbor trial result (reward, exception, timing)
 
@@ -453,6 +453,116 @@ def scan_credential_leak(agent_dir: Path) -> None:
         raise CredentialLeak("credential material in collected artifacts: " + ", ".join(hits[:20]))
 
 
+def check_a0_isolation(agent_dir: Path) -> str:
+    """A0's isolation state, checked here rather than live in-container. A shell/Node one-liner
+    doing this live went through six review rounds (25-30) that each closed one text-parsing,
+    TOCTOU or filesystem-portability gap only to expose a narrower one -- none of it ever touching
+    an actual benchmark result. `tar` already has to stat (never just read a directory-entry type
+    hint) every member it archives, so its recorded type is reliable regardless of filesystem
+    quirks, and its header format needs no shell-style text splitting of a listing at all; this
+    reads that archive's own metadata directly, with plain Python and no shell.
+
+    Round 31 caught a real bug in an earlier version of this function: it tolerated ONLY a real
+    regular file named `.claude.json`, but a genuinely clean A0 trial's CLAUDE_CONFIG_DIR (verified
+    against an actual successful run) also normally holds `.last-cleanup`, `backups/`, `debug/`,
+    `policy-limits.json`, `projects/` (session transcripts), `remote-settings.json`, `session-env/`,
+    a nested `sessions/`, and `shell-snapshots/` -- all Claude Code's own per-trial bookkeeping
+    under a redirected CLAUDE_CONFIG_DIR, none of it storybloq state. The invariant this function
+    checks is narrower and matches the ORIGINAL (pre-round-25) design and the pre-launch gate used
+    for A1/A2 (`assert_effective_config`, `check_home_after_install`): did STORYBLOQ install itself
+    here. That is exactly two things: a non-empty `skills/` directory, or a `settings.json` file at
+    the top level (where storybloq's hooks/MCP registration would live). Everything else -- CLI
+    housekeeping, `.claude.json` included -- is tolerated regardless of what it is.
+
+    Round 32 (real Codex review) caught two more gaps in that two-thing check: (a) a `skills`
+    entry that is a SYMLINK rather than a real directory produces no `skills/...` members at all
+    (tar does not follow a symlink into its target), so it would pass as "empty" while pointing
+    at an arbitrarily populated directory elsewhere -- only a real directory at that exact path is
+    now tolerated; (b) `.claude.json` can itself carry an `mcpServers` registration (Claude Code's
+    user-scope MCP config lives there, not only in `settings.json`), so its bare presence is no
+    longer tolerated unconditionally: if it parses as JSON with an `mcpServers` object, every
+    server's identity fields are checked for the word "storybloq" (case-insensitive); a file that
+    fails to parse as JSON, or whose size exceeds a sane bound, is a violation rather than
+    silently skipped, since an unreadable/oversized file could be hiding exactly this.
+
+    Round 33 (real Codex review) caught two more gaps in (b): (c) `.claude.json` can ALSO carry
+    project-scoped registrations under `projects.<path>.mcpServers`, not only the top-level
+    `mcpServers` object -- every project entry's `mcpServers` is now checked the same way; (d) the
+    original check serialized the ENTIRE server config (including arbitrary `env` values) and
+    substring-matched it, so an unrelated server with an incidental env value like
+    `PROJECT_NAME=storybloq` would false-positive -- the check now only looks at identity/execution
+    fields (server name, `command`, `args`, `url`, `type`), never `env` or other free-form config.
+
+    Returns "ok" (none of the things below is present), "isolation-violated" (a populated or
+    symlinked `skills`, a `settings.json`, or a storybloq MCP registration -- top-level or
+    project-scoped -- inside `.claude.json`), or "unknown" (the artifact is missing, empty, or not
+    a readable, complete archive -- failing closed, never silently "ok")."""
+    f = agent_dir / "config-dir.tgz"
+    if not f.is_file() or f.stat().st_size == 0:
+        return "unknown"
+    try:
+        with tarfile.open(f, "r:*") as tf:
+            members = tf.getmembers()
+            claude_json_member = next((m for m in members if (m.name[2:] if m.name.startswith("./") else m.name) == ".claude.json"), None)
+            claude_json_bytes = None
+            if claude_json_member is not None and claude_json_member.isfile() and claude_json_member.size <= 1_000_000:
+                ex = tf.extractfile(claude_json_member)
+                claude_json_bytes = ex.read() if ex is not None else None
+    except (OSError, tarfile.TarError, EOFError):
+        return "unknown"
+    unexpected = []
+    for m in members:
+        name = m.name[2:] if m.name.startswith("./") else m.name
+        if name in ("", "."):
+            continue  # the archived directory's own top-level entry, not a content entry
+        if name == "settings.json":
+            unexpected.append(name)
+        elif name == "skills":
+            if not m.isdir():  # a symlink or file here hides its true, unarchived contents
+                unexpected.append(f"{name} (not a real directory)")
+        elif name.startswith("skills/"):
+            unexpected.append(name)
+        elif name == ".claude.json":
+            if claude_json_bytes is None:  # too large or unreadable: cannot be verified clean
+                unexpected.append(f"{name} (not verifiably clean)")
+            else:
+                try:
+                    data = json.loads(claude_json_bytes)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    unexpected.append(f"{name} (not valid JSON)")
+                else:
+                    hit = _find_storybloq_mcp_server(data.get("mcpServers") if isinstance(data, dict) else None)
+                    if hit is not None:
+                        unexpected.append(f"{name} (mcpServers.{hit})")
+                    else:
+                        projects = data.get("projects") if isinstance(data, dict) else None
+                        if isinstance(projects, dict):
+                            for project_path, project_cfg in projects.items():
+                                if not isinstance(project_cfg, dict):
+                                    continue
+                                hit = _find_storybloq_mcp_server(project_cfg.get("mcpServers"))
+                                if hit is not None:
+                                    unexpected.append(f"{name} (projects.{project_path}.mcpServers.{hit})")
+    return "isolation-violated" if unexpected else "ok"
+
+
+def _find_storybloq_mcp_server(servers: Any) -> str | None:
+    """First server name in `servers` (an `mcpServers`-shaped mapping) that names storybloq via
+    its identity/execution fields (name, command, args, url, type) only -- never `env` or other
+    free-form config, since those can hold arbitrary unrelated values (round 33: a non-storybloq
+    server's env containing e.g. `PROJECT_NAME=storybloq` must not false-positive)."""
+    if not isinstance(servers, dict):
+        return None
+    for server_name, cfg in servers.items():
+        identity_fields: list[Any] = [server_name]
+        if isinstance(cfg, dict):
+            identity_fields.extend(cfg.get(k) for k in ("command", "args", "url", "type") if k in cfg)
+        haystack = json.dumps(identity_fields)
+        if "storybloq" in haystack.lower():
+            return server_name
+    return None
+
+
 RATE_LIMIT_MARKERS = ("rate limit", "rate_limit", "usage limit", "usage_limit", "429", "overloaded")
 
 
@@ -620,8 +730,7 @@ def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attem
     else:
         reviewer_coverage = "n/a"
     if arm == "A0":
-        comp = _read_json(agent_dir / "compliance-error.json", diags, "compliance-marker")
-        statuses["compliance"] = "isolation-violated" if comp is not None or (agent_dir / "compliance-error.json").exists() else "ok"
+        statuses["compliance"] = check_a0_isolation(agent_dir)
 
     if instruction is not None and arm != "A0" and started:
         if story.ticket_description is None:

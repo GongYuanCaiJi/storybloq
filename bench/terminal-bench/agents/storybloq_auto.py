@@ -230,7 +230,7 @@ class StorybloqAuto(ClaudeCode):
                 f"claude mcp add codex-bridge -s user -e RB_CONFIG_PATH={shlex.quote(env['RB_CONFIG_PATH'])} -e CODEX_HOME={shlex.quote(env['CODEX_HOME'])} -- node {REMOTE}/node_modules/codex-claude-bridge/dist/index.js",
                 "config", env,
             )
-        return await assert_effective_config(sh, self._config_dir(), env, expect_storybloq=True, skill_sha256=self.manifest.artifact("storybloq").get("skill_sha256"), expect_bridge=self.uses_codex())
+        return await assert_effective_config(sh, self._config_dir(), env, skill_sha256=self.manifest.artifact("storybloq").get("skill_sha256"), expect_bridge=self.uses_codex())
 
     async def _prepare_task(self, sh: Shell, env: dict[str, str], instruction: str) -> str:
         wd = shlex.quote(self.workdir or ".")
