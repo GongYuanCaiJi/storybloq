@@ -360,13 +360,18 @@ describe("tool description contract (T-460)", () => {
     // T-320 commit 5 then adds two optional fields (limit, select) to
     // storybloq_lesson_digest after the same trim (its own measurement was
     // 62,745 without T-502); the combined payload is re-measured at landing.
-    // This ceiling leaves ~900 bytes of headroom and fails once an edit gives
+    // ISS-1154 Commit A adds `format` and `withActionability` to
+    // storybloq_ticket_get and storybloq_issue_get after the same trim
+    // (`format` described as "default: md", `withActionability` undescribed);
+    // measured at 63,633 on main with T-502 and T-320 present, so the budget
+    // is raised from 63,500 to 64,000 as a deliberate act.
+    // This ceiling leaves ~370 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
     // above are what protect against over-trimming, and a floor would fail an
     // honest future trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(63_500);
+    expect(bytes).toBeLessThan(64_000);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
