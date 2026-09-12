@@ -9,5 +9,6 @@
   "location": ["src/core/snapshot.ts:108"],
   "discoveredDate": "2026-08-08",
   "resolvedDate": null,
-  "relatedTickets": ["T-1004"]
+  "relatedTickets": ["T-1004"],
+  "disposition": "owner_gated"
 }

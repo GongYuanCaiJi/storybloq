@@ -45,14 +45,10 @@ import {
   byteLength,
   buildNormalizer,
   FIXTURE_ROOT_PLACEHOLDER,
-  parseRecommendMarkdown,
-  deriveRecommendRows,
+  deriveRecommendPayload,
   findContinuationSection,
   extractEntityIds,
-  issueClearsActionabilityBar,
-  ticketClearsActionabilityBar,
-  parseTicketMarkdown,
-  parseIssueMarkdown,
+  deriveEntityActionability,
   reconcileFingerprints,
   isOrchestratorConfig,
   buildFailedRecommendReport,
@@ -66,6 +62,8 @@ import {
   type CapturedMessage,
   type ExchangeMeasurement,
   type ReplayContext,
+  type RecommendRow,
+  type ExcludedRow,
 } from "../../scripts/priming-cost.js";
 import { reduceSessionForCompact } from "../../src/core/output-formatter.js";
 import type { ActiveSessionSummary } from "../../src/core/session-scan.js";
@@ -163,82 +161,61 @@ describe("buildNormalizer", () => {
   });
 });
 
-// --- recommend markdown parsing ------------------------------------------------
+// --- recommend JSON parsing ----------------------------------------------------
 
-describe("parseRecommendMarkdown", () => {
-  it("parses id/kind/title/reason rows from the numbered-list shape", () => {
-    const text = [
-      "# Recommendations",
-      "",
-      "1. **T-1001** (ticket) -- Wire the ingest retry queue",
-      "   _quick win, unblocked_",
-      "",
-      "2. **ISS-2001** (issue) -- Retry queue drops the final byte",
-      "   _high severity, actionable_",
-      "",
-    ].join("\n");
-    const rows = parseRecommendMarkdown(text);
-    expect(rows).toEqual([
-      { id: "T-1001", kind: "ticket", title: "Wire the ingest retry queue", reason: "quick win, unblocked" },
-      { id: "ISS-2001", kind: "issue", title: "Retry queue drops the final byte", reason: "high severity, actionable" },
-    ]);
-  });
-});
+describe("deriveRecommendPayload", () => {
+  function envelope(data: unknown): string {
+    return JSON.stringify({ version: 1, data });
+  }
 
-describe("deriveRecommendRows (strict full-response validation)", () => {
-  it("accepts a fully well-formed response with a trailing 'Showing' line", () => {
-    const text = [
-      "# Recommendations",
-      "",
-      "1. **T-1001** (ticket) -- Wire the ingest retry queue",
-      "   _quick win, unblocked_",
-      "",
-      "Showing 1 of 3 candidates.",
-    ].join("\n");
-    const result = deriveRecommendRows(text);
+  it("parses recommendations/excluded/unreadableHandoverCount from a well-formed envelope", () => {
+    const text = envelope({
+      recommendations: [
+        { id: "T-1001", kind: "ticket", title: "Wire the ingest retry queue", reason: "quick win, unblocked" },
+      ],
+      excluded: [
+        {
+          id: "ISS-2003",
+          kind: "issue",
+          title: "Snapshot pruning may keep stale entries",
+          actionability: { status: "owner_gated", reason: "structured disposition: owner_gated", source: "structured" },
+        },
+      ],
+      unreadableHandoverCount: 0,
+    });
+    const result = deriveRecommendPayload(text);
     expect(result.parseFailed).toBe(false);
-    expect(result.rows).toHaveLength(1);
+    expect(result.rows).toEqual([
+      { id: "T-1001", kind: "ticket", title: "Wire the ingest retry queue", reason: "quick win, unblocked" },
+    ]);
+    expect(result.excluded).toHaveLength(1);
+    expect(result.unreadableHandoverCount).toBe(0);
   });
 
-  it("rejects a response where the second row is missing its reason line, even though the first row is well-formed", () => {
-    // This is exactly the partial-acceptance risk: a lenient row-scanner
-    // would happily extract row 1 and silently skip the malformed row 2,
-    // understating the real candidate set (and the issue_get calls it
-    // implies) instead of flagging the response as unparseable.
-    const text = [
-      "# Recommendations",
-      "",
-      "1. **T-1001** (ticket) -- Wire the ingest retry queue",
-      "   _quick win, unblocked_",
-      "",
-      "2. **ISS-2001** (issue) -- Retry queue drops the final byte",
-      "not a reason line",
-      "",
-    ].join("\n");
-    const result = deriveRecommendRows(text);
+  it("accepts a genuinely empty recommendations/excluded pair as a valid, non-failed result", () => {
+    const result = deriveRecommendPayload(envelope({ recommendations: [], excluded: [], unreadableHandoverCount: 0 }));
+    expect(result.parseFailed).toBe(false);
+    expect(result.rows).toEqual([]);
+    expect(result.excluded).toEqual([]);
+  });
+
+  it("rejects text that is not valid JSON at all", () => {
+    const result = deriveRecommendPayload("# Recommendations\n\nnot json");
     expect(result.parseFailed).toBe(true);
-    expect(result.rows).toHaveLength(0);
+    expect(result.reason).toMatch(/not valid JSON/);
   });
 
-  it("rejects a response with a skipped rank", () => {
-    const text = [
-      "# Recommendations",
-      "",
-      "1. **T-1001** (ticket) -- Wire the ingest retry queue",
-      "   _quick win, unblocked_",
-      "",
-      "3. **ISS-2001** (issue) -- Retry queue drops the final byte",
-      "   _high severity, actionable_",
-      "",
-    ].join("\n");
-    const result = deriveRecommendRows(text);
+  it("rejects a JSON payload missing the recommendations/excluded arrays", () => {
+    const result = deriveRecommendPayload(envelope({ somethingElse: true }));
     expect(result.parseFailed).toBe(true);
+    expect(result.reason).toMatch(/missing its recommendations\/excluded arrays/);
   });
 
-  it("accepts each of the 3 known empty-state strings as a genuine empty result, not a failure", () => {
-    expect(
-      deriveRecommendRows("No recommendations -- all work is complete or blocked.").parseFailed,
-    ).toBe(false);
+  it("treats a null unreadableHandoverCount as null, and a missing/non-numeric one as null", () => {
+    const withNull = deriveRecommendPayload(envelope({ recommendations: [], excluded: [], unreadableHandoverCount: null }));
+    expect(withNull.unreadableHandoverCount).toBeNull();
+    const missing = deriveRecommendPayload(envelope({ recommendations: [], excluded: [] }));
+    expect(missing.unreadableHandoverCount).toBeNull();
   });
 });
 
@@ -280,59 +257,48 @@ describe("extractEntityIds", () => {
   });
 });
 
-// --- actionability bar ---------------------------------------------------------
+// --- entity actionability parsing (continuation fallback) ---------------------
 
-describe("actionability bar", () => {
-  it("an owner-gated issue never clears", () => {
-    expect(
-      issueClearsActionabilityBar({ status: "open", impact: "OWNER-GATED: wait for a decision" }),
-    ).toBe(false);
-  });
+describe("deriveEntityActionability", () => {
+  function envelope(data: unknown): string {
+    return JSON.stringify({ version: 1, data });
+  }
 
-  it("an open issue with no blocker marker clears", () => {
-    expect(issueClearsActionabilityBar({ status: "open", impact: "actionable now" })).toBe(true);
-  });
-
-  it("a blocked ticket never clears", () => {
-    expect(ticketClearsActionabilityBar({ status: "open", blocked: true })).toBe(false);
-  });
-
-  it("an unblocked open ticket clears", () => {
-    expect(ticketClearsActionabilityBar({ status: "open", blocked: false })).toBe(true);
-  });
-});
-
-describe("entity markdown parsing", () => {
-  it("parseTicketMarkdown reads status and the [BLOCKED] marker", () => {
-    const blocked = parseTicketMarkdown(
-      "# T-1005: Migrate config schema to v3 [BLOCKED]\n\nStatus: open | Type: task | Phase: core | Order: 30\nBlocked by: T-1006",
+  it("reads actionability.status and unreadableHandoverCount from a well-formed envelope", () => {
+    const result = deriveEntityActionability(
+      envelope({ actionability: { status: "actionable", reason: "open, no blocking signal", source: "ledger" }, unreadableHandoverCount: 0 }),
     );
-    expect(blocked).toEqual({ status: "open", blocked: true });
-
-    const clear = parseTicketMarkdown(
-      "# T-1002: Document the export CLI flags\n\nStatus: open | Type: chore | Phase: core | Order: 20",
-    );
-    expect(clear).toEqual({ status: "open", blocked: false });
+    expect(result.parseFailed).toBe(false);
+    expect(result.status).toBe("actionable");
+    expect(result.unreadableHandoverCount).toBe(0);
   });
 
-  it("parseIssueMarkdown reads status and the fenced Impact/Resolution sections", () => {
-    const text = [
-      "# ISS-2003: Snapshot pruning may keep stale entries under clock skew",
-      "",
-      "Status: open | Severity: low | Phase: none | Order: none",
-      "Components: core",
-      "Discovered: 2026-08-08",
-      "",
-      "## Impact",
-      "",
-      "```",
-      "OWNER-GATED: pending a decision on the retention policy before any fix lands; do not treat as actionable yet.",
-      "```",
-    ].join("\n");
-    const parsed = parseIssueMarkdown(text);
-    expect(parsed.status).toBe("open");
-    expect(parsed.impact).toContain("OWNER-GATED");
-    expect(parsed.resolution).toBe("");
+  it("reads a non-actionable status (e.g. blocked, owner_gated) the same way", () => {
+    const result = deriveEntityActionability(
+      envelope({ actionability: { status: "owner_gated", reason: "structured disposition: owner_gated", source: "structured" }, unreadableHandoverCount: 0 }),
+    );
+    expect(result.status).toBe("owner_gated");
+  });
+
+  it("rejects text that is not valid JSON at all", () => {
+    const result = deriveEntityActionability("# T-1005: not json");
+    expect(result.parseFailed).toBe(true);
+    expect(result.reason).toMatch(/not valid JSON/);
+  });
+
+  it("rejects a JSON payload missing actionability.status", () => {
+    const result = deriveEntityActionability(envelope({ id: "T-1005" }));
+    expect(result.parseFailed).toBe(true);
+    expect(result.reason).toMatch(/missing actionability\.status/);
+  });
+
+  it("treats a null unreadableHandoverCount as null, and a missing/non-numeric one as null", () => {
+    const withNull = deriveEntityActionability(
+      envelope({ actionability: { status: "actionable", reason: "r", source: "ledger" }, unreadableHandoverCount: null }),
+    );
+    expect(withNull.unreadableHandoverCount).toBeNull();
+    const missing = deriveEntityActionability(envelope({ actionability: { status: "actionable", reason: "r", source: "ledger" } }));
+    expect(missing.unreadableHandoverCount).toBeNull();
   });
 });
 
@@ -931,55 +897,52 @@ describe("runReplaySequence: partial progress survives a later crash", () => {
 // --- callTool resilience: a failing sub-call within a multi-call step must not
 // erase the transport cost of exchanges that already completed, INCLUDING its
 // own captured-but-unreadable exchange (not just prior successful ones). Both
-// stepRecommend's issue_get loop and stepContinuationCheck's per-id walk make
-// several sub-calls inside one step; a naive per-step try/catch (as opposed to
-// per-sub-call) loses everything on the first failure. These tests build a
-// response that is genuinely captured (request+response both logged, so the
-// transport cost is real) but whose content cannot be read as text, forcing
-// callTool's CallToolFailure path and proving its partialBytes/partialCalls
-// actually reach the step's own report. -----------------------------------
+// stepRecommend now parses recommend's own JSON payload directly -- the
+// `recommendations`/`excluded` arrays are already partitioned by
+// recommend()'s own partitionByActionability, so this step makes exactly one
+// call (recommend itself) and never walks issue_get/ticket_get at all.
+// stepContinuationCheck's per-id walk is now a bounded-array lookup first
+// (zero calls for an id resolvable from either `recommendations` or
+// `excluded`) with at most one fallback `_get` call for an id absent from
+// both. These tests prove both zero-call claims and the fallback's own
+// failure-retention path. -----------------------------------
 
-function makeRecommendMarkdown(issueIds: readonly string[]): string {
-  const lines = ["# Recommendations", ""];
-  issueIds.forEach((id, i) => {
-    lines.push(`${i + 1}. **${id}** (issue) -- Issue ${id}`);
-    lines.push(`   _reason for ${id}_`);
-    lines.push("");
+function pushJsonExchange(
+  log: CapturedMessage[],
+  nextId: { value: number },
+  method: string,
+  params: unknown,
+  text: string,
+): void {
+  const id = nextId.value++;
+  log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
+  log.push({
+    seq: log.length,
+    direction: "server-to-client",
+    message: { result: { content: [{ type: "text", text }] }, jsonrpc: "2.0", id },
   });
-  return lines.join("\n");
 }
 
-describe("stepRecommend: retains prior + captured-but-unreadable sub-call costs", () => {
-  it("stops at the first unreadable issue_get, keeping recommend's own cost, the prior successful issue_get, and the failing exchange's captured bytes", async () => {
+describe("stepRecommend: JSON payload parsing, zero sub-calls", () => {
+  it("reports zero issue_get calls when the payload carries ten actionable rows", async () => {
     const log: CapturedMessage[] = [];
-    let nextId = 1;
-    const issueGetOrder: string[] = [];
+    const nextId = { value: 1 };
 
-    const pushExchange = (method: string, params: unknown, result: unknown): void => {
-      const id = nextId++;
-      log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
-      log.push({ seq: log.length, direction: "server-to-client", message: { result, jsonrpc: "2.0", id } });
-    };
+    const rows: RecommendRow[] = Array.from({ length: 10 }, (_, i) => ({
+      id: `ISS-${100 + i}`,
+      kind: "issue" as const,
+      title: `Issue ${100 + i}`,
+      reason: "quick win",
+    }));
+    const payloadText = JSON.stringify({ recommendations: rows, excluded: [], unreadableHandoverCount: 0 });
 
     const mockClient = {
       callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
         if (name === "storybloq_recommend") {
-          pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: makeRecommendMarkdown(["ISS-1", "ISS-2", "ISS-3"]) }] });
+          pushJsonExchange(log, nextId, "tools/call", { name, arguments: args }, payloadText);
           return undefined;
         }
-        if (name === "storybloq_issue_get") {
-          issueGetOrder.push(args.id as string);
-          if (args.id === "ISS-2") {
-            // Genuinely captured (request + response both logged, real
-            // transport cost) but the content shape cannot be read as text.
-            pushExchange("tools/call", { name, arguments: args }, { content: [] });
-            return undefined;
-          }
-          pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: `# ${args.id}: an issue\n\nStatus: closed` }] });
-          return undefined;
-        }
-        pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: "{}" }] });
-        return undefined;
+        throw new Error(`unexpected sub-call to ${name}: stepRecommend must never walk issue_get/ticket_get`);
       },
     };
 
@@ -991,68 +954,241 @@ describe("stepRecommend: retains prior + captured-but-unreadable sub-call costs"
       gitLogMode: "fixture",
     };
 
-    const { report, rows } = await stepRecommend(ctx);
+    const { report, rows: outRows, excluded } = await stepRecommend(ctx);
 
-    // The walk stops at ISS-2 and never reaches ISS-3.
-    expect(issueGetOrder).toEqual(["ISS-1", "ISS-2"]);
-    expect(rows).toHaveLength(3);
-    expect((report as any).status).toBe("incomplete");
-    expect((report as any).reason).toMatch(/ISS-2/);
-    // calls: recommend (1) + issue_get ISS-1 (1, succeeded) + issue_get ISS-2
-    // (1, captured but unreadable -- still a real completed exchange).
-    expect(report.calls).toBe(3);
-    // Exact byte retention, not a weak bound: independently sum every
-    // request+response the log actually captured (recommend + ISS-1 +
-    // ISS-2, but NOT ISS-3, which never fired) and require an exact match.
-    // A mutant that drops only the failing exchange's bytes (while keeping
-    // the call count) would pass a `> 0` check but fails this.
+    expect(outRows).toHaveLength(10);
+    expect(excluded).toHaveLength(0);
+    expect((report as any).status).toBeUndefined();
+    // calls: recommend alone. No issue_get walk exists any more.
+    expect(report.calls).toBe(1);
+    expect((report as any).issueGetCalls).toBe(0);
+    expect((report as any).actionableIssueCount).toBe(10);
+    expect((report as any).excludedCount).toBe(0);
     expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
-    // Only the genuinely-interpreted issue_get is counted in issueGetCalls;
-    // the failing one's cost is folded into the overall bytes/calls instead.
-    expect((report as any).issueGetCalls).toBe(1);
   });
 
-  it("retains a request-only (no-response) failure's own bytes via CallToolFailure, not just captured-but-unreadable ones", async () => {
+  it("surfaces a populated excluded array with no sub-call attempted for any entry", async () => {
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const rows: RecommendRow[] = [
+      { id: "T-1", kind: "ticket", title: "Ticket 1", reason: "quick win" },
+      { id: "ISS-1", kind: "issue", title: "Issue 1", reason: "quick win" },
+    ];
+    const excludedRows: ExcludedRow[] = [
+      {
+        id: "ISS-2",
+        kind: "issue",
+        title: "Issue 2",
+        actionability: { status: "owner_gated", reason: "owner gated", source: "structured" },
+      },
+      {
+        id: "ISS-3",
+        kind: "issue",
+        title: "Issue 3",
+        actionability: { status: "complete", reason: "already done", source: "derived" },
+      },
+    ];
+    const payloadText = JSON.stringify({ recommendations: rows, excluded: excludedRows, unreadableHandoverCount: 0 });
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        if (name === "storybloq_recommend") {
+          pushJsonExchange(log, nextId, "tools/call", { name, arguments: args }, payloadText);
+          return undefined;
+        }
+        throw new Error(`unexpected sub-call to ${name}: excluded entries must never be probed`);
+      },
+    };
+
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const { report, rows: outRows, excluded } = await stepRecommend(ctx);
+
+    expect(outRows).toHaveLength(2);
+    expect(excluded).toEqual(excludedRows);
+    expect(report.calls).toBe(1);
+    expect((report as any).issueGetCalls).toBe(0);
+    expect((report as any).excludedCount).toBe(2);
+  });
+});
+
+describe("stepContinuationCheck: bounded-array lookup, per-id fallback calls", () => {
+  it("resolves an id present in recommendations with zero calls, never reaching the fallback", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-100", ""].join("\n");
+    const log: CapturedMessage[] = [];
+
+    const mockClient = {
+      callTool: async () => {
+        throw new Error("recommendations hit must cost zero calls -- fallback must never fire");
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const recommendRows: RecommendRow[] = [{ id: "ISS-100", kind: "issue", title: "Issue 100", reason: "quick win" }];
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+
+    expect(resolvedId).toBe("ISS-100");
+    expect(report.calls).toBe(0);
+    expect((report as any).walkCalls).toBe(0);
+  });
+
+  it("skips an id present in excluded with zero calls, then resolves the next id via exactly one fallback call reading actionability.status", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-200", "- ISS-300", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+    const called: string[] = [];
+
+    const excludedRows: ExcludedRow[] = [
+      { id: "ISS-200", kind: "issue", title: "Issue 200", actionability: { status: "owner_gated", reason: "gated", source: "structured" } },
+    ];
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        called.push(args.id as string);
+        expect(args.format).toBe("json");
+        expect(args.withActionability).toBe(true);
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ actionability: { status: "actionable", reason: "clear", source: "structured" }, unreadableHandoverCount: 0 }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], excludedRows);
+
+    // ISS-200 costs zero calls (already known via excluded); only ISS-300
+    // ever reaches the fallback get.
+    expect(called).toEqual(["ISS-300"]);
+    expect(resolvedId).toBe("ISS-300");
+    expect(report.calls).toBe(1);
+    expect((report as any).walkCalls).toBe(1);
+    expect((report as any).fallbackUnreadableHandoverCount).toBe(0);
+  });
+
+  it("retains a fallback call's captured-but-unreadable bytes via CallToolFailure", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-400", ""].join("\n");
     const log: CapturedMessage[] = [];
     let nextId = 1;
-    const issueGetOrder: string[] = [];
+
+    const pushExchange = (method: string, params: unknown, result: unknown): void => {
+      const id = nextId++;
+      log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
+      log.push({ seq: log.length, direction: "server-to-client", message: { result, jsonrpc: "2.0", id } });
+    };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        // Genuinely captured (request + response both logged, real transport
+        // cost) but the content shape cannot be read as text.
+        pushExchange("tools/call", { name, arguments: args }, { content: [] });
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], []);
+
+    expect(resolvedId).toBeNull();
+    expect((report as any).status).toBe("incomplete");
+    expect((report as any).reason).toMatch(/ISS-400/);
+    expect(report.calls).toBe(1);
+    expect((report as any).walkCalls).toBe(1);
+    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+  });
+
+  it("keeps walking past a captured-but-unreadable fallback to resolve a later id via recommendations, disclosing the walk as incomplete without losing the resolved id", async () => {
+    // SKILL.md: an unreadable fallback response is "anything else", the same
+    // as a failed (deleted/renamed) get -- the walk must not stop there.
+    const handoverBody = ["## Open items", "", "- ISS-500", "- ISS-600", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    let nextId = 1;
+    const called: string[] = [];
+
+    const pushExchange = (method: string, params: unknown, result: unknown): void => {
+      const id = nextId++;
+      log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
+      log.push({ seq: log.length, direction: "server-to-client", message: { result, jsonrpc: "2.0", id } });
+    };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        called.push(args.id as string);
+        // Genuinely captured but unreadable -- ISS-600 must never reach here
+        // at all, since it resolves via `recommendations` at zero cost.
+        pushExchange("tools/call", { name, arguments: args }, { content: [] });
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const recommendRows: RecommendRow[] = [{ id: "ISS-600", kind: "issue", title: "Issue 600", reason: "quick win" }];
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
+
+    expect(called).toEqual(["ISS-500"]);
+    expect(resolvedId).toBe("ISS-600");
+    expect(report.calls).toBe(1);
+    expect((report as any).walkCalls).toBe(1);
+    expect((report as any).status).toBe("incomplete");
+    expect((report as any).reason).toMatch(/ISS-500/);
+    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+  });
+
+  it("retains a request-only (no-response) fallback failure's bytes via CallToolFailure, then resolves the next id via recommendations", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-900", "- T-999", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    let nextId = 1;
+    const called: string[] = [];
 
     const pushRequest = (method: string, params: unknown, id: number): void => {
       log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
     };
-    const pushExchange = (method: string, params: unknown, result: unknown): void => {
-      const id = nextId++;
-      pushRequest(method, params, id);
-      log.push({ seq: log.length, direction: "server-to-client", message: { result, jsonrpc: "2.0", id } });
-    };
 
     const mockClient = {
       callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
-        if (name === "storybloq_recommend") {
-          pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: makeRecommendMarkdown(["ISS-1", "ISS-2", "ISS-3"]) }] });
-          return undefined;
-        }
-        if (name === "storybloq_issue_get") {
-          issueGetOrder.push(args.id as string);
-          if (args.id === "ISS-2") {
-            // A request was genuinely sent (real bytes) but the call
-            // rejects before any response is ever captured -- a dropped
-            // connection, not a captured-but-unreadable response. This is
-            // the path CallToolFailure's own no-response branch handles,
-            // distinct from the generic runReplaySequence catch (that one
-            // only recovers a step that has no LOCAL catch of its own;
-            // this loop DOES catch CallToolFailure itself).
-            pushRequest("tools/call", { name, arguments: args }, nextId++);
-            throw new Error(`mock connection drop calling issue_get ${args.id}`);
-          }
-          pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: `# ${args.id}: an issue\n\nStatus: closed` }] });
-          return undefined;
-        }
-        pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: "{}" }] });
-        return undefined;
+        called.push(args.id as string);
+        // A request was genuinely sent (real bytes) but the call rejects
+        // before any response is ever captured -- T-999 must never reach
+        // here, since it resolves via `recommendations` at zero cost.
+        pushRequest("tools/call", { name, arguments: args }, nextId++);
+        throw new Error(`mock connection drop calling ${name} ${args.id}`);
       },
     };
-
     const ctx: ReplayContext = {
       root: "/mock-root",
       client: mockClient as any,
@@ -1061,52 +1197,51 @@ describe("stepRecommend: retains prior + captured-but-unreadable sub-call costs"
       gitLogMode: "fixture",
     };
 
-    const { report, rows } = await stepRecommend(ctx);
+    const recommendRows: RecommendRow[] = [{ id: "T-999", kind: "ticket", title: "Ticket 999", reason: "quick win" }];
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
 
-    expect(issueGetOrder).toEqual(["ISS-1", "ISS-2"]);
-    expect(rows).toHaveLength(3);
+    expect(called).toEqual(["ISS-900"]);
+    expect(resolvedId).toBe("T-999");
+    // A request-only failure costs real bytes (retained below) but is not a
+    // completed call -- same convention as callTool's other no-response path.
+    expect(report.calls).toBe(0);
+    expect((report as any).walkCalls).toBe(0);
     expect((report as any).status).toBe("incomplete");
-    expect((report as any).reason).toMatch(/ISS-2/);
-    // calls: recommend (1) + issue_get ISS-1 (1, succeeded). ISS-2's request
-    // was sent but never answered, so it costs real bytes but is not a
-    // completed call.
-    expect(report.calls).toBe(2);
-    expect((report as any).issueGetCalls).toBe(1);
-    // Exact retention: recommend + ISS-1's full exchange plus ISS-2's
-    // dangling, unanswered request -- summed independently of the harness's
-    // own measuredBytes pipeline.
-    expect(report.bytes).toBe(independentByteSum(log, 0, log.length));
+    expect((report as any).reason).toMatch(/ISS-900/);
+    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
   });
-});
 
-describe("stepContinuationCheck: retains prior + captured-but-unreadable walk costs", () => {
-  it("stops at the first unreadable walk exchange, keeping the constructed section cost, the prior successful (non-clearing) lookup, and the failing exchange's captured bytes", async () => {
-    const handoverBody = ["## Open items", "", "- ISS-100", "- ISS-200", "- ISS-300", ""].join("\n");
-
+  it("retains both a completed non-actionable fallback's bytes and a later request-only failure's bytes in the same walk, then resolves via recommendations", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-910", "- ISS-920", "- T-930", ""].join("\n");
     const log: CapturedMessage[] = [];
-    let nextId = 1;
-    const walkOrder: string[] = [];
+    const nextId = { value: 1 };
+    const called: string[] = [];
 
-    const pushExchange = (method: string, params: unknown, result: unknown): void => {
-      const id = nextId++;
-      log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id } });
-      log.push({ seq: log.length, direction: "server-to-client", message: { result, jsonrpc: "2.0", id } });
+    const pushRequestOnly = (method: string, params: unknown): void => {
+      log.push({ seq: log.length, direction: "client-to-server", message: { method, params, jsonrpc: "2.0", id: nextId.value++ } });
     };
 
     const mockClient = {
       callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
-        walkOrder.push(args.id as string);
-        if (args.id === "ISS-200") {
-          pushExchange("tools/call", { name, arguments: args }, { content: [] });
+        called.push(args.id as string);
+        if (args.id === "ISS-910") {
+          // A genuinely completed exchange that reads clean but is not
+          // actionable -- the walk continues past it.
+          pushJsonExchange(
+            log,
+            nextId,
+            "tools/call",
+            { name, arguments: args },
+            JSON.stringify({ actionability: { status: "owner_gated", reason: "gated", source: "structured" }, unreadableHandoverCount: 0 }),
+          );
           return undefined;
         }
-        // ISS-100 is well-formed but does not clear the actionability bar,
-        // so the walk continues past it to ISS-200.
-        pushExchange("tools/call", { name, arguments: args }, { content: [{ type: "text", text: `# ${args.id}: an issue\n\nStatus: closed` }] });
-        return undefined;
+        // ISS-920: request sent, real bytes, but no response ever captured.
+        // T-930 must never reach here at all (resolved via recommendations).
+        pushRequestOnly("tools/call", { name, arguments: args });
+        throw new Error(`mock connection drop calling ${name} ${args.id}`);
       },
     };
-
     const ctx: ReplayContext = {
       root: "/mock-root",
       client: mockClient as any,
@@ -1115,21 +1250,66 @@ describe("stepContinuationCheck: retains prior + captured-but-unreadable walk co
       gitLogMode: "fixture",
     };
 
-    const { report } = await stepContinuationCheck(ctx, handoverBody);
+    const recommendRows: RecommendRow[] = [{ id: "T-930", kind: "ticket", title: "Ticket 930", reason: "quick win" }];
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, recommendRows, []);
 
-    expect(walkOrder).toEqual(["ISS-100", "ISS-200"]);
+    expect(called).toEqual(["ISS-910", "ISS-920"]);
+    expect(resolvedId).toBe("T-930");
+    // Exactly one completed call (ISS-910); ISS-920's dangling request costs
+    // real bytes but is not a completed call, matching callTool's own
+    // no-response convention.
+    expect(report.calls).toBe(1);
+    expect((report as any).walkCalls).toBe(1);
     expect((report as any).status).toBe("incomplete");
-    expect((report as any).reason).toMatch(/ISS-200/);
-    // calls: ISS-100 (succeeded, did not clear) + ISS-200 (captured but
-    // unreadable -- still a real completed exchange). The walk never reaches
-    // ISS-300.
+    expect((report as any).reason).toMatch(/ISS-920/);
+    // Exact byte retention across BOTH the completed and the failed
+    // exchange, independently summed from the raw log.
+    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+  });
+
+  it("preserves the earliest uncertain unreadableHandoverCount across multiple fallback calls instead of letting a later clean one overwrite it", async () => {
+    const handoverBody = ["## Open items", "", "- ISS-700", "- ISS-800", ""].join("\n");
+    const log: CapturedMessage[] = [];
+    const nextId = { value: 1 };
+
+    const mockClient = {
+      callTool: async ({ name, arguments: args }: { name: string; arguments: Record<string, unknown> }) => {
+        if (args.id === "ISS-700") {
+          pushJsonExchange(
+            log,
+            nextId,
+            "tools/call",
+            { name, arguments: args },
+            JSON.stringify({ actionability: { status: "owner_gated", reason: "gated", source: "structured" }, unreadableHandoverCount: 3 }),
+          );
+          return undefined;
+        }
+        pushJsonExchange(
+          log,
+          nextId,
+          "tools/call",
+          { name, arguments: args },
+          JSON.stringify({ actionability: { status: "actionable", reason: "clear", source: "structured" }, unreadableHandoverCount: 0 }),
+        );
+        return undefined;
+      },
+    };
+    const ctx: ReplayContext = {
+      root: "/mock-root",
+      client: mockClient as any,
+      log,
+      normalize: buildNormalizer("/mock-root"),
+      gitLogMode: "fixture",
+    };
+
+    const { report, resolvedId } = await stepContinuationCheck(ctx, handoverBody, [], []);
+
+    expect(resolvedId).toBe("ISS-800");
     expect(report.calls).toBe(2);
     expect((report as any).walkCalls).toBe(2);
-    // Exact byte retention: constructed section text plus the independently
-    // summed ISS-100 + ISS-200 exchanges (never ISS-300, which never
-    // fired). A mutant dropping only the failing exchange's bytes would
-    // still pass a `> constructedBytes` bound but fails this.
-    expect(report.bytes).toBe((report as any).constructedBytes + independentByteSum(log, 0, log.length));
+    // ISS-700's uncertain count (3) must survive ISS-800's later clean 0.
+    expect((report as any).fallbackUnreadableHandoverCount).toBe(3);
+    expect((report as any).status).toBeUndefined();
   });
 });
 
@@ -1339,34 +1519,39 @@ describe("fixture replay", () => {
     expect(report.steps.git_log.bytes).toBe(byteLength(expectedText));
   });
 
-  it("recommend: request carries count 10, Gate B fetched all 3 open issues, and exactly 2 clear the actionability bar", () => {
+  it("recommend: request carries count 10, zero issue_get calls, and exactly 2 of the 3 open issues are actionable", () => {
     const step = report.steps.recommend as any;
     expect(step.requestCarriesCountTen).toBe(true);
-    expect(step.issueGetCalls).toBe(3);
-    expect(step.calls).toBe(1 + 3);
+    // recommend()'s own partitionByActionability (ISS-1154) does the
+    // excluding server-side now -- this step never walks issue_get at all.
+    expect(step.issueGetCalls).toBe(0);
+    expect(step.calls).toBe(1);
     // ISS-2001 (open, high, no marker) and ISS-2002 (open, medium, no marker)
-    // clear; ISS-2003 (open, low, "OWNER-GATED" in impact) does not.
+    // clear; ISS-2003 (open, low, disposition owner_gated) lands in excluded.
     expect(step.actionableIssueCount).toBe(2);
+    expect(step.excludedCount).toBe(1);
   });
 
-  it("continuation_check: resolves T-1002 via exactly one ticket_get, with both sub-costs present", () => {
+  it("continuation_check: resolves T-1002 via the recommendations array with zero calls", () => {
     const step = report.steps.continuation_check as any;
     expect(step.present).toBe(true);
     expect(step.resolvedId).toBe("T-1002");
-    expect(step.walkCalls).toBe(1);
-    expect(step.calls).toBe(1);
+    expect(step.walkCalls).toBe(0);
+    expect(step.calls).toBe(0);
     expect(step.constructedBytes).toBeGreaterThan(0);
-    expect(step.bytes).toBeGreaterThan(step.constructedBytes);
+    // No fallback call ran, so the step's own bytes equal the constructed
+    // section text exactly.
+    expect(step.bytes).toBe(step.constructedBytes);
     // constructedBytes must be the raw-text byte count of the constructed
     // block, not its JSON-message-escaped size.
     expect(step.constructedBytes).toBe(byteLength(step.constructedText));
   });
 
-  it("context_column_lookup: zero cost, n/a plus a diagnostic for every one of the 7 candidates", () => {
+  it("context_column_lookup: zero cost, n/a plus a diagnostic for every one of the 6 actionable candidates", () => {
     const step = report.steps.context_column_lookup as any;
     expect(step.calls).toBe(0);
     expect(step.bytes).toBe(0);
-    expect(step.rows).toHaveLength(7);
+    expect(step.rows).toHaveLength(6);
     for (const row of step.rows) {
       expect(row.context).toBe("n/a");
       expect(typeof row.diagnostic).toBe("string");
@@ -1374,13 +1559,13 @@ describe("fixture replay", () => {
     }
   });
 
-  it("ready_to_work_table: zero calls, constructed text, and shows the (+2 more) suffix", () => {
+  it("ready_to_work_table: zero calls, constructed text, and shows the (+1 more) suffix", () => {
     const step = report.steps.ready_to_work_table as any;
     expect(step.calls).toBe(0);
     expect(step.bytes).toBeGreaterThan(0);
     expect(step.rowsShown).toBe(5);
-    expect(step.moreCount).toBe(2);
-    expect(step.text).toContain("(+2 more)");
+    expect(step.moreCount).toBe(1);
+    expect(step.text).toContain("(+1 more)");
     // bytes must be the raw-text byte count of the table, not its
     // JSON-message-escaped size.
     expect(step.bytes).toBe(byteLength(step.text));
@@ -1420,6 +1605,10 @@ describe("fixture replay", () => {
       .filter((m) => m.method === "tools/call")
       .map((m) => m.params.name as string);
 
+    // No issue_get/ticket_get calls: recommend's own JSON payload already
+    // carries the actionability partition (Gate B) and T-1002's presence in
+    // its recommendations array (the continuation walk), so ISS-1154 Commit
+    // B retires both sub-call walks entirely.
     expect(calls).toEqual([
       "storybloq_session_guard",
       "storybloq_status",
@@ -1427,40 +1616,33 @@ describe("fixture replay", () => {
       "storybloq_handover_latest",
       "storybloq_lesson_digest",
       "storybloq_recommend",
-      "storybloq_issue_get",
-      "storybloq_issue_get",
-      "storybloq_issue_get",
-      "storybloq_ticket_get",
     ]);
   });
 
-  // --- m2: independently re-derived issue_get count, cross-checked against the harness's own field ---
+  // --- m2/m3 corroboration: recompute the recommend exchange's bytes directly from the raw log ---
 
-  it("m2: raw-log issue_get count matches the harness's own reported issueGetCalls field", () => {
+  it("m2: the raw log carries exactly one storybloq_recommend exchange, matching the harness's own reported calls field", () => {
     const rawCount = report.rawLog.filter(
       (e) =>
         e.direction === "client-to-server" &&
         (e.message as any).method === "tools/call" &&
-        (e.message as any).params?.name === "storybloq_issue_get",
+        (e.message as any).params?.name === "storybloq_recommend",
     ).length;
-    expect(rawCount).toBe(3);
-    expect((report.steps.recommend as any).issueGetCalls).toBe(rawCount);
+    expect(rawCount).toBe(1);
+    expect((report.steps.recommend as any).calls).toBe(rawCount);
   });
 
-  // --- m3 corroboration: recompute the multibyte-title exchange's bytes directly from the raw log ---
-
-  it("m3 corroboration: independently summing recommend + all 3 issue_get exchanges from the raw log matches the harness's own reported recommend.bytes", () => {
+  it("m3 corroboration: independently summing the raw log's recommend exchange matches the harness's own reported recommend.bytes, and its multibyte title survives as real UTF-8 bytes", () => {
     const entries = report.rawLog;
     const normalize = buildNormalizer(fixtureDir);
 
-    function exchangeBytes(toolName: string, matchArgs?: (args: any) => boolean): number {
+    function exchangeBytes(toolName: string): number {
       for (let i = 0; i < entries.length; i++) {
         const msg = entries[i]!.message as any;
         if (
           entries[i]!.direction === "client-to-server" &&
           msg.method === "tools/call" &&
-          msg.params?.name === toolName &&
-          (!matchArgs || matchArgs(msg.params?.arguments))
+          msg.params?.name === toolName
         ) {
           const res = entries.slice(i + 1).find(
             (e) => e.direction === "server-to-client" && (e.message as any).id === msg.id,
@@ -1479,18 +1661,12 @@ describe("fixture replay", () => {
     }
 
     const recommendBytes = exchangeBytes("storybloq_recommend");
-    const issueBytes = ["ISS-2001", "ISS-2002", "ISS-2003"].reduce(
-      (sum, id) => sum + exchangeBytes("storybloq_issue_get", (args) => args?.id === id),
-      0,
-    );
-    const independentTotal = recommendBytes + issueBytes;
+    expect(recommendBytes).toBe((report.steps.recommend as any).bytes);
 
-    expect(independentTotal).toBe((report.steps.recommend as any).bytes);
-
-    // Corroborates the multibyte title specifically: a UTF-16-length-based
-    // (buggy) measurement of the ISS-2002 exchange would be strictly smaller
-    // than its true UTF-8 byte count.
-    const iss2002Bytes = exchangeBytes("storybloq_issue_get", (args) => args?.id === "ISS-2002");
+    // Corroborates the multibyte title specifically: ISS-2002's title
+    // ("café, señor, 🎉") now travels inside the single recommend JSON
+    // payload itself. A UTF-16-length-based (buggy) measurement of that
+    // payload would be strictly smaller than its true UTF-8 byte count.
     let rawText = "";
     for (const e of entries) {
       const msg = e.message as any;
@@ -1503,7 +1679,6 @@ describe("fixture replay", () => {
     }
     expect(rawText).not.toBe("");
     expect(byteLength(rawText)).toBeGreaterThan(rawText.length);
-    expect(iss2002Bytes).toBeGreaterThan(0);
   });
 
   // Pinned per-step byte ceilings and exact call counts (T-497's own stated
@@ -1523,8 +1698,8 @@ describe("fixture replay", () => {
     rules_md: { maxBytes: 600, calls: 0 },
     lesson_digest: { maxBytes: 500, calls: 1 },
     git_log: { maxBytes: 900, calls: 0 },
-    recommend: { maxBytes: 4000, calls: 4 },
-    continuation_check: { maxBytes: 1500, calls: 1 },
+    recommend: { maxBytes: 4000, calls: 1 },
+    continuation_check: { maxBytes: 1500, calls: 0 },
     context_column_lookup: { maxBytes: 0, calls: 0 },
     ready_to_work_table: { maxBytes: 1500, calls: 0 },
     node_list: { maxBytes: 0, calls: 0 },
@@ -1550,8 +1725,8 @@ describe("fixture replay", () => {
     }
   });
 
-  it("total bytes stay within a pinned ceiling and total calls equal exactly 10", () => {
-    expect(report.totals.calls).toBe(10);
+  it("total bytes stay within a pinned ceiling and total calls equal exactly 6", () => {
+    expect(report.totals.calls).toBe(6);
     if (report.totals.bytes > 20_000) {
       throw new Error(
         `totals.bytes ${report.totals.bytes} exceeds the pinned 20000 ceiling; ` +

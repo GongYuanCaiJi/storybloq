@@ -251,111 +251,77 @@ function responseText(rawResponse: unknown): string {
 
 // --- recommend response parsing ---------------------------------------------
 //
-// storybloq_recommend never returns a table or JSON here (format defaults to
-// "md" -- confirmed by reading formatRecommendations's source). It returns a
-// numbered Markdown list: "N. **id** (kind) -- title" then "   _reason_". This
-// regex is a fixture-authoring constraint, not a general Markdown parser --
-// fixture titles avoid *_|` to sidestep escapeMarkdownInline edge cases.
+// storybloq_recommend ALWAYS returns its JSON envelope now (ISS-1154 Commit A:
+// the tools.ts registration passes "json" unconditionally to runMcpReadTool).
+// `recommendations` is already partitioned to actionable candidates by
+// recommend()'s own partitionByActionability, so there is no per-row
+// actionability check left for this harness to perform -- the numbered-
+// Markdown-list grammar this section used to parse, and the issue_get walk it
+// existed to drive, are both retired.
+
+export interface RecommendActionability {
+  readonly status: string;
+  readonly reason: string;
+  readonly source: string;
+}
 
 export interface RecommendRow {
   readonly id: string;
+  readonly displayId?: string;
   readonly kind: "ticket" | "issue" | "action";
   readonly title: string;
   readonly reason: string;
+  readonly actionability?: RecommendActionability;
 }
 
-const RECOMMEND_ROW_RE = /^(\d+)\.\s+\*\*(\S+)\*\*\s+\((ticket|issue|action)\)\s+--\s+(.+)$/;
-
-export function parseRecommendMarkdown(text: string): RecommendRow[] {
-  const lines = text.split("\n");
-  const rows: RecommendRow[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const match = RECOMMEND_ROW_RE.exec(lines[i] ?? "");
-    if (!match) continue;
-    const reasonLine = lines[i + 1] ?? "";
-    const reasonMatch = /^\s{3}_(.+)_$/.exec(reasonLine);
-    rows.push({
-      id: match[2]!,
-      kind: match[3] as RecommendRow["kind"],
-      title: match[4]!,
-      reason: reasonMatch ? reasonMatch[1]! : "",
-    });
-  }
-  return rows;
+export interface ExcludedRow {
+  readonly id: string;
+  readonly displayId?: string;
+  readonly kind: "ticket" | "issue";
+  readonly title: string;
+  readonly actionability: RecommendActionability;
 }
 
-/**
- * Validates the ENTIRE response against formatRecommendations's exact
- * grammar (read from output-formatter.ts): `"# Recommendations"`, a blank
- * line, then for each candidate in rank order a numbered line, a `   _reason_`
- * line, and a blank line, optionally followed by one trailing
- * `"Showing N of M candidates."` line. A response with any unrecognized or
- * out-of-sequence line -- a skipped rank, a missing reason line, stray
- * trailing content -- is REJECTED wholesale (returns null) rather than
- * silently accepting whichever rows happened to parse; a partially-matching
- * response is exactly the shape a real client could misread as complete
- * while actually missing candidates (and their issue_get calls).
- */
-function parseFullRecommendMarkdown(text: string): RecommendRow[] | null {
-  const lines = text.split("\n");
-  if (lines[0] !== "# Recommendations" || lines[1] !== "") return null;
-  const rows: RecommendRow[] = [];
-  let i = 2;
-  let rank = 1;
-  while (i < lines.length) {
-    if (i === lines.length - 1 && /^Showing \d+ of \d+ candidates\.$/.test(lines[i] ?? "")) {
-      return rows;
-    }
-    const rowRe = new RegExp(`^${rank}\\.\\s+\\*\\*(\\S+)\\*\\*\\s+\\((ticket|issue|action)\\)\\s+--\\s+(.+)$`);
-    const rowMatch = rowRe.exec(lines[i] ?? "");
-    if (!rowMatch) return null;
-    const reasonMatch = /^\s{3}_(.+)_$/.exec(lines[i + 1] ?? "");
-    if (!reasonMatch) return null;
-    if (lines[i + 2] !== "") return null;
-    rows.push({
-      id: rowMatch[1]!,
-      kind: rowMatch[2] as RecommendRow["kind"],
-      title: rowMatch[3]!,
-      reason: reasonMatch[1]!,
-    });
-    i += 3;
-    rank++;
-  }
-  return rows;
-}
-
-/**
- * storybloq_recommend's only other possible md-format outputs (confirmed by
- * reading formatRecommendations's source): three fixed "no recommendations"
- * messages. A genuine empty result is one of these three strings, never a
- * failure; anything else -- including a response that matches the numbered
- * list shape only PARTIALLY -- is a response shape this harness does not
- * recognize at all as complete, a real, distinct outcome from "zero
- * candidates", and the one live mode must retain already-captured transport
- * cost for while marking dependent steps incomplete.
- */
-const KNOWN_EMPTY_RECOMMEND_TEXTS = [
-  "No recommendations yet -- this project needs tickets and phases. Run the /story setup flow to get started.",
-  "No recommendations. Run storybloq status for federation overview.",
-  "No recommendations -- all work is complete or blocked.",
-];
-
-export interface RecommendParseResult {
+export interface RecommendPayload {
   readonly rows: RecommendRow[];
+  readonly excluded: ExcludedRow[];
+  readonly unreadableHandoverCount: number | null;
   readonly parseFailed: boolean;
   readonly reason?: string;
 }
 
-export function deriveRecommendRows(text: string): RecommendParseResult {
-  const strict = parseFullRecommendMarkdown(text);
-  if (strict !== null && strict.length > 0) return { rows: strict, parseFailed: false };
-  if (KNOWN_EMPTY_RECOMMEND_TEXTS.some((known) => text.trim() === known)) {
-    return { rows: [], parseFailed: false };
+export function deriveRecommendPayload(text: string): RecommendPayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return {
+      rows: [],
+      excluded: [],
+      unreadableHandoverCount: null,
+      parseFailed: true,
+      reason: `recommend response was not valid JSON: ${(err as Error).message}`,
+    };
+  }
+  const data = (parsed as { data?: unknown })?.data ?? parsed;
+  const d = data as { recommendations?: unknown; excluded?: unknown; unreadableHandoverCount?: unknown };
+  if (!Array.isArray(d?.recommendations) || !Array.isArray(d?.excluded)) {
+    return {
+      rows: [],
+      excluded: [],
+      unreadableHandoverCount: null,
+      parseFailed: true,
+      reason: "recommend JSON payload is missing its recommendations/excluded arrays",
+    };
   }
   return {
-    rows: [],
-    parseFailed: true,
-    reason: "recommend response matched neither the full numbered-list shape nor a known empty-state message",
+    rows: d.recommendations as RecommendRow[],
+    excluded: d.excluded as ExcludedRow[],
+    unreadableHandoverCount:
+      typeof d.unreadableHandoverCount === "number" || d.unreadableHandoverCount === null
+        ? (d.unreadableHandoverCount as number | null)
+        : null,
+    parseFailed: false,
   };
 }
 
@@ -363,11 +329,11 @@ export function deriveRecommendRows(text: string): RecommendParseResult {
  * The retained-on-parse-failure report: the step's own already-transmitted-
  * and-measured request/response bytes and call count are kept exactly as
  * captured (the exchange genuinely happened), never zeroed or discarded, even
- * though `rows` -- and therefore every downstream step that depends on rows
- * (Gate B's issue_get walk) -- comes back empty. Exported standalone so the
- * retention behaviour is unit-testable against a synthetic measurement,
- * independent of whether the real tool's output space can ever actually
- * produce an unparseable response.
+ * though `rows`/`excluded` -- and therefore every downstream step that
+ * depends on them (Gate B, the continuation walk, the Ready to Work table) --
+ * come back empty. Exported standalone so the retention behaviour is
+ * unit-testable against a synthetic measurement, independent of whether the
+ * real tool's output space can ever actually produce an unparseable response.
  */
 export function buildFailedRecommendReport(
   measurement: ExchangeMeasurement,
@@ -381,6 +347,7 @@ export function buildFailedRecommendReport(
     reason,
     issueGetCalls: 0,
     actionableIssueCount: 0,
+    excludedCount: 0,
     requestCarriesCountTen: (measurement.rawRequest as any)?.params?.arguments?.count === 10,
   };
 }
@@ -513,33 +480,6 @@ export function renderReadyToWorkTable(
     lines.push("", ...diagnosticLines);
   }
   return lines.join("\n");
-}
-
-// --- Gate B actionability -----------------------------------------------------
-//
-// SKILL.md: an issue counts only when status is open/inprogress AND no
-// explicit blocker or owner-gated marker appears in impact/resolution. The
-// real skill leaves this to the agent's judgement; this harness approximates
-// it with an explicit, documented, fixture-matching heuristic rather than
-// claiming to reproduce open-ended judgement.
-const OWNER_GATE_MARKER_RE = /\b(blocked|blocker|owner-gated)\b/i;
-
-export function issueClearsActionabilityBar(issue: {
-  status: string;
-  impact?: string | null;
-  resolution?: string | null;
-}): boolean {
-  if (issue.status !== "open" && issue.status !== "inprogress") return false;
-  const text = `${issue.impact ?? ""} ${issue.resolution ?? ""}`;
-  return !OWNER_GATE_MARKER_RE.test(text);
-}
-
-export function ticketClearsActionabilityBar(ticket: {
-  status: string;
-  blocked: boolean;
-}): boolean {
-  if (ticket.status !== "open" && ticket.status !== "inprogress") return false;
-  return !ticket.blocked;
 }
 
 // --- reconciliation fingerprint comparison (SKILL.md's guard/status cross-check) ---
@@ -676,40 +616,50 @@ export function isOrchestratorConfig(config: unknown): boolean {
   return c.type === "orchestrator";
 }
 
-// --- entity markdown parsing (storybloq_ticket_get / storybloq_issue_get) -----
+// --- entity actionability parsing (storybloq_ticket_get / storybloq_issue_get fallback) ---
 //
-// Neither tool accepts a `format` argument (confirmed: their inputSchema is
-// {id, node} only) -- both always render Markdown via runMcpReadTool's
-// default. formatTicket/formatIssue's shapes (confirmed by reading their
-// source) are parsed directly rather than assumed to be JSON.
+// ISS-1154 Commit B: the continuation walk's fallback path requests
+// format:"json", withActionability:true and reads the real, server-computed
+// `actionability.status` directly -- both tools' inputSchema gained these
+// fields in Commit A, so there is no markdown heuristic left to approximate
+// what "clears the bar" means.
 
-const STATUS_LINE_RE = /^Status:\s*(\S+)/m;
-
-export function parseTicketMarkdown(text: string): { status: string; blocked: boolean } {
-  const statusMatch = STATUS_LINE_RE.exec(text);
-  const titleLine = text.split("\n")[0] ?? "";
-  return {
-    status: statusMatch ? statusMatch[1]! : "unknown",
-    blocked: titleLine.includes("[BLOCKED]"),
-  };
+export interface EntityActionabilityResult {
+  readonly status: string | null;
+  readonly unreadableHandoverCount: number | null;
+  readonly parseFailed: boolean;
+  readonly reason?: string;
 }
 
-function extractFencedSection(text: string, heading: string): string {
-  const re = new RegExp(`## ${heading}\\n\\n(\`{3,})\\n([\\s\\S]*?)\\n\\1`, "m");
-  const m = re.exec(text);
-  return m ? m[2]! : "";
-}
-
-export function parseIssueMarkdown(text: string): {
-  status: string;
-  impact: string;
-  resolution: string;
-} {
-  const statusMatch = STATUS_LINE_RE.exec(text);
+export function deriveEntityActionability(text: string): EntityActionabilityResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    return {
+      status: null,
+      unreadableHandoverCount: null,
+      parseFailed: true,
+      reason: `entity response was not valid JSON: ${(err as Error).message}`,
+    };
+  }
+  const data = (parsed as { data?: unknown })?.data ?? parsed;
+  const d = data as { actionability?: { status?: unknown }; unreadableHandoverCount?: unknown };
+  if (typeof d?.actionability?.status !== "string") {
+    return {
+      status: null,
+      unreadableHandoverCount: null,
+      parseFailed: true,
+      reason: "entity JSON payload is missing actionability.status",
+    };
+  }
   return {
-    status: statusMatch ? statusMatch[1]! : "unknown",
-    impact: extractFencedSection(text, "Impact"),
-    resolution: extractFencedSection(text, "Resolution"),
+    status: d.actionability.status,
+    unreadableHandoverCount:
+      typeof d.unreadableHandoverCount === "number" || d.unreadableHandoverCount === null
+        ? (d.unreadableHandoverCount as number | null)
+        : null,
+    parseFailed: false,
   };
 }
 
@@ -1044,6 +994,7 @@ async function stepGitLogLive(root: string, normalize: Normalizer): Promise<Step
 interface RecommendStepResult {
   report: StepReport;
   rows: RecommendRow[];
+  excluded: ExcludedRow[];
 }
 
 export async function stepRecommend(ctx: ReplayContext): Promise<RecommendStepResult> {
@@ -1051,52 +1002,29 @@ export async function stepRecommend(ctx: ReplayContext): Promise<RecommendStepRe
   await ctx.client.callTool({ name: "storybloq_recommend", arguments: { count: 10 } });
   const measurement = measureExchange(ctx.log, mark, ctx.normalize);
   const text = responseText(measurement.rawResponse);
-  const parsed = deriveRecommendRows(text);
+  const parsed = deriveRecommendPayload(text);
   if (parsed.parseFailed) {
-    return { report: buildFailedRecommendReport(measurement, parsed.reason), rows: [] };
+    return { report: buildFailedRecommendReport(measurement, parsed.reason), rows: [], excluded: [] };
   }
-  const rows = parsed.rows;
-
-  const issueRows = rows.filter((r) => r.kind === "issue");
-  const issueGetCalls: ExchangeMeasurement[] = [];
-  let actionableIssueCount = 0;
-  let issueGetIncomplete = false;
-  let issueGetIncompleteReason: string | undefined;
-  let failedCallBytes = 0;
-  let failedCallCount = 0;
-  for (const row of issueRows) {
-    try {
-      const { measurement: m, text: issueText } = await callTool(ctx, "storybloq_issue_get", { id: row.id });
-      issueGetCalls.push(m);
-      if (issueClearsActionabilityBar(parseIssueMarkdown(issueText))) actionableIssueCount++;
-    } catch (err) {
-      // Retain every issue_get exchange already completed before the
-      // failure, plus whatever the failing exchange itself genuinely cost
-      // (CallToolFailure carries that even though its interpretation failed).
-      issueGetIncomplete = true;
-      issueGetIncompleteReason = `issue_get failed for ${row.id}: ${(err as Error).message}`;
-      if (err instanceof CallToolFailure) {
-        failedCallBytes = err.partialBytes;
-        failedCallCount = err.partialCalls;
-      }
-      break;
-    }
-  }
-  const issueGetBytes = issueGetCalls.reduce((a, m) => a + m.totalBytes, 0) + failedCallBytes;
-  const issueGetCallCount = issueGetCalls.length + failedCallCount;
 
   return {
     report: {
-      bytes: measurement.totalBytes + issueGetBytes,
-      calls: measurement.calls + issueGetCallCount,
+      bytes: measurement.totalBytes,
+      calls: measurement.calls,
       includedInTotal: true,
-      issueGetCalls: issueGetCalls.length,
-      actionableIssueCount,
+      // Always 0: `recommendations` is already partitioned to actionable
+      // candidates by recommend() itself (ISS-1154), so Gate B and this step
+      // need no per-row issue_get walk at all -- kept as a field (rather
+      // than dropped) so the zero-cost claim stays a pinned assertion.
+      issueGetCalls: 0,
+      actionableIssueCount: parsed.rows.filter((r) => r.kind === "issue").length,
+      excludedCount: parsed.excluded.length,
+      unreadableHandoverCount: parsed.unreadableHandoverCount,
       requestCarriesCountTen:
         (measurement.rawRequest as any)?.params?.arguments?.count === 10,
-      ...(issueGetIncomplete ? { status: "incomplete", reason: issueGetIncompleteReason } : {}),
     },
-    rows,
+    rows: parsed.rows,
+    excluded: parsed.excluded,
   };
 }
 
@@ -1105,9 +1033,15 @@ export interface ContinuationStepResult {
   resolvedId: string | null;
 }
 
+function idMatchesRow(row: { id: string; displayId?: string }, id: string): boolean {
+  return row.id === id || row.displayId === id;
+}
+
 export async function stepContinuationCheck(
   ctx: ReplayContext,
   newestHandoverBody: string,
+  recommendRows: readonly RecommendRow[] = [],
+  excludedRows: readonly ExcludedRow[] = [],
 ): Promise<ContinuationStepResult> {
   const section = findContinuationSection(newestHandoverBody);
   if (!section) {
@@ -1146,31 +1080,65 @@ export async function stepContinuationCheck(
   let walkIncompleteReason: string | undefined;
   let failedCallBytes = 0;
   let failedCallCount = 0;
+  // A fallback can fire once per id absent from both bounded arrays -- SKILL.md
+  // treats an unreadable or non-actionable fallback exactly like "anything
+  // else": the walk keeps going to the next id, it never stops the walk. So
+  // this tracks whatever uncertainty ANY fallback along the way disclosed,
+  // never just the last one: once a fallback reports a nonzero/null count,
+  // a later call's clean 0 must not paper over it.
+  let fallbackUnreadableHandoverCount: number | null | undefined;
+
   for (const id of ids) {
+    // Bounded-array lookups cost zero calls: an id in `recommendations` is
+    // already known actionable (recommend()'s own partition), and an id in
+    // `excluded` already carries its own known-non-actionable verdict.
+    if (recommendRows.some((r) => idMatchesRow(r, id))) {
+      resolvedId = id;
+      break;
+    }
+    if (excludedRows.some((r) => idMatchesRow(r, id))) {
+      continue;
+    }
+
     try {
       const isIssue = id.startsWith("ISS-");
       const toolName = isIssue ? "storybloq_issue_get" : "storybloq_ticket_get";
-      const { measurement, text } = await callTool(ctx, toolName, { id });
+      const { measurement, text } = await callTool(ctx, toolName, {
+        id,
+        format: "json",
+        withActionability: true,
+      });
       walkCalls.push(measurement);
-      const clears = isIssue
-        ? issueClearsActionabilityBar(parseIssueMarkdown(text))
-        : ticketClearsActionabilityBar(parseTicketMarkdown(text));
-      if (clears) {
+      const parsed = deriveEntityActionability(text);
+      if (parsed.parseFailed) {
+        // An unreadable fallback response is "anything else" too -- SKILL.md
+        // keeps walking past it exactly like a failed (deleted/renamed) get.
+        // The exchange still genuinely happened (measured above), so the
+        // walk is flagged incomplete for disclosure without stopping it.
+        walkIncomplete = true;
+        walkIncompleteReason ??= `continuation fallback response for ${id} could not be parsed: ${parsed.reason}`;
+        continue;
+      }
+      if (fallbackUnreadableHandoverCount === undefined || fallbackUnreadableHandoverCount === 0) {
+        fallbackUnreadableHandoverCount = parsed.unreadableHandoverCount;
+      }
+      if (parsed.status === "actionable") {
         resolvedId = id;
         break;
       }
     } catch (err) {
-      // Retain every exchange already observed before the failure, plus
-      // whatever the failing exchange itself genuinely cost (CallToolFailure
-      // carries that even though its interpretation failed); only the
-      // unfinished portion of the walk is marked incomplete.
+      // Retain every exchange already observed, plus whatever the failing
+      // exchange itself genuinely cost (CallToolFailure carries that even
+      // though its interpretation failed). SKILL.md treats a failed
+      // (deleted/renamed) get the same as any other non-actionable
+      // verdict -- the walk continues to the next id rather than stopping.
       walkIncomplete = true;
-      walkIncompleteReason = `continuation walk failed on ${id}: ${(err as Error).message}`;
+      walkIncompleteReason ??= `continuation walk failed on ${id}: ${(err as Error).message}`;
       if (err instanceof CallToolFailure) {
-        failedCallBytes = err.partialBytes;
-        failedCallCount = err.partialCalls;
+        failedCallBytes += err.partialBytes;
+        failedCallCount += err.partialCalls;
       }
-      break;
+      continue;
     }
   }
   const walkBytes = walkCalls.reduce((a, m) => a + m.totalBytes, 0) + failedCallBytes;
@@ -1185,6 +1153,7 @@ export async function stepContinuationCheck(
     constructedText: ctx.normalize(constructedText),
     walkCalls: walkCallCount,
     resolvedId,
+    ...(fallbackUnreadableHandoverCount !== undefined ? { fallbackUnreadableHandoverCount } : {}),
     ...(walkIncomplete ? { status: "incomplete", reason: walkIncompleteReason } : {}),
   };
 
@@ -1373,22 +1342,29 @@ export async function runReplaySequence(
     // stepRecommend never throws on a parse failure: it retains the already-
     // captured request/response bytes and call count in the returned report
     // (status: "incomplete") rather than discarding them, since the exchange
-    // genuinely transmitted. `rows` comes back empty in that case, which is
-    // what correctly starves the downstream Gate B / context / table steps of
-    // anything to depend on below.
+    // genuinely transmitted. `rows`/`excluded` come back empty in that case,
+    // which is what correctly starves the downstream Gate B / continuation /
+    // context / table steps of anything to depend on below.
     enter("recommend");
-    const { report: recommend, rows: recommendRows } = await stepRecommend(ctx);
+    const { report: recommend, rows: recommendRows, excluded: excludedRows } = await stepRecommend(ctx);
     if (recommend.status === "incomplete") anyIncomplete = true;
     steps.recommend = recommend;
 
     // handoverFilenames (and therefore handover_latest's returned bodies) are
     // ordered NEWEST FIRST -- bodies[0] is the most recent handover, the one
-    // the Continuation check scans.
+    // the Continuation check scans. Both `recommendRows` and `excludedRows`
+    // are threaded through so a handover-named id already resolved by
+    // recommend()'s own partition costs zero further calls.
     // stepContinuationCheck never throws: a mid-walk failure is caught inside
     // it and reported as status:"incomplete" while retaining every exchange
     // already observed before the failure.
     enter("continuation_check");
-    const { report: continuation } = await stepContinuationCheck(ctx, handover.bodies[0] ?? "");
+    const { report: continuation } = await stepContinuationCheck(
+      ctx,
+      handover.bodies[0] ?? "",
+      recommendRows,
+      excludedRows,
+    );
     if (continuation.status === "incomplete") anyIncomplete = true;
     steps.continuation_check = continuation;
 

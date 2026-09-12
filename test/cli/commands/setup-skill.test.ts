@@ -2536,12 +2536,13 @@ describe("T-414: orchestrate discoverability", () => {
     const content = await readFile(join(PROJECT_ROOT, "src", "skill", "SKILL.md"), "utf-8");
     // storybloq_recommend loaded with count: 10.
     expect(content).toContain("count: 10");
-    // issue rows are verified actionable via storybloq_issue_get.
-    expect(content).toContain("storybloq_issue_get");
+    // recommend() already partitions actionability server-side (ISS-1154
+    // Commit B); Gate B counts recommendations rows directly, no per-row get.
+    expect(content).toContain("already partitioned to actionable candidates");
     // kind "action" rows are excluded.
     expect(content).toContain("never count a row whose `kind` is `\"action\"`");
-    // status verification.
-    expect(content).toContain("open` or `inprogress");
+    // unreadableHandoverCount disclosure.
+    expect(content).toContain("unreadableHandoverCount");
   });
 
   it("SKILL.md Gate A uses an exact-name allowlist that fails closed", async () => {
