@@ -18,6 +18,7 @@ import type { ValidationResult, ValidationFinding, ValidationLevel } from "./val
 import type { LedgerIntegrityResult } from "./ledger-integrity.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "./queries.js";
 import type { RecommendResult } from "./recommend.js";
+import { isHandoverWindowIncomplete } from "./recommend.js";
 import type { HandoverBriefResult, HandoverBriefEntry } from "./handover-brief.js";
 import type { SectionRecord, TrajectoryEntry } from "./markdown-sections.js";
 import type { ReconcileResult } from "./reconcile.js";
@@ -1256,9 +1257,15 @@ export function formatTicket(
   state: ProjectState,
   format: OutputFormat,
   citedRulings: readonly CitationResolution[] = [],
+  /** ISS-1154 2h: `{ actionability, unreadableHandoverCount }` when `withActionability` was requested. JSON-only. */
+  extraJsonFields?: Record<string, unknown>,
 ): string {
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ ...ticket, citedRulings: citedRulingsForJson(citedRulings) }), null, 2);
+    return JSON.stringify(
+      successEnvelope({ ...ticket, citedRulings: citedRulingsForJson(citedRulings), ...extraJsonFields }),
+      null,
+      2,
+    );
   }
 
   const blocked = state.isBlocked(ticket) ? " [BLOCKED]" : "";
@@ -1447,9 +1454,15 @@ export function formatIssue(
   format: OutputFormat,
   state?: ProjectState,
   citedRulings: readonly CitationResolution[] = [],
+  /** ISS-1154 2h: `{ actionability, unreadableHandoverCount }` when `withActionability` was requested. JSON-only. */
+  extraJsonFields?: Record<string, unknown>,
 ): string {
   if (format === "json") {
-    return JSON.stringify(successEnvelope({ ...issue, citedRulings: citedRulingsForJson(citedRulings) }), null, 2);
+    return JSON.stringify(
+      successEnvelope({ ...issue, citedRulings: citedRulingsForJson(citedRulings), ...extraJsonFields }),
+      null,
+      2,
+    );
   }
 
   const lines: string[] = [
@@ -3179,16 +3192,29 @@ export function formatReference(
   return lines.join("\n");
 }
 
+/**
+ * ISS-1154: without `withActionability`, markdown output is byte-identical
+ * to before this ticket -- the flag opt-in gates every new rendering
+ * addition (actionability suffixes, the Excluded section, the
+ * window-incomplete warning). MCP's JSON envelope carries the new fields
+ * unconditionally regardless of this flag (2f) -- this gate is CLI-only.
+ */
 export function formatRecommendations(
   result: RecommendResult,
   state: ProjectState,
   format: OutputFormat,
+  withActionability = false,
 ): string {
   if (format === "json") {
     return JSON.stringify(successEnvelope({ ...result, isEmptyScaffold: state.isEmptyScaffold }), null, 2);
   }
 
-  if (result.recommendations.length === 0) {
+  const windowIncomplete = isHandoverWindowIncomplete(result.unreadableHandoverCount);
+  const hasNothingToShow = withActionability
+    ? result.recommendations.length === 0 && result.excludedCount === 0 && !windowIncomplete
+    : result.recommendations.length === 0;
+
+  if (hasNothingToShow) {
     if (state.isEmptyScaffold) {
       return "No recommendations yet -- this project needs tickets and phases. Run the /story setup flow to get started.";
     }
@@ -3200,10 +3226,23 @@ export function formatRecommendations(
 
   const lines: string[] = ["# Recommendations", ""];
 
+  if (withActionability && windowIncomplete) {
+    lines.push(
+      result.unreadableHandoverCount === null
+        ? "_Warning: handover history could not be listed -- results may be incomplete._"
+        : `_Warning: ${result.unreadableHandoverCount} handover file(s) could not be read -- results may be incomplete._`,
+    );
+    lines.push("");
+  }
+
   for (let i = 0; i < result.recommendations.length; i++) {
     const rec = result.recommendations[i]!;
+    const suffix =
+      withActionability && rec.actionability
+        ? ` (${rec.actionability.status} -- ${escapeMarkdownInline(rec.actionability.reason)})`
+        : "";
     lines.push(
-      `${i + 1}. **${escapeMarkdownInline(displayIdOf(rec))}** (${rec.kind}) -- ${escapeMarkdownInline(rec.title)}`,
+      `${i + 1}. **${escapeMarkdownInline(displayIdOf(rec))}** (${rec.kind}) -- ${escapeMarkdownInline(rec.title)}${suffix}`,
     );
     lines.push(`   _${escapeMarkdownInline(rec.reason)}_`);
     lines.push("");
@@ -3213,6 +3252,22 @@ export function formatRecommendations(
     lines.push(
       `Showing ${result.recommendations.length} of ${result.totalCandidates} candidates.`,
     );
+  }
+
+  if (withActionability && result.excludedCount > 0) {
+    lines.push("");
+    const shown = result.excluded.length;
+    lines.push(
+      shown === result.excludedCount
+        ? `## Excluded (${result.excludedCount})`
+        : `## Excluded (${result.excludedCount} total, showing ${shown})`,
+    );
+    lines.push("");
+    for (const entry of result.excluded) {
+      lines.push(
+        `- ${escapeMarkdownInline(displayIdOf(entry))}: ${escapeMarkdownInline(entry.title)} (${entry.actionability.status} -- ${escapeMarkdownInline(entry.actionability.reason)})`,
+      );
+    }
   }
 
   return lines.join("\n");

@@ -711,12 +711,19 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     description: "Get a ticket by ID (includes umbrella tickets)",
     inputSchema: {
       id: z.string().refine((v) => TICKET_ID_REGEX.test(v) || TICKET_CANONICAL_ID_REGEX.test(v), "Ticket ID").describe("e.g. T-001, T-079b, t-[canonical]"),
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
+      withActionability: z.boolean().optional(),
       node: nodeParam,
     },
   }, (args) => {
     const eff = resolveEffectiveRoot(pinnedRoot, args.node);
     if ("content" in eff) return eff;
-    return runMcpReadTool(pinnedRoot, (ctx) => handleTicketGet(args.id, ctx), eff.root);
+    return runMcpReadTool(
+      pinnedRoot,
+      (ctx) => handleTicketGet(args.id, ctx, args.withActionability ?? false),
+      eff.root,
+      args.format ?? (args.withActionability ? "json" : "md"),
+    );
   });
 
   server.registerTool("storybloq_ticket_meta_get", {
@@ -763,12 +770,19 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     description: "Get an issue by ID",
     inputSchema: {
       id: IssueRefSchema.describe("Issue ID (e.g. ISS-001, i-[canonical])"),
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
+      withActionability: z.boolean().optional(),
       node: nodeParam,
     },
   }, (args) => {
     const eff = resolveEffectiveRoot(pinnedRoot, args.node);
     if ("content" in eff) return eff;
-    return runMcpReadTool(pinnedRoot, (ctx) => handleIssueGet(args.id, ctx), eff.root);
+    return runMcpReadTool(
+      pinnedRoot,
+      (ctx) => handleIssueGet(args.id, ctx, args.withActionability ?? false),
+      eff.root,
+      args.format ?? (args.withActionability ? "json" : "md"),
+    );
   });
 
   server.registerTool("storybloq_issue_meta_get", {
@@ -802,9 +816,14 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
   }, (args) => {
     const eff = resolveEffectiveRoot(pinnedRoot, args.node);
     if ("content" in eff) return eff;
+    // ISS-1154: json unconditionally, so actionability/excluded/
+    // unreadableHandoverCount are always reachable to the MCP caller (the
+    // SKILL's Gate B/Part 3 included) -- these are additive JSON fields with
+    // no markdown-rendering opt-in gate at this layer (that gate is the
+    // CLI's --with-actionability flag instead).
     return runMcpReadTool(pinnedRoot, (ctx) =>
       handleRecommend(ctx, args.count ?? 5),
-    eff.root);
+    eff.root, "json");
   });
 
   server.registerTool("storybloq_snapshot", {

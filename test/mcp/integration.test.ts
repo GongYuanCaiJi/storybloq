@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { handleStatus } from "../../src/cli/commands/status.js";
 import { handleTicketGet } from "../../src/cli/commands/ticket.js";
 import { handlePhaseList, handlePhaseCreate } from "../../src/cli/commands/phase.js";
-import { handleIssueList } from "../../src/cli/commands/issue.js";
+import { handleIssueList, handleIssueGet } from "../../src/cli/commands/issue.js";
 import { handleHandoverList, handleHandoverLatest } from "../../src/cli/commands/handover.js";
 import { handleValidate } from "../../src/cli/commands/validate.js";
 import { handleBlockerList } from "../../src/cli/commands/blocker.js";
@@ -112,6 +112,222 @@ describe("MCP integration -- real filesystem", () => {
     // not_found is informational -- NOT isError
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain("not found");
+  });
+
+  // --- ISS-1154: format/withActionability on issue_get/ticket_get ---
+
+  it("storybloq_issue_get -- format:'json' returns disposition/duplicateOf when set", async () => {
+    const root = await setupProject();
+    await writeFile(
+      join(root, ".story", "issues", "ISS-090.json"),
+      JSON.stringify({
+        id: "ISS-090",
+        title: "Duplicate of an earlier report",
+        status: "open",
+        severity: "medium",
+        components: [],
+        impact: "n/a",
+        resolution: null,
+        location: [],
+        discoveredDate: "2026-09-01",
+        resolvedDate: null,
+        relatedTickets: [],
+        disposition: "duplicate",
+        duplicateOf: "ISS-001",
+      }),
+    );
+    const result = await runMcpReadTool(root, (ctx) => handleIssueGet("ISS-090", ctx), undefined, "json");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.data.disposition).toBe("duplicate");
+    expect(parsed.data.duplicateOf).toBe("ISS-001");
+  });
+
+  it("storybloq_ticket_get -- withActionability:true returns a real tier-3-inclusive verdict for a handover-only exclusion", async () => {
+    const root = await setupProject();
+    const handoversDir = join(root, ".story", "handovers");
+    await mkdir(handoversDir, { recursive: true });
+    await writeFile(join(handoversDir, "2026-09-12-h1.md"), "## Blocked\n- T-003: waiting on external dependency\n");
+    // T-003 is open and unblocked by ledger rules alone -- the ONLY reason to
+    // exclude it is the handover-tier mention, proving the targeted lookup
+    // genuinely runs tier 3 and not just the ledger/structured/heuristic tiers.
+    const result = await runMcpReadTool(root, (ctx) => handleTicketGet("T-003", ctx, true), undefined, "json");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.data.actionability.status).toBe("blocked");
+    expect(parsed.data.actionability.source).toBe("handover");
+    expect(parsed.data.unreadableHandoverCount).toBe(0);
+  });
+
+  it("storybloq_ticket_get -- withActionability shares the same crossNodeRefStatuses cache recommend() reads (loadClassificationContext is genuinely shared)", async () => {
+    const root = await setupProject();
+    await writeFile(
+      join(root, ".story", "tickets", "T-095.json"),
+      JSON.stringify({
+        id: "T-095",
+        title: "Cross-node dependent ticket",
+        description: "n/a",
+        type: "task",
+        status: "open",
+        phase: null,
+        order: 900,
+        createdDate: "2026-09-01",
+        completedDate: null,
+        blockedBy: [],
+        crossNodeBlockedBy: ["engine:T-005"],
+      }),
+    );
+    await writeFile(
+      join(root, ".story", "federation-cache.json"),
+      JSON.stringify({
+        lastScanTimestamp: new Date().toISOString(),
+        nodes: {},
+        crossNodeRefStatuses: { "engine:T-005": "complete" },
+      }),
+    );
+    const result = await runMcpReadTool(root, (ctx) => handleTicketGet("T-095", ctx, true), undefined, "json");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    // The cross-node dependency is resolved (complete) in the shared cache --
+    // actionable, not blocked, matching how recommend() itself would treat it.
+    expect(parsed.data.actionability.status).toBe("actionable");
+  });
+
+  it("storybloq_ticket_get -- withActionability:true on an archived ticket returns complete/ledger, matching how recommend() treats it", async () => {
+    const root = await setupProject();
+    await writeFile(
+      join(root, ".story", "tickets", "T-096.json"),
+      JSON.stringify({
+        id: "T-096",
+        title: "Archived ticket",
+        description: "n/a",
+        type: "task",
+        status: "open",
+        phase: null,
+        order: 901,
+        createdDate: "2026-09-01",
+        completedDate: null,
+        blockedBy: [],
+        lifecycle: "archived",
+      }),
+    );
+    const result = await runMcpReadTool(root, (ctx) => handleTicketGet("T-096", ctx, true), undefined, "json");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.data.actionability.status).toBe("complete");
+    expect(parsed.data.actionability.source).toBe("ledger");
+  });
+
+  it("storybloq_ticket_get -- withActionability:false (default) omits the actionability field", async () => {
+    const root = await setupProject();
+    const result = await runMcpReadTool(root, (ctx) => handleTicketGet("T-003", ctx), undefined, "json");
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.data.actionability).toBeUndefined();
+  });
+
+  /**
+   * ISS-1154: same real-registration pattern as callHandoverLatest below --
+   * exercises the storybloq_ticket_get/storybloq_issue_get/storybloq_recommend
+   * zod inputSchema's format/withActionability fields and their forwarding at
+   * the tools.ts registration site, which a direct handleTicketGet/
+   * handleIssueGet/runMcpReadTool call (as used above) bypasses entirely.
+   */
+  async function callTool(
+    root: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ isError?: boolean; text: string }> {
+    const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+    registerAllTools(server, root);
+    const client = new Client({ name: `${name}-test`, version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name, arguments: args });
+    await client.close();
+    const content = result.content as { text: string }[];
+    return { isError: result.isError as boolean | undefined, text: content[0]!.text };
+  }
+
+  it("storybloq_ticket_get -- format:'json'+withActionability:true through the real MCP registration returns the actionability field", async () => {
+    const root = await setupProject();
+    const result = await callTool(root, "storybloq_ticket_get", { id: "T-003", format: "json", withActionability: true });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.data.actionability).toBeDefined();
+    expect(parsed.data.actionability.status).toBeDefined();
+  });
+
+  it("storybloq_ticket_get -- withActionability:true with format omitted defaults to JSON through the real MCP registration (the flag would otherwise be silently inert under the markdown default)", async () => {
+    const root = await setupProject();
+    const result = await callTool(root, "storybloq_ticket_get", { id: "T-003", withActionability: true });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.data.actionability).toBeDefined();
+  });
+
+  it("storybloq_issue_get -- format:'json' through the real MCP registration returns disposition/duplicateOf", async () => {
+    const root = await setupProject();
+    await writeFile(
+      join(root, ".story", "issues", "ISS-091.json"),
+      JSON.stringify({
+        id: "ISS-091",
+        title: "Duplicate via real registration",
+        status: "open",
+        severity: "medium",
+        components: [],
+        impact: "n/a",
+        resolution: null,
+        location: [],
+        discoveredDate: "2026-09-01",
+        resolvedDate: null,
+        relatedTickets: [],
+        disposition: "duplicate",
+        duplicateOf: "ISS-001",
+      }),
+    );
+    const result = await callTool(root, "storybloq_issue_get", { id: "ISS-091", format: "json" });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.data.disposition).toBe("duplicate");
+    expect(parsed.data.duplicateOf).toBe("ISS-001");
+  });
+
+  it("storybloq_issue_get -- withActionability:true through the real MCP registration returns the actionability field", async () => {
+    const root = await setupProject();
+    await writeFile(
+      join(root, ".story", "issues", "ISS-092.json"),
+      JSON.stringify({
+        id: "ISS-092",
+        title: "Duplicate, actionability via real registration",
+        status: "open",
+        severity: "medium",
+        components: [],
+        impact: "n/a",
+        resolution: null,
+        location: [],
+        discoveredDate: "2026-09-01",
+        resolvedDate: null,
+        relatedTickets: [],
+        disposition: "duplicate",
+        duplicateOf: "ISS-001",
+      }),
+    );
+    const result = await callTool(root, "storybloq_issue_get", { id: "ISS-092", withActionability: true });
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.data.actionability.status).toBe("duplicate");
+    expect(parsed.data.actionability.source).toBe("structured");
+  });
+
+  it("storybloq_recommend -- format omitted through the real MCP registration still returns the JSON envelope (excludedCount/excluded/unreadableHandoverCount reachable)", async () => {
+    const root = await setupProject();
+    const result = await callTool(root, "storybloq_recommend", {});
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.text);
+    expect(parsed.data.excludedCount).toBeDefined();
+    expect(parsed.data.excluded).toBeDefined();
+    expect("unreadableHandoverCount" in parsed.data).toBe(true);
   });
 
   it("storybloq_phase_list -- lists phases", async () => {

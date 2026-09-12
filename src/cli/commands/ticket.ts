@@ -18,6 +18,7 @@ import { validateProject } from "../../core/validation.js";
 import { ProjectState } from "../../core/project-state.js";
 import { loadCitationContext } from "../../core/ruling-loader.js";
 import { citationMapFor, resolveEntityCitations, resolveCitesRulingsInput } from "../../core/ruling.js";
+import { computeTargetedActionability } from "../../core/classification-context.js";
 import {
   withProjectLock,
   writeTicketUnlocked,
@@ -123,6 +124,7 @@ export function handleTicketList(
 export function handleTicketGet(
   id: string,
   ctx: CommandContext,
+  withActionability = false,
 ): CommandResult {
   const result = ctx.state.resolveTicketRef(id);
   if (result.kind === "ambiguous") {
@@ -141,7 +143,10 @@ export function handleTicketGet(
     };
   }
   const rulingCtx = loadCitationContext(ctx.root);
-  return { output: formatTicket(result.item, ctx.state, ctx.format, resolveEntityCitations(result.item, rulingCtx)) };
+  const extraJsonFields = withActionability ? computeTargetedActionability(ctx, "ticket", result.item) : undefined;
+  return {
+    output: formatTicket(result.item, ctx.state, ctx.format, resolveEntityCitations(result.item, rulingCtx), extraJsonFields),
+  };
 }
 
 export function handleTicketMetaGet(

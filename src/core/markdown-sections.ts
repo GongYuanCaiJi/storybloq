@@ -945,6 +945,29 @@ function fitIndex(
 // Trajectory list
 // ---------------------------------------------------------------------------
 
+/**
+ * Within one handover, reduces its (already document-order) occurrences to
+ * the FIRST disposition per id -- resolving a same-id tie (e.g. shipped AND
+ * continuation both name it) by whichever occurrence is textually first
+ * (round-1 code review finding: trajectory-ordering). Relying on Map
+ * insertion order over the document-ordered stream is what implements
+ * "textually first" here. Extracted (ISS-1154) so `computeActionability`'s
+ * `continuationMentionCount` can share this exact reduction with
+ * `buildTrajectory`, rather than re-deriving it and risking the two
+ * disagreeing on which disposition "won" a same-handover tie.
+ */
+export function firstDispositionPerHandover(
+  orderedIdOccurrences: readonly IdOccurrence[],
+): Map<string, TrajectoryDisposition> {
+  const firstDisposition = new Map<string, TrajectoryDisposition>();
+  for (const occurrence of orderedIdOccurrences) {
+    if (!firstDisposition.has(occurrence.id)) {
+      firstDisposition.set(occurrence.id, occurrence.disposition);
+    }
+  }
+  return firstDisposition;
+}
+
 export function buildTrajectory(
   handovers: TrajectoryHandoverInput[],
 ): TrajectoryEntry[] {
@@ -961,13 +984,7 @@ export function buildTrajectory(
   // handovers is expected newest-to-oldest. We iterate in that order so the
   // FIRST time we see an id, it's the newest (latest) mention.
   for (const handover of handovers) {
-    // Within one handover, resolve a same-id tie (e.g. shipped AND
-    // continuation both name it) by whichever occurrence is textually
-    // first -- round-1 code review finding: trajectory-ordering. This
-    // requires the caller's occurrences to already be in document order;
-    // relying on Map insertion order over that stream is what implements
-    // "textually first" here.
-    const firstDispositionThisHandover = new Map<string, TrajectoryDisposition>();
+    const firstDispositionThisHandover = firstDispositionPerHandover(handover.orderedIdOccurrences);
     // occurrenceCount counts handovers whose continuation/blocked/
     // owner-gated/carried sections name the id -- a shipped-only mention
     // sets latest/latestDisposition (via firstDispositionThisHandover
@@ -975,9 +992,6 @@ export function buildTrajectory(
     // finding).
     const hasNonShippedMention = new Set<string>();
     for (const occurrence of handover.orderedIdOccurrences) {
-      if (!firstDispositionThisHandover.has(occurrence.id)) {
-        firstDispositionThisHandover.set(occurrence.id, occurrence.disposition);
-      }
       if (occurrence.disposition !== "shipped") {
         hasNonShippedMention.add(occurrence.id);
       }

@@ -767,6 +767,9 @@ describe("formatRecommendations", () => {
         { id: "T-001", kind: "ticket", title: "Task", category: "inprogress_ticket", reason: "In-progress", score: 800 },
       ],
       totalCandidates: 2,
+      excludedCount: 0,
+      excluded: [],
+      unreadableHandoverCount: 0,
     };
     const md = formatRecommendations(result, populatedState, "md");
     expect(md).toContain("# Recommendations");
@@ -777,14 +780,14 @@ describe("formatRecommendations", () => {
   });
 
   it("empty + populated → 'complete or blocked' message", () => {
-    const result: RecommendResult = { recommendations: [], totalCandidates: 0 };
+    const result: RecommendResult = { recommendations: [], totalCandidates: 0, excludedCount: 0, excluded: [], unreadableHandoverCount: 0 };
     const md = formatRecommendations(result, populatedState, "md");
     expect(md).toContain("No recommendations");
     expect(md).toContain("complete or blocked");
   });
 
   it("empty + empty scaffold → setup message", () => {
-    const result: RecommendResult = { recommendations: [], totalCandidates: 0 };
+    const result: RecommendResult = { recommendations: [], totalCandidates: 0, excludedCount: 0, excluded: [], unreadableHandoverCount: 0 };
     const scaffoldState = makeState();
     const md = formatRecommendations(result, scaffoldState, "md");
     expect(md).toContain("No recommendations yet");
@@ -797,6 +800,9 @@ describe("formatRecommendations", () => {
         { id: "T-001", kind: "ticket", title: "Task", category: "quick_win", reason: "Chore", score: 400 },
       ],
       totalCandidates: 5,
+      excludedCount: 0,
+      excluded: [],
+      unreadableHandoverCount: 0,
     };
     const json = formatRecommendations(result, populatedState, "json");
     const parsed = JSON.parse(json);
@@ -807,7 +813,7 @@ describe("formatRecommendations", () => {
   });
 
   it("JSON envelope includes isEmptyScaffold: true for scaffold", () => {
-    const result: RecommendResult = { recommendations: [], totalCandidates: 0 };
+    const result: RecommendResult = { recommendations: [], totalCandidates: 0, excludedCount: 0, excluded: [], unreadableHandoverCount: 0 };
     const scaffoldState = makeState();
     const json = formatRecommendations(result, scaffoldState, "json");
     const parsed = JSON.parse(json);
@@ -820,9 +826,139 @@ describe("formatRecommendations", () => {
         { id: "T-001", kind: "ticket", title: "Task", category: "quick_win", reason: "Chore", score: 400 },
       ],
       totalCandidates: 8,
+      excludedCount: 0,
+      excluded: [],
+      unreadableHandoverCount: 0,
     };
     const md = formatRecommendations(result, populatedState, "md");
     expect(md).toContain("Showing 1 of 8 candidates.");
+  });
+
+  // ISS-1154: --with-actionability rendering
+  describe("withActionability", () => {
+    function actionableRec() {
+      return {
+        id: "T-001",
+        kind: "ticket" as const,
+        title: "Task",
+        category: "quick_win" as const,
+        reason: "Chore",
+        score: 400,
+        actionability: { status: "actionable" as const, reason: "open, no blocking signal", source: "ledger" as const },
+      };
+    }
+    function excludedEntry(id: string) {
+      return {
+        id,
+        kind: "issue" as const,
+        title: "Duplicate bug",
+        actionability: { status: "duplicate" as const, reason: "structured disposition: duplicate", source: "structured" as const },
+      };
+    }
+
+    it("without the flag, markdown is byte-identical to the pre-ISS-1154 shape", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 2,
+        excluded: [excludedEntry("ISS-001"), excludedEntry("ISS-002")],
+        unreadableHandoverCount: 1,
+      };
+      const withoutFlag = formatRecommendations(result, populatedState, "md");
+      const resultNoExtras: RecommendResult = { ...result, excludedCount: 0, excluded: [], unreadableHandoverCount: 0 };
+      const baseline = formatRecommendations(resultNoExtras, populatedState, "md");
+      expect(withoutFlag).toBe(baseline);
+      expect(withoutFlag).not.toContain("actionability");
+      expect(withoutFlag).not.toContain("Excluded");
+    });
+
+    it("appends the actionability suffix to each recommendation row", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 0,
+        excluded: [],
+        unreadableHandoverCount: 0,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).toContain("(actionable -- open, no blocking signal)");
+    });
+
+    it("Excluded section: exact-count header form (N === M)", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 2,
+        excluded: [excludedEntry("ISS-001"), excludedEntry("ISS-002")],
+        unreadableHandoverCount: 0,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).toContain("## Excluded (2)");
+      expect(md).toContain("ISS-001: Duplicate bug (duplicate -- structured disposition: duplicate)");
+      expect(md).toContain("ISS-002: Duplicate bug");
+    });
+
+    it("Excluded section: truncated header form (N !== M)", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 5,
+        excluded: [excludedEntry("ISS-001")],
+        unreadableHandoverCount: 0,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).toContain("## Excluded (5 total, showing 1)");
+    });
+
+    it("all-excluded response reaches the Excluded section instead of the terse empty string", () => {
+      const result: RecommendResult = {
+        recommendations: [],
+        totalCandidates: 2,
+        excludedCount: 2,
+        excluded: [excludedEntry("ISS-001"), excludedEntry("ISS-002")],
+        unreadableHandoverCount: 0,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).not.toContain("No recommendations");
+      expect(md).toContain("## Excluded (2)");
+    });
+
+    it("window-incomplete warning: counted form (positive unreadableHandoverCount)", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 0,
+        excluded: [],
+        unreadableHandoverCount: 3,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).toContain("3 handover file(s) could not be read");
+    });
+
+    it("window-incomplete warning: count-free form (unreadableHandoverCount: null)", () => {
+      const result: RecommendResult = {
+        recommendations: [actionableRec()],
+        totalCandidates: 1,
+        excludedCount: 0,
+        excluded: [],
+        unreadableHandoverCount: null,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).toContain("handover history could not be listed");
+    });
+
+    it("an incomplete window alone (no excluded, empty recommendations) still reaches the warning, not the terse string", () => {
+      const result: RecommendResult = {
+        recommendations: [],
+        totalCandidates: 0,
+        excludedCount: 0,
+        excluded: [],
+        unreadableHandoverCount: null,
+      };
+      const md = formatRecommendations(result, populatedState, "md", true);
+      expect(md).not.toContain("No recommendations");
+      expect(md).toContain("handover history could not be listed");
+    });
   });
 });
 

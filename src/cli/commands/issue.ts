@@ -12,6 +12,7 @@ import { nextIssueID, allocateTeamIssueId } from "../../core/id-allocation.js";
 import { reserveDisplayId } from "../../core/remote-refs.js";
 import { checkBranchAllocationWarning } from "../../core/branch-allocation-warning.js";
 import { loadCitationContext } from "../../core/ruling-loader.js";
+import { computeTargetedActionability } from "../../core/classification-context.js";
 import { citationMapFor, resolveEntityCitations, resolveCitesRulingsInput } from "../../core/ruling.js";
 import {
   formatIssueList,
@@ -131,6 +132,7 @@ export function handleIssueList(
 export function handleIssueGet(
   id: string,
   ctx: CommandContext,
+  withActionability = false,
 ): CommandResult {
   const result = ctx.state.resolveIssueRef(id);
   if (result.kind === "ambiguous") {
@@ -149,7 +151,10 @@ export function handleIssueGet(
     };
   }
   const rulingCtx = loadCitationContext(ctx.root);
-  return { output: formatIssue(result.item, ctx.format, ctx.state, resolveEntityCitations(result.item, rulingCtx)) };
+  const extraJsonFields = withActionability ? computeTargetedActionability(ctx, "issue", result.item) : undefined;
+  return {
+    output: formatIssue(result.item, ctx.format, ctx.state, resolveEntityCitations(result.item, rulingCtx), extraJsonFields),
+  };
 }
 
 export function handleIssueMetaGet(

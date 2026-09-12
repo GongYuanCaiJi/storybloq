@@ -3911,12 +3911,16 @@ export function registerRecommendCommand(yargs: Argv): Argv {
         type: "number",
         default: 5,
         describe: "Number of recommendations (1-10)",
+      }).option("with-actionability", {
+        type: "boolean",
+        default: false,
+        describe: "Show actionability status/reason per row plus an Excluded section (ISS-1154)",
       }),
     async (argv) => {
       const format = parseOutputFormat(argv.format);
       const raw = Number(argv.count) || 5;
       const count = Math.max(1, Math.min(10, Math.floor(raw)));
-      await runReadCommand(format, (ctx) => handleRecommend(ctx, count));
+      await runReadCommand(format, (ctx) => handleRecommend(ctx, count, Boolean(argv["with-actionability"])));
     },
   );
 }

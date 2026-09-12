@@ -1,4 +1,5 @@
 import { displayIdOf } from "../core/resolver.js";
+import { loadClassificationContext } from "../core/classification-context.js";
 import { readFileSync, writeFileSync, existsSync, unlinkSync, readdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
@@ -324,15 +325,17 @@ export const RECOVERY_MAPPING: Readonly<Record<string, { state: string; resetPla
 // ---------------------------------------------------------------------------
 
 async function buildGuideRecommendOptions(root: string): Promise<RecommendOptions> {
-  const opts: { latestHandoverContent?: string; previousOpenIssueCount?: number; currentUser?: string } = {};
+  const opts: {
+    recentHandovers?: RecommendOptions["recentHandovers"];
+    unreadableHandoverCount?: number | null;
+    previousOpenIssueCount?: number;
+    currentUser?: string;
+  } = {};
 
-  try {
-    const handoversDir = join(root, ".story", "handovers");
-    const files = readdirSync(handoversDir, "utf-8").filter((f: string) => f.endsWith(".md")).sort();
-    if (files.length > 0) {
-      opts.latestHandoverContent = readFileSync(join(handoversDir, files[files.length - 1]), "utf-8");
-    }
-  } catch { /* no handovers */ }
+  const handoversDir = join(root, ".story", "handovers");
+  const classification = loadClassificationContext(root, handoversDir);
+  opts.recentHandovers = classification.recentHandovers;
+  opts.unreadableHandoverCount = classification.unreadableHandoverCount;
 
   try {
     const snapshotsDir = join(root, ".story", "snapshots");
