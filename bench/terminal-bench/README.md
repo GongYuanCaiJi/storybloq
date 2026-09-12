@@ -147,7 +147,30 @@ user-scope MCP config lives there, not only in `settings.json`, and can also be 
 `command`, `args`, `url`, `type`) only, never its free-form `env` or other config, so an unrelated
 server whose env happens to mention "storybloq" is not a false positive -- an unparseable or
 oversized `.claude.json` counts as a violation too, never a silent skip. A missing, empty, or
-unreadable archive is `unknown` (fails closed, never silently `ok`). A hook command passes
+unreadable archive is `unknown` (fails closed, never silently `ok`).
+
+For every non-A0 arm (A1-A4), `compliance` also carries a `guide-not-invoked` gate (ISS-1198):
+`/story auto <ticket>` sent as prose piped into `claude --print`'s stdin was found not to
+actually invoke the storybloq skill's autonomous-mode flow (Claude reads it as prose and calls
+a couple of storybloq tools directly instead of ever calling `storybloq_autonomous_guide`), so
+a trial can complete, even pass its task, having run none of the review discipline the
+benchmark exists to measure. The gate requires positive, VALIDATED evidence the guide's own
+state machine ran at all, not merely something that resembles it: either a
+`.story/sessions/<id>/state.json` in the collected story tree that parsed cleanly, recorded a
+real guide state or status (not an arbitrary non-null string), and whose `currentTicket`
+resolves to the ticket the adapter actually created for this trial (`versions.json`'s
+`ticket_id`, correlated through the loaded ticket record's id/displayId when the two forms
+differ) -- or an actual `tool_use` call to `storybloq_autonomous_guide`, made by a real
+`assistant` record (never a record merely containing a tool_use-shaped item), with a matching
+`tool_result` recording success (an errored or unacknowledged call doesn't count; the tool's
+presence in a transcript's system-init tool inventory doesn't count either -- every registered
+MCP tool is listed there on every session whether or not it was ever called). Absent both, `compliance` becomes
+`guide-not-invoked`, which excludes the row from every compliant-only summary and flags it in
+the raw one, the same treatment as `no-review` and `isolation-violated`; for A2/A4 it takes
+priority over the existing `reviewed`/`no-review` distinction, since that distinction
+presupposes the guide ran in the first place.
+
+A hook command passes
 only as a single plain invocation of one of the package's two bins (`storybloq`,
 `storybloq-presence`) with an audited subcommand: no shell operators,
 substitutions, quotes or redirections anywhere in the string), `agent/started.json` (written right before claude is

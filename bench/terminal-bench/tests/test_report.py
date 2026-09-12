@@ -55,6 +55,21 @@ def test_denominator_keeps_timeouts_excludes_infra():
     assert s.flagged == 1
 
 
+def test_guide_not_invoked_flagged_counted_and_excluded_from_compliant_only():
+    """ISS-1198's report-level contract: a guide-not-invoked row stays in the raw denominator
+    (visible, flagged) but is excluded once compliant_only=True, same treatment as no-review and
+    isolation-violated -- and the summary carries an explicit counter for it, not just a fold
+    into the generic flagged total."""
+    cs = [
+        costed(row("a", "A1", compliance="ok"), 1.0),
+        costed(row("b", "A1", compliance="guide-not-invoked"), 1.0),
+    ]
+    raw = summarize("A1", cs)
+    assert raw.denominator == 2 and raw.flagged == 1 and raw.guide_not_invoked == 1
+    compliant = summarize("A1", cs, compliant_only=True)
+    assert compliant.denominator == 1 and compliant.guide_not_invoked == 0
+
+
 def test_zero_passes_is_undefined():
     s = summarize("A0", [costed(row("a", "A0", passed=False), 1.0)])
     assert s.passes == 0 and s.cost_per_passed == "undefined" and s.cost_per_task == 1.0

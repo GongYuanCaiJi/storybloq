@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from report.parse import (  # noqa: E402
     check_a0_isolation,
+    check_guide_invoked,
     cost_usd,
     parse_claude_sessions,
     parse_codex_home,
@@ -219,7 +220,9 @@ def test_story_truncated_archive_falls_back_to_live(tmp_path):
         parse_trial(t, "A2", INSTRUCTION)
     (t / "agent" / "story.tgz").unlink()  # the adapter never leaves one: story.tgz is written outside /logs/agent and moved in whole
     r = parse_trial(t, "A2", INSTRUCTION)  # never raises once the collected set is inspectable
-    assert r.statuses["compliance"] == "no-review"
+    # ISS-1198 round 36: an unreadable state.json is no longer treated as evidence the guide ran
+    # at all -- guide-not-invoked, not the weaker no-review (which presupposes it ran).
+    assert r.statuses["compliance"] == "guide-not-invoked"
 
 
 def test_trial_row_statuses_and_compliance():
@@ -250,6 +253,154 @@ def test_trial_row_no_review_when_session_id_uncorrelated(tmp_path):
     st.write_text(json.dumps(s))
     r = parse_trial(t, "A2", INSTRUCTION)
     assert r.statuses["compliance"] == "no-review"
+
+
+def test_trial_row_guide_not_invoked_when_session_state_absent(tmp_path):
+    """ISS-1198: a trial with no .story/sessions/<id>/state.json and no storybloq_autonomous_guide
+    tool_use anywhere in its transcripts must fail the gate -- for A2 this takes priority over
+    the reviewed/no-review distinction (which presupposes the guide ran at all), and for A1 it
+    is the only compliance signal there is."""
+    t = copy_fixture(tmp_path)
+    shutil.rmtree(t / "agent" / "story-live" / ".story" / "sessions")
+    r = parse_trial(t, "A2", INSTRUCTION)
+    assert r.statuses["compliance"] == "guide-not-invoked"
+    r = parse_trial(t, "A1", INSTRUCTION)
+    assert r.statuses["compliance"] == "guide-not-invoked"
+
+
+def test_trial_row_guide_not_invoked_when_session_state_unvalidated(tmp_path):
+    """Round 36/37 findings: session_state_present alone is not enough -- an empty/malformed
+    state file, a state file with an invented (not a real guide state) or absent state/status
+    value, or one whose currentTicket doesn't resolve to the ticket the adapter actually created
+    for this trial, must each fail the gate exactly like no state file at all. None of these
+    automatically produces compliance='ok'."""
+    t = copy_fixture(tmp_path)
+    st = t / "agent" / "story-live" / ".story" / "sessions" / "s1" / "state.json"
+    # Malformed / unreadable: parses as invalid JSON.
+    st.write_text("{not json")
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+    # Readable but empty of any state or status signal: proves nothing happened.
+    st.write_text(json.dumps({"currentTicket": {"id": "T-001"}, "reviews": {}}))
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+    # An invented value that is neither a real guide state nor a real guide status: not accepted
+    # just because it happens to be a non-null string.
+    st.write_text(json.dumps({"state": "anything", "currentTicket": {"id": "T-001"}}))
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+    # A readable, populated, validly-stated session, but its currentTicket does not resolve to
+    # the ticket the adapter actually created for this trial (versions.json's ticket_id):
+    # must not vouch for this trial, even though the ticket FILE's description text matches.
+    st.write_text(json.dumps({"state": "SESSION_END", "status": "completed", "currentTicket": {"id": "T-999-unrelated"}}))
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+    # No currentTicket reference in the session at all: same treatment -- missing identity is
+    # not evidence, never a silent pass.
+    st.write_text(json.dumps({"state": "SESSION_END", "status": "completed"}))
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+
+
+def test_trial_row_guide_not_invoked_when_state_unvalidated_and_transcript_call_errored(tmp_path):
+    """Neither weak signal rescues the other: an unvalidated state file (malformed) alongside a
+    transcript tool_use call that itself errored must still fail the gate."""
+    t = copy_fixture(tmp_path)
+    st = t / "agent" / "story-live" / ".story" / "sessions" / "s1" / "state.json"
+    st.write_text("{not json")
+    main = next((t / "agent" / "sessions" / "projects").rglob("*.jsonl"))
+    _append_jsonl(main, _guide_tool_use_record())
+    _append_jsonl(main, {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-guide-1", "content": "invalid arguments", "is_error": True}]}})
+    assert parse_trial(t, "A1", INSTRUCTION).statuses["compliance"] == "guide-not-invoked"
+
+
+def _append_jsonl(path, obj):
+    with path.open("a") as fh:
+        fh.write(json.dumps(obj) + "\n")
+
+
+def _guide_tool_use_record(tool_id="tu-guide-1", msg_id="msg-guide-1"):
+    return {
+        "type": "assistant",
+        "message": {"id": msg_id, "model": "claude-sonnet-5", "usage": {
+            "input_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 1,
+        }, "content": [{"type": "tool_use", "id": tool_id, "name": "mcp__storybloq__storybloq_autonomous_guide", "input": {}}]},
+    }
+
+
+def test_trial_row_guide_invoked_via_transcript_tool_use_without_session_state(tmp_path):
+    """A real tool_use call to storybloq_autonomous_guide, WITH a matching successful tool_result,
+    is sufficient on its own, even with no readable session state (e.g. a crash right after)."""
+    t = copy_fixture(tmp_path)
+    shutil.rmtree(t / "agent" / "story-live" / ".story" / "sessions")
+    main = next((t / "agent" / "sessions" / "projects").rglob("*.jsonl"))
+    _append_jsonl(main, _guide_tool_use_record())
+    _append_jsonl(main, {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-guide-1", "content": "ok"}]}})
+    r = parse_trial(t, "A1", INSTRUCTION)
+    assert r.statuses["compliance"] == "ok"
+
+
+def test_trial_row_guide_invoked_for_states_outside_the_narrower_recovery_mapping(tmp_path):
+    """Round 38: GUIDE_STATES/GUIDE_STATUSES must match the authoritative schema
+    (session-types.ts's WORKFLOW_STATES and SessionStateSchema.status), not the narrower table
+    that guide.ts's RECOVERY_MAPPING happens to reference -- INIT/LOAD_CONTEXT/BUILD/VERIFY/
+    COMPACT are real workflow states, and 'active' is the real default (non-terminal) status."""
+    t = copy_fixture(tmp_path)
+    st = t / "agent" / "story-live" / ".story" / "sessions" / "s1" / "state.json"
+    for state in ("BUILD", "VERIFY", "COMPACT", "INIT", "LOAD_CONTEXT"):
+        st.write_text(json.dumps({"state": state, "status": "active", "currentTicket": {"id": "T-001"}}))
+        r = parse_trial(t, "A1", INSTRUCTION)
+        assert r.statuses["compliance"] == "ok", f"state={state!r} should be accepted as real guide-invocation evidence"
+
+
+def test_trial_row_guide_not_invoked_when_tool_use_only_in_a_non_assistant_record(tmp_path):
+    """Round 35 finding: a user (or other non-assistant) record merely CONTAINING a
+    tool_use-shaped item must not satisfy the gate -- only Claude actually requesting the tool
+    counts, never an item that happens to appear in some other record."""
+    t = copy_fixture(tmp_path)
+    shutil.rmtree(t / "agent" / "story-live" / ".story" / "sessions")
+    main = next((t / "agent" / "sessions" / "projects").rglob("*.jsonl"))
+    forged = _guide_tool_use_record()
+    forged["type"] = "user"
+    _append_jsonl(main, forged)
+    _append_jsonl(main, {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-guide-1", "content": "ok"}]}})
+    r = parse_trial(t, "A1", INSTRUCTION)
+    assert r.statuses["compliance"] == "guide-not-invoked"
+
+
+def test_trial_row_guide_not_invoked_when_tool_use_errored(tmp_path):
+    """Round 35 finding: a tool_use call that was made but errored (rejected arguments, tool
+    failure) proves an attempt, not that the guide's flow actually ran -- not accepted alone."""
+    t = copy_fixture(tmp_path)
+    shutil.rmtree(t / "agent" / "story-live" / ".story" / "sessions")
+    main = next((t / "agent" / "sessions" / "projects").rglob("*.jsonl"))
+    _append_jsonl(main, _guide_tool_use_record())
+    _append_jsonl(main, {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu-guide-1", "content": "invalid arguments", "is_error": True}]}})
+    r = parse_trial(t, "A1", INSTRUCTION)
+    assert r.statuses["compliance"] == "guide-not-invoked"
+    # ...and with no tool_result at all (call issued, response never observed): also not accepted.
+    t2 = copy_fixture(tmp_path.with_name(tmp_path.name + "-2"))
+    shutil.rmtree(t2 / "agent" / "story-live" / ".story" / "sessions")
+    main2 = next((t2 / "agent" / "sessions" / "projects").rglob("*.jsonl"))
+    _append_jsonl(main2, _guide_tool_use_record())
+    r2 = parse_trial(t2, "A1", INSTRUCTION)
+    assert r2.statuses["compliance"] == "guide-not-invoked"
+
+
+def test_trial_row_guide_invocation_gate_against_real_captured_smoke_transcripts():
+    """The gate this test exists to pin down: the two real A1/A2 smoke trials captured
+    2026-09-12 (before this fix) must fail it. `/story auto <ticket>` piped as stdin prose to
+    `claude --print` never actually invoked storybloq_autonomous_guide in either trial -- Claude
+    read it as prose and called a couple of storybloq tools directly instead. Skips if the
+    smoke artifacts are not present on this machine (they live outside the repo, under the
+    SSD's runs/ directory, not checked in)."""
+    smoke_dirs = {
+        "A1": Path("/Volumes/Sharge/cpm-bench/runs/smoke-A1-regex-log/2026-09-12__00-52-36/regex-log__wxbsZAk"),
+        "A2": Path("/Volumes/Sharge/cpm-bench/runs/smoke-A2-regex-log/2026-09-12__01-06-24/regex-log__niTGbdh"),
+    }
+    for arm, trial_dir in smoke_dirs.items():
+        if not trial_dir.is_dir():
+            pytest.skip(f"real {arm} smoke trial not present on this machine: {trial_dir}")
+        versions = json.loads((trial_dir / "agent" / "versions.json").read_text())
+        created_ticket_id = versions.get("ticket_id")
+        assert isinstance(created_ticket_id, str) and created_ticket_id, f"{arm} smoke trial's versions.json should record a ticket_id (test input, not the thing under test)"
+        story = parse_story(trial_dir / "agent")
+        assert check_guide_invoked(trial_dir / "agent", story, created_ticket_id) is False, f"{arm} smoke trial should fail the guide-invocation gate even with its real created_ticket_id supplied"
 
 
 def test_trial_row_timeout_without_result_event(tmp_path):

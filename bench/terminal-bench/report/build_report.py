@@ -137,6 +137,7 @@ class ArmSummary:
     mean_wall_clock: float | None
     mean_rounds: float | None
     no_review: int
+    guide_not_invoked: int
     flagged: int
     rate_limited: int = 0
 
@@ -161,14 +162,15 @@ def summarize(arm: str, costed: list[Costed], compliant_only: bool = False) -> A
     cgs = statistics.mean(succ) if succ and all(s is not None for s in succ) else None
     wc = [c.row.wall_clock_s for c in valid if c.row.wall_clock_s is not None]
     rounds = [c.row.review_rounds for c in valid]
-    flagged = sum(1 for c in valid if c.row.statuses["agent"] != "completed" or any(c.row.statuses[k] != "ok" for k in ("verifier", "telemetry", "collection")) or c.row.statuses.get("compliance") in ("no-review", "isolation-violated"))
+    flagged = sum(1 for c in valid if c.row.statuses["agent"] != "completed" or any(c.row.statuses[k] != "ok" for k in ("verifier", "telemetry", "collection")) or c.row.statuses.get("compliance") in ("no-review", "isolation-violated", "guide-not-invoked"))
     return ArmSummary(
         arm=arm, scheduled=scheduled, infra_excluded=scheduled - len([c for c in rows if c.row.statuses["infra"] == "ok"]),
         denominator=n, passes=passes, pass_rate=(passes / n) if n else None,
         cost_per_task=cpt, cost_per_passed=cpp, lower_bound_per_passed=lb,
         cost_given_success=cgs, unknown_cost_rows=unknown,
         mean_wall_clock=(statistics.mean(wc) if wc else None), mean_rounds=(statistics.mean(rounds) if rounds else None),
-        no_review=sum(1 for c in valid if c.row.statuses.get("compliance") == "no-review"), flagged=flagged,
+        no_review=sum(1 for c in valid if c.row.statuses.get("compliance") == "no-review"),
+        guide_not_invoked=sum(1 for c in valid if c.row.statuses.get("compliance") == "guide-not-invoked"), flagged=flagged,
         rate_limited=sum(1 for c in valid if c.row.statuses.get("rate_limit") == "rate-limited"),
     )
 
@@ -188,15 +190,15 @@ def render(header: dict[str, str], summaries: list[ArmSummary], compliant: list[
     if errors:
         lines += ["", "## BUILD ERRORS (tables below are not valid until these are resolved)", ""] + [f"- {e}" for e in errors]
     lines += ["", "## Per arm (denominator = selected trials that started)", "",
-              "| Arm | n | passes | pass rate | cost/task USD | wall clock s | rounds | flagged | no-review | infra excluded | rate-limited |",
-              "|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| Arm | n | passes | pass rate | cost/task USD | wall clock s | rounds | flagged | no-review | guide-not-invoked | infra excluded | rate-limited |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for s in summaries:
-        lines.append(f"| {s.arm} | {s.denominator} | {s.passes} | {_f(s.pass_rate, '{:.2f}')} | {_f(s.cost_per_task)} | {_f(s.mean_wall_clock, '{:.0f}')} | {_f(s.mean_rounds, '{:.1f}')} | {s.flagged} | {s.no_review} | {s.infra_excluded} | {s.rate_limited} |")
+        lines.append(f"| {s.arm} | {s.denominator} | {s.passes} | {_f(s.pass_rate, '{:.2f}')} | {_f(s.cost_per_task)} | {_f(s.mean_wall_clock, '{:.0f}')} | {_f(s.mean_rounds, '{:.1f}')} | {s.flagged} | {s.no_review} | {s.guide_not_invoked} | {s.infra_excluded} | {s.rate_limited} |")
     lines += ["", "## Cost per PASSED task (total arm spend incl. failures / passes)", "",
               "| Arm | cost/passed USD | lower bound (known spend only) | cost given success | unknown-cost rows |", "|---|---|---|---|---|"]
     for s in summaries:
         lines.append(f"| {s.arm} | {_f(s.cost_per_passed)} | {_f(s.lower_bound_per_passed)} | {_f(s.cost_given_success)} | {s.unknown_cost_rows} |")
-    lines += ["", "## Protocol-compliant trials only (A2/A4: reviewed; A0: isolation kept; others unchanged)", "",
+    lines += ["", "## Protocol-compliant trials only (A2/A4: guide invoked and reviewed; A1/A3: guide invoked; A0: isolation kept)", "",
               "| Arm | n | passes | pass rate | cost/passed USD |", "|---|---|---|---|---|"]
     for s in compliant:
         lines.append(f"| {s.arm} | {s.denominator} | {s.passes} | {_f(s.pass_rate, '{:.2f}')} | {_f(s.cost_per_passed)} |")

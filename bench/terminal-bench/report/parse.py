@@ -22,6 +22,14 @@ Usage identity rules (plan T-500):
 Coverage: any malformed line, missing required usage field, invalid count or unresolved
 identity marks the source INCOMPLETE and the report treats its cost as unknown. Nothing here
 substitutes zero for an unknown value.
+
+Guide-invocation gate (ISS-1198): for every non-A0 arm, `check_guide_invoked` fails the row's
+`compliance` status to "guide-not-invoked" -- excluded from every summary, same as an isolation
+violation -- unless a `.story/sessions/<id>/state.json` exists in the collected story tree, or
+an actual `tool_use` call to `storybloq_autonomous_guide` appears in a collected transcript.
+Both are things only that MCP tool's own state machine can produce; a trial that completed,
+even one that passed its task, proves nothing about the review loop under test without one of
+them.
 """
 from __future__ import annotations
 
@@ -216,6 +224,103 @@ def parse_claude_sessions(sessions_root: Path) -> ClaudeUsage:
     return out
 
 
+# Round 38: sourced from the authoritative schema, storybloq/src/autonomous/session-types.ts's
+# WORKFLOW_STATES array and SessionStateSchema's status enum -- not guide.ts's RECOVERY_MAPPING,
+# which is a narrower, unrelated table and was missing INIT/LOAD_CONTEXT/BUILD/VERIFY/COMPACT.
+GUIDE_STATES = {"INIT", "LOAD_CONTEXT", "PICK_TICKET", "PLAN", "PLAN_REVIEW", "IMPLEMENT", "WRITE_TESTS", "TEST", "CODE_REVIEW", "BUILD", "VERIFY", "FINALIZE", "COMPACT", "HANDOVER", "COMPLETE", "LESSON_CAPTURE", "ISSUE_FIX", "ISSUE_SWEEP", "SESSION_END"}
+GUIDE_STATUSES = {"active", "completed", "superseded"}
+
+
+def _ticket_identity_confirmed(story: "StoryState", created_ticket_id: str | None) -> bool:
+    """True iff the SESSION's own recorded ticket reference (`session_ticket_id`, from
+    currentTicket/currentIssue -- never the ticket-file fallback, which proves only that a
+    ticket file happens to exist, not which one the session referenced) resolves to the same
+    ticket the adapter actually created for this trial (`created_ticket_id`, from
+    versions.json). Both may be either the display id (T-xxx) or the internal hash id; the
+    single loaded ticket record, when there is exactly one, resolves between the two forms."""
+    if created_ticket_id is None or story.session_ticket_id is None:
+        return False
+    if story.session_ticket_id == created_ticket_id:
+        return True
+    rec = story.ticket_record
+    if rec is None:
+        return False
+    ids = {v for v in (rec.get("id"), rec.get("displayId")) if isinstance(v, str)}
+    return story.session_ticket_id in ids and created_ticket_id in ids
+
+
+def check_guide_invoked(agent_dir: Path, story: "StoryState", created_ticket_id: str | None = None) -> bool:
+    """ISS-1198: `/story auto <ticket>` sent as the first line of a prompt piped to `claude
+    --print` was found (A1 and A2 smoke, 2026-09-12) to never actually invoke the storybloq
+    skill's autonomous-mode flow -- Claude reads it as prose and calls a couple of storybloq
+    tools directly instead, never storybloq_autonomous_guide. Neither of those smoke trials
+    exercised the review loop the benchmark exists to measure, and nothing upstream of this
+    caught it: a trial can complete, pass its task, and still have run none of the discipline
+    under test. This is the hard gate that catches it in code rather than by eye.
+
+    True iff EITHER of the two independent things `storybloq_autonomous_guide`'s state machine
+    is the only thing that can produce is present AND VALIDATED, not merely present:
+
+    (1) A `.story/sessions/<id>/state.json` in the collected story tree
+    (`story.session_state_present`), but only when ALL of: it parsed cleanly (no diagnostic
+    whose PREFIX is `session-state-unreadable` -- round 37: the actual diagnostic carries a
+    suffix, e.g. `session-state-unreadable:JSONDecodeError`, so an exact-membership check against
+    it never matched anything and this branch was silently unconditional; round 36 originally
+    meant to require this); its `state` is one of the guide's own named states (`GUIDE_STATES`)
+    or its `status` one of the guide's own named statuses (`GUIDE_STATUSES`) -- round 37: an
+    arbitrary non-null string like `"anything"` no longer counts, only a value the state machine
+    actually emits; and `_ticket_identity_confirmed` holds against `created_ticket_id` (the
+    adapter's own recorded ticket for this trial, from versions.json) -- round 37: replaces the
+    round-36 ticket-DESCRIPTION-text comparison (which silently passed whenever a description was
+    merely absent) with an actual ticket-ID correlation between the session's own reference and
+    the ticket the adapter created.
+
+    (2) A `tool_use` call to `storybloq_autonomous_guide` -- made by an actual `assistant`
+    record, never a `user` or other record merely CONTAINING a tool_use-shaped item -- that also
+    has a matching `tool_result` recording success (`is_error` not true) somewhere in the
+    transcripts: a rejected or errored call proves an attempt, not that the guide's flow
+    actually ran, so it is not accepted on its own (round 35 findings). The tool's bare presence
+    in a transcript's system-init tool inventory does NOT count either: every registered MCP
+    tool is listed there on every session regardless of whether it was ever called."""
+    if (story.session_state_present
+            and not any(d.startswith("session-state-unreadable") for d in story.diagnostics)
+            and (story.exit_state in GUIDE_STATES or story.status in GUIDE_STATUSES)
+            and _ticket_identity_confirmed(story, created_ticket_id)):
+        return True
+    transcript_dir = agent_dir / "sessions" / "projects"
+    if not transcript_dir.exists():
+        return False
+    files = sorted(transcript_dir.rglob("*.jsonl"))
+    scratch: list[str] = []
+    pending_ids: set[str] = set()
+    for f in files:
+        for rec in _iter_jsonl(f, scratch, str(f)):
+            if rec.get("type") != "assistant":
+                continue
+            msg = rec.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict) or item.get("type") != "tool_use":
+                    continue
+                name, tool_id = item.get("name"), item.get("id")
+                if isinstance(name, str) and isinstance(tool_id, str) and name.rsplit("__", 1)[-1] == "storybloq_autonomous_guide":
+                    pending_ids.add(tool_id)
+    if not pending_ids:
+        return False
+    for f in files:
+        for rec in _iter_jsonl(f, scratch, str(f)):
+            msg = rec.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "tool_result" and item.get("tool_use_id") in pending_ids and item.get("is_error") is not True:
+                    return True
+    return False
+
+
 def parse_codex_home(codex_home: Path) -> CodexUsage:
     out = CodexUsage()
     sessions = codex_home / "sessions"
@@ -281,6 +386,15 @@ class StoryState:
     ticket_description: str | None = None
     diagnostics: list[str] = field(default_factory=list)
     source: str | None = None  # story.tgz | story-live
+    session_state_present: bool = False  # a .story/sessions/<id>/state.json existed in the tree
+    # at all (parse failure doesn't clear this: only storybloq_autonomous_guide ever creates this
+    # path, so its mere presence is evidence the guide ran -- see ISS-1198 / check_guide_invoked)
+    session_ticket_id: str | None = None  # currentTicket/currentIssue.id from the SESSION state
+    # only (round 37: distinct from ticket_id below, which also falls back to "there happens to
+    # be a ticket file" -- that fallback proves nothing about which ticket the session itself
+    # references, so it must never be used for guide-invocation identity correlation)
+    ticket_record: dict[str, Any] | None = None  # the single loaded ticket file's raw dict, kept
+    # so its id/displayId can resolve against session_ticket_id and the adapter's created id
 
 
 def _norm(name: str) -> str:
@@ -321,6 +435,7 @@ def parse_story(agent_dir: Path) -> StoryState:
         out.diagnostics.append("no-story-state")
         return out
     states = [k for k in tree if k.startswith(".story/sessions/") and k.endswith("/state.json")]
+    out.session_state_present = bool(states)
     if not states:
         out.diagnostics.append("no-session-state")
     else:
@@ -340,6 +455,7 @@ def parse_story(agent_dir: Path) -> StoryState:
             out.ticket_id = ct.get("id") if isinstance(ct.get("id"), str) else None
         elif isinstance(ct, str):
             out.ticket_id = ct
+        out.session_ticket_id = out.ticket_id  # captured before the ticket-file fallback below
         raw_reviews = s.get("reviews")
         if raw_reviews is not None and not isinstance(raw_reviews, dict):
             out.diagnostics.append("reviews-malformed:container")
@@ -363,6 +479,7 @@ def parse_story(agent_dir: Path) -> StoryState:
                 raise ValueError
             out.ticket_description = t.get("description") if isinstance(t.get("description"), str) else None
             out.ticket_id = out.ticket_id or t.get("displayId") or t.get("id")
+            out.ticket_record = t
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             out.diagnostics.append("ticket-unreadable")
     elif tickets:
@@ -714,6 +831,8 @@ def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attem
     executor_coverage = claude.coverage
     if executor_coverage == "complete" and claude.unpriceable:
         executor_coverage = "unpriceable"
+    created_ticket_id = versions.get("ticket_id") if isinstance(versions.get("ticket_id"), str) else None
+    guide_invoked = check_guide_invoked(agent_dir, story, created_ticket_id) if (arm != "A0" and started) else None
     if arm in ("A2", "A4"):
         codex_rounds = [r for r in story.rounds if r.get("reviewer") == "codex"]
         if codex.coverage == "complete":
@@ -726,9 +845,14 @@ def parse_trial(trial_dir: Path, arm: str, instruction: str | None = None, attem
             reviewer_coverage = "missing"
         ids = {r.get("reviewerSessionId") for r in codex_rounds}
         correlated = [i for i in ids if isinstance(i, str) and codex.rollouts.get(i, {}).get("responses", 0) > 0]
-        statuses["compliance"] = "reviewed" if correlated else "no-review"
+        # ISS-1198: a trial that never invoked the guide never ran the review loop at all, no
+        # matter what story.rounds or the Codex rollout appear to show -- this takes priority
+        # over the reviewed/no-review distinction below, which presupposes the guide ran.
+        statuses["compliance"] = "guide-not-invoked" if not guide_invoked else ("reviewed" if correlated else "no-review")
     else:
         reviewer_coverage = "n/a"
+        if guide_invoked is not None:  # arm != A0 and started
+            statuses["compliance"] = "ok" if guide_invoked else "guide-not-invoked"
     if arm == "A0":
         statuses["compliance"] = check_a0_isolation(agent_dir)
 
