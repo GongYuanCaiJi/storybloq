@@ -6,7 +6,8 @@ import { initProject } from "../../src/core/init.js";
 import { ensureCapture } from "../../src/core/session-intel/capture.js";
 import { applyBannerToMcpText, applyStatusPushesToMcpText, cliBannerFor, cliStatusPushesFor, guideDirectiveFor, renderUsageAdvisory, stampHandoverForCaller, statusPushesFor, tokenPressureBannerFor, usageAdvisoryFor } from "../../src/core/session-intel/push.js";
 import type { UsageAdvisory } from "../../src/core/session-intel/types.js";
-import { markCompactPending, readPresenceRecord } from "../../src/core/session-intel/presence-bridge.js";
+import { markCompactPending, readPresenceRecord, stampHandover, type HandoverStampObservation } from "../../src/core/session-intel/presence-bridge.js";
+import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { processEra } from "../../src/core/session-intel/process-era.js";
 import { handleSessionIntel, handleStopHookSample } from "../../src/cli/commands/session-intel.js";
 import { handleHandoverCreate } from "../../src/cli/commands/handover.js";
@@ -416,33 +417,67 @@ describe("guide directive and handover stamp", () => {
     });
   });
 
-  // ISS-1197 commit 2 round 2: the compact line may only describe a sample the
-  // OTHER surfaces on the same response would also accept. The banner
-  // prefixed to this very reply re-scans a sample older than maxSampleAgeMs
-  // and drops one whose reconciliation is incomplete; reporting the raw
-  // stored sample here prints a line about a measurement the banner has
-  // already replaced. Falling back to the continuation line is deliberate:
-  // going silent is what ISS-1185 exists to prevent.
-  it("ISS-1197 commit 2 round 2: a STALE compact-needed sample falls back to the continuation line", async () => {
+  // ISS-1197 commit 2 round 3: the reply line and the banner prefixed to the
+  // SAME response must not contradict each other. An AGE gate was the wrong
+  // way to get that: context grows monotonically within an epoch and
+  // compact-needed is never suppressed, so an old stored compact-needed
+  // re-samples to compact-needed when the banner refreshes AFTER the handler
+  // (runMcpWriteTool runs the handler, then the banner). Only the
+  // reconciliation gate is left, which is what actually catches a sample the
+  // banner would refuse.
+  it("ISS-1197 commit 2 round 3: an OLD stored compact-needed sample still gets the compact line, and the banner on the same response agrees", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
       primed(f, 400_000, now);
       expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
-      // 31 s on, past the 30 s maxSampleAgeMs default.
-      const stale = await handleHandoverCreate("# Stale", "stale", "md", f.root, { now: now + 31_000, projectsDir: f.projects });
+      // 31 s on: past maxSampleAgeMs, so the banner will re-sample rather than
+      // reuse the stored reading.
+      const late = await handleHandoverCreate("# Late", "late", "md", f.root, { now: now + 31_000, projectsDir: f.projects });
       expect(intelOf(f.root).handoverWrittenAt).toBe(new Date(now + 31_000).toISOString());
-      expect(stale.output).toMatch(/held at advisory/);
-      expect(stale.output).not.toMatch(/past the compact line/);
+      expect(late.output).toMatch(/past the compact line/);
+      expect(late.output).not.toMatch(/held at advisory/);
+      // The agreement IS the assertion: the banner that prints above this
+      // reply re-measures and still reads compact-needed, so a continuation
+      // line here would contradict the banner directly above it.
+      expect(tokenPressureBannerFor(f.root, { now: now + 31_000, ...seams(f) }, "mcp")?.state).toBe("compact-needed");
     });
   });
 
-  it("ISS-1197 commit 2 round 2: one second inside the freshness window the compact line is still used", async () => {
+  it("ISS-1197 commit 2 round 3: an EXPIRED pending event reconciles to complete with the sample CLEARED, and only the identity clause catches it", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
-      primed(f, 400_000, now);
-      const fresh = await handleHandoverCreate("# Fresh", "fresh", "md", f.root, { now: now + 29_000, projectsDir: f.projects });
-      expect(fresh.output).toMatch(/past the compact line/);
-      expect(fresh.output).not.toMatch(/held at advisory/);
+      const era = primed(f, 400_000, now);
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
+      // Older than compactPendingTtlMs (300,000 ms): reconcileIntel takes the
+      // ASSUMED reset, which reports status "complete" while nulling the
+      // sample. The status alone would say the record is fine.
+      markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now - 400_000).toISOString() });
+      // Called directly: handleHandoverCreate reconciles under its own lock
+      // first, which would clear the stored sample before the stamp ever sees
+      // it and so exercise the null guard instead of this clause.
+      const observed: HandoverStampObservation = { state: null };
+      const outcome = stampHandover(f.root, SID, era, null, now, { out: observed, cfg: resolveSessionIntelConfig(null) });
+      expect(outcome.status).toBe("written");
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed"); // the stamp did NOT clear it
+      expect(observed.state).toBeNull();
+      // End to end the caller keeps the continuation line.
+      const r = await handleHandoverCreate("# Expired", "expired", "md", f.root, { now, projectsDir: f.projects });
+      expect(r.output).toMatch(/held at advisory/);
+      expect(r.output).not.toMatch(/past the compact line/);
+    });
+  });
+
+  it("ISS-1197 commit 2 round 3: a bound record with NO sample stamps without throwing and keeps the continuation line", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
+      expect(intelOf(f.root).lastSample).toBeNull();
+      const r = await handleHandoverCreate("# NoSample", "no-sample", "md", f.root, { now, projectsDir: f.projects });
+      // The stamp lands and the line is the pre-existing one: nothing about
+      // the sample can be said, and silence is what ISS-1185 forbids.
+      expect(intelOf(f.root).handoverWrittenAt).toBe(new Date(now).toISOString());
+      expect(r.output).toMatch(/held at advisory/);
+      expect(r.output).not.toMatch(/past the compact line/);
     });
   });
 

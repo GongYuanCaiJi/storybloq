@@ -711,14 +711,20 @@ export interface HandoverStampObservation {
 }
 
 /**
- * Round 2 (concurrency lens): the observation and the banner prefixed to the
- * SAME response must describe the same sample. `acquireCallerSample` re-scans
- * a stored sample older than `maxSampleAgeMs` and drops one whose
- * reconciliation is incomplete, so a stamp that reported the raw stored sample
- * could print "held at advisory" under a COMPACT-NEEDED banner measured
- * seconds later (Stop hook persists at T0; 30+ s of tool calls; stamp at T1
- * reads the T0 sample; banner at T2 re-measures). The stamp therefore applies
- * the same two gates, from the same config.
+ * The observation and the banner prefixed to the SAME response must not
+ * contradict each other: `runMcpWriteTool` runs the handler first and the
+ * banner second, so the banner describes a LATER measurement than the reply
+ * line beneath it.
+ *
+ * The gate is reconciliation, and only reconciliation. An age gate was tried
+ * and was itself the defect: context grows monotonically within an epoch and
+ * `computeSample` never suppresses compact-needed, so an old stored
+ * compact-needed re-samples to compact-needed when the banner refreshes --
+ * and refusing to report it printed "held at advisory" directly under a
+ * COMPACT-NEEDED banner, the exact contradiction the line exists to prevent.
+ * What actually invalidates a sample is a compaction, and a compaction
+ * publishes a pending event or a boundary that `reconcileIntel` catches. The
+ * config travels for that call.
  */
 export interface HandoverStampObserve {
   readonly out: HandoverStampObservation;
@@ -745,14 +751,16 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
     // agents that had just written a handover kept seeing the imperative
     // banner and stopped.
     const last = intel.lastSample;
-    // Both gates are the push surfaces' own, applied to the record as it is
-    // HERE so the answer belongs to the sample actually being stamped. A
-    // rejected sample leaves the observation null, which is the pre-existing
+    // Applied to the record as it is HERE, so the answer belongs to the sample
+    // actually being stamped. The identity clause is not redundant with the
+    // status: an expired pending event of this era takes the ASSUMED reset,
+    // which reports "complete" while nulling the sample, and reporting the
+    // pre-reset reading would describe a compaction that has already happened.
+    // A rejected sample leaves the observation null, which is the pre-existing
     // continuation line, never silence.
     if (observe && last) {
-      const fresh = now - Date.parse(last.sampledAt) <= observe.cfg.maxSampleAgeMs;
       const rec = reconcileIntel(intel, null, peekPending(root, sessionId, now), observe.cfg, now);
-      if (fresh && rec.status === "complete" && rec.intel.lastSample === last) observe.out.state = last.state;
+      if (rec.status === "complete" && rec.intel.lastSample === last) observe.out.state = last.state;
     }
     const lastSample = last && last.state === "imperative" && last.ceiling !== null && (tokensAtHandover === null || tokensAtHandover === last.contextTokens)
       ? { ...last, state: "advisory" as const, suppressedBy: "handover" as const }
