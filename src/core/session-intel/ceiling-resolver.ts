@@ -14,7 +14,8 @@
  * does promote (ISS-1197 commit 3): it measures where compaction actually
  * fired, so a forecast below one this session has already passed is raised to
  * it rather than left to report "97%" of a point already behind. The raise is
- * scoped to the window it was measured under and capped by the native window;
+ * scoped to the window it was measured under and refused above the native
+ * window rather than clamped down to it;
  * it is also not monotonic, because ledger retention (per-session newest
  * `boundarySampleCount`, then the global cap) can evict the boundary the raise
  * rests on, after which the ceiling falls back to the forecast.
@@ -95,15 +96,16 @@ function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly 
   // the number, not the provenance.
   //
   // `nativeWindow` is non-null only on the model path, which forecasts from
-  // the whole context rather than a captured setting; a boundary above it was
-  // measured under a window this process does not have, so it caps the raise.
-  if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling) {
-    const cap = r.nativeWindow;
-    const raised = cap !== null && observedFloor > cap ? cap : observedFloor;
-    if (raised > ceiling) {
-      ceiling = raised;
-      basis = `${basis}; raised to observed boundary ${observedFloor}${raised === observedFloor ? "" : ` clamped to native window ${cap}`}`;
-    }
+  // the whole context rather than a captured setting. A boundary above it was
+  // measured under a different window state (the 1M flag), so it is evidence
+  // about that state and none about this one: the raise has no basis and is
+  // refused outright rather than clamped down to the native window, which
+  // would report a number no evidence supports. Below it the boundary is
+  // reachable here and raises normally.
+  const cap = r.nativeWindow;
+  if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling && !(cap !== null && observedFloor > cap)) {
+    ceiling = observedFloor;
+    basis = `${basis}; raised to observed boundary ${observedFloor}`;
   }
   // Judged against the RAISED ceiling, so a boundary that explains the
   // overshoot clears the conflict instead of reporting it forever. A scanned

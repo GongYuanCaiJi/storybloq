@@ -226,12 +226,16 @@ describe("ISS-1197 commit 3: the raise is scoped to the window it was measured u
     expect(resolveCeiling(modelPath({ ledger: [entry(ME, 1, 190_000, { era: "9:9" })] })).ceiling).toBe(190_000);
   });
 
-  it("the model path raises, but never above the native window it is forecasting from", () => {
+  it("the model path REFUSES a boundary above the native window rather than clamping to it", () => {
     // The 1M-flag era compacted at 830,000; this process resumed without the
-    // flag, so 200,000 is the whole context. 830,000 is not reachable here.
+    // flag, so 200,000 is the whole context. That boundary is evidence about a
+    // different window state, not about this one, so it has no bearing here:
+    // the forecast stands, unraised and unannotated. Clamping to 200,000 would
+    // report a number no evidence supports.
     const r = resolveCeiling(modelPath({ ledger: [entry(ME, 1, 830_000, { era: "9:9", autoCompactWindowAtStart: 1_000_000 })] }));
     expect(r.source).toBe("model");
-    expect(r.ceiling).toBe(200_000);
-    expect(r.basis).toMatch(/raised to observed boundary 830000 clamped to native window 200000/);
+    expect(r.ceiling).toBe(185_000); // 0.925 x 200,000, untouched
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+    expect(r.basis).not.toMatch(/clamped to native window/);
   });
 });
