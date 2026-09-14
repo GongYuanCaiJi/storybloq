@@ -156,7 +156,32 @@ describe("acceptance-oracle corpus: ISS-1154 field-shape fixtures", () => {
   });
 });
 
-describe.skipIf(!existsSync(HANDOVERS_DIR))(
+// ISS-1204: the ten filenames below are pinned, point-in-time evidence --
+// worker handovers that (as of this writing) have never been committed. The
+// directory itself (`.story/handovers/`) is tracked and exists in every
+// worktree, so checking only for its existence let this describe block run
+// in a fresh worktree or clone and fail on ENOENT for whichever pinned files
+// were never committed there, instead of skipping. Skip on ANY pinned file
+// being absent, not just all of them: a partial corpus is not the frozen
+// oracle this tier claims to run.
+const PINNED_HANDOVER_FILENAMES = [
+  "2026-09-10-084104-f16aec6c-cpm-89-t500-round21-approve-r12-dry-run.md",
+  "2026-09-10-082124-0ddd4ddb-cpm-89-t500-round19-archive-publication.md",
+  "2026-09-10-080339-07e76426-cpm-89-t500-subscription-auth-round17-request-changes.md",
+  "2026-09-10-075954-6761f0ca-session.md",
+  "2026-09-10-075335-7d08377a-session.md",
+  "2026-09-10-074541-7e435477-session.md",
+  "2026-09-10-072059-6d948ec0-t320-full-spec-read-exploring-codebase-next.md",
+  "2026-09-10-072022-fbf748c9-t320-dispatched-reading-spec.md",
+  "2026-09-10-072005-bbca959e-cpm-89-t500-ready-for-smoke-manifest-r10.md",
+  "2026-09-10-071943-ace29e70-cpm-d1-handover-9-legc-closed-t320-dispatched.md",
+] as const;
+
+const missingPinnedHandovers = existsSync(HANDOVERS_DIR)
+  ? PINNED_HANDOVER_FILENAMES.filter((f) => !existsSync(join(HANDOVERS_DIR, f)))
+  : PINNED_HANDOVER_FILENAMES;
+
+describe.skipIf(missingPinnedHandovers.length > 0)(
   "acceptance-oracle corpus: this repo's real last ten handovers (pinned 2026-09-10) -- private corpus: runs only in the workspace checkout",
   () => {
   // Five of the ten real handovers below have a "## Next" (or equivalent
@@ -485,3 +510,16 @@ describe.skipIf(!existsSync(HANDOVERS_DIR))(
     assertBudgetInvariants(parsed.records, filename);
   });
 });
+
+// A skipped `describe` can render as collapsed or absent depending on
+// reporter verbosity, which would leave "this gate silently did not run"
+// invisible. This standalone skipped `it` always renders as its own line
+// (ISS-1204 acceptance: "a visible skip... with a one-line disclosure naming
+// how many pinned files are missing"), independent of how the describe
+// block above is displayed.
+if (missingPinnedHandovers.length > 0) {
+  it.skip(
+    `SKIPPED: acceptance-oracle corpus not run -- ${missingPinnedHandovers.length}/${PINNED_HANDOVER_FILENAMES.length} pinned handover files are absent from .story/handovers/ (private workspace-only oracle)`,
+    () => {},
+  );
+}
