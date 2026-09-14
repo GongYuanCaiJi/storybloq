@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, readdirSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureCapture, publishCompactPending } from "../../src/core/session-intel/capture.js";
-import { PENDING_SUBDIR, markCompactPending, readPresenceRecord } from "../../src/core/session-intel/presence-bridge.js";
+import { PENDING_SUBDIR, markCompactPending, readPresenceRecord, stampHandover } from "../../src/core/session-intel/presence-bridge.js";
 import { readEra, markEraEnded, ERA_STORE_SUBDIR } from "../../src/core/session-intel/era-store.js";
 import { ProcessEraResolver, processEra, type PsRunner } from "../../src/core/session-intel/process-era.js";
 import { readLedger } from "../../src/core/session-intel/boundary-ledger.js";
@@ -17,7 +17,7 @@ import { handleSessionCompactPrepare } from "../../src/cli/commands/session-comp
 import { buildActivePayload } from "../../src/autonomous/status-payload.js";
 import { refreshStatusForSession } from "../../src/autonomous/status-writer.js";
 import type { SessionState } from "../../src/autonomous/session-types.js";
-import { SID, assistantRecord, boundaryRecord, contextOf, growingSession, writeTranscript } from "./session-intel-fixtures.js";
+import { SID, assistantRecord, boundaryRecord, contextOf, growingSession, userRecord, writeTranscript } from "./session-intel-fixtures.js";
 
 const T0 = Date.parse("2026-09-09T12:00:00Z");
 const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
@@ -386,7 +386,104 @@ describe("handleSessionIntelPrompt (UserPromptSubmit)", () => {
       expect(parsed).toEqual({ hookSpecificOutput: { hookEventName: PROMPT_HOOK_EVENT_NAME, additionalContext: expect.any(String) } });
       expect(PROMPT_HOOK_EVENT_NAME).toBe("UserPromptSubmit");
       expect(parsed.hookSpecificOutput.additionalContext).toMatch(/^\[storybloq\] Context pressure IMPERATIVE: [78][0-9]% of the expected auto-compact point \([0-9,]+ tokens; source setting, high confidence\)\. Write a handover now via storybloq_handover_create/);
+      // ISS-1197: the directive says compaction after the handover is expected.
+      expect(parsed.hookSpecificOutput.additionalContext).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
       expect(Object.keys(parsed)).toEqual(["hookSpecificOutput"]);
+    });
+  });
+
+  it("ISS-1197: a cross-session bus message and an idle notice are ordinary prompts that only advance the prompt count", () => {
+    withFixture((f) => {
+      const era = bindStartup(f);
+      const lines = [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })];
+      const path = writeTranscript(f.projects, encoded(f.root), SID, lines);
+      expect(handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");
+      const tokens = intelOf(f.root).lastSample!.contextTokens!;
+      expect(stampHandover(f.root, SID, era, tokens, T0 + 6 * 60_000).status).toBe("written");
+      expect(intelOf(f.root).promptsSinceHandover).toBe(0);
+
+      // Neither arrives as a turn the agent asked for, and neither is read as
+      // text: they are prompts, so they age the latch and nothing else.
+      const texts = [
+        "<cross-session-message from=\"cpm-89\">status?</cross-session-message>",
+        "[Cross-session idle notice] worker cpm-d1 has been idle for 15 minutes",
+        "<cross-session-message from=\"cpm-8d\">ack</cross-session-message>",
+      ];
+      for (const [i, text] of texts.entries()) {
+        lines.push(userRecord({ ts: at(7 + i), text }));
+        writeTranscript(f.projects, encoded(f.root), SID, lines);
+        const r = handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + (7 + i) * 60_000, ...seams(f) });
+        expect(r, text).toMatchObject({ status: "silent", reason: "state advisory", output: null });
+        expect(intelOf(f.root).promptsSinceHandover, text).toBe(i + 1);
+      }
+      expect(intelOf(f.root).lastSample).toMatchObject({ state: "advisory", rawState: "imperative", suppressedBy: "handover" });
+    });
+  });
+
+  it("mutant-query-recompute-after-latch: a re-armed imperative is reported, not re-suppressed by its own latch", () => {
+    withFixture((f) => {
+      bindStartup(f);
+      const lines = [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })];
+      const path = writeTranscript(f.projects, encoded(f.root), SID, lines);
+      expect(handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");
+      const tokens = intelOf(f.root).lastSample!.contextTokens!;
+      expect(stampHandover(f.root, SID, processEra.current()!.id, tokens, T0 + 6 * 60_000).status).toBe("written");
+
+      // Same compaction throughout: no boundary is written, only growth, time
+      // and prompts. Growth and the interval clear at once; the prompt gate
+      // then opens on the third prompt.
+      lines.push(assistantRecord({ ts: at(16), read: tokens + 25_000 }));
+      writeTranscript(f.projects, encoded(f.root), SID, lines);
+      for (const i of [0, 1]) {
+        lines.push(userRecord({ ts: at(17 + i) }));
+        writeTranscript(f.projects, encoded(f.root), SID, lines);
+        const held = handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + (17 + i) * 60_000, ...seams(f) });
+        expect(held, `prompt ${i + 1}`).toMatchObject({ status: "silent" });
+        expect(held.result?.pressure, `prompt ${i + 1}`).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+      }
+      lines.push(userRecord({ ts: at(19) }));
+      writeTranscript(f.projects, encoded(f.root), SID, lines);
+      const rearmed = handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 19 * 60_000, ...seams(f) });
+      // The verdict the model is handed must be the one computed against the
+      // record as it stood, never a recompute against the latch this very
+      // sample just wrote.
+      expect(rearmed.result?.pressure).toMatchObject({ state: "imperative", rawState: "imperative", suppressedBy: null });
+      expect(rearmed.status).toBe("emitted");
+      expect(intelOf(f.root)).toMatchObject({ promptsSinceHandover: 0, lastImperativeAt: new Date(T0 + 19 * 60_000).toISOString(), lastBoundaryAt: null });
+    });
+  });
+
+  it("mutant-stop-hook-latches: a stop-hook sample delivers nothing to the model, so it never spends the re-arm", () => {
+    withFixture((f) => {
+      bindStartup(f);
+      const lines = [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })];
+      const path = writeTranscript(f.projects, encoded(f.root), SID, lines);
+      expect(handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");
+      const tokens = intelOf(f.root).lastSample!.contextTokens!;
+      expect(stampHandover(f.root, SID, processEra.current()!.id, tokens, T0 + 6 * 60_000).status).toBe("written");
+
+      // Three prompts age the prompt gate; the step gate still holds them all.
+      for (const i of [0, 1, 2]) {
+        lines.push(userRecord({ ts: at(7 + i) }));
+        writeTranscript(f.projects, encoded(f.root), SID, lines);
+        expect(handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + (7 + i) * 60_000, ...seams(f) }).status).toBe("silent");
+      }
+      expect(intelOf(f.root).promptsSinceHandover).toBe(3);
+
+      // Growth and time now clear the other two, and a Stop-hook sample reads
+      // imperative -- but the model never sees a Stop hook's verdict.
+      lines.push(assistantRecord({ ts: at(19), read: tokens + 25_000 }));
+      writeTranscript(f.projects, encoded(f.root), SID, lines);
+      const stop = handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 20 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(stop.result?.pressure).toMatchObject({ state: "imperative", suppressedBy: null });
+      expect(intelOf(f.root)).toMatchObject({ promptsSinceHandover: 3, lastImperativeAt: null });
+
+      // So the next prompt still delivers the imperative instead of swallowing it.
+      lines.push(userRecord({ ts: at(21) }));
+      writeTranscript(f.projects, encoded(f.root), SID, lines);
+      expect(handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 21 * 60_000, ...seams(f) }).status).toBe("emitted");
+      expect(intelOf(f.root).lastImperativeAt).toBe(new Date(T0 + 21 * 60_000).toISOString());
+      expect(intelOf(f.root).promptsSinceHandover).toBe(0);
     });
   });
 

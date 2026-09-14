@@ -57,7 +57,7 @@ const pctText = (p: number | null) => (p === null ? "n/a" : `${Math.round(p * 10
 export function renderBannerText(sample: SessionIntelSample, surface: "mcp" | "cli"): string {
   const where = surface === "mcp" ? "storybloq_handover_create" : "storybloq handover create";
   const head = `Context pressure ${sample.state.toUpperCase()}: ${pctText(sample.pct)} of the expected auto-compact point (${sample.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}).`;
-  if (sample.state === "imperative") return `${head} Write a handover now via ${where}, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.`;
+  if (sample.state === "imperative") return `${head} Write a handover now via ${where}, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   return `${head}${sample.suppressedBy === "handover" ? " A recent handover holds this at advisory: keep working." : ""} Plan a handover before the next large step, and keep working.`;
 }
 
@@ -438,7 +438,7 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
     if (!intel || !sample || sample.state !== "imperative") return null;
     const rec = reconcileIntel(intel, null, peekPending(resolvedRoot, ownerClaudeSessionId, now), cfg, now);
     if (rec.status !== "complete" || rec.intel.lastSample !== sample) return null;
-    return `Context pressure imperative (${pctText(sample.pct)} of ceiling, source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}): write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.`;
+    return `Context pressure imperative (${pctText(sample.pct)} of ceiling, source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}): write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   } catch {
     return null;
   }

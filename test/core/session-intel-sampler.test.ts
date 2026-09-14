@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { computeSample, handoverSuppresses, jumpAllowanceFor, p90, usageAdvisoryFrom } from "../../src/core/session-intel/sampler.js";
-import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
+import { resolveSessionIntelConfig, type SessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
 import type { CeilingResolution, ScanResult, UsageAdvisoryInput } from "../../src/core/session-intel/types.js";
 
@@ -22,8 +22,8 @@ function scan(contextTokens: number | null, deltas: number[] = []): ScanResult {
 
 const NO_USAGE: UsageAdvisoryInput = { window: null, source: null, provenance: "none" };
 
-const sample = (tokens: number | null, over: { deltas?: number[]; record?: SessionIntelPresence | null; ceiling?: CeilingResolution; usage?: UsageAdvisoryInput } = {}) =>
-  computeSample({ scan: scan(tokens, over.deltas ?? []), ceiling: over.ceiling ?? ceiling(), cfg, sampledBy: "query", sampledAt: NOW, record: over.record ?? null, usage: over.usage ?? NO_USAGE });
+const sample = (tokens: number | null, over: { deltas?: number[]; record?: SessionIntelPresence | null; ceiling?: CeilingResolution; usage?: UsageAdvisoryInput; sampledAt?: string; cfg?: SessionIntelConfig } = {}) =>
+  computeSample({ scan: scan(tokens, over.deltas ?? []), ceiling: over.ceiling ?? ceiling(), cfg: over.cfg ?? cfg, sampledBy: "query", sampledAt: over.sampledAt ?? NOW, record: over.record ?? null, usage: over.usage ?? NO_USAGE });
 
 describe("computeSample states", () => {
   it("266,711 against 417,737 is 63.8%, ok", () => {
@@ -86,10 +86,77 @@ describe("handover suppression", () => {
     expect(s.reason).toMatch(/suppressed by a handover/);
   });
 
-  it("re-arms once tokens cross stepPct x ceiling past the handover", () => {
-    const step = Math.ceil(0.05 * 417_737);
-    expect(sample(imperativeTokens + step - 1, { record: withHandover({}) }).state).toBe("advisory");
-    expect(sample(imperativeTokens + step, { record: withHandover({}) }).state).toBe("imperative");
+  // ISS-1197: three independent re-arm gates. The stamp sits at 86% of a
+  // 400,000 ceiling, so the effective growth step is 20,000 tokens (0.05 x
+  // 400,000, under the 25,000 cap) and the re-arm line is 91% of ceiling.
+  const CEILING = 400_000;
+  const C = ceiling({ ceiling: CEILING });
+  const STAMP_AT = "2026-09-09T12:20:00.000Z";
+  const STAMP_TOKENS = Math.round(0.86 * CEILING);
+  const afterStamp = (minutes: number) => new Date(Date.parse(STAMP_AT) + minutes * 60_000).toISOString();
+  const pctTokens = (pct: number) => Math.round(pct * CEILING);
+  const rearm = (over: Partial<SessionIntelPresence> = {}): SessionIntelPresence => ({
+    ...emptySessionIntel(),
+    handoverWrittenAt: STAMP_AT,
+    tokensAtHandover: STAMP_TOKENS,
+    handoverBoundaryAt: null,
+    lastBoundaryAt: null,
+    ...over,
+  });
+
+  it("holds advisory while any re-arm gate is closed and re-fires once all three clear", () => {
+    for (const [i, pct] of [0.87, 0.88, 0.89].entries()) {
+      const s = sample(pctTokens(pct), { ceiling: C, record: rearm({ promptsSinceHandover: i }), sampledAt: afterStamp(2) });
+      expect(s, `${pct} of ceiling`).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+      expect(s.reason, `${pct} of ceiling`).toMatch(/step gate/);
+    }
+    const rearmed = sample(pctTokens(0.92), { ceiling: C, record: rearm({ promptsSinceHandover: 3 }), sampledAt: afterStamp(11) });
+    expect(rearmed).toMatchObject({ rawState: "imperative", state: "imperative", suppressedBy: null });
+  });
+
+  it("mutant-step-dropped: the growth gate alone holds the advisory at 89% eleven minutes and three prompts on", () => {
+    const s = sample(pctTokens(0.89), { ceiling: C, record: rearm({ promptsSinceHandover: 3 }), sampledAt: afterStamp(11) });
+    expect(s).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+    expect(s.reason).toMatch(/step gate/);
+  });
+
+  it("mutant-interval-dropped: the time latch alone holds the advisory at 92% two minutes and three prompts on", () => {
+    const s = sample(pctTokens(0.92), { ceiling: C, record: rearm({ promptsSinceHandover: 3 }), sampledAt: afterStamp(2) });
+    expect(s).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+    expect(s.reason).toMatch(/interval gate/);
+  });
+
+  it("mutant-prompt-age-dropped: the prompt count alone holds the advisory at 92% eleven minutes and two prompts on", () => {
+    const s = sample(pctTokens(0.92), { ceiling: C, record: rearm({ promptsSinceHandover: 2 }), sampledAt: afterStamp(11) });
+    expect(s).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+    expect(s.reason).toMatch(/prompts gate/);
+  });
+
+  it("mutant-prompts-gate-ignores-hook-off: the prompt gate is skipped when the prompt hook is off, since nothing would ever advance the count", () => {
+    const record = rearm({ promptsSinceHandover: 0 });
+    const noHook = resolveSessionIntelConfig({ promptHook: false });
+    expect(sample(pctTokens(0.92), { ceiling: C, record, sampledAt: afterStamp(11), cfg: noHook })).toMatchObject({ rawState: "imperative", state: "imperative", suppressedBy: null });
+    // The same record with the hook on is held by the prompt gate.
+    const held = sample(pctTokens(0.92), { ceiling: C, record, sampledAt: afterStamp(11) });
+    expect(held).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+    expect(held.reason).toMatch(/prompts gate/);
+    // The other two gates still hold with the hook off.
+    expect(sample(pctTokens(0.89), { ceiling: C, record, sampledAt: afterStamp(11), cfg: noHook })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+    expect(sample(pctTokens(0.92), { ceiling: C, record, sampledAt: afterStamp(2), cfg: noHook })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+  });
+
+  it("the time latch runs from the later of the handover and the last imperative", () => {
+    const record = rearm({ promptsSinceHandover: 3, lastImperativeAt: afterStamp(9) });
+    expect(sample(pctTokens(0.92), { ceiling: C, record, sampledAt: afterStamp(11) })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+    expect(sample(pctTokens(0.92), { ceiling: C, record, sampledAt: afterStamp(19) })).toMatchObject({ state: "imperative", suppressedBy: null });
+  });
+
+  it("the growth step is capped in tokens, so a larger ceiling does not widen the gate", () => {
+    const big = ceiling({ ceiling: 1_000_000 });
+    const record = rearm({ tokensAtHandover: 860_000, promptsSinceHandover: 3 });
+    // 0.05 x 1,000,000 is 50,000, capped to 25,000: the line is 885,000.
+    expect(sample(884_000, { ceiling: big, record, sampledAt: afterStamp(11) })).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+    expect(sample(885_000, { ceiling: big, record, sampledAt: afterStamp(11) })).toMatchObject({ state: "imperative", suppressedBy: null });
   });
 
   it("a handover from a previous compaction does not suppress; one migrated to the current boundary does", () => {
@@ -97,8 +164,8 @@ describe("handover suppression", () => {
     expect(sample(imperativeTokens, { record: stale }).state).toBe("imperative");
     const migrated = withHandover({ lastBoundaryAt: "2026-09-09T12:25:00.000Z", handoverBoundaryAt: "2026-09-09T12:25:00.000Z" });
     expect(sample(imperativeTokens, { record: migrated }).state).toBe("advisory");
-    expect(handoverSuppresses(null, 1, 1, cfg)).toBe(false);
-    expect(handoverSuppresses(withHandover({ tokensAtHandover: null }), 1, 1, cfg)).toBe(false);
+    expect(handoverSuppresses(null, 1, 1, cfg, NOW)).toBeNull();
+    expect(handoverSuppresses(withHandover({ tokensAtHandover: null }), 1, 1, cfg, NOW)).toBeNull();
   });
 
   it("imperativeSince is carried from the record's last sample and cleared when not imperative; it never affects suppression", () => {

@@ -9,8 +9,9 @@
  *               the epoch, floor, cap), floor when fewer than 5 deltas;
  *   suppressed  an imperative raw state reads advisory when the record's
  *               handover belongs to the CURRENT compaction
- *               (handoverBoundaryAt === lastBoundaryAt) and the context has
- *               not grown a step (stepPct x ceiling) since it was written.
+ *               (handoverBoundaryAt === lastBoundaryAt) and any one of the
+ *               three re-arm gates is still closed: growth, interval, prompts
+ *               (ISS-1197).
  *
  * `imperativeSince` is informational only and takes no part in suppression.
  * The I/O half (locate, scan, reconcile, persist) lives with the presence
@@ -54,11 +55,39 @@ export function jumpAllowanceFor(deltas: readonly number[], cfg: SessionIntelCon
   return { value, basis: `p90 of ${deltas.length} per-turn deltas since epoch = ${p}${clamped}` };
 }
 
-/** Suppression as a function of the record alone (recomputed after acceptance against the record as it is THEN). */
-export function handoverSuppresses(record: SessionIntelPresence | null, contextTokens: number, ceiling: number, cfg: SessionIntelConfig): boolean {
-  if (!record || record.tokensAtHandover === null || record.handoverWrittenAt === null) return false;
-  if (record.handoverBoundaryAt !== record.lastBoundaryAt) return false;
-  return contextTokens < record.tokensAtHandover + cfg.stepPct * ceiling;
+/** The re-arm gate that is still closed, and so is holding the advisory. */
+export type HandoverRearmGate = "step" | "interval" | "prompts";
+
+/**
+ * Suppression as a function of the record alone (recomputed after acceptance
+ * against the record as it is THEN). Null means nothing holds and the
+ * imperative stands.
+ *
+ * ISS-1197: growth alone re-armed roughly a jump allowance past the handover,
+ * so the imperative came back on the very next prompt and an agent wrote
+ * eleven handovers in one session. Three gates now guard the re-arm and the
+ * advisory holds while ANY of them is closed: the context has to have grown,
+ * time has to have passed since the handover or the last imperative, and the
+ * session has to have taken a few prompts.
+ */
+export function handoverSuppresses(
+  record: SessionIntelPresence | null,
+  contextTokens: number,
+  ceiling: number,
+  cfg: SessionIntelConfig,
+  sampledAt: string,
+): HandoverRearmGate | null {
+  if (!record || record.tokensAtHandover === null || record.handoverWrittenAt === null) return null;
+  if (record.handoverBoundaryAt !== record.lastBoundaryAt) return null;
+  const step = Math.min(cfg.stepPct * ceiling, cfg.handoverRearmStepCapTokens);
+  if (contextTokens < record.tokensAtHandover + step) return "step";
+  const written = Date.parse(record.handoverWrittenAt);
+  const latch = record.lastImperativeAt === null ? written : Math.max(written, Date.parse(record.lastImperativeAt));
+  if (Date.parse(sampledAt) - latch < cfg.handoverRearmIntervalMs) return "interval";
+  // Only the prompt hook advances the count, so with the hook off this gate
+  // could never open and would hold the advisory until the next compaction.
+  if (cfg.promptHook && record.promptsSinceHandover < cfg.handoverRearmPrompts) return "prompts";
+  return null;
 }
 
 /**
@@ -123,14 +152,15 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
 
   let state = rawState;
   let suppressedBy: "handover" | null = null;
-  if (rawState === "imperative" && handoverSuppresses(record, tokens, c, cfg)) {
+  const heldBy = rawState === "imperative" ? handoverSuppresses(record, tokens, c, cfg, input.sampledAt) : null;
+  if (heldBy !== null) {
     state = "advisory";
     suppressedBy = "handover";
   }
   const imperativeSince = rawState === "imperative" ? previousSince ?? input.sampledAt : null;
   const reason =
     rawState === "imperative"
-      ? `${tokens} + jump allowance ${jump.value} >= ${cfg.imperativePct} x ${Math.round(c)}${suppressedBy ? "; suppressed by a handover written for this compaction" : ""}`
+      ? `${tokens} + jump allowance ${jump.value} >= ${cfg.imperativePct} x ${Math.round(c)}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
       : rawState === "advisory"
         ? ceiling.conflict && tokens < cfg.advisoryPct * c
           ? `ceiling conflict: ${ceiling.conflict}`

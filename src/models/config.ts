@@ -101,6 +101,11 @@ export const SessionIntelConfigSchema = z.object({
   maxSampleAgeMs: z.number().int().min(0).max(600_000).optional(),   // default 30000
   compactPendingTtlMs: z.number().int().min(10_000).max(3_600_000).optional(), // default 300000
   stepPct: z.number().min(0.01).max(0.5).optional(),                 // default 0.05
+  // ISS-1197: the three handover re-arm gates. Suppression holds while ANY
+  // of them is closed, so a handover is not demanded again on the next prompt.
+  handoverRearmStepCapTokens: z.number().int().min(1_000).max(1_000_000).optional(), // default 25000
+  handoverRearmIntervalMs: z.number().int().min(0).max(3_600_000).optional(),        // default 600000
+  handoverRearmPrompts: z.number().int().min(0).max(50).optional(),                  // default 3
   // T-501: 0 disables the usage-cost advisory; any other value is a
   // threshold compared as written. The union mirrors the hot-path reader's
   // `allowZero` rule exactly (the agreement test pins both ends).

@@ -267,7 +267,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
     const outcome = persistSample({ root: opts.root, sessionId, sample: pressure, transcriptPath, cfg, now, recompute: (rec) => compute(rec) });
     if (outcome.status === "accepted") {
       presence = "persisted";
-      pressure = compute(outcome.intel);
+      pressure = outcome.sample;
     } else if (outcome.status === "rejected") {
       // Validation rejected the observation (era, revision, replacement,
       // anchor, pending compaction): the evidence does not describe the

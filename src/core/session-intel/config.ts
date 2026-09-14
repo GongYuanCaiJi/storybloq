@@ -27,6 +27,19 @@ export interface SessionIntelConfig {
   readonly compactPendingTtlMs: number;
   readonly stepPct: number;
   /**
+   * ISS-1197: the three handover re-arm gates. A handover holds the
+   * imperative at advisory while ANY of them is still closed, so an agent
+   * that has just written one is not told to write another on the next
+   * prompt. The growth gate is `min(stepPct x ceiling, this cap)`: on a large
+   * ceiling a percentage step alone is wider than the jump allowance that
+   * raised the imperative in the first place.
+   */
+  readonly handoverRearmStepCapTokens: number;
+  /** Wall time since the later of the handover and the last imperative. */
+  readonly handoverRearmIntervalMs: number;
+  /** Prompts seen since the handover (a bus message and an idle notice each count as one). */
+  readonly handoverRearmPrompts: number;
+  /**
    * T-501: the auto-compact window at or below which no usage advisory is
    * shown. A THRESHOLD, never a sentinel by magnitude: 0 disables the
    * advisory outright, and any other value is compared as written (a
@@ -51,6 +64,9 @@ export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
   maxSampleAgeMs: 30_000,
   compactPendingTtlMs: 300_000,
   stepPct: 0.05,
+  handoverRearmStepCapTokens: 25_000,
+  handoverRearmIntervalMs: 600_000,
+  handoverRearmPrompts: 3,
   recommendedWindowMax: 450_000,
   banner: true,
   promptHook: true,
@@ -68,6 +84,9 @@ export const SESSION_INTEL_BOUNDS = {
   maxSampleAgeMs: { min: 0, max: 600_000, integer: true },
   compactPendingTtlMs: { min: 10_000, max: 3_600_000, integer: true },
   stepPct: { min: 0.01, max: 0.5, integer: false },
+  handoverRearmStepCapTokens: { min: 1_000, max: 1_000_000, integer: true },
+  handoverRearmIntervalMs: { min: 0, max: 3_600_000, integer: true },
+  handoverRearmPrompts: { min: 0, max: 50, integer: true },
   // T-501: 0 is a legal DISABLE value outside the live range, so it is named
   // here rather than widening the range (a 1-token max is not a threshold).
   recommendedWindowMax: { min: 100_000, max: 1_000_000, integer: true, allowZero: true },
@@ -139,6 +158,9 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     maxSampleAgeMs: numberOr(raw, "maxSampleAgeMs", notes),
     compactPendingTtlMs: numberOr(raw, "compactPendingTtlMs", notes),
     stepPct: numberOr(raw, "stepPct", notes),
+    handoverRearmStepCapTokens: numberOr(raw, "handoverRearmStepCapTokens", notes),
+    handoverRearmIntervalMs: numberOr(raw, "handoverRearmIntervalMs", notes),
+    handoverRearmPrompts: numberOr(raw, "handoverRearmPrompts", notes),
     recommendedWindowMax: numberOr(raw, "recommendedWindowMax", notes),
     banner: boolOr(raw, "banner"),
     promptHook: boolOr(raw, "promptHook"),

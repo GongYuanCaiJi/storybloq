@@ -115,6 +115,15 @@ export interface SessionIntelPresence {
   readonly tokensAtHandover: number | null;
   readonly handoverBoundaryAt: string | null;
   /**
+   * ISS-1197: prompts seen since the handover was stamped, and when the
+   * imperative last fired. Two of the three re-arm gates read these; a record
+   * written before they existed reads 0 and null, which is the behaviour it
+   * already had. Never shed: shedding either would re-arm the imperative
+   * early, which is the bug they exist to close.
+   */
+  readonly promptsSinceHandover: number;
+  readonly lastImperativeAt: string | null;
+  /**
    * T-501: when the usage-cost advisory was shown for this session. Written
    * once, inside the record lock, and never shed: shedding it would show the
    * advisory again on the next priming call.
@@ -148,6 +157,8 @@ export function emptySessionIntel(): SessionIntelPresence {
     handoverWrittenAt: null,
     tokensAtHandover: null,
     handoverBoundaryAt: null,
+    promptsSinceHandover: 0,
+    lastImperativeAt: null,
     usageAdvisoryShownAt: null,
   };
 }
@@ -183,6 +194,8 @@ export function parseSessionIntel(value: unknown): SessionIntelPresence | null {
     handoverWrittenAt: isoOrNull(v.handoverWrittenAt),
     tokensAtHandover: nonNegativeIntOrNull(v.tokensAtHandover),
     handoverBoundaryAt: isoOrNull(v.handoverBoundaryAt),
+    promptsSinceHandover: safeInt(v.promptsSinceHandover, 0),
+    lastImperativeAt: isoOrNull(v.lastImperativeAt),
     usageAdvisoryShownAt: isoOrNull(v.usageAdvisoryShownAt),
   };
   return fitSessionIntel(parsed);

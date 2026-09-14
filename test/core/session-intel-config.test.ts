@@ -65,6 +65,16 @@ describe("sessionIntel config: hot-path reader", () => {
     }
   });
 
+  it("ISS-1197: the three handover re-arm keys default, are taken as written, and clamp per field", () => {
+    expect(resolveSessionIntelConfig(null)).toMatchObject({ handoverRearmStepCapTokens: 25_000, handoverRearmIntervalMs: 600_000, handoverRearmPrompts: 3 });
+    const taken = resolveSessionIntelConfig({ handoverRearmStepCapTokens: 1_000, handoverRearmIntervalMs: 0, handoverRearmPrompts: 0 });
+    expect(taken).toMatchObject({ handoverRearmStepCapTokens: 1_000, handoverRearmIntervalMs: 0, handoverRearmPrompts: 0 });
+    expect(taken.notes).toEqual([]);
+    const clamped = resolveSessionIntelConfig({ handoverRearmStepCapTokens: 999, handoverRearmIntervalMs: 3_600_001, handoverRearmPrompts: 51 });
+    expect(clamped).toMatchObject({ handoverRearmStepCapTokens: 25_000, handoverRearmIntervalMs: 600_000, handoverRearmPrompts: 3 });
+    expect(clamped.notes).toHaveLength(3);
+  });
+
   it("a non-boolean flag falls back silently (flags have no bounds to report)", () => {
     const cfg = resolveSessionIntelConfig({ enabled: "no", banner: 0 });
     expect(cfg.enabled).toBe(true);

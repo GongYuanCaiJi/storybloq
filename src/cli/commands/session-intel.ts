@@ -68,7 +68,7 @@ export function formatSessionIntelMd(r: SessionIntelResult, root: string | null 
     if (c.conflict) lines.push(`- Conflict: ${c.conflict}`);
     lines.push(`- Headroom: ${p.headroom?.toLocaleString() ?? "n/a"} tokens; jump allowance ${p.jumpAllowance?.toLocaleString() ?? "n/a"} (${p.jumpAllowanceBasis})`);
     if (p.reason) lines.push(`- Why: ${p.reason}`);
-    if (p.state === "imperative") lines.push("", "Write a handover now (storybloq handover create / storybloq_handover_create), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.");
+    if (p.state === "imperative") lines.push("", "Write a handover now (storybloq handover create / storybloq_handover_create), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.");
     else if (p.state === "advisory") lines.push("", "Plan a handover before the next large step.");
   }
   // T-501: reported on every call, whatever the pressure state, and never
@@ -299,7 +299,7 @@ export interface SessionIntelPromptOutcome {
 export function renderPromptDirective(p: NonNullable<SessionIntelResult["pressure"]>): string {
   const pct = p.pct === null ? "n/a" : `${Math.round(p.pct * 100)}%`;
   const conf = p.ceiling.confidence ? `, ${p.ceiling.confidence} confidence` : "";
-  return `[storybloq] Context pressure IMPERATIVE: ${pct} of the expected auto-compact point (${p.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${p.ceiling.source}${conf}). Write a handover now via storybloq_handover_create (or \`storybloq handover create\`), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue.`;
+  return `[storybloq] Context pressure IMPERATIVE: ${pct} of the expected auto-compact point (${p.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${p.ceiling.source}${conf}). Write a handover now via storybloq_handover_create (or \`storybloq handover create\`), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
 }
 
 /**

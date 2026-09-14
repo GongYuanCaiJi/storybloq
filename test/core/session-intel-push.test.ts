@@ -172,6 +172,8 @@ describe("tokenPressureBannerFor", () => {
       const imp = tokenPressureBannerFor(f.root, { now: now + 1000, ...seams(f) }, "cli");
       expect(imp?.state).toBe("imperative");
       expect(imp!.text).toMatch(/Write a handover now via storybloq handover create/);
+      // ISS-1197: the banner says compaction after the handover is expected.
+      expect(imp!.text).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(4), read: 10 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 2000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(tokenPressureBannerFor(f.root, { now: now + 2000, ...seams(f) })).toBeNull();
@@ -306,6 +308,8 @@ describe("guide directive and handover stamp", () => {
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(3), read: IMPERATIVE_TOKENS - 2 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/^Context pressure imperative \([78][0-9]% of ceiling, source setting, high confidence\): write a handover now via storybloq_handover_create, then keep working in this same turn\./);
+      // ISS-1197: the directive says compaction after the handover is expected.
+      expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
       expect(guideDirectiveFor(f.root, null, now + 1000)).toBeNull();
       markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 2000).toISOString() });
       expect(guideDirectiveFor(f.root, SID, now + 3000)).toBeNull();
@@ -320,6 +324,8 @@ describe("guide directive and handover stamp", () => {
       const now = T0 + 5 * 60_000;
       primed(f, IMPERATIVE_TOKENS, now);
       expect(intelOf(f.root).lastSample?.state).toBe("imperative");
+      // ISS-1197: a live prompt count and imperative latch from before the stamp.
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, promptsSinceHandover: 5, lastImperativeAt: at(4) } }));
       const r = await handleHandoverCreate("# Handover\nDone.", "session", "md", f.root, { now, projectsDir: f.projects });
       expect(r.output).toContain("Created handover:");
       // The reply itself tells the caller to keep working (the pause-after-handover field finding, 2026-09-09).
@@ -331,6 +337,9 @@ describe("guide directive and handover stamp", () => {
       expect(intel.handoverWrittenAt).toBe(new Date(now).toISOString());
       expect(intel.tokensAtHandover).toBe(intel.lastSample?.contextTokens);
       expect(intel.handoverBoundaryAt).toBe(intel.lastBoundaryAt);
+      // ISS-1197: the stamp zeroes both re-arm counters.
+      expect(intel.promptsSinceHandover).toBe(0);
+      expect(intel.lastImperativeAt).toBeNull();
       // The next sample at the same level is held at advisory.
       const next = handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(next.result?.pressure).toMatchObject({ state: "advisory", rawState: "imperative", suppressedBy: "handover" });

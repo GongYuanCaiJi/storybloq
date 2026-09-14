@@ -90,6 +90,8 @@ function full(): SessionIntelPresence {
     handoverWrittenAt: "2026-09-09T09:55:00.000Z",
     tokensAtHandover: 290_000,
     handoverBoundaryAt: "2026-09-09T08:00:00.000Z",
+    promptsSinceHandover: 4,
+    lastImperativeAt: "2026-09-09T09:50:00.000Z",
     usageAdvisoryShownAt: "2026-09-09T09:00:00.000Z",
   };
 }
@@ -116,6 +118,19 @@ describe("session intel fields (T-499)", () => {
       tokensAtHandover: -3, handoverBoundaryAt: "",
     })!;
     expect(junk).toEqual(emptySessionIntel());
+  });
+
+  it("ISS-1197: a record written before the re-arm counters existed parses with 0 and null, keeping its handover fields", () => {
+    const { promptsSinceHandover, lastImperativeAt, ...legacy } = full();
+    expect(promptsSinceHandover).toBe(4);
+    expect(lastImperativeAt).not.toBeNull();
+    const parsed = parseSessionIntel(JSON.parse(JSON.stringify(legacy)))!;
+    expect(parsed.promptsSinceHandover).toBe(0);
+    expect(parsed.lastImperativeAt).toBeNull();
+    expect(parsed.handoverWrittenAt).toBe(legacy.handoverWrittenAt);
+    expect(parsed.tokensAtHandover).toBe(legacy.tokensAtHandover);
+    // A hand-edited negative or fractional count reads as 0, never as itself.
+    expect(parseSessionIntel({ ...full(), promptsSinceHandover: -1, lastImperativeAt: "nope" })!).toMatchObject({ promptsSinceHandover: 0, lastImperativeAt: null });
   });
 
   it("drops a malformed sample without dropping the capture", () => {

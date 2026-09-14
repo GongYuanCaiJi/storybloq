@@ -422,6 +422,8 @@ export function applyBoundaryReset(intel: SessionIntelPresence, ts: string): Ses
     handoverWrittenAt: handoverAfter ? intel.handoverWrittenAt : null,
     tokensAtHandover: handoverAfter ? intel.tokensAtHandover : null,
     handoverBoundaryAt: handoverAfter ? ts : null,
+    promptsSinceHandover: handoverAfter ? intel.promptsSinceHandover : 0,
+    lastImperativeAt: handoverAfter ? intel.lastImperativeAt : null,
   };
 }
 
@@ -437,6 +439,8 @@ export function applyAssumedReset(intel: SessionIntelPresence, at: string): Sess
     handoverWrittenAt: null,
     tokensAtHandover: null,
     handoverBoundaryAt: null,
+    promptsSinceHandover: 0,
+    lastImperativeAt: null,
   };
 }
 
@@ -535,7 +539,12 @@ export function reconcileUnderLock(input: ReconcileInput, budgetMs: number): Rec
 // ---------------------------------------------------------------------------
 
 export type PersistOutcome =
-  | { readonly status: "accepted"; readonly intel: SessionIntelPresence }
+  /**
+   * `sample` is the verdict as it was computed against the locked record.
+   * ISS-1197: the caller must report THIS rather than recompute from `intel`,
+   * whose re-arm latches already record that this sample fired.
+   */
+  | { readonly status: "accepted"; readonly intel: SessionIntelPresence; readonly sample: TokenPressureSample }
   | { readonly status: "rejected"; readonly reason: string }
   /**
    * Not persisted. `validated` is true only when the locked checks RAN and
@@ -639,16 +648,36 @@ export function persistSample(input: PersistInput): PersistOutcome {
     // Suppression recomputed against the record as it is NOW (a handover
     // stamp that landed between compute and persist is honoured). The epoch
     // is owned by reconciliation, never by a sample.
-    const recomputed = input.recompute(intel);
+    // ISS-1197: a prompt that arrives while a handover stands for the current
+    // compaction ages the prompt gate. Counted BEFORE the recompute, so the
+    // prompt that clears the gate is the one that re-arms.
+    const stamped = intel.handoverWrittenAt !== null && intel.handoverBoundaryAt === intel.lastBoundaryAt;
+    const counted = stamped && input.sample.sampledBy === "prompt-hook"
+      ? { ...intel, promptsSinceHandover: intel.promptsSinceHandover + 1 }
+      : intel;
+    const recomputed = input.recompute(counted);
+    // The latch is a CONSEQUENCE of this sample, so it is written to the
+    // record but never fed back into the sample's own verdict: the caller
+    // reads `sample`, not a recompute of a record that now says the
+    // imperative just fired.
+    //
+    // Only the prompt hook spends the re-arm, because only its
+    // additionalContext reaches the model. A Stop-hook sample that reads
+    // imperative delivers nothing, so latching on it would zero the count and
+    // restart the interval behind the agent's back, and the next prompt would
+    // go silent: the imperative would be swallowed for another full cycle.
+    const fired = recomputed.state === "imperative" && input.sample.sampledBy === "prompt-hook";
     const next: SessionIntelPresence = {
-      ...intel,
+      ...counted,
       transcriptPath: input.transcriptPath,
       consumedOffset: obs.consumedOffset,
       incarnation: obs.incarnation,
       baselineAnchor: obs.anchor,
       lastSample: compactSample(recomputed),
+      promptsSinceHandover: fired ? 0 : counted.promptsSinceHandover,
+      lastImperativeAt: fired ? recomputed.sampledAt : counted.lastImperativeAt,
     };
-    box.outcome = { status: "accepted", intel: next };
+    box.outcome = { status: "accepted", intel: next, sample: recomputed };
     return { ...base, sessionIntel: next };
   }, () => new Date(input.now));
   if (enrichment.status !== "written") {
@@ -696,6 +725,9 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
         handoverWrittenAt: nowIso,
         tokensAtHandover: tokensAtHandover ?? intel.lastSample?.contextTokens ?? null,
         handoverBoundaryAt: intel.lastBoundaryAt,
+        // ISS-1197: the stamp starts both re-arm latches from zero.
+        promptsSinceHandover: 0,
+        lastImperativeAt: null,
       },
     };
   }, () => new Date(now));

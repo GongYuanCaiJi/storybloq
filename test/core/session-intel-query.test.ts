@@ -284,6 +284,18 @@ describe("sampleSession", () => {
 });
 
 describe("handleSessionIntel (the shared CLI/MCP handler)", () => {
+  it("ISS-1197: the md surface carries the same imperative wording as the banner, the guide directive and the prompt hook", () => {
+    withFixture((f) => {
+      bindCaller(f.root);
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(0), read: 340_000 })]);
+      const md = formatSessionIntelMd(handleSessionIntel({ cwd: f.root, format: "json", projectsDir: f.projects }).result);
+      expect(md).toMatch(/Token pressure: IMPERATIVE/);
+      expect(md).toMatch(/Write a handover now \(storybloq handover create \/ storybloq_handover_create\), then keep working in this same turn\./);
+      expect(md).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
+    });
+  });
+
+
   it("md and json carry the same numbers; json is an {ok, data} envelope; the CLI and MCP samplers agree; a nested cwd finds the project", () => {
     withFixture((f) => {
       bindCaller(f.root);
