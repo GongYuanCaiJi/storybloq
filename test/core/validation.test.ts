@@ -367,6 +367,48 @@ describe("validateProject", () => {
   });
 });
 
+describe("ISS-1203: open issue with no phase, when the roadmap has phases", () => {
+  it("reports an info finding for an open issue with no phase", () => {
+    const state = makeState({
+      issues: [makeIssue({ id: "ISS-001", status: "open" })],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = validateProject(state);
+    const finding = result.findings.find((f) => f.code === "issue_missing_phase");
+    expect(finding).toBeDefined();
+    expect(finding!.level).toBe("info");
+    expect(finding!.entity).toBe("ISS-001");
+    expect(result.valid).toBe(true); // info doesn't affect validity
+  });
+
+  it("does not flag an issue that already has a phase", () => {
+    const state = makeState({
+      issues: [makeIssue({ id: "ISS-001", status: "open", phase: "p1" })],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = validateProject(state);
+    expect(result.findings.some((f) => f.code === "issue_missing_phase")).toBe(false);
+  });
+
+  it("does not flag a resolved issue with no phase", () => {
+    const state = makeState({
+      issues: [makeIssue({ id: "ISS-001", status: "resolved" })],
+      roadmap: makeRoadmap([makePhase({ id: "p1" })]),
+    });
+    const result = validateProject(state);
+    expect(result.findings.some((f) => f.code === "issue_missing_phase")).toBe(false);
+  });
+
+  it("does not flag a phase-less issue when the roadmap itself has no phases", () => {
+    const state = makeState({
+      issues: [makeIssue({ id: "ISS-001", status: "open" })],
+      roadmap: makeRoadmap([]),
+    });
+    const result = validateProject(state);
+    expect(result.findings.some((f) => f.code === "issue_missing_phase")).toBe(false);
+  });
+});
+
 describe("ISS-729: team-mode duplicate displayId detection", () => {
   const teamConfig = { ...minimalConfig, team: { enabled: true } } as Config;
 

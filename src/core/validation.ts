@@ -441,6 +441,22 @@ export function validateProject(
     }
   }
 
+  // ISS-1203: an open issue with no phase is invisible on the Mac app's
+  // phase-grouped board. Only worth flagging when the roadmap has phases to
+  // sort into -- a phase-less roadmap makes the field moot for everyone.
+  if (phaseIDs.size > 0) {
+    for (const i of state.activeIssues) {
+      if (i.status !== "open") continue;
+      if (i.phase != null) continue;
+      findings.push({
+        level: "info",
+        code: "issue_missing_phase",
+        message: `Issue ${displayIdOf(i)} has no phase and will not appear on the phase-grouped board.`,
+        entity: i.id,
+      });
+    }
+  }
+
   // Duplicate leaf order within same phase (info)
   const orderByPhase = new Map<string | null, Map<number, string[]>>();
   for (const t of state.leafTickets) {

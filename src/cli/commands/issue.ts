@@ -209,6 +209,43 @@ function validateAndResolveRelatedTickets(ids: string[], state: ProjectState): s
   return resolved;
 }
 
+/**
+ * ISS-1203: an issue filed with no phase is invisible on the Mac app's
+ * phase-grouped board. When the caller omits `phase`, default it from the
+ * first related ticket's phase, or the active session's current ticket when
+ * there is no related ticket. This is only ever a DEFAULT VALUE -- nothing
+ * about the inference is recorded on the issue, so it is indistinguishable
+ * from a phase the caller typed in directly.
+ *
+ * Pitfall: a child ticket's own `phase` can be null while its umbrella
+ * carries the real one (leaf tickets are the ones roadmap phase listings
+ * group by, but a child's own field is not guaranteed to be populated).
+ * Resolve through `resolvedParent` in that case rather than leaving the
+ * issue phase-less. An umbrella-related ticket has no parent to resolve
+ * through, so this is a no-op for it.
+ */
+async function inferIssuePhase(
+  state: ProjectState,
+  resolvedRelatedTicketIds: readonly string[],
+  root: string,
+): Promise<string | null> {
+  let ticketId = resolvedRelatedTicketIds[0];
+  if (!ticketId) {
+    try {
+      const { findActiveSessionFull } = await import("../../autonomous/session.js");
+      ticketId = findActiveSessionFull(root)?.state.ticket?.id;
+    } catch {
+      // An unreadable session store is not proof a session is running --
+      // leave the issue phase-less rather than guess.
+    }
+  }
+  if (!ticketId) return null;
+  const ticket = state.activeTickets.find((t) => t.id === ticketId);
+  if (!ticket) return null;
+  if (ticket.phase != null) return ticket.phase;
+  return state.resolvedParent(ticket)?.phase ?? null;
+}
+
 /** Build a multiset of error findings keyed by code|entity|message, with message lookup. */
 function buildErrorMultiset(findings: readonly { level: string; code: string; entity: string | null; message: string }[]): { counts: Map<string, number>; messages: Map<string, string> } {
   const counts = new Map<string, number>();
@@ -335,6 +372,7 @@ export async function handleIssueCreate(
     const resolvedRelated = args.relatedTickets.length > 0
       ? validateAndResolveRelatedTickets(args.relatedTickets, state)
       : [];
+    const effectivePhase = args.phase ?? (await inferIssuePhase(state, resolvedRelated, root));
 
     createdInState = state;
     const isTeam = state.config.team?.enabled === true;
@@ -368,7 +406,7 @@ export async function handleIssueCreate(
       ...(args.createdBy ? { createdBy: args.createdBy } : {}),
       resolvedDate: null,
       relatedTickets: resolvedRelated,
-      phase: args.phase ?? null,
+      phase: effectivePhase,
       ...(citesRulingsResolution.citesRulings !== undefined && citesRulingsResolution.citesRulings.length > 0
         && { citesRulings: citesRulingsResolution.citesRulings }),
     };

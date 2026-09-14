@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, readdir, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,11 +12,13 @@ import {
   handleIssueMetaUnset,
   handleIssueDelete,
 } from "../../../src/cli/commands/issue.js";
+import { handleTicketCreate } from "../../../src/cli/commands/ticket.js";
 import { ExitCode } from "../../../src/core/output-formatter.js";
 import { CliValidationError } from "../../../src/cli/helpers.js";
 import { initProject } from "../../../src/core/init.js";
 import { loadProject } from "../../../src/core/project-loader.js";
 import { makeState, makeIssue } from "../../core/test-factories.js";
+import { deriveWorkspaceId } from "../../../src/autonomous/session-types.js";
 import type { CommandContext } from "../../../src/cli/run.js";
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
@@ -434,6 +436,138 @@ describe("handleIssueCreate", () => {
         "md", dir,
       ),
     ).rejects.toThrow("not found in roadmap");
+  });
+
+  describe("ISS-1203: phase inference so issues with no explicit phase still appear on the phase-grouped board", () => {
+    it("infers phase from the first related ticket", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "issue-create-"));
+      tmpDirs.push(dir);
+      await initProject(dir, { name: "test" });
+      const ticket = JSON.parse((await handleTicketCreate(
+        { title: "Leaf", type: "task", phase: "p0", description: "x", blockedBy: [], parentTicket: null },
+        "json", dir,
+      )).output).data;
+
+      const result = await handleIssueCreate(
+        { title: "Bug", severity: "high", impact: "x", components: [], relatedTickets: [ticket.id], location: [] },
+        "json", dir,
+      );
+
+      expect(JSON.parse(result.output).data.phase).toBe("p0");
+    });
+
+    it("falls back to the resolved parent's phase when a related child ticket has no phase of its own", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "issue-create-"));
+      tmpDirs.push(dir);
+      await initProject(dir, { name: "test" });
+      const umbrella = JSON.parse((await handleTicketCreate(
+        { title: "Umbrella", type: "feature", phase: "p0", description: "x", blockedBy: [], parentTicket: null },
+        "json", dir,
+      )).output).data;
+      const child = JSON.parse((await handleTicketCreate(
+        { title: "Child", type: "task", phase: null, description: "x", blockedBy: [], parentTicket: umbrella.id },
+        "json", dir,
+      )).output).data;
+      expect(child.phase).toBeNull();
+
+      const result = await handleIssueCreate(
+        { title: "Bug", severity: "high", impact: "x", components: [], relatedTickets: [child.id], location: [] },
+        "json", dir,
+      );
+
+      expect(JSON.parse(result.output).data.phase).toBe("p0");
+    });
+
+    it("stays phase-less with no related tickets and no active session", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "issue-create-"));
+      tmpDirs.push(dir);
+      await initProject(dir, { name: "test" });
+
+      const result = await handleIssueCreate(
+        { title: "Bug", severity: "high", impact: "x", components: [], relatedTickets: [], location: [] },
+        "json", dir,
+      );
+
+      expect(JSON.parse(result.output).data.phase).toBeNull();
+    });
+
+    it("uses the active session's current ticket phase when relatedTickets is empty", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "issue-create-"));
+      tmpDirs.push(dir);
+      await initProject(dir, { name: "test" });
+      const ticket = JSON.parse((await handleTicketCreate(
+        { title: "In progress", type: "task", phase: "p0", description: "x", blockedBy: [], parentTicket: null },
+        "json", dir,
+      )).output).data;
+
+      const sessionId = "aaaaaaaa-0000-0000-0000-000000000001";
+      const sessDir = join(dir, ".story", "sessions", sessionId);
+      await mkdir(sessDir, { recursive: true });
+      const now = new Date().toISOString();
+      await writeFile(join(sessDir, "state.json"), JSON.stringify({
+        schemaVersion: 1,
+        sessionId,
+        recipe: "coding",
+        state: "IMPLEMENT",
+        revision: 1,
+        status: "active",
+        mode: "auto",
+        reviews: { plan: [], code: [] },
+        completedTickets: [],
+        finalizeCheckpoint: null,
+        git: { branch: "main", mergeBase: null },
+        lease: {
+          workspaceId: deriveWorkspaceId(dir),
+          lastHeartbeat: now,
+          expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        },
+        contextPressure: { level: "low", guideCallCount: 0, ticketsCompleted: 0, compactionCount: 0, eventsLogBytes: 0 },
+        pendingProjectMutation: null,
+        resumeFromRevision: null,
+        preCompactState: null,
+        compactPending: false,
+        compactPreparedAt: null,
+        resumeBlocked: false,
+        terminationReason: null,
+        waitingForRetry: false,
+        lastGuideCall: now,
+        startedAt: now,
+        guideCallCount: 0,
+        config: { maxTicketsPerSession: 5, compactThreshold: "high", reviewBackends: ["codex", "agent"] },
+        ticket: { id: ticket.id, title: ticket.title },
+      }));
+      await writeFile(join(sessDir, "events.log"), "");
+
+      const result = await handleIssueCreate(
+        { title: "Deferred finding", severity: "high", impact: "x", components: [], relatedTickets: [], location: [] },
+        "json", dir,
+      );
+
+      expect(JSON.parse(result.output).data.phase).toBe("p0");
+    });
+
+    it("does not override an explicit phase with an inferred one", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "issue-create-"));
+      tmpDirs.push(dir);
+      await initProject(dir, {
+        name: "test",
+        phases: [
+          { id: "p0", label: "PHASE 0", name: "Setup", description: "x" },
+          { id: "p1", label: "PHASE 1", name: "Next", description: "y" },
+        ],
+      });
+      const ticket = JSON.parse((await handleTicketCreate(
+        { title: "Leaf", type: "task", phase: "p0", description: "x", blockedBy: [], parentTicket: null },
+        "json", dir,
+      )).output).data;
+
+      const result = await handleIssueCreate(
+        { title: "Bug", severity: "high", impact: "x", components: [], relatedTickets: [ticket.id], location: [], phase: "p1" },
+        "json", dir,
+      );
+
+      expect(JSON.parse(result.output).data.phase).toBe("p1");
+    });
   });
 });
 
