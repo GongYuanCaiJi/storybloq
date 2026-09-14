@@ -14,8 +14,8 @@
  * does promote (ISS-1197 commit 3): it measures where compaction actually
  * fired, so a forecast below one this session has already passed is raised to
  * it rather than left to report "97%" of a point already behind. The raise is
- * scoped to the window it was measured under and refused above the native
- * window rather than clamped down to it;
+ * scoped to the window it was measured under and refused outright above the
+ * window the resolution is forecasting from, rather than clamped down to it;
  * it is also not monotonic, because ledger retention (per-session newest
  * `boundarySampleCount`, then the global cap) can evict the boundary the raise
  * rests on, after which the ceiling falls back to the forecast.
@@ -64,8 +64,13 @@ const ts = (e: LedgerEntry) => Date.parse(e.timestamp);
  * restarted at 200k would hold the ceiling at 416,642 while compaction fires
  * at 185,000, suppressing advisory, imperative and compact-needed through the
  * very event the raise exists to predict. When either side is unknown the
- * entry still counts: the alternative is to discard a real measurement over a
- * missing field, and the caller clamps what it cannot attribute.
+ * entry still counts here rather than being discarded over a missing field,
+ * which matters because the unknown side is the common one: `query.ts` stamps
+ * every boundary outside the live era with a null era and a null window, and
+ * `capture.ts` does the same when the window read fails. What keeps that safe
+ * is the caller, which REFUSES any floor above the window it is forecasting
+ * from, so an unattributable boundary can sharpen the forecast but never
+ * exceed it.
  *
  * Manual and unclassified triggers are excluded: a user compacting early
  * measures nothing about where compaction fires on its own.
@@ -80,7 +85,7 @@ function observedAutoFloor(ledger: readonly LedgerEntry[], sessionId: string, ta
   return floor;
 }
 
-function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly string[], observedFloor: number | null): CeilingResolution {
+function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly string[], observedFloor: number | null, targetWindow: number | null): CeilingResolution {
   let ceiling = r.ceiling;
   let basis = r.basis;
   let conflict = r.conflict;
@@ -95,15 +100,17 @@ function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly 
   // median into a max. Confidence is untouched either way: the raise sharpens
   // the number, not the provenance.
   //
-  // `nativeWindow` is non-null only on the model path, which forecasts from
-  // the whole context rather than a captured setting. A boundary above it was
-  // measured under a different window state (the 1M flag), so it is evidence
-  // about that state and none about this one: the raise has no basis and is
-  // refused outright rather than clamped down to the native window, which
-  // would report a number no evidence supports. Below it the boundary is
-  // reachable here and raises normally.
-  const cap = r.nativeWindow;
-  if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling && !(cap !== null && observedFloor > cap)) {
+  // The bound is the window this resolution is forecasting from: the target's
+  // captured or live window, or, when there is none, the native window the
+  // model path uses (non-null only there). A floor above it was measured under
+  // a different window state, so it is evidence about THAT state and none
+  // about this one: the raise has no basis and is refused outright rather than
+  // clamped down to the bound, which would report a number no evidence
+  // supports. At or below the bound the boundary is reachable here and raises
+  // normally, which is what keeps the field case and an older ledger's
+  // null-window entries useful.
+  const bound = targetWindow ?? r.nativeWindow ?? null;
+  if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling && !(bound !== null && observedFloor > bound)) {
     ceiling = observedFloor;
     basis = `${basis}; raised to observed boundary ${observedFloor}`;
   }
@@ -124,7 +131,8 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
   // source wins, so every path gets the same treatment. The window it is
   // scoped to is the captured one, or the live setting when there is no
   // capture; the model path has none and is bounded by `nativeWindow` instead.
-  const floor = observedAutoFloor(ledger, sessionId, window ?? input.liveSetting?.value ?? null);
+  const targetWindow = window ?? input.liveSetting?.value ?? null;
+  const floor = observedAutoFloor(ledger, sessionId, targetWindow);
   const base = {
     sampleCount: 0,
     independentSessions: 0,
@@ -153,7 +161,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
         independentSessions: 1,
         effectiveSampleWindow: own.length,
         basis: `median preTokens of ${own.length} auto boundaries in this session's process era${reduced}`,
-      }, input.highWaterMark, cfg.notes, floor);
+      }, input.highWaterMark, cfg.notes, floor, targetWindow);
     }
   }
 
@@ -177,7 +185,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
         independentSessions: sessions.size,
         effectiveSampleWindow: sample.length,
         basis: `median preTokens of ${sample.length} auto boundaries from ${sessions.size} other sessions captured at startup with autoCompactWindow ${window}`,
-      }, input.highWaterMark, cfg.notes, floor);
+      }, input.highWaterMark, cfg.notes, floor, targetWindow);
     }
   }
 
@@ -189,7 +197,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       source: "setting",
       confidence: captureKind === "startup" ? "high" : "medium",
       basis: `${cfg.ceilingFraction} x autoCompactWindow ${window} captured ${captureKind === "startup" ? "at process start" : "late"}`,
-    }, input.highWaterMark, cfg.notes, floor);
+    }, input.highWaterMark, cfg.notes, floor, targetWindow);
   }
   if (input.liveSetting) {
     return withConflict({
@@ -199,7 +207,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       confidence: "medium",
       autoCompactWindowAtStart: null,
       basis: `${cfg.ceilingFraction} x autoCompactWindow ${input.liveSetting.value} (${input.liveSetting.basis})`,
-    }, input.highWaterMark, cfg.notes, floor);
+    }, input.highWaterMark, cfg.notes, floor, targetWindow);
   }
 
   // 4. model
@@ -214,7 +222,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       nativeWindow,
       conflict: evidence === "none" ? "no model-window evidence" : null,
       basis: `${cfg.ceilingFraction} x native window ${nativeWindow} for ${input.lastAssistantModel} (${evidence === "none" ? "no model-window record; 200k assumed" : `1M flag ${input.oneMillionFlag ? "set" : "not set"} from ${evidence} scan`})`,
-    }, input.highWaterMark, cfg.notes, floor);
+    }, input.highWaterMark, cfg.notes, floor, targetWindow);
   }
 
   // 5. unknown
@@ -224,5 +232,5 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
     source: "unknown",
     confidence: null,
     basis: "no capture, no setting, no measured boundary, no model evidence",
-  }, input.highWaterMark, cfg.notes, floor);
+  }, input.highWaterMark, cfg.notes, floor, targetWindow);
 }

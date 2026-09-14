@@ -129,7 +129,9 @@ describe("ISS-1197 commit 3: an observed auto boundary raises the forecast it di
   const priorEra = (pre: number, over: Partial<LedgerEntry> = {}) => entry(ME, 1, pre, { era: "9:9", ...over });
 
   it("raises the ceiling to the boundary, names it in basis, and drops the exceeds-forecast conflict", () => {
-    const pre = Math.round(1.1 * FORECAST); // 457,875
+    // Above the 416,250 forecast and inside the 450,000 window that bounds
+    // the raise: a boundary above the window itself is refused, not raised.
+    const pre = 445_000;
     const r = resolveCeiling(input({ ledger: [priorEra(pre)], highWaterMark: pre }));
     expect(r.source).toBe("setting");
     expect(r.ceiling).toBe(pre);
@@ -186,9 +188,9 @@ describe("ISS-1197 commit 3: an observed auto boundary raises the forecast it di
 
   it("the floor is the MAX of this session's boundaries, not the first one seen", () => {
     // Lower boundary first, so a first-wins reduction lands on 430,000.
-    const r = resolveCeiling(input({ ledger: [priorEra(430_000), entry(ME, 2, 457_875, { era: "9:9" })] }));
-    expect(r.ceiling).toBe(457_875);
-    expect(r.basis).toMatch(/raised to observed boundary 457875/);
+    const r = resolveCeiling(input({ ledger: [priorEra(430_000), entry(ME, 2, 445_000, { era: "9:9" })] }));
+    expect(r.ceiling).toBe(445_000);
+    expect(r.basis).toMatch(/raised to observed boundary 445000/);
   });
 });
 
@@ -221,9 +223,56 @@ describe("ISS-1197 commit 3: the raise is scoped to the window it was measured u
   });
 
   it("a null window on either side still counts (the gate skips only a known mismatch)", () => {
-    expect(resolveCeiling(input({ ledger: [entry(ME, 1, 457_875, { era: "9:9", autoCompactWindowAtStart: null })] })).ceiling).toBe(457_875);
+    expect(resolveCeiling(input({ ledger: [entry(ME, 1, 445_000, { era: "9:9", autoCompactWindowAtStart: null })] })).ceiling).toBe(445_000);
     // Target side null: the model path has no window at all.
     expect(resolveCeiling(modelPath({ ledger: [entry(ME, 1, 190_000, { era: "9:9" })] })).ceiling).toBe(190_000);
+  });
+
+  it("a null-window entry is bounded by the TARGET window, not waved through", () => {
+    // query.ts stamps every boundary outside the live era with era null and
+    // autoCompactWindowAtStart null, and capture.ts does the same when the
+    // window read fails, so this is the common shape, not a corner. Unbounded
+    // it would hold a 200,000-window session's ceiling at 416,642 while
+    // compaction fires at 185,000.
+    const shrunkTarget = { era: "2:2", capture: { captureKind: "startup" as const, autoCompactWindowAtStart: 200_000, capturedAt: at(-10) } };
+    const orphan = (pre: number) => entry(ME, 1, pre, { era: null, autoCompactWindowAtStart: null });
+    const refused = resolveCeiling(input({ target: shrunkTarget, ledger: [orphan(416_642)] }));
+    expect(refused.ceiling).toBeCloseTo(185_000);
+    expect(refused.basis).not.toMatch(/raised to observed boundary/);
+    // At or below the target window it is still a usable measurement.
+    expect(resolveCeiling(input({ target: shrunkTarget, ledger: [orphan(190_000)] })).ceiling).toBe(190_000);
+  });
+
+  it("measured-project is bounded the same way", () => {
+    const pool = [180_000, 181_000, 182_000, 183_000, 184_000].map((p, i) =>
+      entry(i < 3 ? "a" : "b", i + 1, p, { autoCompactWindowAtStart: 200_000 }),
+    );
+    const target = { era: "2:2", capture: { captureKind: "startup" as const, autoCompactWindowAtStart: 200_000, capturedAt: at(-10) } };
+    const orphan = (pre: number) => entry(ME, 9, pre, { era: null, autoCompactWindowAtStart: null });
+    const refused = resolveCeiling(input({ target, ledger: [...pool, orphan(416_642)] }));
+    expect(refused.source).toBe("measured-project");
+    expect(refused.ceiling).toBe(182_000);
+    expect(refused.basis).not.toMatch(/raised to observed boundary/);
+    expect(resolveCeiling(input({ target, ledger: [...pool, orphan(190_000)] })).ceiling).toBe(190_000);
+  });
+
+  it("the live-setting path is scoped to the live setting's own window", () => {
+    const r = resolveCeiling(
+      input({
+        target: { era: null, capture: null },
+        liveSetting: { value: 200_000, basis: "live read, unbound" },
+        ledger: [entry(ME, 1, 416_642, { era: "9:9", autoCompactWindowAtStart: 450_000 })],
+      }),
+    );
+    expect(r.source).toBe("setting");
+    expect(r.ceiling).toBeCloseTo(185_000);
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+  });
+
+  it("the bound is inclusive: a boundary exactly at the native window raises", () => {
+    const r = resolveCeiling(modelPath({ ledger: [entry(ME, 1, 200_000, { era: "9:9", autoCompactWindowAtStart: null })] }));
+    expect(r.ceiling).toBe(200_000);
+    expect(r.basis).toMatch(/raised to observed boundary 200000/);
   });
 
   it("the model path REFUSES a boundary above the native window rather than clamping to it", () => {

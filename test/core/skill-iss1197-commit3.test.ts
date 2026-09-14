@@ -98,10 +98,12 @@ describe("ISS-1197 commit 3: the state enumerations name compact-needed", () => 
     expect(text).toContain("At `compact-needed` the line says to write none");
     // The defect this replaces: one sentence that listed both states and then
     // told the reader to write a handover, which is the opposite instruction
-    // at compact-needed. No sentence may name compact-needed and ask for one.
+    // at compact-needed. No sentence here may name compact-needed and ask for
+    // one, under any verb. Scoped to this file on purpose: SKILL.md's own
+    // enumeration legitimately names both states in one sentence.
     const conflated = text
       .split(/(?<=[.!?])\s/)
-      .filter((s) => /compact-needed/.test(s) && /write (a|the) handover/i.test(s));
+      .filter((s) => /compact-needed/.test(s) && /\b(write|record|create)\b[^.]*\bhandover/i.test(s));
     expect(conflated).toEqual([]);
   });
 
