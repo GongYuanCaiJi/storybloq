@@ -19,7 +19,7 @@ import { readPresenceRecord } from "../../../src/core/session-intel/presence-bri
 import { createEraIfAbsent } from "../../../src/core/session-intel/era-store.js";
 import { processEra } from "../../../src/core/session-intel/process-era.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../../src/core/presence-enrichment.js";
-import { emptySessionIntel } from "../../../src/presence/session-intel-fields.js";
+import { emptySessionIntel, type SessionIntelSample } from "../../../src/presence/session-intel-fields.js";
 import { makeWorktreePair, SID } from "../../core/session-intel-fixtures.js";
 
 function makeCtx(overrides: Partial<CommandContext> = {}): CommandContext {
@@ -448,6 +448,39 @@ describe("ISS-1185: handleHandoverCreate's stamped-root diagnostic", () => {
     expect(r.status).toBe("written");
   }
 
+  /**
+   * ISS-1197 commit 2: a fresh, reconcilable compact-needed sample. `sampledAt`
+   * is the caller's argument so the test can put it inside the 30 s freshness
+   * window the stamp now requires.
+   */
+  function compactNeededSample(sampledAt: string): SessionIntelSample {
+    return {
+      sampledAt,
+      sampledBy: "stop-hook",
+      state: "compact-needed",
+      rawState: "compact-needed",
+      pct: 0.96,
+      contextTokens: 400_000,
+      ceiling: 416_250,
+      ceilingSource: "setting",
+      ceilingConfidence: "high",
+      observation: {
+        era: null,
+        incarnation: "1:1",
+        sizeAtOpen: 10,
+        consumedOffset: 10,
+        anchor: { offset: 10, sha256: "a".repeat(64) },
+        authoritative: true,
+        revisionSeen: 0,
+        lastRecordTimestamp: sampledAt,
+        epoch: { kind: "unobserved" },
+      },
+      imperativeSince: sampledAt,
+      suppressedBy: null,
+      usageInput: null,
+    };
+  }
+
   it("reports the stamped root (MD parenthetical, JSON tokenPressureStampedRoot) only when it diverges from the MCP root", async () => {
     const wt = makeWorktreePair("hc-wt-");
     const saved = { CLAUDE_CODE_SESSION_ID: process.env.CLAUDE_CODE_SESSION_ID, CLAUDE_PID: process.env.CLAUDE_PID };
@@ -471,6 +504,19 @@ describe("ISS-1185: handleHandoverCreate's stamped-root diagnostic", () => {
       const parsed = JSON.parse(json.output as string) as { data: { tokenPressureStamped?: boolean; tokenPressureStampedRoot?: string } };
       expect(parsed.data.tokenPressureStamped).toBe(true);
       expect(parsed.data.tokenPressureStampedRoot).toBe(wt.worktree);
+
+      // ISS-1197 commit 2: compact-needed AND a diverged root in one reply.
+      // The parenthetical is appended to whichever line was chosen, so a
+      // divergence must not silently restore the advisory wording.
+      const at = new Date().toISOString();
+      applyPresenceEnrichment(wt.worktree, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({
+        ...b,
+        sessionIntel: { ...b.sessionIntel!, handoverWrittenAt: null, tokensAtHandover: null, handoverBoundaryAt: null, lastSample: compactNeededSample(at) },
+      }));
+      const both = await handleHandoverCreate("# H-compact", "session-compact", "md", wt.main);
+      expect(both.output).toMatch(/past the compact line/);
+      expect(both.output).not.toMatch(/held at advisory/);
+      expect(both.output).toMatch(new RegExp(`\\(stamped under a different root: ${wt.worktree.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
 
       // A record found directly under the MCP root itself: no divergence note.
       bindCallerAt(wt.main);

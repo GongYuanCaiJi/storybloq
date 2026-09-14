@@ -168,9 +168,6 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     notes.push(`sessionIntel.compactNeededPct (${compactNeededPct}) no longer exceeds imperativePct (${imperativePct}) after the advisoryPct fallback; default ${d.compactNeededPct} used`);
     compactNeededPct = d.compactNeededPct;
   }
-  // Only imperativePct moved above, so only compactNeededPct is restored here:
-  // resetting the pair would undo an advisory fallback that has already been
-  // reported and is correct as it stands.
 
   let jumpAllowanceFloorTokens = numberOr(raw, "jumpAllowanceFloorTokens", notes);
   let jumpAllowanceCapTokens = numberOr(raw, "jumpAllowanceCapTokens", notes);

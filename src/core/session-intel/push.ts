@@ -530,7 +530,7 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     // sampler or compaction landing between the reconcile and the stamp
     // cannot pair an old count with a newer boundary.
     const observed: HandoverStampObservation = { state: null };
-    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now, observed);
+    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now, { out: observed, cfg });
     return { status: "stamped", sessionId, outcome, root: resolvedRoot, pressureState: observed.state };
   } catch (err) {
     return { status: "skipped", reason: err instanceof Error ? err.message : String(err) };

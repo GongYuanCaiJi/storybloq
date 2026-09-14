@@ -416,6 +416,48 @@ describe("guide directive and handover stamp", () => {
     });
   });
 
+  // ISS-1197 commit 2 round 2: the compact line may only describe a sample the
+  // OTHER surfaces on the same response would also accept. The banner
+  // prefixed to this very reply re-scans a sample older than maxSampleAgeMs
+  // and drops one whose reconciliation is incomplete; reporting the raw
+  // stored sample here prints a line about a measurement the banner has
+  // already replaced. Falling back to the continuation line is deliberate:
+  // going silent is what ISS-1185 exists to prevent.
+  it("ISS-1197 commit 2 round 2: a STALE compact-needed sample falls back to the continuation line", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, 400_000, now);
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
+      // 31 s on, past the 30 s maxSampleAgeMs default.
+      const stale = await handleHandoverCreate("# Stale", "stale", "md", f.root, { now: now + 31_000, projectsDir: f.projects });
+      expect(intelOf(f.root).handoverWrittenAt).toBe(new Date(now + 31_000).toISOString());
+      expect(stale.output).toMatch(/held at advisory/);
+      expect(stale.output).not.toMatch(/past the compact line/);
+    });
+  });
+
+  it("ISS-1197 commit 2 round 2: one second inside the freshness window the compact line is still used", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, 400_000, now);
+      const fresh = await handleHandoverCreate("# Fresh", "fresh", "md", f.root, { now: now + 29_000, projectsDir: f.projects });
+      expect(fresh.output).toMatch(/past the compact line/);
+      expect(fresh.output).not.toMatch(/held at advisory/);
+    });
+  });
+
+  it("ISS-1197 commit 2 round 2: a pending compaction over a fresh compact-needed sample falls back to the continuation line", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      const era = primed(f, 400_000, now);
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
+      markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 1000).toISOString() });
+      const pending = await handleHandoverCreate("# Pending", "pending", "md", f.root, { now: now + 2000, projectsDir: f.projects });
+      expect(pending.output).toMatch(/held at advisory/);
+      expect(pending.output).not.toMatch(/past the compact line/);
+    });
+  });
+
   it("the continuation line and tokenPressureStamped ride only on a stamp whose locked write LANDED: busy lock, failed write, and a refusal under the lock all yield the bare reply and leave the record imperative", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;

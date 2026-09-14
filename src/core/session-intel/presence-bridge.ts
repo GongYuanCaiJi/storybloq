@@ -699,11 +699,30 @@ export type HandoverStampOutcome = EnrichmentOutcome | { readonly status: "refus
  * stamp actually saw UNDER THE LOCK. The reply's continuation line depends on
  * it, and reading it from a second, unlocked read would pair a line with a
  * different sample than the one stamped -- the same hazard `tokensAtHandover`
- * is taken inside the lock to avoid. `null` when the stamp saw no sample or
- * never reached one (a refusal returns before the sample is read).
+ * is taken inside the lock to avoid.
+ *
+ * `null` means "say nothing new": no sample, a refusal that returned before
+ * the sample was read, or a sample the gates below rejected. The caller keeps
+ * its existing continuation line for null. Going neutral instead is not an
+ * option -- ISS-1185 exists because agents stopped working without that line.
  */
 export interface HandoverStampObservation {
   state: TokenPressureState | null;
+}
+
+/**
+ * Round 2 (concurrency lens): the observation and the banner prefixed to the
+ * SAME response must describe the same sample. `acquireCallerSample` re-scans
+ * a stored sample older than `maxSampleAgeMs` and drops one whose
+ * reconciliation is incomplete, so a stamp that reported the raw stored sample
+ * could print "held at advisory" under a COMPACT-NEEDED banner measured
+ * seconds later (Stop hook persists at T0; 30+ s of tool calls; stamp at T1
+ * reads the T0 sample; banner at T2 re-measures). The stamp therefore applies
+ * the same two gates, from the same config.
+ */
+export interface HandoverStampObserve {
+  readonly out: HandoverStampObservation;
+  readonly cfg: SessionIntelConfig;
 }
 
 /**
@@ -712,7 +731,7 @@ export interface HandoverStampObservation {
  * and its era must be the caller's live (non-null) era. Never creates a
  * subtree for an unbound record.
  */
-export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number, observed?: HandoverStampObservation): HandoverStampOutcome {
+export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number, observe?: HandoverStampObserve): HandoverStampOutcome {
   let refused: string | null = null;
   const outcome = applyPresenceEnrichment(root, sessionId, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base, nowIso) => {
     const intel = base.sessionIntel;
@@ -726,7 +745,15 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
     // agents that had just written a handover kept seeing the imperative
     // banner and stopped.
     const last = intel.lastSample;
-    if (observed) observed.state = last?.state ?? null;
+    // Both gates are the push surfaces' own, applied to the record as it is
+    // HERE so the answer belongs to the sample actually being stamped. A
+    // rejected sample leaves the observation null, which is the pre-existing
+    // continuation line, never silence.
+    if (observe && last) {
+      const fresh = now - Date.parse(last.sampledAt) <= observe.cfg.maxSampleAgeMs;
+      const rec = reconcileIntel(intel, null, peekPending(root, sessionId, now), observe.cfg, now);
+      if (fresh && rec.status === "complete" && rec.intel.lastSample === last) observe.out.state = last.state;
+    }
     const lastSample = last && last.state === "imperative" && last.ceiling !== null && (tokensAtHandover === null || tokensAtHandover === last.contextTokens)
       ? { ...last, state: "advisory" as const, suppressedBy: "handover" as const }
       : last;
