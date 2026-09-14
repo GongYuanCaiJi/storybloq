@@ -2430,6 +2430,15 @@ export const HANDOVER_STAMPED_CONTINUE_LINE =
   "Handover recorded against your current compaction boundary: context pressure is held at advisory. Keep working in this same turn; do not stop, defer the next step, or ask the user whether to continue.";
 
 /**
+ * ISS-1197 commit 2: the same stamp, at compact-needed. The line above is a
+ * false claim here -- the stamp lands, but nothing is suppressed past the
+ * compact line, and it would print directly under a COMPACT-NEEDED banner
+ * telling the caller the opposite.
+ */
+export const HANDOVER_STAMPED_COMPACT_NEEDED_LINE =
+  "Handover recorded, but context is past the compact line, so this does not lower the pressure. Auto-compaction will follow and is expected: keep working through it, and write no further handovers.";
+
+/**
  * ISS-1185: `stampedRoot`/`mcpRoot` report the actually-stamped root only
  * when it diverges from the MCP server's own root (the common single-root
  * case stays exactly as before, no added noise).
@@ -2440,6 +2449,8 @@ export function formatHandoverCreateResult(
   stamped = false,
   stampedRoot: string | null = null,
   mcpRoot: string | null = null,
+  /** ISS-1197 commit 2: the stamp landed, but on a compact-needed sample. */
+  compactNeeded = false,
 ): string {
   const diverged = stamped && stampedRoot !== null && mcpRoot !== null && stampedRoot !== mcpRoot;
   if (format === "json") {
@@ -2449,7 +2460,8 @@ export function formatHandoverCreateResult(
   }
   if (!stamped) return `Created handover: ${filename}`;
   const note = diverged ? ` (stamped under a different root: ${stampedRoot})` : "";
-  return `Created handover: ${filename}\n\n${HANDOVER_STAMPED_CONTINUE_LINE}${note}`;
+  const line = compactNeeded ? HANDOVER_STAMPED_COMPACT_NEEDED_LINE : HANDOVER_STAMPED_CONTINUE_LINE;
+  return `Created handover: ${filename}\n\n${line}${note}`;
 }
 
 // --- Snapshot / Recap / Export ---

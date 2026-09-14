@@ -114,6 +114,26 @@ describe("sessionIntel config: hot-path reader", () => {
     expect(cascade.notes).toHaveLength(2);
   });
 
+  it("ISS-1197 commit 2: the advisory/imperative fallback can RAISE imperativePct into compactNeededPct, and the chain is restored afterwards", () => {
+    // Both inputs are individually in bounds and pass the compact rule on the
+    // way in; the advisory rule then resets imperativePct to 0.85, which is
+    // exactly the value compactNeededPct was allowed to keep.
+    for (const raw of [
+      { advisoryPct: 0.75, imperativePct: 0.7, compactNeededPct: 0.85 },
+      { advisoryPct: 0.85, imperativePct: 0.8, compactNeededPct: 0.85 },
+    ]) {
+      const cfg = resolveSessionIntelConfig(raw);
+      expect(cfg.advisoryPct, JSON.stringify(raw)).toBeLessThan(cfg.imperativePct);
+      expect(cfg.imperativePct, JSON.stringify(raw)).toBeLessThan(cfg.compactNeededPct);
+      expect(cfg.compactNeededPct, JSON.stringify(raw)).toBe(0.95);
+      expect(cfg.notes.some((n) => n.includes("compactNeededPct") && n.includes("imperativePct")), JSON.stringify(raw)).toBe(true);
+    }
+    // The defaults themselves always satisfy the chain, so the re-check can
+    // never leave a config it cannot repair.
+    expect(DEFAULT_SESSION_INTEL_CONFIG.advisoryPct).toBeLessThan(DEFAULT_SESSION_INTEL_CONFIG.imperativePct);
+    expect(DEFAULT_SESSION_INTEL_CONFIG.imperativePct).toBeLessThan(DEFAULT_SESSION_INTEL_CONFIG.compactNeededPct);
+  });
+
   it("a non-boolean flag falls back silently (flags have no bounds to report)", () => {
     const cfg = resolveSessionIntelConfig({ enabled: "no", banner: 0 });
     expect(cfg.enabled).toBe(true);

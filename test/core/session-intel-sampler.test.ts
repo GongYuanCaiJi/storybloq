@@ -225,6 +225,32 @@ describe("compact-needed", () => {
     expect(sample(COMPACT_TOKENS, { ceiling: C, deltas })).toMatchObject({ state: "compact-needed" });
   });
 
+  it("imperativeSince continues across the crossing from imperative into compact-needed, rather than restarting or clearing", () => {
+    const EARLIER = "2026-09-09T12:05:00.000Z";
+    const IMPERATIVE_BEFORE = Math.round(0.9 * CEILING);
+    const priorImperative: SessionIntelPresence = {
+      ...emptySessionIntel(),
+      lastSample: {
+        ...sample(IMPERATIVE_BEFORE, { ceiling: C }),
+        sampledAt: EARLIER,
+        imperativeSince: EARLIER,
+        state: "imperative",
+        rawState: "imperative",
+        ceiling: CEILING,
+        ceilingSource: "measured-session",
+        ceilingConfidence: "high",
+      },
+    };
+    // Sanity: the record it is built from really was imperative.
+    expect(priorImperative.lastSample?.state).toBe("imperative");
+    const crossed = sample(COMPACT_TOKENS, { ceiling: C, record: priorImperative, sampledAt: NOW });
+    expect(crossed.state).toBe("compact-needed");
+    expect(crossed.imperativeSince).toBe(EARLIER);
+    // With no prior sample it starts at this sample's own time, never null:
+    // the tokens alone already clear the lower imperative line.
+    expect(sample(COMPACT_TOKENS, { ceiling: C, sampledAt: NOW }).imperativeSince).toBe(NOW);
+  });
+
   it("a configured compactNeededPct moves the line", () => {
     const high = resolveSessionIntelConfig({ compactNeededPct: 0.99 });
     expect(high.compactNeededPct).toBe(0.99);

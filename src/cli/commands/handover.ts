@@ -395,6 +395,9 @@ export async function handleHandoverCreate(
   // project lock is released, never affecting the result.
   let stamped = false;
   let stampedRoot: string | null = null;
+  // ISS-1197 commit 2: past the compact line the stamp still lands, but it
+  // suppresses nothing, so the reply must not claim it did.
+  let compactNeeded = false;
   if (intel.stamp !== false) {
     try {
       const { stampHandoverForCaller } = await import("../../core/session-intel/push.js");
@@ -402,7 +405,10 @@ export async function handleHandoverCreate(
       // Only a stamp whose locked write LANDED counts: a busy lock, a failed
       // write, or a refusal under the lock leaves the record unchanged.
       stamped = r.status === "stamped" && r.outcome.status === "written";
-      if (stamped && r.status === "stamped") stampedRoot = r.root;
+      if (stamped && r.status === "stamped") {
+        stampedRoot = r.root;
+        compactNeeded = r.pressureState === "compact-needed";
+      }
     } catch {
       // never
     }
@@ -413,5 +419,5 @@ export async function handleHandoverCreate(
   // a suppression that did not happen. ISS-1185: stampedRoot is reported
   // only when it diverges from the MCP root (formatHandoverCreateResult
   // gates on that itself).
-  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot) };
+  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded) };
 }

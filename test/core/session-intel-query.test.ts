@@ -295,6 +295,21 @@ describe("handleSessionIntel (the shared CLI/MCP handler)", () => {
     });
   });
 
+  it("ISS-1197 commit 2: past compactNeededPct the md surface says to run /compact and never to write a handover", () => {
+    withFixture((f) => {
+      bindCaller(f.root);
+      // Ceiling 416,250; 400,000 tokens is 96%, past the 395,438 compact line.
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(0), read: 400_000 })]);
+      const md = formatSessionIntelMd(handleSessionIntel({ cwd: f.root, format: "json", projectsDir: f.projects }).result);
+      expect(md).toMatch(/Token pressure: COMPACT-NEEDED/);
+      expect(md).toMatch(/\/compact/);
+      expect(md).not.toMatch(/write a handover/i);
+      // The advice line is present, not just the header: a dropped branch
+      // would still render the header and the Why line.
+      expect(md).toMatch(/no further handovers/i);
+    });
+  });
+
 
   it("md and json carry the same numbers; json is an {ok, data} envelope; the CLI and MCP samplers agree; a nested cwd finds the project", () => {
     withFixture((f) => {

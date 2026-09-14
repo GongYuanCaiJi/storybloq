@@ -144,11 +144,13 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
   let advisoryPct = numberOr(raw, "advisoryPct", notes);
   let imperativePct = numberOr(raw, "imperativePct", notes);
   let compactNeededPct = numberOr(raw, "compactNeededPct", notes);
-  // ISS-1197 commit 2: checked BEFORE the advisory/imperative rule on purpose.
-  // Restoring the default imperative here can leave it at or below a raised
-  // advisory, and the rule below is what puts that right (and reports its own
-  // fallback), so the whole chain advisory < imperative < compactNeeded holds
-  // whichever pair the user got wrong.
+  // ISS-1197 commit 2: the chain is advisory < imperative < compactNeeded, and
+  // the two pair rules below can each MOVE imperativePct, so neither one alone
+  // establishes it. The compact rule runs first (it can lower imperativePct to
+  // the default, which the advisory rule then judges); the advisory rule can
+  // RAISE imperativePct to the default 0.85, which is inside compactNeededPct's
+  // legal range, so a third check repairs that case afterwards. The defaults
+  // (0.7 / 0.85 / 0.95) satisfy the chain, so the repair always terminates.
   if (compactNeededPct <= imperativePct) {
     notes.push(`sessionIntel.compactNeededPct (${compactNeededPct}) must exceed imperativePct (${imperativePct}); defaults ${d.imperativePct}/${d.compactNeededPct} used for the pair`);
     imperativePct = d.imperativePct;
@@ -159,6 +161,16 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     advisoryPct = d.advisoryPct;
     imperativePct = d.imperativePct;
   }
+  // Only imperativePct moved above, so only compactNeededPct is restored here:
+  // resetting the pair would undo an advisory fallback that has already been
+  // reported and is correct as it stands.
+  if (compactNeededPct <= imperativePct) {
+    notes.push(`sessionIntel.compactNeededPct (${compactNeededPct}) no longer exceeds imperativePct (${imperativePct}) after the advisoryPct fallback; default ${d.compactNeededPct} used`);
+    compactNeededPct = d.compactNeededPct;
+  }
+  // Only imperativePct moved above, so only compactNeededPct is restored here:
+  // resetting the pair would undo an advisory fallback that has already been
+  // reported and is correct as it stands.
 
   let jumpAllowanceFloorTokens = numberOr(raw, "jumpAllowanceFloorTokens", notes);
   let jumpAllowanceCapTokens = numberOr(raw, "jumpAllowanceCapTokens", notes);

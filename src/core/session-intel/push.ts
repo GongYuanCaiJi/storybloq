@@ -15,10 +15,10 @@
  */
 
 import { isPresenceEnabled } from "../../presence/handler.js";
-import type { SessionIntelPresence, SessionIntelSample } from "../../presence/session-intel-fields.js";
+import type { SessionIntelPresence, SessionIntelSample, TokenPressureState } from "../../presence/session-intel-fields.js";
 import { LIFECYCLE_LOCK_BUDGET_MS } from "../presence-enrichment.js";
 import { readSessionIntelConfig, type SessionIntelConfig } from "./config.js";
-import { consumeUsageAdvisory, findPresenceRecordAcrossWorktrees, peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, revalidateCandidateIdentity, stampHandover, type CandidateIdentity, type HandoverStampOutcome } from "./presence-bridge.js";
+import { consumeUsageAdvisory, findPresenceRecordAcrossWorktrees, peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, revalidateCandidateIdentity, stampHandover, type CandidateIdentity, type HandoverStampObservation, type HandoverStampOutcome } from "./presence-bridge.js";
 import { sampleSession } from "./query.js";
 import { usageAdvisoryFrom } from "./sampler.js";
 import type { UsageAdvisory } from "./types.js";
@@ -62,14 +62,15 @@ const pctText = (p: number | null) => (p === null ? "n/a" : `${Math.round(p * 10
  * them apart on the words alone.
  */
 export const COMPACT_NEEDED_ADVICE =
-  "Context is past the point where another handover helps, and no further handover should be written. A session cannot compact itself: finish the step in flight, say plainly that the context is exhausted, and stop there. Only the user can clear it, by running /compact in this session or by starting a fresh one.";
+  "Context is past the point where another handover helps: write no further handovers. A session cannot compact itself; finish the step in flight and keep working, auto-compaction is expected and the session continues through it. If the user wants it sooner, they can run /compact in this session.";
 
 export function renderBannerText(sample: SessionIntelSample, surface: "mcp" | "cli"): string {
   const where = surface === "mcp" ? "storybloq_handover_create" : "storybloq handover create";
   const head = `Context pressure ${sample.state.toUpperCase()}: ${pctText(sample.pct)} of the expected auto-compact point (${sample.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}).`;
   // ISS-1197 commit 2: past this line another handover buys nothing, so the
   // text must not ask for one. It carries both halves: what the agent should
-  // do (finish, then stop) and what only the user can do (run /compact).
+  // do (keep working through the compaction that is coming) and what only the
+  // user can do (bring it forward with /compact).
   if (sample.state === "compact-needed") return `${head} ${COMPACT_NEEDED_ADVICE}`;
   if (sample.state === "imperative") return `${head} Write a handover now via ${where}, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   return `${head}${sample.suppressedBy === "handover" ? " A recent handover holds this at advisory: keep working." : ""} Plan a handover before the next large step, and keep working.`;
@@ -468,7 +469,18 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
 // ---------------------------------------------------------------------------
 
 export type HandoverStampResult =
-  | { readonly status: "stamped"; readonly sessionId: string; readonly outcome: HandoverStampOutcome; readonly root: string }
+  | {
+      readonly status: "stamped";
+      readonly sessionId: string;
+      readonly outcome: HandoverStampOutcome;
+      readonly root: string;
+      /**
+       * ISS-1197 commit 2: the state of the sample the stamp saw under its own
+       * lock, so the reply can say what the stamp actually achieved. Null when
+       * there was no sample, or when the write never reached one.
+       */
+      readonly pressureState: TokenPressureState | null;
+    }
   | { readonly status: "skipped"; readonly reason: string };
 
 /**
@@ -517,8 +529,9 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     // count and handoverBoundaryAt always describe the same locked record; a
     // sampler or compaction landing between the reconcile and the stamp
     // cannot pair an old count with a newer boundary.
-    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now);
-    return { status: "stamped", sessionId, outcome, root: resolvedRoot };
+    const observed: HandoverStampObservation = { state: null };
+    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now, observed);
+    return { status: "stamped", sessionId, outcome, root: resolvedRoot, pressureState: observed.state };
   } catch (err) {
     return { status: "skipped", reason: err instanceof Error ? err.message : String(err) };
   }

@@ -387,6 +387,35 @@ describe("guide directive and handover stamp", () => {
     });
   });
 
+  it("ISS-1197 commit 2: a handover stamped at compact-needed never claims the pressure is held at advisory", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      // Ceiling 416,250 (0.925 x 450,000); 400,000 tokens is 96%, past the
+      // 395,438 compact line.
+      primed(f, 400_000, now);
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
+      const r = await handleHandoverCreate("# Handover\nDone.", "session", "md", f.root, { now, projectsDir: f.projects });
+      expect(r.output).toContain("Created handover:");
+      // The imperative continuation line is a lie here: the stamp lands, but
+      // nothing is suppressed and the banner above it still says COMPACT-NEEDED.
+      expect(r.output).not.toMatch(/held at advisory/);
+      expect(r.output).not.toMatch(/context pressure is held/i);
+      expect(r.output).toMatch(/past the compact line/);
+      expect(r.output).toMatch(/auto-compaction/i);
+      expect(r.output).toMatch(/no further handovers/i);
+      // The stamp itself still lands, and the sample is NOT rewritten to advisory.
+      expect(intelOf(f.root)).toMatchObject({ handoverWrittenAt: new Date(now).toISOString(), lastSample: { state: "compact-needed", suppressedBy: null } });
+      // json keeps its envelope (it carries no continuation line at all).
+      const asJson = await handleHandoverCreate("# Two", "two", "json", f.root, { now: now + 1000, projectsDir: f.projects });
+      expect(JSON.parse(asJson.output as string).data).toMatchObject({ tokenPressureStamped: true });
+      // The same handler is what MCP storybloq_handover_create calls, with
+      // format "md": the branch both surfaces reach is the one asserted above.
+      const viaMcpShape = await handleHandoverCreate("# Three", "three", "md", f.root, { now: now + 2000, projectsDir: f.projects });
+      expect(viaMcpShape.output).not.toMatch(/held at advisory/);
+      expect(viaMcpShape.output).toMatch(/past the compact line/);
+    });
+  });
+
   it("the continuation line and tokenPressureStamped ride only on a stamp whose locked write LANDED: busy lock, failed write, and a refusal under the lock all yield the bare reply and leave the record imperative", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;

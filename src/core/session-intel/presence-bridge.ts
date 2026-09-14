@@ -24,7 +24,7 @@ import { assertNoSymlinkOnPath } from "../skill-sync-check.js";
 import { presenceDirIfPresent, readBoundedNoFollow, directoryIdentity, ensureTelemetrySubdir, removeRegularFile, telemetrySubdirIfPresent } from "../../presence/io.js";
 import { parsePresenceRecord } from "../../presence/record.js";
 import { MAX_RECORD_BYTES, presenceFileBase, type SessionPresence } from "../../presence/types.js";
-import { emptySessionIntel, type Epoch, type SessionIntelPresence, type SessionIntelSample } from "../../presence/session-intel-fields.js";
+import { emptySessionIntel, type Epoch, type SessionIntelPresence, type SessionIntelSample, type TokenPressureState } from "../../presence/session-intel-fields.js";
 import type { SessionIntelConfig } from "./config.js";
 import { readEra, type EraEntry } from "./era-store.js";
 import { processEra, type ProcessCheck, type ProcessEraResolver } from "./process-era.js";
@@ -695,12 +695,24 @@ export function persistSample(input: PersistInput): PersistOutcome {
 export type HandoverStampOutcome = EnrichmentOutcome | { readonly status: "refused"; readonly reason: string };
 
 /**
+ * ISS-1197 commit 2: an out-parameter filled with the state of the sample the
+ * stamp actually saw UNDER THE LOCK. The reply's continuation line depends on
+ * it, and reading it from a second, unlocked read would pair a line with a
+ * different sample than the one stamped -- the same hazard `tokensAtHandover`
+ * is taken inside the lock to avoid. `null` when the stamp saw no sample or
+ * never reached one (a refusal returns before the sample is read).
+ */
+export interface HandoverStampObservation {
+  state: TokenPressureState | null;
+}
+
+/**
  * Stamps a handover on the CALLER's record under the binding rule,
  * revalidated against the locked record: the session must not have ended
  * and its era must be the caller's live (non-null) era. Never creates a
  * subtree for an unbound record.
  */
-export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number): HandoverStampOutcome {
+export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number, observed?: HandoverStampObservation): HandoverStampOutcome {
   let refused: string | null = null;
   const outcome = applyPresenceEnrichment(root, sessionId, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base, nowIso) => {
     const intel = base.sessionIntel;
@@ -714,6 +726,7 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
     // agents that had just written a handover kept seeing the imperative
     // banner and stopped.
     const last = intel.lastSample;
+    if (observed) observed.state = last?.state ?? null;
     const lastSample = last && last.state === "imperative" && last.ceiling !== null && (tokensAtHandover === null || tokensAtHandover === last.contextTokens)
       ? { ...last, state: "advisory" as const, suppressedBy: "handover" as const }
       : last;

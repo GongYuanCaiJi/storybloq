@@ -364,6 +364,20 @@ describe("status.json projection", () => {
     });
   });
 
+  it("ISS-1197 commit 2: an UNUSABLE stored compact-needed sample projects unknown AND compactNeeded false, never the stale fact", () => {
+    withFixture((f) => {
+      const era = bindStartup(f);
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: 400_000 })]);
+      handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
+      // A compaction of this era is in flight: the reading may already be
+      // obsolete, so the projection must not tell a reader a compact is needed.
+      markCompactPending(f.root, SID, { eventId: "p", era, at: at(6) });
+      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 7 * 60_000))
+        .toMatchObject({ state: "unknown", pctBucket: null, compactNeeded: false });
+    });
+  });
+
   it("the era-less late capture answers the query at medium confidence and projects nothing bound: no ledger attribution, sample persisted read-only never", () => {
     withFixture((f) => {
       delete process.env.CLAUDE_PID;
