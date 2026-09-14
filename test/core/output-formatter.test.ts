@@ -1617,3 +1617,39 @@ describe("T-476 binding ruling: every attribution-displaying ruling formatter ou
     }
   });
 });
+
+/**
+ * ISS-1214: a handover whose stamp did not land used to return exactly
+ * "Created handover: <file>", so an agent read the reply as success while the
+ * presence record kept `handoverWrittenAt: null` and the prompt hook re-fired
+ * the imperative two prompts later with no visible cause.
+ */
+describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did not land", () => {
+  const FILE = "2026-09-14-01-session.md";
+
+  it("md: the bare reply is unchanged when there is no reason, and a reason adds one block under it", () => {
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md")).toBe(`Created handover: ${FILE}`);
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, null)).toBe(`Created handover: ${FILE}`);
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "lock busy")).toBe(
+      `Created handover: ${FILE}\n\nHandover stamp did not land (lock busy): context pressure is not held; the next imperative is expected.`,
+    );
+  });
+
+  it("md: an unbound-caller or stale-server reason carries the one action hint; a lock-busy reason does not", () => {
+    const unbound = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "skipped: no presence record for the caller");
+    expect(unbound).toContain("Handover stamp did not land (skipped: no presence record for the caller): context pressure is not held; the next imperative is expected.");
+    expect(unbound).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
+    const refusedEra = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "refused: record era differs from the caller's live era");
+    expect(refusedEra).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "lock busy")).not.toContain("Restart the client");
+  });
+
+  it("json: tokenPressureStampReason carries the reason, and the key is absent when there is none", () => {
+    const withReason = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", false, null, null, false, "lock busy")) as { data: Record<string, unknown> };
+    expect(withReason.data).toEqual({ filename: FILE, tokenPressureStampReason: "lock busy" });
+    const none = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", false, null, null, false, null)) as { data: Record<string, unknown> };
+    expect(none.data).toEqual({ filename: FILE });
+    const landed = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", true)) as { data: Record<string, unknown> };
+    expect(landed.data).toEqual({ filename: FILE, tokenPressureStamped: true });
+  });
+});

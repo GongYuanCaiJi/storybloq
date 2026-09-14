@@ -21,7 +21,7 @@ import type { RegistrationContext } from "./registration-context.js";
 export type { RegistrationContext } from "./registration-context.js";
 import { findActiveSessionMinimal, readSessionResilient, sessionDir, isLeaseExpired, withSessionLock } from "../autonomous/session.js";
 import { citationsForReviewTarget } from "../autonomous/cited-rulings.js";
-import { withStalenessNote } from "../autonomous/binary-staleness.js";
+import { describeBinaryStaleness, withStalenessNote } from "../autonomous/binary-staleness.js";
 import { touchLastMcpCallFile } from "../autonomous/liveness.js";
 import { registerBusTools } from "./bus-tools.js";
 import { withStrictToolSchemas } from "./strict-schemas.js";
@@ -351,6 +351,15 @@ export async function runMcpWriteTool(
     }
     // T-499: same banner as the read pipeline (write tools are always md).
     text = applyBannerToMcpText(text, "md", tokenPressureBannerFor(pinnedRoot, { cwd: pinnedRoot }, "mcp"));
+    // ISS-1214: a server binary older than the on-disk build keeps serving
+    // writes after a build that changed the presence schema -- the field
+    // report's handover_create stamps never landed for exactly that reason,
+    // and only review_lenses_prepare's session path ever said so. The check
+    // is process-relative (a startup fingerprint against the disk), not
+    // session-scoped, so every write tool can carry it. Appended, so each
+    // handler's own output stays byte-identical above it.
+    const staleNote = describeBinaryStaleness();
+    if (staleNote) text = `${text}\n\n${staleNote}`;
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
     if (err instanceof ProjectLoaderError) {

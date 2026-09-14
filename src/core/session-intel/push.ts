@@ -484,6 +484,44 @@ export type HandoverStampResult =
   | { readonly status: "skipped"; readonly reason: string };
 
 /**
+ * ISS-1214: the not-applicable preconditions. A stamp that never applied is
+ * not a failure a reader can act on -- every plain `storybloq handover
+ * create` in a terminal skips on "client is not Claude" -- so these stay
+ * silent and the reply is byte-identical to what it has always been.
+ */
+const STAMP_NOT_APPLICABLE = new Set([
+  "sessionIntel disabled",
+  "presence disabled",
+  "client is not Claude",
+  "no caller session id",
+  "no project",
+]);
+
+/** Human-readable forms of the enrichment outcomes a stamp can end on. */
+const STAMP_OUTCOME_REASONS: Readonly<Record<string, string>> = {
+  "skipped-lock-busy": "lock busy",
+  "skipped-write-failed": "write failed",
+  "skipped-no-directory": "no presence directory",
+  "skipped-too-large": "record too large",
+  aborted: "aborted",
+};
+
+/**
+ * ISS-1214: why the stamp did not land, or null when it landed or when it
+ * never applied. The shape knowledge lives here, beside the result type, so
+ * the CLI surface does not have to reason about outcome statuses.
+ */
+export function describeStampFailure(result: HandoverStampResult): string | null {
+  if (result.status === "skipped") {
+    return STAMP_NOT_APPLICABLE.has(result.reason) ? null : `skipped: ${result.reason}`;
+  }
+  const outcome = result.outcome;
+  if (outcome.status === "written") return null;
+  if (outcome.status === "refused") return `refused: ${outcome.reason}`;
+  return STAMP_OUTCOME_REASONS[outcome.status] ?? outcome.status;
+}
+
+/**
  * After a successful `handover create`: reconcile the caller's record (a
  * boundary the tail shows is applied first, so the stamp lands on the
  * CURRENT compaction), then stamp it under the binding rule. Best-effort.

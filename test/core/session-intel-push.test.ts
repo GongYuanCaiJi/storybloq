@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync, renameSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
@@ -12,6 +12,7 @@ import { processEra } from "../../src/core/session-intel/process-era.js";
 import { handleSessionIntel, handleStopHookSample } from "../../src/cli/commands/session-intel.js";
 import { handleHandoverCreate } from "../../src/cli/commands/handover.js";
 import { runMcpReadTool, runMcpWriteTool, registerAllTools } from "../../src/mcp/tools.js";
+import * as staleness from "../../src/autonomous/binary-staleness.js";
 import { runReadCommandWithRoot } from "../../src/cli/run.js";
 import { registerStatusCommand } from "../../src/cli/register.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS, type EnrichmentOutcome } from "../../src/core/presence-enrichment.js";
@@ -144,6 +145,7 @@ afterEach(() => {
   identityInject.consumeCalls = 0;
   identityInject.throwOnConsume = false;
   locateSwap.hook = null;
+  staleness.__testing.reset();
 });
 
 const encoded = (root: string) => root.replace(/[^A-Za-z0-9]/g, "-");
@@ -504,7 +506,9 @@ describe("guide directive and handover stamp", () => {
         inject.forceOutcome = forced;
         const r = await handleHandoverCreate("# H", `h-${forced.status}`, "json", f.root, { now, projectsDir: f.projects });
         expect(inject.forceOutcome).toBeNull();
-        expect(JSON.parse(r.output as string).data).toEqual({ filename: expect.any(String) });
+        // ISS-1214 adds the reason beside `filename`; `tokenPressureStamped`
+        // is still absent, which is what this test pins.
+        expect(JSON.parse(r.output as string).data).toEqual({ filename: expect.any(String), tokenPressureStampReason: expect.any(String) });
         expect(r.output).not.toMatch(/Keep working/);
         expect(intelOf(f.root)).toMatchObject({ handoverWrittenAt: null, lastSample: { state: "imperative" } });
       }
@@ -514,7 +518,10 @@ describe("guide directive and handover stamp", () => {
       inject.transformBase = (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, era: "999:1" } });
       const md = await handleHandoverCreate("# H", "h-refused", "md", f.root, { now, projectsDir: f.projects });
       expect(inject.transformBase).toBeNull();
-      expect(md.output).toMatch(/^Created handover: [^\n]+$/);
+      // ISS-1214: the continuation line is still absent; what the reply now
+      // carries instead is the reason the stamp did not land.
+      expect(md.output).toMatch(/^Created handover: [^\n]+\n\nHandover stamp did not land \(/);
+      expect(md.output).not.toMatch(/Keep working/);
       expect(intelOf(f.root).handoverWrittenAt).toBeNull();
     });
   });
@@ -1202,6 +1209,100 @@ describe("T-320 commit 3: --compact/compact forces json even when format is omit
       const parsed = JSON.parse(text) as { data: Record<string, unknown>; usageAdvisory?: unknown };
       expect(parsed.data.activeSessions).toBeDefined();
       expect(parsed.usageAdvisory).toBeDefined();
+    });
+  });
+});
+
+/**
+ * ISS-1214: field report, 2026-09-14. Two `storybloq_handover_create` calls
+ * through a stale MCP server returned only "Created handover: <file>"; the
+ * presence record kept `handoverWrittenAt: null`, so the ISS-1197 re-arm
+ * gates had nothing to hold and the prompt hook re-fired the imperative two
+ * prompts later. The reply must say why the stamp did not land, and a server
+ * binary older than the on-disk build must say so on every write tool.
+ */
+describe("ISS-1214: the reply names a stamp that did not land", () => {
+  it("a busy lock: md names the reason under the unchanged first line, json carries tokenPressureStampReason", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      // The stamp's reconcile is session-intel write 1; the stamp itself is write 2.
+      inject.calls = 0;
+      inject.onCall = 2;
+      inject.forceOutcome = { status: "skipped-lock-busy" };
+      const md = await handleHandoverCreate("# H", "h-1214-busy", "md", f.root, { now, projectsDir: f.projects });
+      expect(inject.forceOutcome).toBeNull();
+      expect(md.output).toMatch(/^Created handover: [^\n]+\n\nHandover stamp did not land \(lock busy\): context pressure is not held; the next imperative is expected\.$/);
+      expect(intelOf(f.root).handoverWrittenAt).toBeNull();
+
+      inject.calls = 0;
+      inject.onCall = 2;
+      inject.forceOutcome = { status: "skipped-lock-busy" };
+      const json = await handleHandoverCreate("# H", "h-1214-busy-json", "json", f.root, { now, projectsDir: f.projects });
+      expect(inject.forceOutcome).toBeNull();
+      expect(JSON.parse(json.output as string).data).toEqual({ filename: expect.any(String), tokenPressureStampReason: "lock busy" });
+    });
+  });
+
+  it("a refusal under the lock names the refused era and carries the restart hint", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      inject.calls = 0;
+      inject.onCall = 2;
+      inject.transformBase = (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, era: "999:1" } });
+      const md = await handleHandoverCreate("# H", "h-1214-refused", "md", f.root, { now, projectsDir: f.projects });
+      expect(inject.transformBase).toBeNull();
+      expect(md.output).toContain("Handover stamp did not land (refused: record era differs from the caller's live era): context pressure is not held; the next imperative is expected.");
+      expect(md.output).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
+      expect(intelOf(f.root).handoverWrittenAt).toBeNull();
+    });
+  });
+
+  it("a skipped stamp reports its binding reason; only the stale-server family gets the hint", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(5) }));
+      const ended = await handleHandoverCreate("# H", "h-1214-ended", "md", f.root, { now, projectsDir: f.projects });
+      expect(ended.output).toContain("Handover stamp did not land (skipped: caller session has ended): context pressure is not held; the next imperative is expected.");
+      expect(ended.output).not.toContain("Restart the client");
+
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: null, sessionIntel: { ...b.sessionIntel!, era: "9:9" } }));
+      const era = await handleHandoverCreate("# H", "h-1214-era", "md", f.root, { now, projectsDir: f.projects });
+      expect(era.output).toContain("Handover stamp did not land (skipped: record era differs from the live process era): context pressure is not held; the next imperative is expected.");
+      expect(era.output).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
+    });
+  });
+
+  it("the not-applicable skips stay silent: a project with session intel off returns the bare line", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      const cfgPath = join(f.root, ".story", "config.json");
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+      writeFileSync(cfgPath, JSON.stringify({ ...cfg, sessionIntel: { enabled: false } }));
+      const off = await handleHandoverCreate("# H", "h-1214-off", "md", f.root, { now, projectsDir: f.projects });
+      expect(off.output).toMatch(/^Created handover: [^\n]+$/);
+      const json = await handleHandoverCreate("# H", "h-1214-off-json", "json", f.root, { now, projectsDir: f.projects });
+      expect(JSON.parse(json.output as string).data).toEqual({ filename: expect.any(String) });
+    });
+  });
+
+  it("MCP: a server binary older than the on-disk build attaches the stale-server line to handover_create's reply", async () => {
+    await withFixture(async (f) => {
+      staleness.__testing.setStartupFingerprint({ sha256: "aaaa" });
+      staleness.__testing.setDiskProbe(() => ({ sha256: "bbbb" }));
+      const server = new McpServer({ name: "storybloq-test", version: "0.0.0" });
+      registerAllTools(server, f.root);
+      const client = new Client({ name: "iss1214-test", version: "0.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+      const result = await client.callTool({ name: "storybloq_handover_create", arguments: { content: "# H", slug: "h-1214-stale" } });
+      await client.close();
+      const text = (result.content as { text: string }[])[0]!.text;
+      expect(text).toContain("Created handover:");
+      expect(text).toContain("Server binary is stale (fingerprint mismatch); restart the client.");
     });
   });
 });

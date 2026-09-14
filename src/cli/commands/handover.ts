@@ -398,9 +398,13 @@ export async function handleHandoverCreate(
   // ISS-1197 commit 2: past the compact line the stamp still lands, but it
   // suppresses nothing, so the reply must not claim it did.
   let compactNeeded = false;
+  // ISS-1214: why an attempted stamp did not land, so the reply cannot read
+  // as success while the record keeps `handoverWrittenAt: null` and the
+  // prompt hook re-fires the imperative with no visible cause.
+  let stampReason: string | null = null;
   if (intel.stamp !== false) {
     try {
-      const { stampHandoverForCaller } = await import("../../core/session-intel/push.js");
+      const { describeStampFailure, stampHandoverForCaller } = await import("../../core/session-intel/push.js");
       const r = stampHandoverForCaller(root, { explicitTaskId: intel.clientTaskId, cwd: root, now: intel.now, projectsDir: intel.projectsDir });
       // Only a stamp whose locked write LANDED counts: a busy lock, a failed
       // write, or a refusal under the lock leaves the record unchanged.
@@ -408,9 +412,13 @@ export async function handleHandoverCreate(
       if (stamped && r.status === "stamped") {
         stampedRoot = r.root;
         compactNeeded = r.pressureState === "compact-needed";
+      } else {
+        stampReason = describeStampFailure(r);
       }
-    } catch {
-      // never
+    } catch (err) {
+      // Reached only if the import or the stamp itself throws. Silent before
+      // ISS-1214, which is the exact shape that hid the field-report failure.
+      stampReason = `error: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -419,5 +427,5 @@ export async function handleHandoverCreate(
   // a suppression that did not happen. ISS-1185: stampedRoot is reported
   // only when it diverges from the MCP root (formatHandoverCreateResult
   // gates on that itself).
-  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded) };
+  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded, stampReason) };
 }

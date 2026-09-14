@@ -2439,6 +2439,41 @@ export const HANDOVER_STAMPED_COMPACT_NEEDED_LINE =
   "Handover recorded, but context is past the compact line, so this does not lower the pressure. Auto-compaction will follow and is expected: keep working through it, and write no further handovers.";
 
 /**
+ * ISS-1214: the one action a reader can take when the stamp failed because
+ * the process that tried to write it cannot bind the caller at all -- the
+ * stale-server shape from the field report, where the MCP server predates the
+ * on-disk build and the prompt hook (which runs the new binary) disagrees
+ * with it about the era.
+ */
+export const HANDOVER_STAMP_RESTART_HINT =
+  "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
+
+/**
+ * The reasons the hint above actually addresses. Everything else (a busy
+ * lock, a failed write, an ended session) is not fixed by a restart, so it
+ * gets the reason alone rather than an action that would not help.
+ */
+const HANDOVER_STAMP_RESTART_REASONS = new Set([
+  "no presence record for the caller",
+  "process era unknown",
+  "record era differs from the live process era",
+  "record era differs from the caller's live era",
+]);
+
+/**
+ * ISS-1214: the line a reply carries when a stamp was attempted and did not
+ * land. Before this, `handover_create` returned exactly "Created handover:
+ * <file>" on every failure path, so an agent read the reply as success while
+ * `handoverWrittenAt` stayed null and the prompt hook re-fired the imperative
+ * with no visible cause.
+ */
+export function formatHandoverStampFailure(reason: string): string {
+  const tail = reason.includes(": ") ? reason.slice(reason.indexOf(": ") + 2) : reason;
+  const hint = HANDOVER_STAMP_RESTART_REASONS.has(tail) || tail.startsWith("process era ") ? ` ${HANDOVER_STAMP_RESTART_HINT}` : "";
+  return `Handover stamp did not land (${reason}): context pressure is not held; the next imperative is expected.${hint}`;
+}
+
+/**
  * ISS-1185: `stampedRoot`/`mcpRoot` report the actually-stamped root only
  * when it diverges from the MCP server's own root (the common single-root
  * case stays exactly as before, no added noise).
@@ -2451,14 +2486,25 @@ export function formatHandoverCreateResult(
   mcpRoot: string | null = null,
   /** ISS-1197 commit 2: the stamp landed, but on a compact-needed sample. */
   compactNeeded = false,
+  /**
+   * ISS-1214: why an attempted stamp did not land. Null when it landed, when
+   * none was attempted, and when the skip was a not-applicable precondition
+   * (session intel off, a non-Claude client) that a reader cannot act on.
+   */
+  stampReason: string | null = null,
 ): string {
   const diverged = stamped && stampedRoot !== null && mcpRoot !== null && stampedRoot !== mcpRoot;
+  const reason = stamped ? null : stampReason;
   if (format === "json") {
     const data: Record<string, unknown> = stamped ? { filename, tokenPressureStamped: true } : { filename };
     if (diverged) data.tokenPressureStampedRoot = stampedRoot;
+    if (reason !== null) data.tokenPressureStampReason = reason;
     return JSON.stringify(successEnvelope(data), null, 2);
   }
-  if (!stamped) return `Created handover: ${filename}`;
+  if (!stamped) {
+    const base = `Created handover: ${filename}`;
+    return reason === null ? base : `${base}\n\n${formatHandoverStampFailure(reason)}`;
+  }
   const note = diverged ? ` (stamped under a different root: ${stampedRoot})` : "";
   const line = compactNeeded ? HANDOVER_STAMPED_COMPACT_NEEDED_LINE : HANDOVER_STAMPED_CONTINUE_LINE;
   return `Created handover: ${filename}\n\n${line}${note}`;
