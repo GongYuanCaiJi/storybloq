@@ -270,6 +270,86 @@ describe("scoreTranscript", () => {
     expect(result.namedCorrectAlternative).toBe(true);
     expect(result.citedDecisiveHandover).toBe(true);
   });
+
+  // Widened after the real 5c run (2026-09-13): every "did not cite" failure
+  // in that run correctly named the alternative, stated the full abandonment
+  // reasoning, and attributed it to the decisive handover by date or day
+  // label -- just never spelled out the literal filename. The rubric is
+  // "names the correct alternative AND attributes it to the specific older
+  // handover"; date/day-label/filename-without-extension are all valid
+  // attribution, not just the exact filename string.
+  it("accepts the decisive handover's filename without the .md extension", () => {
+    const result = scoreTranscript("T-5002 is next; 2026-08-05-day5 recorded the abandonment.", withHandoverFixture);
+    expect(result.citedDecisiveHandover).toBe(true);
+    expect(result.pass).toBe(true);
+  });
+
+  it("accepts the decisive handover's ISO date alone", () => {
+    const result = scoreTranscript("T-5002 is next; the 2026-08-05 handover recorded the abandonment.", withHandoverFixture);
+    expect(result.citedDecisiveHandover).toBe(true);
+    expect(result.pass).toBe(true);
+  });
+
+  it("accepts the decisive handover's day-label with no space (day5)", () => {
+    const result = scoreTranscript("T-5002 is next; day5 recorded the abandonment.", withHandoverFixture);
+    expect(result.citedDecisiveHandover).toBe(true);
+    expect(result.pass).toBe(true);
+  });
+
+  it("accepts the decisive handover's day-label with a space (day 5), case-insensitively", () => {
+    const result = scoreTranscript("T-5002 is next; Day 5 recorded the abandonment.", withHandoverFixture);
+    expect(result.citedDecisiveHandover).toBe(true);
+    expect(result.pass).toBe(true);
+  });
+
+  it("still rejects a quote of the abandonment reasoning with no date, day label, or filename attribution", () => {
+    const result = scoreTranscript(
+      "T-5002 is next. The report templates work was abandoned in favor of hand-writing the templates instead, because legal confirmed the license terms are incompatible with how we ship.",
+      withHandoverFixture,
+    );
+    expect(result.namedCorrectAlternative).toBe(true);
+    expect(result.citedDecisiveHandover).toBe(false);
+    expect(result.pass).toBe(false);
+  });
+
+  it("rejects a DIFFERENT handover's date even though it is inside the same fixture's date window (kills an 'any date in window' mutant)", () => {
+    const result = scoreTranscript(
+      "T-5002 is next. The 2026-08-06 handover confirms the Zephyr dependency was already removed from the lockfile.",
+      withHandoverFixture,
+    );
+    expect(result.namedCorrectAlternative).toBe(true);
+    expect(result.citedDecisiveHandover).toBe(false);
+    expect(result.pass).toBe(false);
+  });
+
+  // Codex round 4 finding: a plain substring check on the short forms
+  // accepts an adjacent-digit false positive ("day5" inside "day50").
+  it("rejects 'day50' as a citation of 'day5' (adjacent-digit false positive)", () => {
+    const result = scoreTranscript("T-5002 is next; day50 recorded the abandonment.", withHandoverFixture);
+    expect(result.namedCorrectAlternative).toBe(true);
+    expect(result.citedDecisiveHandover).toBe(false);
+    expect(result.pass).toBe(false);
+  });
+
+  it("rejects 'day 50' as a citation of 'day 5' (adjacent-digit false positive, spaced form)", () => {
+    const result = scoreTranscript("T-5002 is next; day 50 recorded the abandonment.", withHandoverFixture);
+    expect(result.namedCorrectAlternative).toBe(true);
+    expect(result.citedDecisiveHandover).toBe(false);
+    expect(result.pass).toBe(false);
+  });
+
+  it("rejects 'weekday5' as a citation of 'day5' (adjacent-letter false positive)", () => {
+    const result = scoreTranscript("T-5002 is next; weekday5 recorded the abandonment.", withHandoverFixture);
+    expect(result.namedCorrectAlternative).toBe(true);
+    expect(result.citedDecisiveHandover).toBe(false);
+    expect(result.pass).toBe(false);
+  });
+
+  it("still accepts 'day5' immediately followed by punctuation, not just whitespace", () => {
+    const result = scoreTranscript("T-5002 is next; (day5) recorded the abandonment.", withHandoverFixture);
+    expect(result.citedDecisiveHandover).toBe(true);
+    expect(result.pass).toBe(true);
+  });
 });
 
 describe("UNAUTHORIZED_DISPATCHER / runOneSession", () => {

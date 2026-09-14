@@ -285,6 +285,51 @@ export interface ScoreResult {
 }
 
 /**
+ * Derives the accepted citation forms for a reconciliation fixture's
+ * decisive handover from its filename alone -- no per-fixture hand lists.
+ * Widened 2026-09-13 after the real 5c run: the rubric is "names the
+ * correct alternative AND attributes it to the specific older handover",
+ * and a citation by exact date or day label is that attribution just as
+ * much as the literal filename is -- a literal filename-with-extension
+ * match was stricter than the rubric ever intended. Accepts: the filename
+ * with or without ".md", the ISO date parsed from the filename, and the
+ * slug label after the date (e.g. "day5"), with or without a space before
+ * the trailing digits. Deliberately narrow: only the SPECIFIC parsed date
+ * and slug count, not "any date-shaped string" -- a quote of the
+ * handover's prose with no date/slug/filename attribution, or a
+ * different handover's date, must still fail (see the scoreTranscript
+ * tests for both).
+ */
+function decisiveHandoverCitationForms(decisiveHandoverFilename: string): readonly string[] {
+  const filenameWithExt = decisiveHandoverFilename.toLowerCase();
+  const filenameNoExt = filenameWithExt.replace(/\.md$/, "");
+  const match = /^(\d{4}-\d{2}-\d{2})-(.+)$/.exec(filenameNoExt);
+  if (!match) return [filenameWithExt, filenameNoExt];
+  const [, date, slug] = match as unknown as [string, string, string];
+  const slugSpaced = slug.replace(/^([a-z]+)(\d+)$/i, "$1 $2");
+  return Array.from(new Set([filenameWithExt, filenameNoExt, date, slug, slugSpaced]));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * `text.includes(form)` alone is not enough for the short forms: "day5"
+ * would also match inside "day50" or "weekday5", and the spaced "day 5"
+ * would match inside "day 50" -- accepting a citation of the WRONG day.
+ * Word-boundary anchors on both ends of each form reject an adjacent
+ * letter or digit while still allowing adjacent punctuation/whitespace
+ * (parens, periods, commas), so "(day5)" and "day5." still match but
+ * "day50" and "weekday5" do not.
+ */
+function citesDecisiveHandover(text: string, decisiveHandoverFilename: string): boolean {
+  return decisiveHandoverCitationForms(decisiveHandoverFilename).some((form) =>
+    new RegExp(`\\b${escapeRegExp(form)}\\b`).test(text),
+  );
+}
+
+/**
  * Blind, mechanical scorer: does the transcript name the fixture's correct
  * answer and cite the specific older handover its rationale depends on?
  * This checks textual presence only -- it does not itself judge whether
@@ -298,7 +343,7 @@ export function scoreTranscript(transcript: string, fixture: FixtureSpec): Score
   const namedCorrectAlternative = text.includes(fixture.correctAnswer.toLowerCase());
   const citedDecisiveHandover =
     fixture.evidence.kind === "reconciliation"
-      ? text.includes(fixture.evidence.decisiveHandoverFilename.toLowerCase())
+      ? citesDecisiveHandover(text, fixture.evidence.decisiveHandoverFilename)
       : true; // fixtures 1/4 resolve via line one directly; no older-handover citation required
   const pass = namedCorrectAlternative && citedDecisiveHandover;
   const reason = pass
