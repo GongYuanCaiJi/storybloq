@@ -3,6 +3,8 @@ import { computeSample, handoverSuppresses, jumpAllowanceFor, p90, usageAdvisory
 import { resolveSessionIntelConfig, type SessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
 import type { CeilingResolution, ScanResult, UsageAdvisoryInput } from "../../src/core/session-intel/types.js";
+import { resolveCeiling } from "../../src/core/session-intel/ceiling-resolver.js";
+import type { LedgerEntry } from "../../src/core/session-intel/boundary-ledger.js";
 
 const cfg = resolveSessionIntelConfig(null);
 const NOW = "2026-09-09T12:30:00.000Z";
@@ -249,6 +251,33 @@ describe("compact-needed", () => {
     // With no prior sample it starts at this sample's own time, never null:
     // the tokens alone already clear the lower imperative line.
     expect(sample(COMPACT_TOKENS, { ceiling: C, sampledAt: NOW }).imperativeSince).toBe(NOW);
+  });
+
+  it("ISS-1197 commit 3: the next sample's pct is measured against the RAISED ceiling, so a passed boundary stops reading as 97 percent", () => {
+    // The field shape: a 416,250 forecast and an auto boundary at 416,642 from
+    // a previous era, with the context sitting at the boundary.
+    const ledger: LedgerEntry[] = [{
+      sessionId: "me", era: "9:9", captureKind: "startup", timestamp: "2026-09-09T12:01:00.000Z",
+      trigger: "auto", preTokens: 416_642, postTokens: 30_000, autoCompactWindowAtStart: 450_000,
+    }];
+    const raised = resolveCeiling({
+      sessionId: "me",
+      target: { era: "1:2", capture: { captureKind: "startup", autoCompactWindowAtStart: 450_000, capturedAt: "2026-09-09T11:50:00.000Z" } },
+      ledger, liveSetting: null, lastAssistantModel: "claude-opus-5", oneMillionFlag: null,
+      modelEvidence: "none", highWaterMark: null, cfg,
+    });
+    expect(raised.ceiling).toBe(416_642);
+    const s = sample(416_642, { ceiling: raised });
+    expect(s.pct).toBe(1);
+    // Against the unraised 416,250 forecast the same context read 100.1% of a
+    // point already passed; the whole defect was reading BELOW 100 there.
+    const unraised = resolveCeiling({
+      sessionId: "me",
+      target: { era: "1:2", capture: { captureKind: "startup", autoCompactWindowAtStart: 450_000, capturedAt: "2026-09-09T11:50:00.000Z" } },
+      ledger: [], liveSetting: null, lastAssistantModel: "claude-opus-5", oneMillionFlag: null,
+      modelEvidence: "none", highWaterMark: null, cfg,
+    });
+    expect(sample(403_000, { ceiling: unraised }).pct).toBeGreaterThan(sample(403_000, { ceiling: raised }).pct!);
   });
 
   it("a configured compactNeededPct moves the line", () => {

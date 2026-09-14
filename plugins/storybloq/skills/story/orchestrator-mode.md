@@ -144,14 +144,16 @@ PLAN_REVIEW and CODE_REVIEW/BYTE-REVIEW SHOULD use the project's configured back
 
 ## Handover cadence
 
+Cadence ruling: handover before auto-compaction, after a major item completes, and after a batch of issues or one big issue resolves; the pushed line is advice, not one handover per message; never stop at a percentage; one continue after a handover is allowed; no status demands to a worker above 90 percent.
+
 The wave boundary (step 7) is the FLOOR for handovers, not the whole rule. A single item can be a multi-stage, multi-hour, locally-committed-but-unpushed unit of work; if handovers fire only at wave boundaries, a compaction or crash mid-item loses everything since the last boundary. The trigger is reconstruction cost, not the wave:
 
-- **Checkpoint whenever the cost to reconstruct your unrecorded state, if the session died right now, exceeds the cost of writing the checkpoint.** These states are examples, not a whitelist; when unsure, checkpoint (a handover is cheap; re-deriving a multi-round plan approval from a transcript is not):
+- **Checkpoint whenever the cost to reconstruct your unrecorded state, if the session died right now, exceeds the cost of writing the checkpoint.** These states are examples, not a whitelist; when unsure, checkpoint:
   - a local commit that is not yet pushed (git has it, origin does not),
   - a gate or decision milestone landed -- a plan approved after review rounds, an architecture ruling, an owner ratification -- EVEN with no commit yet,
   - substantial uncommitted work in flight, especially before any expensive or irreversible step (a deploy-on-push, a paid-API probe, a long build),
   - you can no longer summarize what happened since the last handover in one line.
-- **Two weights.** Wave-boundary handovers are the full synthesis of step 7 (deltas, evidence, owner-gate register, next wave). Intra-wave checkpoints are light deltas: what shipped, what was decided, the current fragile state (local-only commits, in-flight stage), and the immediate next step. Only the latest handovers are reloaded on re-entry, so more-frequent-lighter is strictly safer at low cost.
+- **Two weights.** Wave-boundary handovers are the full synthesis of step 7 (deltas, evidence, owner-gate register, next wave). Intra-wave checkpoints are light deltas: what shipped, what was decided, the current fragile state (local-only commits, in-flight stage), and the immediate next step.
 - **Decisions land in the ledger the moment they are made, not only in a handover.** A reconstruction-expensive decision -- a plan approved after N rounds, an architecture ruling -- is captured as a note or folded into the item's enriched description immediately, exactly as enrichment and audit output must (step 7). The handover then points at it. This is the primary durability mechanism; checkpoint handovers are the re-entry net. A decision that lives only in session context is one compaction away from gone.
 
 Compaction note: `/story auto` gets an automatic post-compaction resume prompt; an orchestrate/pen session driving directly has no autonomous session, so on compaction the resume hook injects only a lightweight continuity breadcrumb (latest handover + `storybloq recap`). That breadcrumb restores only what is already durable -- which is why decisions must reach the ledger continuously, above.

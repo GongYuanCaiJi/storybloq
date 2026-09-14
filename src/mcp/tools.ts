@@ -2365,7 +2365,7 @@ export function registerSessionGuardTool(server: McpServer, root: string) {
 export function registerSessionIntelTool(server: McpServer, root: string | null) {
   return server.registerTool("storybloq_session_intel", {
     description:
-      "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative) and session facts. Works without .story/; sessionId or transcript inspects another session read-only.",
+      "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed) and session facts. Works without .story/; sessionId or transcript inspects another session read-only.",
     inputSchema: {
       format: z.enum(["md", "json"]).optional().describe("default: md"),
       sessionId: z.string().optional(),

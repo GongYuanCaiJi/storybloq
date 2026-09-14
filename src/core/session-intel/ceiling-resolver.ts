@@ -8,9 +8,12 @@
  *   3 setting           ceilingFraction x autoCompactWindowAtStart;
  *   4 model             ceilingFraction x native window (1M flag or 200k);
  *   5 unknown.
- * Every result names its source, confidence and basis. Overshoot never
- * promotes: a high-water mark above the forecast keeps the forecast and
- * raises a conflict, which the sampler floors at advisory.
+ * Every result names its source, confidence and basis. A scanned high-water
+ * mark never promotes: above the forecast it keeps the forecast and raises a
+ * conflict, which the sampler floors at advisory. An observed AUTO BOUNDARY
+ * does promote (ISS-1197 commit 3): it measures where compaction actually
+ * fired, so a forecast below one this session has already passed is raised to
+ * it rather than left to report "97%" of a point already behind.
  */
 
 import type { SessionIntelConfig } from "./config.js";
@@ -41,15 +44,56 @@ function median(values: readonly number[]): number {
 
 const ts = (e: LedgerEntry) => Date.parse(e.timestamp);
 
-function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly string[]): CeilingResolution {
+/**
+ * ISS-1197 commit 3: the highest `preTokens` THIS session has actually
+ * auto-compacted at, across every era. Era-agnostic on purpose: when the
+ * boundary belongs to a previous era, `measured-session` cannot consume it and
+ * the resolver falls through to a forecast, which is exactly the case that
+ * went wrong in the field (an auto boundary at 416,642 under a 416,250
+ * forecast, read out as "97%" of a point the session was already past).
+ *
+ * Manual and unclassified triggers are excluded: a user compacting early
+ * measures nothing about where compaction fires on its own.
+ */
+function observedAutoFloor(ledger: readonly LedgerEntry[], sessionId: string): number | null {
+  let floor: number | null = null;
+  for (const e of ledger) {
+    if (e.sessionId !== sessionId || e.trigger !== "auto" || e.preTokens === null) continue;
+    if (floor === null || e.preTokens > floor) floor = e.preTokens;
+  }
+  return floor;
+}
+
+function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly string[], observedFloor: number | null): CeilingResolution {
+  let ceiling = r.ceiling;
+  let basis = r.basis;
   let conflict = r.conflict;
-  if (r.ceiling !== null && hwm !== null && hwm > r.ceiling) conflict = conflict ? `${conflict}; high-water exceeds forecast` : "high-water exceeds forecast";
-  const basis = notes.length ? `${r.basis}; config: ${notes.join("; ")}` : r.basis;
-  return { ...r, conflict, basis, highWaterMark: hwm };
+  // An auto boundary is a MEASUREMENT of the fire point, so a forecast below
+  // one is not in conflict with the evidence, it has been replaced by it.
+  //
+  // Not applied to `measured-session`: that source is already this session's
+  // own auto boundaries, and its median is the deliberate robust estimator of
+  // where the NEXT compaction fires. Raising it to the max of the same set
+  // would turn the median into a max on nearly every real ledger, which is a
+  // different change from the one this fixes. Confidence is untouched either
+  // way: the raise sharpens the number, not the provenance.
+  if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling) {
+    ceiling = observedFloor;
+    basis = `${basis}; raised to observed boundary ${observedFloor}`;
+  }
+  // Judged against the RAISED ceiling, so a boundary that explains the
+  // overshoot clears the conflict instead of reporting it forever. A scanned
+  // high-water mark is not evidence of the same kind and never raises: it
+  // proves the context got that big, not that compaction fires there.
+  if (ceiling !== null && hwm !== null && hwm > ceiling) conflict = conflict ? `${conflict}; high-water exceeds forecast` : "high-water exceeds forecast";
+  return { ...r, ceiling, conflict, basis: notes.length ? `${basis}; config: ${notes.join("; ")}` : basis, highWaterMark: hwm };
 }
 
 export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
   const { cfg, target, ledger, sessionId } = input;
+  // ISS-1197 commit 3: computed once, applied by `withConflict` to whichever
+  // source wins, so every path gets the same treatment.
+  const floor = observedAutoFloor(ledger, sessionId);
   const capture = target.capture;
   const captureKind = capture?.captureKind ?? "absent";
   const window = capture?.autoCompactWindowAtStart ?? null;
@@ -81,7 +125,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
         independentSessions: 1,
         effectiveSampleWindow: own.length,
         basis: `median preTokens of ${own.length} auto boundaries in this session's process era${reduced}`,
-      }, input.highWaterMark, cfg.notes);
+      }, input.highWaterMark, cfg.notes, floor);
     }
   }
 
@@ -105,7 +149,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
         independentSessions: sessions.size,
         effectiveSampleWindow: sample.length,
         basis: `median preTokens of ${sample.length} auto boundaries from ${sessions.size} other sessions captured at startup with autoCompactWindow ${window}`,
-      }, input.highWaterMark, cfg.notes);
+      }, input.highWaterMark, cfg.notes, floor);
     }
   }
 
@@ -117,7 +161,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       source: "setting",
       confidence: captureKind === "startup" ? "high" : "medium",
       basis: `${cfg.ceilingFraction} x autoCompactWindow ${window} captured ${captureKind === "startup" ? "at process start" : "late"}`,
-    }, input.highWaterMark, cfg.notes);
+    }, input.highWaterMark, cfg.notes, floor);
   }
   if (input.liveSetting) {
     return withConflict({
@@ -127,7 +171,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       confidence: "medium",
       autoCompactWindowAtStart: null,
       basis: `${cfg.ceilingFraction} x autoCompactWindow ${input.liveSetting.value} (${input.liveSetting.basis})`,
-    }, input.highWaterMark, cfg.notes);
+    }, input.highWaterMark, cfg.notes, floor);
   }
 
   // 4. model
@@ -142,7 +186,7 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       nativeWindow,
       conflict: evidence === "none" ? "no model-window evidence" : null,
       basis: `${cfg.ceilingFraction} x native window ${nativeWindow} for ${input.lastAssistantModel} (${evidence === "none" ? "no model-window record; 200k assumed" : `1M flag ${input.oneMillionFlag ? "set" : "not set"} from ${evidence} scan`})`,
-    }, input.highWaterMark, cfg.notes);
+    }, input.highWaterMark, cfg.notes, floor);
   }
 
   // 5. unknown
@@ -152,5 +196,5 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
     source: "unknown",
     confidence: null,
     basis: "no capture, no setting, no measured boundary, no model evidence",
-  }, input.highWaterMark, cfg.notes);
+  }, input.highWaterMark, cfg.notes, floor);
 }

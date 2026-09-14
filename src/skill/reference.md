@@ -69,7 +69,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **limit-status** (--cancel?, --requeue?, --recent?, --format?) - Show pending usage-limit auto-resumes (global across projects); cancel or requeue records
 - **session intel-start** (--client?) - Capture the auto-compact setting for the current process era (SessionStart hook)
 - **session intel-prompt** (--client?) - Sample context pressure and emit additionalContext at imperative pressure (UserPromptSubmit hook)
-- **session intel** (--session-id?, --transcript?, --caller-model?, --full?, --client-task-id?, --format?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative), session facts. Works without .story/
+- **session intel** (--session-id?, --transcript?, --caller-model?, --full?, --client-task-id?, --format?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/
 - **setup** (--client?, --skip-hooks?, --skip-skill?) - Install Storybloq skill, MCP, and hooks for Claude, Codex, or both
 - **setup-skill** (--skip-hooks?) - Compatibility alias for `storybloq setup --client claude`
 - **reconcile** (--dry-run?, --ci?, --rebalance-ranks?, --format?) - Detect and fix duplicate displayIds across all entity types
@@ -206,7 +206,7 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_session_guard** (clientTaskId?) - Session ownership verdict: is anything running, and may I write? Reads only .story/sessions/, no ledger load. Also registered in degraded mode
 - **storybloq_session_milestone** (kind, gateName?, note?, clientTaskId?) - Self-reported implementing/gate-hold/blocked-external/reviewing milestone on this session's presence, never a computed verdict. gate-hold requires gateName. Lock contention or write failure returns a retryable error.
 - **storybloq_session_report** (sessionId) - Structured analysis of an autonomous session (works even if project state is corrupted)
-- **storybloq_session_intel** (format?, sessionId?, transcript?, callerModel?, full?, clientTaskId?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative) and session facts. Works without .story/; sessionId or transcript inspects another session read-only. Also registered in degraded mode
+- **storybloq_session_intel** (format?, sessionId?, transcript?, callerModel?, full?, clientTaskId?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed) and session facts. Works without .story/; sessionId or transcript inspects another session read-only. Also registered in degraded mode
 - **storybloq_register_subprocess** (pid, cmd, category, sessionId) - Register a running subprocess so monitors can tell slow builds from hung agents
 - **storybloq_unregister_subprocess** (pid, sessionId) - Unregister a subprocess after it completes (idempotent)
 - **storybloq_bus_send** (endpointId, clientTaskId, threadId?, threadKind?, predecessorThreadId?, toRole?, messageKind, severity, body, refs?, inReplyTo?, idempotencyKey) - Send a task-bound advisory peer message; routes to the sole peer (toRole is deprecated, optional, and ignored)

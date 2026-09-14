@@ -97,6 +97,12 @@ describe("resolveCeiling precedence", () => {
     expect(model.ceiling).toBe(185_000);
   });
 
+  it("ISS-1197 commit 3: a HWM above the forecast raises only the conflict, and never the basis note", () => {
+    const r = resolveCeiling(input({ highWaterMark: 460_000 }));
+    expect(r.ceiling).toBeCloseTo(416_250);
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+  });
+
   it("nothing at all is unknown", () => {
     const r = resolveCeiling(input({ target: { era: null, capture: null }, lastAssistantModel: null }));
     expect(r).toMatchObject({ source: "unknown", ceiling: null, confidence: null });
@@ -105,5 +111,76 @@ describe("resolveCeiling precedence", () => {
   it("config fallbacks are surfaced in basis", () => {
     const bad = resolveSessionIntelConfig({ advisoryPct: 0.9, imperativePct: 0.8 });
     expect(resolveCeiling(input({ cfg: bad })).basis).toMatch(/config: sessionIntel.imperativePct/);
+  });
+});
+
+/**
+ * ISS-1197 commit 3 (acceptance c): an auto boundary is a MEASUREMENT of where
+ * compaction actually fired. A forecast below one this session has already
+ * passed is not a forecast in conflict with the evidence, it is a forecast the
+ * evidence has replaced, and leaving it made a session read "97%" of a point it
+ * was already past. The boundary is era-agnostic on purpose: when it belongs to
+ * a previous era, measured-session cannot use it and the resolver falls through
+ * to the forecast, which is exactly the case that went wrong in the field.
+ */
+describe("ISS-1197 commit 3: an observed auto boundary raises the forecast it disproves", () => {
+  const FORECAST = 0.925 * 450_000; // 416,250, the `setting` source
+  /** Attributed to a DIFFERENT era, so measured-session cannot consume it. */
+  const priorEra = (pre: number, over: Partial<LedgerEntry> = {}) => entry(ME, 1, pre, { era: "9:9", ...over });
+
+  it("raises the ceiling to the boundary, names it in basis, and drops the exceeds-forecast conflict", () => {
+    const pre = Math.round(1.1 * FORECAST); // 457,875
+    const r = resolveCeiling(input({ ledger: [priorEra(pre)], highWaterMark: pre }));
+    expect(r.source).toBe("setting");
+    expect(r.ceiling).toBe(pre);
+    expect(r.basis).toMatch(new RegExp(`raised to observed boundary ${pre}`));
+    // The high-water mark is judged against the RAISED ceiling, so the
+    // "exceeds forecast" conflict the old code raised here is gone.
+    expect(r.conflict).toBeNull();
+    // A high-water mark still above the raised ceiling keeps conflicting.
+    expect(resolveCeiling(input({ ledger: [priorEra(pre)], highWaterMark: pre + 1 })).conflict).toBe("high-water exceeds forecast");
+  });
+
+  it("the field case: an auto boundary at 416,642 against the 416,250 forecast lands at 416,642", () => {
+    const r = resolveCeiling(input({ ledger: [priorEra(416_642)] }));
+    expect(FORECAST).toBe(416_250);
+    expect(r.ceiling).toBe(416_642);
+    expect(r.basis).toMatch(/raised to observed boundary 416642/);
+    expect(r.confidence).toBe("high"); // unchanged by the raise
+    expect(r.source).toBe("setting");
+  });
+
+  it("a MANUAL boundary above the forecast never raises: a user compacting early measures nothing about the fire point", () => {
+    const r = resolveCeiling(input({ ledger: [priorEra(500_000, { trigger: "manual" })] }));
+    expect(r.ceiling).toBeCloseTo(FORECAST);
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+    // Same for an unclassified trigger.
+    expect(resolveCeiling(input({ ledger: [priorEra(500_000, { trigger: "unknown" })] })).ceiling).toBeCloseTo(FORECAST);
+  });
+
+  it("only THIS session's boundaries raise, and only when they exceed the resolved ceiling", () => {
+    expect(resolveCeiling(input({ ledger: [entry("other", 1, 500_000, { era: "9:9" })] })).ceiling).toBeCloseTo(FORECAST);
+    // At or below the forecast there is nothing to replace.
+    expect(resolveCeiling(input({ ledger: [priorEra(416_250)] })).basis).not.toMatch(/raised to observed boundary/);
+    expect(resolveCeiling(input({ ledger: [priorEra(400_000)] })).ceiling).toBeCloseTo(FORECAST);
+  });
+
+  it("measured-session keeps its median: the raise replaces a FORECAST, never this session's own measurement", () => {
+    // 410k/420k/430k in the target era: the median is the deliberate robust
+    // estimator of where the NEXT compaction fires, and the 430k observation
+    // is one of the samples it already weighed. Re-maxing it would turn the
+    // median into a max on nearly every real ledger.
+    const ledger = [entry(ME, 1, 410_000), entry(ME, 2, 420_000), entry(ME, 3, 430_000)];
+    const r = resolveCeiling(input({ ledger }));
+    expect(r).toMatchObject({ source: "measured-session", ceiling: 420_000 });
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+  });
+
+  it("measured-project IS raised: other sessions' median says nothing about what this session has passed", () => {
+    const others = [entry("a", 1, 415_000), entry("a", 2, 416_000), entry("a", 3, 417_000), entry("b", 4, 418_000), entry("b", 5, 419_000)];
+    const r = resolveCeiling(input({ ledger: [...others, priorEra(440_000)] }));
+    expect(r.source).toBe("measured-project");
+    expect(r.ceiling).toBe(440_000);
+    expect(r.basis).toMatch(/raised to observed boundary 440000/);
   });
 });
