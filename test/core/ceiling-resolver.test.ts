@@ -267,6 +267,17 @@ describe("ISS-1197 commit 3: the raise is scoped to the window it was measured u
     expect(r.source).toBe("setting");
     expect(r.ceiling).toBeCloseTo(185_000);
     expect(r.basis).not.toMatch(/raised to observed boundary/);
+    // null-window orphan: bounded by the live setting. The entry-side gate
+    // cannot help here (its window is unknown), so only the bound refuses it.
+    expect(
+      resolveCeiling(
+        input({
+          target: { era: null, capture: null },
+          liveSetting: { value: 200_000, basis: "live read, unbound" },
+          ledger: [entry(ME, 1, 416_642, { era: null, autoCompactWindowAtStart: null })],
+        }),
+      ).ceiling,
+    ).toBeCloseTo(185_000);
   });
 
   it("the bound is inclusive: a boundary exactly at the native window raises", () => {
