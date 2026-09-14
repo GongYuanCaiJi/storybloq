@@ -32,7 +32,15 @@ export type CaptureKind = "startup" | "late" | "absent";
 export type AutoCompactWindowSource = "local" | "project" | "user";
 export type CeilingSource = "measured-session" | "measured-project" | "setting" | "model" | "unknown";
 export type CeilingConfidence = "high" | "medium" | "low";
-export type TokenPressureState = "ok" | "advisory" | "imperative" | "unknown";
+/**
+ * ISS-1197 commit 2: `compact-needed` is a STATE MEMBER, not a flag on
+ * `imperative`. Past `compactNeededPct` a handover no longer buys anything --
+ * the session is close enough to the auto-compact point that the only useful
+ * act is the user's `/compact` -- so every surface has to be able to say
+ * something different, and a boolean beside `imperative` would leave each of
+ * them free to keep saying "write a handover".
+ */
+export type TokenPressureState = "ok" | "advisory" | "imperative" | "compact-needed" | "unknown";
 export type SampledBy = "stop-hook" | "prompt-hook" | "session-start" | "query" | "mcp-refresh";
 
 /**
@@ -135,7 +143,7 @@ const CAPTURE_KINDS: ReadonlySet<string> = new Set(["startup", "late", "absent"]
 const WINDOW_SOURCES: ReadonlySet<string> = new Set(["local", "project", "user"]);
 const CEILING_SOURCES: ReadonlySet<string> = new Set(["measured-session", "measured-project", "setting", "model", "unknown"]);
 const CONFIDENCES: ReadonlySet<string> = new Set(["high", "medium", "low"]);
-const STATES: ReadonlySet<string> = new Set(["ok", "advisory", "imperative", "unknown"]);
+const STATES: ReadonlySet<string> = new Set(["ok", "advisory", "imperative", "compact-needed", "unknown"]);
 const SAMPLED_BY: ReadonlySet<string> = new Set(["stop-hook", "prompt-hook", "session-start", "query", "mcp-refresh"]);
 
 /** A brand-new subtree with nothing proven yet. */

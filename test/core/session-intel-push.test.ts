@@ -101,6 +101,8 @@ const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
 const CEILING = 0.925 * 450_000;
 const ADVISORY_TOKENS = Math.ceil(0.7 * CEILING) + 1_000;
 const IMPERATIVE_TOKENS = Math.ceil(0.85 * CEILING) - 25_000 + 1_000;
+/** ISS-1197 commit 2: past the default compactNeededPct of 0.95. */
+const COMPACT_TOKENS = Math.ceil(0.95 * CEILING) + 1_000;
 
 interface Fx { base: string; root: string; projects: string; userSettings: string }
 
@@ -177,6 +179,20 @@ describe("tokenPressureBannerFor", () => {
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(4), read: 10 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 2000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(tokenPressureBannerFor(f.root, { now: now + 2000, ...seams(f) })).toBeNull();
+    });
+  });
+
+  it("ISS-1197 commit 2: the compact-needed banner tells the user to run /compact and never says write a handover", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, COMPACT_TOKENS, now);
+      for (const surface of ["mcp", "cli"] as const) {
+        const b = tokenPressureBannerFor(f.root, { now, ...seams(f) }, surface);
+        expect(b?.state, surface).toBe("compact-needed");
+        expect(b!.text, surface).toMatch(/^Context pressure COMPACT-NEEDED: 9[0-9]% of the expected auto-compact point/);
+        expect(b!.text, surface).toMatch(/\/compact/);
+        expect(b!.text, surface).not.toMatch(/write a handover/i);
+      }
     });
   });
 
@@ -299,6 +315,20 @@ describe("MCP and CLI pipelines", () => {
 });
 
 describe("guide directive and handover stamp", () => {
+  it("ISS-1197 commit 2: the compact-needed guide directive tells the user to run /compact and never says write a handover", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, COMPACT_TOKENS, now);
+      const directive = guideDirectiveFor(f.root, SID, now);
+      expect(directive).toMatch(/^Context pressure compact-needed \(9[0-9]% of ceiling, source setting, high confidence\)/);
+      expect(directive).toMatch(/\/compact/);
+      expect(directive).not.toMatch(/write a handover/i);
+      // Still gated by guideDirective, like the imperative line.
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { guideDirective: false } }));
+      expect(guideDirectiveFor(f.root, SID, now)).toBeNull();
+    });
+  });
+
   it("the directive appears only for an imperative, usable owner sample and only when enabled", async () => {
     await withFixture((f) => {
       const now = T0 + 5 * 60_000;

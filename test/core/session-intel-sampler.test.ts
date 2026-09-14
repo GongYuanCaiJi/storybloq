@@ -179,6 +179,61 @@ describe("handover suppression", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ISS-1197 commit 2: compact-needed, the state past which a handover no longer
+// helps and only the user's /compact does.
+// ---------------------------------------------------------------------------
+
+describe("compact-needed", () => {
+  const CEILING = 400_000;
+  const C = ceiling({ ceiling: CEILING });
+  /** The first token count at or past the default compactNeededPct of 0.95. */
+  const COMPACT_TOKENS = Math.ceil(0.95 * CEILING);
+  const STAMP_AT = "2026-09-09T12:29:00.000Z";
+  /** A handover written one minute ago with every re-arm gate still closed. */
+  const freshHandover = (tokens: number): SessionIntelPresence => ({
+    ...emptySessionIntel(),
+    handoverWrittenAt: STAMP_AT,
+    tokensAtHandover: tokens,
+    handoverBoundaryAt: null,
+    lastBoundaryAt: null,
+    promptsSinceHandover: 0,
+  });
+
+  it("past compactNeededPct the state is compact-needed and a fresh handover stamp does not suppress it", () => {
+    const s = sample(COMPACT_TOKENS, { ceiling: C });
+    expect(s).toMatchObject({ state: "compact-needed", rawState: "compact-needed", suppressedBy: null });
+    expect(s.reason).toMatch(/>= 0\.95 x 400000/);
+    // One token lower is still the ordinary imperative: the threshold is a
+    // boundary, not a mood.
+    expect(sample(COMPACT_TOKENS - 1, { ceiling: C })).toMatchObject({ state: "imperative", rawState: "imperative" });
+
+    // The gate that holds an imperative cannot hold this: a handover written a
+    // minute ago, no growth, no prompts, every re-arm gate closed.
+    const record = freshHandover(COMPACT_TOKENS);
+    const held = sample(COMPACT_TOKENS, { ceiling: C, record, sampledAt: NOW });
+    expect(held).toMatchObject({ state: "compact-needed", rawState: "compact-needed", suppressedBy: null });
+    // Proof the same record really is suppressing: one token lower it does.
+    expect(sample(COMPACT_TOKENS - 1, { ceiling: C, record: freshHandover(COMPACT_TOKENS - 1), sampledAt: NOW }))
+      .toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+  });
+
+  it("the threshold is checked before the jump allowance, so a large allowance cannot promote imperative past it", () => {
+    // Deltas big enough that tokens + allowance clears the imperative line by a
+    // mile; the state below the compact line is still imperative, not compact-needed.
+    const deltas = [140_000, 150_000, 150_000, 150_000, 150_000];
+    expect(sample(COMPACT_TOKENS - 1, { ceiling: C, deltas })).toMatchObject({ state: "imperative", rawState: "imperative" });
+    expect(sample(COMPACT_TOKENS, { ceiling: C, deltas })).toMatchObject({ state: "compact-needed" });
+  });
+
+  it("a configured compactNeededPct moves the line", () => {
+    const high = resolveSessionIntelConfig({ compactNeededPct: 0.99 });
+    expect(high.compactNeededPct).toBe(0.99);
+    expect(sample(COMPACT_TOKENS, { ceiling: C, cfg: high })).toMatchObject({ state: "imperative" });
+    expect(sample(Math.ceil(0.99 * CEILING), { ceiling: C, cfg: high })).toMatchObject({ state: "compact-needed" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // T-501: the usage-cost advisory, decided from the resolved inputs alone.
 // ---------------------------------------------------------------------------
 

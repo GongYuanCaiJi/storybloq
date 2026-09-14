@@ -40,6 +40,14 @@ export interface SessionIntelConfig {
   /** Prompts seen since the handover (a bus message and an idle notice each count as one). */
   readonly handoverRearmPrompts: number;
   /**
+   * ISS-1197 commit 2: the fraction of the ceiling past which a handover no
+   * longer helps and only the user's `/compact` does. Must exceed
+   * `imperativePct` -- a compact-needed line at or below the imperative one
+   * would swallow the imperative state entirely -- and the pair falls back to
+   * the defaults together when it does not, the way advisory/imperative does.
+   */
+  readonly compactNeededPct: number;
+  /**
    * T-501: the auto-compact window at or below which no usage advisory is
    * shown. A THRESHOLD, never a sentinel by magnitude: 0 disables the
    * advisory outright, and any other value is compared as written (a
@@ -67,6 +75,7 @@ export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
   handoverRearmStepCapTokens: 25_000,
   handoverRearmIntervalMs: 600_000,
   handoverRearmPrompts: 3,
+  compactNeededPct: 0.95,
   recommendedWindowMax: 450_000,
   banner: true,
   promptHook: true,
@@ -87,6 +96,7 @@ export const SESSION_INTEL_BOUNDS = {
   handoverRearmStepCapTokens: { min: 1_000, max: 1_000_000, integer: true },
   handoverRearmIntervalMs: { min: 0, max: 3_600_000, integer: true },
   handoverRearmPrompts: { min: 0, max: 50, integer: true },
+  compactNeededPct: { min: 0.85, max: 1, integer: false },
   // T-501: 0 is a legal DISABLE value outside the live range, so it is named
   // here rather than widening the range (a 1-token max is not a threshold).
   recommendedWindowMax: { min: 100_000, max: 1_000_000, integer: true, allowZero: true },
@@ -133,6 +143,17 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
 
   let advisoryPct = numberOr(raw, "advisoryPct", notes);
   let imperativePct = numberOr(raw, "imperativePct", notes);
+  let compactNeededPct = numberOr(raw, "compactNeededPct", notes);
+  // ISS-1197 commit 2: checked BEFORE the advisory/imperative rule on purpose.
+  // Restoring the default imperative here can leave it at or below a raised
+  // advisory, and the rule below is what puts that right (and reports its own
+  // fallback), so the whole chain advisory < imperative < compactNeeded holds
+  // whichever pair the user got wrong.
+  if (compactNeededPct <= imperativePct) {
+    notes.push(`sessionIntel.compactNeededPct (${compactNeededPct}) must exceed imperativePct (${imperativePct}); defaults ${d.imperativePct}/${d.compactNeededPct} used for the pair`);
+    imperativePct = d.imperativePct;
+    compactNeededPct = d.compactNeededPct;
+  }
   if (imperativePct <= advisoryPct) {
     notes.push(`sessionIntel.imperativePct (${imperativePct}) must exceed advisoryPct (${advisoryPct}); defaults ${d.advisoryPct}/${d.imperativePct} used for the pair`);
     advisoryPct = d.advisoryPct;
@@ -161,6 +182,7 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     handoverRearmStepCapTokens: numberOr(raw, "handoverRearmStepCapTokens", notes),
     handoverRearmIntervalMs: numberOr(raw, "handoverRearmIntervalMs", notes),
     handoverRearmPrompts: numberOr(raw, "handoverRearmPrompts", notes),
+    compactNeededPct,
     recommendedWindowMax: numberOr(raw, "recommendedWindowMax", notes),
     banner: boolOr(raw, "banner"),
     promptHook: boolOr(raw, "promptHook"),

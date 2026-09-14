@@ -359,10 +359,12 @@ export interface StatusPayloadActive {
    * is the guide's own heuristic and unrelated.
    */
   readonly tokenPressure?: {
-    readonly state: "ok" | "advisory" | "imperative" | "unknown";
+    readonly state: "ok" | "advisory" | "imperative" | "compact-needed" | "unknown";
     readonly pctBucket: number | null;
     readonly ceilingSource: "measured-session" | "measured-project" | "setting" | "model" | "unknown";
     readonly ceilingConfidence: "high" | "medium" | "low" | null;
+    /** ISS-1197 commit 2: `state === "compact-needed"`, for readers that fall back on an unknown enum. */
+    readonly compactNeeded: boolean;
   };
 }
 

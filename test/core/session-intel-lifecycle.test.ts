@@ -314,7 +314,7 @@ describe("status.json projection", () => {
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: 266_709 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       const coarse = readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 5 * 60_000);
-      expect(coarse).toEqual({ state: "ok", pctBucket: 60, ceilingSource: "setting", ceilingConfidence: "high" });
+      expect(coarse).toEqual({ state: "ok", pctBucket: 60, ceilingSource: "setting", ceilingConfidence: "high", compactNeeded: false });
       // The Stop hook's own session is not the owner: the projection follows the owner id.
       expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID2 })).toBeNull();
       // Both writers: buildActivePayload carries it only when given; the guide writer reads it through the same function.
@@ -328,7 +328,7 @@ describe("status.json projection", () => {
       expect(written.tokenPressure).toEqual(coarse);
       // A pending compaction of this era: unknown, bucket withheld, provenance kept.
       markCompactPending(f.root, SID, { eventId: "p", era, at: at(6) });
-      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 7 * 60_000)).toEqual({ state: "unknown", pctBucket: null, ceilingSource: "setting", ceilingConfidence: "high" });
+      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 7 * 60_000)).toEqual({ state: "unknown", pctBucket: null, ceilingSource: "setting", ceilingConfidence: "high", compactNeeded: false });
     });
   });
 
@@ -340,7 +340,27 @@ describe("status.json projection", () => {
       expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 5 * 60_000)?.state).toBe("ok");
       markCompactPending(f.root, SID, { eventId: "p", era, at: at(6) });
       // Past the TTL with no boundary in reach: reconciliation reports complete but has cleared the sample.
-      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 60 * 60_000)).toEqual({ state: "unknown", pctBucket: null, ceilingSource: "setting", ceilingConfidence: "high" });
+      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 60 * 60_000)).toEqual({ state: "unknown", pctBucket: null, ceilingSource: "setting", ceilingConfidence: "high", compactNeeded: false });
+    });
+  });
+
+  it("ISS-1197 commit 2: compact-needed projects both the state string and the sibling compactNeeded boolean", () => {
+    withFixture((f) => {
+      bindStartup(f);
+      // 0.95 x (0.925 x 450,000) is 395,437.5: 400,000 is past the line.
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: 400_000 })]);
+      handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      const coarse = readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 5 * 60_000);
+      expect(coarse).toMatchObject({ state: "compact-needed", compactNeeded: true });
+      expect(coarse!.pctBucket).toBeGreaterThanOrEqual(95);
+      // A reader that falls back on an unknown enum still learns the fact.
+      const state = { sessionId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", state: "IMPLEMENT", status: "active", claudeCodeSessionId: SID } as unknown as SessionState;
+      expect(buildActivePayload(state, { tokenPressure: coarse }).tokenPressure).toEqual(coarse);
+
+      // An imperative sample carries the boolean as false, never absent.
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(3), read: Math.ceil(0.85 * 0.925 * 450_000) - 25_000 })]);
+      handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 6 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(readCoarseTokenPressureForSession(f.root, { claudeCodeSessionId: SID }, T0 + 6 * 60_000)).toMatchObject({ state: "imperative", compactNeeded: false });
     });
   });
 
@@ -365,7 +385,25 @@ describe("handleSessionIntelPrompt (UserPromptSubmit)", () => {
   const CEILING = 0.925 * 450_000;
   const ADVISORY_TOKENS = Math.ceil(0.7 * CEILING) + 1_000;
   const IMPERATIVE_TOKENS = Math.ceil(0.85 * CEILING) - 25_000 + 1_000;
+  /** ISS-1197 commit 2: past the default compactNeededPct of 0.95. */
+  const COMPACT_TOKENS = Math.ceil(0.95 * CEILING) + 1_000;
   const seams = (f: Fx) => ({ cwd: f.root, projectsDir: f.projects, userSettingsPath: f.userSettings });
+
+  it("ISS-1197 commit 2: the prompt hook at compact-needed emits the /compact line and no handover imperative", () => {
+    withFixture((f) => {
+      bindStartup(f);
+      const path = writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: COMPACT_TOKENS - 2 })]);
+      const r = handleSessionIntelPrompt({ sessionId: SID, transcriptPath: path, now: T0 + 5 * 60_000, ...seams(f) });
+      expect(r.status).toBe("emitted");
+      expect(r.result?.pressure?.state).toBe("compact-needed");
+      const parsed = JSON.parse(r.output!) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+      expect(parsed.hookSpecificOutput.hookEventName).toBe(PROMPT_HOOK_EVENT_NAME);
+      const line = parsed.hookSpecificOutput.additionalContext;
+      expect(line).toMatch(/^\[storybloq\] Context pressure COMPACT-NEEDED: 9[0-9]% of the expected auto-compact point/);
+      expect(line).toMatch(/\/compact/);
+      expect(line).not.toMatch(/write a handover/i);
+    });
+  });
 
   it("emits additionalContext only at imperative from a usable sample; ok and advisory stay silent; the sample is persisted as prompt-hook", () => {
     withFixture((f) => {

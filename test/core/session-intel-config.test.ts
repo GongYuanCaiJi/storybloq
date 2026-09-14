@@ -75,6 +75,45 @@ describe("sessionIntel config: hot-path reader", () => {
     expect(clamped.notes).toHaveLength(3);
   });
 
+  it("ISS-1197 commit 2: compactNeededPct defaults to 0.95, is taken as written in 0.85..1, and clamps outside it", () => {
+    expect(resolveSessionIntelConfig(null).compactNeededPct).toBe(0.95);
+    expect(resolveSessionIntelConfig({}).compactNeededPct).toBe(0.95);
+    const taken = resolveSessionIntelConfig({ compactNeededPct: 1 });
+    expect(taken.compactNeededPct).toBe(1);
+    expect(taken.notes).toEqual([]);
+    for (const value of [0.84, 1.01, "0.9"]) {
+      const cfg = resolveSessionIntelConfig({ compactNeededPct: value });
+      expect(cfg.compactNeededPct, `${String(value)} reader`).toBe(0.95);
+      expect(cfg.notes.some((n) => n.startsWith("sessionIntel.compactNeededPct ignored")), `${String(value)} note`).toBe(true);
+      expect(SessionIntelConfigSchema.safeParse({ compactNeededPct: value }).success, `${String(value)} schema`).toBe(false);
+    }
+  });
+
+  it("ISS-1197 commit 2: compactNeededPct at or below imperativePct falls back to the DEFAULT PAIR", () => {
+    const equal = resolveSessionIntelConfig({ imperativePct: 0.9, compactNeededPct: 0.9 });
+    expect(equal.imperativePct).toBe(0.85);
+    expect(equal.compactNeededPct).toBe(0.95);
+    expect(equal.notes).toHaveLength(1);
+    expect(equal.notes[0]).toMatch(/compactNeededPct \(0\.9\) must exceed imperativePct \(0\.9\)/);
+
+    // Only imperativePct raised: the pair rule still governs against the default.
+    const onlyImperative = resolveSessionIntelConfig({ imperativePct: 0.97 });
+    expect(onlyImperative.imperativePct).toBe(0.85);
+    expect(onlyImperative.compactNeededPct).toBe(0.95);
+    expect(onlyImperative.notes).toHaveLength(1);
+
+    // A legal chain passes untouched.
+    const ok = resolveSessionIntelConfig({ advisoryPct: 0.75, imperativePct: 0.88, compactNeededPct: 0.97 });
+    expect(ok).toMatchObject({ advisoryPct: 0.75, imperativePct: 0.88, compactNeededPct: 0.97 });
+    expect(ok.notes).toEqual([]);
+
+    // The restored default imperative is still ordered against advisory: the
+    // advisory rule runs after this one and reports its own fallback.
+    const cascade = resolveSessionIntelConfig({ advisoryPct: 0.9, imperativePct: 0.94, compactNeededPct: 0.92 });
+    expect(cascade).toMatchObject({ advisoryPct: 0.7, imperativePct: 0.85, compactNeededPct: 0.95 });
+    expect(cascade.notes).toHaveLength(2);
+  });
+
   it("a non-boolean flag falls back silently (flags have no bounds to report)", () => {
     const cfg = resolveSessionIntelConfig({ enabled: "no", banner: 0 });
     expect(cfg.enabled).toBe(true);

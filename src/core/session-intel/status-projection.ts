@@ -20,6 +20,15 @@ export interface TokenPressureStatus {
   readonly pctBucket: number | null;
   readonly ceilingSource: CeilingSource;
   readonly ceilingConfidence: CeilingConfidence | null;
+  /**
+   * ISS-1197 commit 2: the same fact as `state === "compact-needed"`, beside
+   * it rather than instead of it. `status.json` is read by clients compiled
+   * against the older four-member enum (the Mac app among them), and a reader
+   * that falls back on an unrecognised string would otherwise learn nothing
+   * about the one state that matters most. Always written, never omitted, so
+   * `false` is a fact and not an absence.
+   */
+  readonly compactNeeded: boolean;
 }
 
 export function pctBucketOf(pct: number | null): number | null {
@@ -54,11 +63,16 @@ export function readCoarseTokenPressureForSession(
     const pending = peekPending(root, sessionId, now);
     const r = reconcileIntel(intel, null, pending, cfg, now);
     const usable = r.status === "complete" && r.intel.lastSample === sample;
+    const state = usable ? sample.state : "unknown";
     return {
-      state: usable ? sample.state : "unknown",
+      state,
       pctBucket: usable ? pctBucketOf(sample.pct) : null,
       ceilingSource: sample.ceilingSource,
       ceilingConfidence: sample.ceilingConfidence,
+      // Derived from the PROJECTED state, not the raw sample: an unusable
+      // sample projects `unknown`, and it must not claim a compact is needed
+      // on the strength of a reading that may predate a compaction.
+      compactNeeded: state === "compact-needed",
     };
   } catch {
     return null;

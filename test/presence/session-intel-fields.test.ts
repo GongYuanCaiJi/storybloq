@@ -120,6 +120,17 @@ describe("session intel fields (T-499)", () => {
     expect(junk).toEqual(emptySessionIntel());
   });
 
+  it("ISS-1197 commit 2: compact-needed round-trips as a state, and an unknown state string is still refused", () => {
+    const intel = { ...full(), lastSample: sample({ state: "compact-needed", rawState: "compact-needed", suppressedBy: null }) };
+    const parsed = parseSessionIntel(JSON.parse(JSON.stringify(intel)))!;
+    expect(parsed.lastSample).toMatchObject({ state: "compact-needed", rawState: "compact-needed", suppressedBy: null });
+    expect(parsed).toEqual(intel);
+    // The set is still closed: an invented state drops the sample, and an
+    // invented rawState falls back to the sample's own state.
+    expect(parseSessionIntel({ ...full(), lastSample: { ...sample(), state: "compact_needed" } })!.lastSample).toBeNull();
+    expect(parseSessionIntel({ ...full(), lastSample: { ...sample(), state: "compact-needed", rawState: "panic" } })!.lastSample).toMatchObject({ state: "compact-needed", rawState: "compact-needed" });
+  });
+
   it("ISS-1197: a record written before the re-arm counters existed parses with 0 and null, keeping its handover fields", () => {
     const { promptsSinceHandover, lastImperativeAt, ...legacy } = full();
     expect(promptsSinceHandover).toBe(4);

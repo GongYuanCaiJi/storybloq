@@ -106,6 +106,9 @@ export const SessionIntelConfigSchema = z.object({
   handoverRearmStepCapTokens: z.number().int().min(1_000).max(1_000_000).optional(), // default 25000
   handoverRearmIntervalMs: z.number().int().min(0).max(3_600_000).optional(),        // default 600000
   handoverRearmPrompts: z.number().int().min(0).max(50).optional(),                  // default 3
+  // ISS-1197 commit 2: the compact-needed line. Must exceed imperativePct;
+  // that pair rule lives in the reader, not here, like the other two.
+  compactNeededPct: z.number().min(0.85).max(1).optional(),                          // default 0.95
   // T-501: 0 disables the usage-cost advisory; any other value is a
   // threshold compared as written. The union mirrors the hot-path reader's
   // `allowZero` rule exactly (the agreement test pins both ends).

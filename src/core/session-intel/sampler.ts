@@ -7,6 +7,10 @@
  *   imperative  contextTokens + jumpAllowance >= imperativePct x ceiling,
  *               jumpAllowance = clamp(p90 of per-assistant deltas since
  *               the epoch, floor, cap), floor when fewer than 5 deltas;
+ *   compact-needed
+ *               contextTokens >= compactNeededPct x ceiling, decided before
+ *               the imperative rule and without the jump allowance, and never
+ *               suppressed by a handover (ISS-1197 commit 2);
  *   suppressed  an imperative raw state reads advisory when the record's
  *               handover belongs to the CURRENT compaction
  *               (handoverBoundaryAt === lastBoundaryAt) and any one of the
@@ -147,25 +151,40 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   const headroom = Math.max(0, Math.round(c - tokens));
 
   let rawState: TokenPressureState = "ok";
-  if (tokens + jump.value >= cfg.imperativePct * c) rawState = "imperative";
+  // ISS-1197 commit 2: compact-needed is decided FIRST, on the measured tokens
+  // alone. Before the imperative rule, because the two overlap by construction
+  // and imperative would otherwise win every time; and without the jump
+  // allowance, because the allowance is headroom reserved for the NEXT turn,
+  // while this line is about where the context already is.
+  if (tokens >= cfg.compactNeededPct * c) rawState = "compact-needed";
+  else if (tokens + jump.value >= cfg.imperativePct * c) rawState = "imperative";
   else if (tokens >= cfg.advisoryPct * c || ceiling.conflict !== null) rawState = "advisory";
 
   let state = rawState;
   let suppressedBy: "handover" | null = null;
+  // Only an imperative is ever held. A handover cannot answer compact-needed:
+  // the whole point of the state is that writing one more is not the fix, so
+  // routing it through the re-arm gates would hide the one state the surfaces
+  // exist to show.
   const heldBy = rawState === "imperative" ? handoverSuppresses(record, tokens, c, cfg, input.sampledAt) : null;
   if (heldBy !== null) {
     state = "advisory";
     suppressedBy = "handover";
   }
-  const imperativeSince = rawState === "imperative" ? previousSince ?? input.sampledAt : null;
+  // At compact-needed the imperative condition is satisfied too (the tokens
+  // alone already clear the higher line), so the stamp continues rather than
+  // being cleared and re-taken on the way past.
+  const imperativeSince = rawState === "imperative" || rawState === "compact-needed" ? previousSince ?? input.sampledAt : null;
   const reason =
-    rawState === "imperative"
-      ? `${tokens} + jump allowance ${jump.value} >= ${cfg.imperativePct} x ${Math.round(c)}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
-      : rawState === "advisory"
-        ? ceiling.conflict && tokens < cfg.advisoryPct * c
-          ? `ceiling conflict: ${ceiling.conflict}`
-          : `${tokens} >= ${cfg.advisoryPct} x ${Math.round(c)}`
-        : null;
+    rawState === "compact-needed"
+      ? `${tokens} >= ${cfg.compactNeededPct} x ${Math.round(c)}; past this point a handover does not help and only /compact does`
+      : rawState === "imperative"
+        ? `${tokens} + jump allowance ${jump.value} >= ${cfg.imperativePct} x ${Math.round(c)}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
+        : rawState === "advisory"
+          ? ceiling.conflict && tokens < cfg.advisoryPct * c
+            ? `ceiling conflict: ${ceiling.conflict}`
+            : `${tokens} >= ${cfg.advisoryPct} x ${Math.round(c)}`
+          : null;
 
   return { ...common, pct, headroom, jumpAllowance: jump.value, jumpAllowanceBasis: jump.basis, state, rawState, suppressedBy, imperativeSince, reason };
 }

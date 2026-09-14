@@ -13,7 +13,7 @@ import { isPresenceEnabled } from "../../presence/handler.js";
 import { ensureCapture, type CaptureOutcome, type CaptureSource } from "../../core/session-intel/capture.js";
 import { readSessionIntelConfig } from "../../core/session-intel/config.js";
 import { findPresenceRecordAcrossWorktrees, readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
-import { renderUsageAdvisory } from "../../core/session-intel/push.js";
+import { COMPACT_NEEDED_ADVICE, renderUsageAdvisory } from "../../core/session-intel/push.js";
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
 import { scanTail } from "../../core/session-intel/transcript-scan.js";
@@ -68,7 +68,10 @@ export function formatSessionIntelMd(r: SessionIntelResult, root: string | null 
     if (c.conflict) lines.push(`- Conflict: ${c.conflict}`);
     lines.push(`- Headroom: ${p.headroom?.toLocaleString() ?? "n/a"} tokens; jump allowance ${p.jumpAllowance?.toLocaleString() ?? "n/a"} (${p.jumpAllowanceBasis})`);
     if (p.reason) lines.push(`- Why: ${p.reason}`);
-    if (p.state === "imperative") lines.push("", "Write a handover now (storybloq handover create / storybloq_handover_create), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.");
+    // ISS-1197 commit 2: compact-needed is checked first, so the diagnostic
+    // surface never prints the handover imperative past the compact line.
+    if (p.state === "compact-needed") lines.push("", COMPACT_NEEDED_ADVICE);
+    else if (p.state === "imperative") lines.push("", "Write a handover now (storybloq handover create / storybloq_handover_create), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.");
     else if (p.state === "advisory") lines.push("", "Plan a handover before the next large step.");
   }
   // T-501: reported on every call, whatever the pressure state, and never
@@ -295,11 +298,15 @@ export interface SessionIntelPromptOutcome {
   readonly output: string | null;
 }
 
-/** The line the model reads on its next turn. Imperative only. */
+/** The line the model reads on its next turn. Imperative and compact-needed only. */
 export function renderPromptDirective(p: NonNullable<SessionIntelResult["pressure"]>): string {
   const pct = p.pct === null ? "n/a" : `${Math.round(p.pct * 100)}%`;
   const conf = p.ceiling.confidence ? `, ${p.ceiling.confidence} confidence` : "";
-  return `[storybloq] Context pressure IMPERATIVE: ${pct} of the expected auto-compact point (${p.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${p.ceiling.source}${conf}). Write a handover now via storybloq_handover_create (or \`storybloq handover create\`), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
+  const head = `[storybloq] Context pressure ${p.state.toUpperCase()}: ${pct} of the expected auto-compact point (${p.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${p.ceiling.source}${conf}).`;
+  // ISS-1197 commit 2: this hook fires on EVERY prompt, so it is the surface
+  // that would nag for handovers forever past the compact line.
+  if (p.state === "compact-needed") return `${head} ${COMPACT_NEEDED_ADVICE}`;
+  return `${head} Write a handover now via storybloq_handover_create (or \`storybloq handover create\`), then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
 }
 
 /**
@@ -347,7 +354,7 @@ export function handleSessionIntelPrompt(options: SessionIntelPromptOptions = {}
     if (result.binding !== "bound") {
       return { status: "silent", reason: `unbound caller: ${result.bindingReason}`, capture, result, output: null };
     }
-    if (!result.usable || !pressure || pressure.state !== "imperative") {
+    if (!result.usable || !pressure || (pressure.state !== "imperative" && pressure.state !== "compact-needed")) {
       return { status: "silent", reason: result.usable ? `state ${pressure?.state ?? "unknown"}` : (result.unusableReason ?? "unusable"), capture, result, output: null };
     }
     const output = JSON.stringify({ hookSpecificOutput: { hookEventName: PROMPT_HOOK_EVENT_NAME, additionalContext: renderPromptDirective(pressure) } });

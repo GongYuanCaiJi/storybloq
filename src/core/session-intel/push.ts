@@ -29,7 +29,7 @@ export const BANNER_SOFT_BUDGET_MS = 150;
 
 /** The banner's payload: the compact sample plus a rendered line. */
 export interface TokenPressureBanner {
-  readonly state: "advisory" | "imperative";
+  readonly state: "advisory" | "imperative" | "compact-needed";
   readonly pct: number | null;
   readonly contextTokens: number | null;
   readonly ceiling: number | null;
@@ -54,9 +54,23 @@ export interface BannerOptions {
 
 const pctText = (p: number | null) => (p === null ? "n/a" : `${Math.round(p * 100)}%`);
 
+/**
+ * ISS-1197 commit 2: the one wording every compact-needed surface shares, so
+ * the banner, the guide directive and the prompt hook cannot drift into
+ * asking for a handover that would not help. Deliberately free of the phrase
+ * the imperative surfaces use: an agent that reads both must be able to tell
+ * them apart on the words alone.
+ */
+export const COMPACT_NEEDED_ADVICE =
+  "Context is past the point where another handover helps, and no further handover should be written. A session cannot compact itself: finish the step in flight, say plainly that the context is exhausted, and stop there. Only the user can clear it, by running /compact in this session or by starting a fresh one.";
+
 export function renderBannerText(sample: SessionIntelSample, surface: "mcp" | "cli"): string {
   const where = surface === "mcp" ? "storybloq_handover_create" : "storybloq handover create";
   const head = `Context pressure ${sample.state.toUpperCase()}: ${pctText(sample.pct)} of the expected auto-compact point (${sample.contextTokens?.toLocaleString() ?? "n/a"} tokens; source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}).`;
+  // ISS-1197 commit 2: past this line another handover buys nothing, so the
+  // text must not ask for one. It carries both halves: what the agent should
+  // do (finish, then stop) and what only the user can do (run /compact).
+  if (sample.state === "compact-needed") return `${head} ${COMPACT_NEEDED_ADVICE}`;
   if (sample.state === "imperative") return `${head} Write a handover now via ${where}, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   return `${head}${sample.suppressedBy === "handover" ? " A recent handover holds this at advisory: keep working." : ""} Plan a handover before the next large step, and keep working.`;
 }
@@ -154,9 +168,9 @@ export function tokenPressureBannerFor(root: string, opts: BannerOptions = {}, s
   }
 }
 
-/** The pressure gate on top of an acquired sample: only advisory and imperative are pushed. */
+/** The pressure gate on top of an acquired sample: only advisory, imperative and compact-needed are pushed. */
 function bannerFromSample(sample: SessionIntelSample, surface: "mcp" | "cli"): TokenPressureBanner | null {
-  if (sample.state !== "advisory" && sample.state !== "imperative") return null;
+  if (sample.state !== "advisory" && sample.state !== "imperative" && sample.state !== "compact-needed") return null;
   return {
     state: sample.state,
     pct: sample.pct,
@@ -417,7 +431,8 @@ export function cliBannerFor(root: string, format: "md" | "json", opts: BannerOp
 /**
  * The autonomous OWNER's imperative directive, from its record only (the
  * guide never scans a transcript). Null unless the owner's usable sample is
- * imperative and `guideDirective` is on. Not a state transition.
+ * imperative or compact-needed and `guideDirective` is on. Not a state
+ * transition.
  */
 export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | null | undefined, now: number = Date.now(), cfg: SessionIntelConfig = readSessionIntelConfig(root)): string | null {
   try {
@@ -435,10 +450,14 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
     }
     const intel = record?.sessionIntel ?? null;
     const sample = intel?.lastSample ?? null;
-    if (!intel || !sample || sample.state !== "imperative") return null;
+    if (!intel || !sample || (sample.state !== "imperative" && sample.state !== "compact-needed")) return null;
     const rec = reconcileIntel(intel, null, peekPending(resolvedRoot, ownerClaudeSessionId, now), cfg, now);
     if (rec.status !== "complete" || rec.intel.lastSample !== sample) return null;
-    return `Context pressure imperative (${pctText(sample.pct)} of ceiling, source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""}): write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
+    const head = `Context pressure ${sample.state} (${pctText(sample.pct)} of ceiling, source ${sample.ceilingSource}${sample.ceilingConfidence ? `, ${sample.ceilingConfidence} confidence` : ""})`;
+    // ISS-1197 commit 2: the guide is an autonomous driver, so this is exactly
+    // where a handover demand past the compact line would loop forever.
+    if (sample.state === "compact-needed") return `${head}: ${COMPACT_NEEDED_ADVICE}`;
+    return `${head}: write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   } catch {
     return null;
   }
