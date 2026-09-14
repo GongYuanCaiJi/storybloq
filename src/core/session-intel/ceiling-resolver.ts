@@ -13,7 +13,11 @@
  * conflict, which the sampler floors at advisory. An observed AUTO BOUNDARY
  * does promote (ISS-1197 commit 3): it measures where compaction actually
  * fired, so a forecast below one this session has already passed is raised to
- * it rather than left to report "97%" of a point already behind.
+ * it rather than left to report "97%" of a point already behind. The raise is
+ * scoped to the window it was measured under and capped by the native window;
+ * it is also not monotonic, because ledger retention (per-session newest
+ * `boundarySampleCount`, then the global cap) can evict the boundary the raise
+ * rests on, after which the ceiling falls back to the forecast.
  */
 
 import type { SessionIntelConfig } from "./config.js";
@@ -46,19 +50,30 @@ const ts = (e: LedgerEntry) => Date.parse(e.timestamp);
 
 /**
  * ISS-1197 commit 3: the highest `preTokens` THIS session has actually
- * auto-compacted at, across every era. Era-agnostic on purpose: when the
- * boundary belongs to a previous era, `measured-session` cannot consume it and
- * the resolver falls through to a forecast, which is exactly the case that
- * went wrong in the field (an auto boundary at 416,642 under a 416,250
- * forecast, read out as "97%" of a point the session was already past).
+ * auto-compacted at. Era-agnostic on purpose: when the boundary belongs to a
+ * previous era, `measured-session` cannot consume it and the resolver falls
+ * through to a forecast, which is exactly the case that went wrong in the
+ * field (an auto boundary at 416,642 under a 416,250 forecast, read out as
+ * "97%" of a point the session was already past).
+ *
+ * Window-scoped, by the same rule `measured-project` pools on: an entry is
+ * skipped when its `autoCompactWindowAtStart` and the target's are both known
+ * and unequal. Crossing a window change is what makes the raise dangerous
+ * rather than merely wrong: a 450k-era boundary carried into a session
+ * restarted at 200k would hold the ceiling at 416,642 while compaction fires
+ * at 185,000, suppressing advisory, imperative and compact-needed through the
+ * very event the raise exists to predict. When either side is unknown the
+ * entry still counts: the alternative is to discard a real measurement over a
+ * missing field, and the caller clamps what it cannot attribute.
  *
  * Manual and unclassified triggers are excluded: a user compacting early
  * measures nothing about where compaction fires on its own.
  */
-function observedAutoFloor(ledger: readonly LedgerEntry[], sessionId: string): number | null {
+function observedAutoFloor(ledger: readonly LedgerEntry[], sessionId: string, targetWindow: number | null): number | null {
   let floor: number | null = null;
   for (const e of ledger) {
     if (e.sessionId !== sessionId || e.trigger !== "auto" || e.preTokens === null) continue;
+    if (targetWindow !== null && e.autoCompactWindowAtStart !== null && e.autoCompactWindowAtStart !== targetWindow) continue;
     if (floor === null || e.preTokens > floor) floor = e.preTokens;
   }
   return floor;
@@ -71,15 +86,24 @@ function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly 
   // An auto boundary is a MEASUREMENT of the fire point, so a forecast below
   // one is not in conflict with the evidence, it has been replaced by it.
   //
-  // Not applied to `measured-session`: that source is already this session's
-  // own auto boundaries, and its median is the deliberate robust estimator of
-  // where the NEXT compaction fires. Raising it to the max of the same set
-  // would turn the median into a max on nearly every real ledger, which is a
-  // different change from the one this fixes. Confidence is untouched either
-  // way: the raise sharpens the number, not the provenance.
+  // Not applied to `measured-session`: that source is this session's own auto
+  // boundaries within the CURRENT era, and its median is the deliberate robust
+  // estimator of where the NEXT compaction fires, while the floor is taken
+  // across eras; raising the one by the other both imports a prior era's fire
+  // point and, whenever the floor comes from the current era, turns that
+  // median into a max. Confidence is untouched either way: the raise sharpens
+  // the number, not the provenance.
+  //
+  // `nativeWindow` is non-null only on the model path, which forecasts from
+  // the whole context rather than a captured setting; a boundary above it was
+  // measured under a window this process does not have, so it caps the raise.
   if (r.source !== "measured-session" && ceiling !== null && observedFloor !== null && observedFloor > ceiling) {
-    ceiling = observedFloor;
-    basis = `${basis}; raised to observed boundary ${observedFloor}`;
+    const cap = r.nativeWindow;
+    const raised = cap !== null && observedFloor > cap ? cap : observedFloor;
+    if (raised > ceiling) {
+      ceiling = raised;
+      basis = `${basis}; raised to observed boundary ${observedFloor}${raised === observedFloor ? "" : ` clamped to native window ${cap}`}`;
+    }
   }
   // Judged against the RAISED ceiling, so a boundary that explains the
   // overshoot clears the conflict instead of reporting it forever. A scanned
@@ -91,12 +115,14 @@ function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly 
 
 export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
   const { cfg, target, ledger, sessionId } = input;
-  // ISS-1197 commit 3: computed once, applied by `withConflict` to whichever
-  // source wins, so every path gets the same treatment.
-  const floor = observedAutoFloor(ledger, sessionId);
   const capture = target.capture;
   const captureKind = capture?.captureKind ?? "absent";
   const window = capture?.autoCompactWindowAtStart ?? null;
+  // ISS-1197 commit 3: computed once, applied by `withConflict` to whichever
+  // source wins, so every path gets the same treatment. The window it is
+  // scoped to is the captured one, or the live setting when there is no
+  // capture; the model path has none and is bounded by `nativeWindow` instead.
+  const floor = observedAutoFloor(ledger, sessionId, window ?? input.liveSetting?.value ?? null);
   const base = {
     sampleCount: 0,
     independentSessions: 0,

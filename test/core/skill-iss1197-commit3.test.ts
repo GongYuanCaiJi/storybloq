@@ -38,26 +38,34 @@ const read = (name: string) => readFileSync(join(SKILL_DIR, name), "utf-8");
 export const CADENCE_RULING =
   "Cadence ruling: handover before auto-compaction, after a major item completes, and after a batch of issues or one big issue resolves; the pushed line is advice, not one handover per message; never stop at a percentage; one continue after a handover is allowed; no status demands to a worker above 90 percent.";
 
+const RULING_FILES = ["SKILL.md", "duet-mode.md", "orchestrator-mode.md"] as const;
+
+/** The five points, as a reader of the shipped file must find them. */
+const FIVE_POINTS = [
+  "before auto-compaction",
+  "after a major item completes",
+  "after a batch of issues or one big issue resolves",
+  "not one handover per message",
+  "never stop at a percentage",
+  "one continue after a handover is allowed",
+  "no status demands to a worker above 90 percent",
+];
+
 describe("ISS-1197 commit 3: the handover cadence ruling reaches the skill text", () => {
-  it.each(["SKILL.md", "duet-mode.md", "orchestrator-mode.md"])("%s carries the ruling verbatim", (file) => {
+  it.each(RULING_FILES)("%s carries the ruling verbatim", (file) => {
     expect(read(file)).toContain(CADENCE_RULING);
   });
 
-  it("the ruling names all five points", () => {
-    // Read off the one string every file shares, so a partial paraphrase in
-    // any single file cannot satisfy the per-file assertions above.
-    expect(CADENCE_RULING).toContain("before auto-compaction");
-    expect(CADENCE_RULING).toContain("after a major item completes");
-    expect(CADENCE_RULING).toContain("after a batch of issues or one big issue resolves");
-    expect(CADENCE_RULING).toContain("not one handover per message");
-    expect(CADENCE_RULING).toContain("never stop at a percentage");
-    expect(CADENCE_RULING).toContain("one continue after a handover is allowed");
-    expect(CADENCE_RULING).toContain("no status demands to a worker above 90 percent");
+  it.each(RULING_FILES)("%s names all five points", (file) => {
+    // Read off the FILE, not the local constant: a constant asserted against
+    // itself proves nothing about what shipped.
+    const text = read(file);
+    for (const point of FIVE_POINTS) expect(text).toContain(point);
   });
 
-  it("carries no em dash in any copy", () => {
-    // Built from the codepoint so this file itself stays em-dash free.
-    expect(CADENCE_RULING).not.toContain(String.fromCharCode(0x2014));
+  it.each(RULING_FILES)("%s carries no em dash anywhere", (file) => {
+    // Built from the codepoint so this test file itself stays em-dash free.
+    expect(read(file)).not.toContain(String.fromCharCode(0x2014));
   });
 });
 
@@ -81,9 +89,26 @@ describe("ISS-1197 commit 3: the state enumerations name compact-needed", () => 
   });
 
   it("autonomous-mode.md names compact-needed in the guide directive paragraph", () => {
+    expect(read("autonomous-mode.md")).toContain("or `compact-needed` (95%)");
+  });
+
+  it("autonomous-mode.md splits the two states: a handover at imperative, none at compact-needed", () => {
     const text = read("autonomous-mode.md");
-    expect(text).toContain("or `compact-needed` (95%)");
-    expect(text).toContain("fires at `imperative` and at `compact-needed`");
+    expect(text).toContain("At `imperative` the line asks for a handover");
+    expect(text).toContain("At `compact-needed` the line says to write none");
+    // The defect this replaces: one sentence that listed both states and then
+    // told the reader to write a handover, which is the opposite instruction
+    // at compact-needed. No sentence may name compact-needed and ask for one.
+    const conflated = text
+      .split(/(?<=[.!?])\s/)
+      .filter((s) => /compact-needed/.test(s) && /write (a|the) handover/i.test(s));
+    expect(conflated).toEqual([]);
+  });
+
+  it("autonomous-mode.md keeps the stamp doctrine, scoped to imperative", () => {
+    // The only surviving copy in src/skill after SKILL.md paid for its ruling
+    // with this clause; it is true at imperative and false at compact-needed.
+    expect(read("autonomous-mode.md")).toContain("stamp holds the state at `advisory` until the context grows another step");
   });
 
   it("setup-flow.md says the UserPromptSubmit hook injects at both states", () => {

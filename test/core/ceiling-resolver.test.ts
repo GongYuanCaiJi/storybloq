@@ -183,4 +183,55 @@ describe("ISS-1197 commit 3: an observed auto boundary raises the forecast it di
     expect(r.ceiling).toBe(440_000);
     expect(r.basis).toMatch(/raised to observed boundary 440000/);
   });
+
+  it("the floor is the MAX of this session's boundaries, not the first one seen", () => {
+    // Lower boundary first, so a first-wins reduction lands on 430,000.
+    const r = resolveCeiling(input({ ledger: [priorEra(430_000), entry(ME, 2, 457_875, { era: "9:9" })] }));
+    expect(r.ceiling).toBe(457_875);
+    expect(r.basis).toMatch(/raised to observed boundary 457875/);
+  });
+});
+
+/**
+ * ISS-1197 commit 3 gate (byte-review MAJOR): the floor is a measurement of a
+ * SPECIFIC window. Carrying it across a window change inflates the ceiling of
+ * the new one, and a ceiling above the real fire point is worse than no
+ * learning at all: it suppresses advisory, imperative and compact-needed right
+ * through the compaction it was meant to predict.
+ */
+describe("ISS-1197 commit 3: the raise is scoped to the window it was measured under", () => {
+  /** The user lowered autoCompactWindow to 200,000 and resumed. */
+  const shrunk = (over: Partial<ResolveCeilingInput> = {}) =>
+    input({ target: { era: "2:2", capture: { captureKind: "startup", autoCompactWindowAtStart: 200_000, capturedAt: at(-10) } }, ...over });
+  /** No capture and no live setting: the resolver falls to the model path. */
+  const modelPath = (over: Partial<ResolveCeilingInput> = {}) =>
+    input({ target: { era: null, capture: null }, oneMillionFlag: false, modelEvidence: "full", ...over });
+
+  it("a 450k-window boundary never raises a session that restarted at 200k", () => {
+    const r = resolveCeiling(shrunk({ ledger: [entry(ME, 1, 416_642, { era: "9:9", autoCompactWindowAtStart: 450_000 })] }));
+    expect(r.source).toBe("setting");
+    expect(r.ceiling).toBeCloseTo(0.925 * 200_000); // 185,000, the honest forecast
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+  });
+
+  it("the grow direction is unaffected: a 200k-window boundary leaves the 450k forecast alone", () => {
+    const r = resolveCeiling(input({ ledger: [entry(ME, 1, 185_000, { era: "9:9", autoCompactWindowAtStart: 200_000 })] }));
+    expect(r.ceiling).toBeCloseTo(0.925 * 450_000);
+    expect(r.basis).not.toMatch(/raised to observed boundary/);
+  });
+
+  it("a null window on either side still counts (the gate skips only a known mismatch)", () => {
+    expect(resolveCeiling(input({ ledger: [entry(ME, 1, 457_875, { era: "9:9", autoCompactWindowAtStart: null })] })).ceiling).toBe(457_875);
+    // Target side null: the model path has no window at all.
+    expect(resolveCeiling(modelPath({ ledger: [entry(ME, 1, 190_000, { era: "9:9" })] })).ceiling).toBe(190_000);
+  });
+
+  it("the model path raises, but never above the native window it is forecasting from", () => {
+    // The 1M-flag era compacted at 830,000; this process resumed without the
+    // flag, so 200,000 is the whole context. 830,000 is not reachable here.
+    const r = resolveCeiling(modelPath({ ledger: [entry(ME, 1, 830_000, { era: "9:9", autoCompactWindowAtStart: 1_000_000 })] }));
+    expect(r.source).toBe("model");
+    expect(r.ceiling).toBe(200_000);
+    expect(r.basis).toMatch(/raised to observed boundary 830000 clamped to native window 200000/);
+  });
 });
