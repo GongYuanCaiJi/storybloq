@@ -24,10 +24,6 @@
   <a href="https://storybloq.com/privacy">Privacy</a>
 </p>
 
-<p align="center">
-  <img src="https://www.storybloq.com/media/luma-board-detail.webp" alt="Storybloq Mac app showing stories and progress in the Luma demo project" />
-</p>
-
 ---
 
 ## The problem
