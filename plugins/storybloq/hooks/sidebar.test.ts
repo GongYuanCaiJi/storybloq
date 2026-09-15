@@ -163,7 +163,10 @@ function harness(fixture: Fixture): Harness {
         if (names.length === 0) throw new Error(`ENOENT: ${dir}`);
         return names.sort().map((name) => ({ name, kind: "file", size: fixture.files[`${dir}/${name}`]!.length }));
       },
-      exists: async (path: string): Promise<boolean> => fixture.files[path] !== undefined,
+      // A file, or a directory with anything under it: the Mod asks about the
+      // ledger DIRECTORY, and the fixture is a flat map of paths.
+      exists: async (path: string): Promise<boolean> =>
+        fixture.files[path] !== undefined || Object.keys(fixture.files).some((file) => file.startsWith(`${path}/`)),
       stat: async (path: string): Promise<{ kind: string; size: number; mtimeMs: number }> => {
         if (fixture.files[path] === undefined) throw new Error(`ENOENT: ${path}`);
         return { kind: "file", size: fixture.files[path]!.length, mtimeMs: fixture.mtimes[path]! };
@@ -474,6 +477,100 @@ test("opens no pane where nothing is drawn and nobody is at the prompt", async (
   await h.fire("session.start", { cwd: "/repo", surface: null, isInteractive: false });
   await h.tick();
   expect(h.opened).toEqual([]);
+});
+
+/** A project that never ran `storybloq init`: no ledger directory at all. */
+function noLedgerFixture(): Fixture {
+  return { files: { "README.md": "# A project" }, mtimes: { "README.md": 1000 } };
+}
+
+test("opens no pane at all in a project with no ledger", async () => {
+  const h = harness(noLedgerFixture());
+  await started(h);
+
+  // A repo that never ran `storybloq init` was getting four bordered "none"
+  // columns and an all-zero issues line: a dashboard reporting on nothing.
+  // M-PANE-WITHOUT-LEDGER opens the pane whatever is there and this fails.
+  expect(h.opened).toEqual([]);
+  // Nothing on the band either, and nothing in the pane if one existed.
+  expect(await h.render(paneEvent())).toBe(null);
+  expect(await h.render({ component: "AbovePrompt", viewport: { columns: 80, rows: 40 }, props: {} })).toBe(null);
+  // Said once, and not again on the next turn.
+  await h.fire("turn.complete", {});
+  await h.tick();
+  expect(h.logged.filter((line) => line.includes("no .story directory"))).toHaveLength(1);
+});
+
+test("opens the pane the moment the ledger appears, without a reload", async () => {
+  const h = harness(noLedgerFixture());
+  await started(h);
+  expect(h.opened).toEqual([]);
+
+  // `storybloq init` in the same session: the pane has to appear on the next
+  // turn rather than at the next reload. M-NOLEDGER-STICKY never clears the
+  // flag and the Mod stays hidden for the rest of the session.
+  h.fixture.files[".story/config.json"] = JSON.stringify({ project: "fresh" });
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "inprogress", title: "Working on it" });
+  for (const path of Object.keys(h.fixture.files)) h.fixture.mtimes[path] = 1000;
+  await h.fire("turn.complete", {});
+  await h.tick();
+
+  expect(h.opened).toEqual([{ id: "storybloq", title: "Storybloq" }]);
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+});
+
+test("opens the pane on the init that made the ledger, inside the turn", async () => {
+  const h = harness(noLedgerFixture());
+  await started(h);
+
+  // The same recovery from the tool call rather than the turn: `init` is a
+  // ledger write like any other, and it is the one that turns a hidden Mod
+  // into a drawn one.
+  h.fixture.files[".story/config.json"] = JSON.stringify({ project: "fresh" });
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "inprogress", title: "Working on it" });
+  for (const path of Object.keys(h.fixture.files)) h.fixture.mtimes[path] = 1000;
+  await h.fire("tool.call", { tool: "Bash", command: "storybloq init", tool_use_id: "init-1" });
+  await h.tick();
+
+  expect(h.opened).toEqual([{ id: "storybloq", title: "Storybloq" }]);
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+});
+
+test("draws four empty columns for a ledger that is there but has nothing in it", async () => {
+  // A fresh `storybloq init` leaves `.story/` with empty subdirectories, and
+  // that IS a ledger: the board belongs there, saying none four times.
+  const h = harness({
+    files: { ".story/config.json": JSON.stringify({ project: "fresh" }) },
+    mtimes: { ".story/config.json": 1000 },
+  });
+  await started(h);
+
+  expect(h.opened).toEqual([{ id: "storybloq", title: "Storybloq" }]);
+  const tree = await h.render(paneEvent());
+  expect(headingOf(tree, "board-open")).toBe("Open 0");
+  expect(cardsOf(tree, "board-open")[0]).toBe("none");
+});
+
+test("says the issues line in a word when every bucket is empty", async () => {
+  const fixture = newFixture();
+  delete fixture.files[".story/issues/ISS-001.json"];
+  delete fixture.mtimes[".story/issues/ISS-001.json"];
+  const h = harness(fixture);
+  await started(h);
+
+  // Four zeros is four numbers to read before finding out there is nothing to
+  // read. M-FOUR-ZEROS prints them.
+  const tree = await h.render(paneEvent(160, 30));
+  expect(textOf(nodeByKey(tree, "issues"))).toBe("issues: none");
+  expect(textOf(nodeByKey(tree, "footer"))).not.toContain("0 critical");
+  // Narrow, where the buckets would have been abbreviated: the same word.
+  expect(textOf(nodeByKey(await h.render(paneEvent(48, 30)), "issues"))).toBe("issues: none");
+  // And one issue of any severity brings the four buckets back.
+  h.fixture.files[".story/issues/ISS-009.json"] = issueText({ id: "ISS-009", severity: "low" });
+  h.fixture.mtimes[".story/issues/ISS-009.json"] = 1000;
+  await h.fire("turn.complete", {});
+  await h.tick();
+  expect(textOf(nodeByKey(await h.render(paneEvent(160, 30)), "issues"))).toContain("1 low");
 });
 
 test("a .story/ write shows up after the turn that made it", async () => {

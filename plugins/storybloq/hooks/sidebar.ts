@@ -117,6 +117,9 @@ const MIN_COLUMN_WIDTH = 12;
  * The severity buckets in the order the footer names them, with the colour a
  * nonzero one carries and the short label it falls back to.
  */
+/** What the issues line says when every bucket is empty. */
+const NO_ISSUES = "issues: none";
+
 const SEVERITY_ORDER = [
   { key: "critical", long: "critical", short: "crit", tone: "red" },
   { key: "high", long: "high", short: "high", tone: "yellow" },
@@ -215,6 +218,8 @@ const SED_COMMAND = "sed";
 /** Where a path can arrive on a built-in file tool's event. */
 const PATH_ARGUMENTS = ["file_path", "path", "notebook_path"] as const;
 const STORY_DIR = ".story/";
+/** The ledger directory itself, which is what says a project HAS a ledger. */
+const LEDGER_DIR = ".story";
 
 /** The cell-width approximation's special code points, and the cut mark. */
 const ZERO_WIDTH_JOINER = 0x200d;
@@ -264,7 +269,10 @@ let sessionActive = false;
 let contextPercent: number | null = null;
 let warm = false;
 let uiAvailable = true;
+/** The project has no `.story/` at all, so the Mod draws nothing anywhere. */
+let noLedger = false;
 let saidNoUi = false;
+let saidNoLedger = false;
 let saidScanFailed = false;
 
 /** Reset between tests; a session only ever loads this module once. */
@@ -287,7 +295,9 @@ function forgetEverything(): void {
   contextPercent = null;
   warm = false;
   uiAvailable = true;
+  noLedger = false;
   saidNoUi = false;
+  saidNoLedger = false;
   saidScanFailed = false;
 }
 
@@ -584,6 +594,63 @@ function finalizeScan($: any, outcome: "done" | "failed"): void {
  * prompted this call, so that write would otherwise never be listed at all.
  * Many requests during one scan collapse into the single scan that follows it.
  */
+/**
+ * Does this project have a ledger at all?
+ *
+ * The directory itself, not `tickets/`: a fresh `storybloq init` leaves
+ * `.story/` with empty subdirectories, and that IS a ledger. A board of four
+ * "none" columns is the right answer there and the wrong one in a repo that
+ * never ran init.
+ *
+ * A host that refuses the question answers yes: the Mod hiding itself because
+ * `$.fs.exists` threw would be a worse failure than one empty board.
+ */
+async function ledgerPresent($: any): Promise<boolean> {
+  try {
+    return (await $.fs.exists(LEDGER_DIR)) !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Opens the pane and reads the ledger: everything `session.start` does once
+ * it knows there is something to draw.
+ *
+ * Also the recovery path. A project that had no `.story/` when the session
+ * started gets one the moment someone runs `storybloq init`, and the pane has
+ * to appear then rather than at the next reload, so `turn.complete` and a
+ * ledger-writing `tool.call` both come back through here.
+ */
+async function attach($: any): Promise<void> {
+  if (!paneOpen) {
+    await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
+    paneOpen = true;
+  }
+  // The context figures belong to the window, not to the turn: they are
+  // readable the moment the Mod loads into a session that has already had a
+  // response. Reading them only on `turn.complete` is why the owner's header
+  // was blank after a reload, with the fill only appearing a turn later.
+  contextPercent = await readContextFill($);
+  await readHeader($);
+  await loadCache($);
+  startTimer($);
+  requestScan($);
+}
+
+/**
+ * The ledger was missing; is it there now? Attaches if it is.
+ *
+ * Nothing is drawn while it is absent, so this is the only way back: every
+ * refresh the Mod already made asks the question again, and the answer costs
+ * one `$.fs.exists` on a project that has no ledger to read anyway.
+ */
+async function attachIfLedgerArrived($: any): Promise<void> {
+  if (!(await ledgerPresent($))) return;
+  noLedger = false;
+  await attach($);
+}
+
 function requestScan($: any): void {
   if (scanActive || scanInitializing) {
     pendingRefresh = true;
@@ -1292,6 +1359,28 @@ function footerNode(
   const contextText = context === null ? "" : `context ${context}%`;
   const room = Math.max(1, width - cellWidth(contextText) - 1);
   const counts = SEVERITY_ORDER.map((severity) => bySeverity[severity.key] ?? 0);
+  // A ledger with nothing open says so in a word. Four zeros is four numbers
+  // to read before finding out there is nothing to read, and it looks like a
+  // pane that failed rather than a project with no open issues. The
+  // abbreviated row says the same word, since there is nothing to abbreviate.
+  if (counts.every((count) => count === 0)) {
+    return elements.Box({
+      key: "footer",
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      children: [
+        elements.Box({
+          key: "issues",
+          flexDirection: "row",
+          width: Math.min(room, cellWidth(NO_ISSUES)),
+          overflow: "hidden",
+          children: [elements.Text({ dimColor: true, wrap: "truncate", children: NO_ISSUES })],
+        }),
+        elements.Text({ key: "context", wrap: "truncate", children: contextText }),
+      ],
+    });
+  }
   const long = `issues: ${SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.long}`).join(", ")}`;
   const short = SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.short}`).join(" ");
   const abbreviated = cellWidth(long) > room;
@@ -1342,6 +1431,9 @@ export function registerSidebar(on: On, _options: Options): void {
   // `$.ui.invalidate("ui.render")`, so this hook only draws what the refresh
   // hooks have already computed: it awaits nothing.
   (on("ui.render", ($: any, e: any, next: (e: any) => unknown) => {
+    // Nothing is drawn without a ledger, pane or band: there is no pane open
+    // to render into, and the band's line would be the empty board in one row.
+    if (noLedger) return next(e);
     if (e.component === "Pane" && e.requestId === PANE_ID) {
       const elements = $.ui.resolve(e);
       const { Box, Text } = elements;
@@ -1404,22 +1496,25 @@ export function registerSidebar(on: On, _options: Options): void {
     // the prompt, so there is no pane to open and no ledger worth reading for
     // a sidebar nobody will see.
     if (e.surface === null || e.isInteractive !== true) return next(e);
+    // On, whatever happens next: the refresh hooks stay armed so the pane can
+    // appear the moment a ledger does.
     sidebarEnabled = true;
-    // `session.start` fires again on a reload, and an open of an open id only
-    // retitles it, but asking twice is still asking twice.
-    if (!paneOpen) {
-      await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
-      paneOpen = true;
+    // No `.story/` means no pane, by the owner's ruling. A project that never
+    // ran `storybloq init` was getting four bordered "none" columns and an
+    // all-zero issues line, which is a dashboard reporting on nothing; the Mod
+    // hides instead, and says so once in the log rather than every turn.
+    if (!(await ledgerPresent($))) {
+      noLedger = true;
+      if (!saidNoLedger) {
+        saidNoLedger = true;
+        $.ui.log("storybloq sidebar: no .story directory here, so the pane stays closed until storybloq init runs");
+      }
+      return next(e);
     }
-    // The context figures belong to the window, not to the turn: they are
-    // readable the moment the Mod loads into a session that has already had a
-    // response. Reading them only on `turn.complete` is why the owner's header
-    // was blank after a reload, with the fill only appearing a turn later.
-    contextPercent = await readContextFill($);
-    await readHeader($);
-    await loadCache($);
-    startTimer($);
-    requestScan($);
+    noLedger = false;
+    // `session.start` fires again on a reload, and an open of an open id only
+    // retitles it, but asking twice is still asking twice: `attach` asks once.
+    await attach($);
     return next(e);
   });
 
@@ -1427,6 +1522,10 @@ export function registerSidebar(on: On, _options: Options): void {
   // up by the next prompt.
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
+    if (noLedger) {
+      await attachIfLedgerArrived($);
+      return next(e);
+    }
     contextPercent = await readContextFill($);
     await readHeader($);
     requestScan($);
@@ -1446,12 +1545,18 @@ export function registerSidebar(on: On, _options: Options): void {
   // client-api.ts, which is not this Mod's file to change.
   on("tool.call", async ($: any, e: any, next: (e: any) => unknown) => {
     const result = await next(e);
-    if (uiAvailable && sidebarEnabled && wroteLedger(e)) requestScan($);
+    if (uiAvailable && sidebarEnabled && wroteLedger(e)) {
+      // `storybloq init` is a ledger write like any other, and it is the one
+      // that turns a hidden Mod into a drawn one, so the no-ledger case goes
+      // through the same filter rather than waiting for the turn to end.
+      if (noLedger) await attachIfLedgerArrived($);
+      else requestScan($);
+    }
     return result;
   });
 
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable || !sidebarEnabled) return next(e);
+    if (!uiAvailable || !sidebarEnabled || noLedger) return next(e);
     contextPercent = await readContextFill($);
     $.ui.invalidate("ui.render");
     return next(e);
