@@ -25,6 +25,7 @@ import {
 import { describeSessionLookupFailure } from "../../src/autonomous/session.js";
 import { registerAllTools, runMcpWriteTool } from "../../src/mcp/tools.js";
 import { ProjectLoaderError } from "../../src/core/errors.js";
+import { CliValidationError } from "../../src/cli/helpers.js";
 import { initProject } from "../../src/core/init.js";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -299,6 +300,14 @@ describe("runMcpWriteTool error replies carry the note on both exits", () => {
     const r = await runMcpWriteTool(tmpdir(), () => Promise.reject(new ProjectLoaderError("project_corrupt", "roadmap.json is unparseable")));
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("roadmap.json is unparseable");
+    expect(r.content[0]!.text).toContain("restart the client");
+  });
+
+  it("a thrown CliValidationError carries it", async () => {
+    stale();
+    const r = await runMcpWriteTool(tmpdir(), () => Promise.reject(new CliValidationError("invalid_input", "slug is required")));
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("slug is required");
     expect(r.content[0]!.text).toContain("restart the client");
   });
 
