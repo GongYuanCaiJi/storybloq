@@ -57,21 +57,16 @@ function clientAvailable(): boolean {
 }
 
 /**
- * Validates the plugin as the client will load it. The scaffold's `mod.ts` is
- * another session's file and wires the sidebar in its own commit, so until it
- * does, this validates a copy with the wiring added: the scan follows imports,
- * so what it prints for the copy is what it will print for the real one.
+ * Validates a copy of the plugin whose hooks module wires the sidebar ALONE.
+ * The real `mod.ts` wires the roster Mod beside it (T-507), and the scan
+ * follows imports and prints one list for the whole graph, so validating the
+ * real plugin could not tell a sidebar call from a roster call: a `$` call
+ * the sidebar dropped would still be supplied by the roster. The copy keeps
+ * this file's contract exact; test/plugin/roster-validate.test.ts pins the
+ * union the real module prints.
  */
 function validateOutput(): string {
   const realMod = readFileSync(join(PLUGIN_DIR, "hooks", "mod.ts"), "utf8");
-  const alreadyWired = realMod.includes('from "./sidebar.js"');
-  if (alreadyWired) {
-    return execFileSync("claude", ["plugin", "validate", PLUGIN_DIR], {
-      encoding: "utf8",
-      env: { ...process.env, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" },
-    });
-  }
-
   const dir = mkdtempSync(join(tmpdir(), "storybloq-sidebar-validate-"));
   try {
     mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
@@ -83,11 +78,13 @@ function validateOutput(): string {
     for (const name of ["hooks.json", "client-api.ts", "sidebar.ts", "sidebar-projection.ts"]) {
       copyFileSync(join(PLUGIN_DIR, "hooks", name), join(dir, "hooks", name));
     }
-    const wired = realMod
-      .replace("type Options = Readonly<", 'import { registerSidebar } from "./sidebar.js";\n\ntype Options = Readonly<')
-      .replace("// T-508 wires here: if (sidebar) registerSidebar(on, options);", "if (sidebar) registerSidebar(on, options);");
-    expect(wired, "mod.ts no longer carries the T-508 wiring comment").not.toBe(realMod);
-    writeFileSync(join(dir, "hooks", "mod.ts"), wired);
+    const withoutImport = realMod.replace(/^import \{ registerRoster \} from "\.\/roster\.js";\n/m, "");
+    expect(withoutImport, "mod.ts no longer carries the roster import this copy removes").not.toBe(realMod);
+    const sidebarOnly = withoutImport.replace(/^\s*if \(roster\) registerRoster\(on, options\);\n/m, "");
+    expect(sidebarOnly, "mod.ts no longer carries the roster wiring line this copy removes").not.toBe(withoutImport);
+    expect(sidebarOnly).not.toContain("roster.js");
+    expect(sidebarOnly).not.toMatch(/\bregisterRoster\b/);
+    writeFileSync(join(dir, "hooks", "mod.ts"), sidebarOnly);
     return execFileSync("claude", ["plugin", "validate", dir], {
       encoding: "utf8",
       env: { ...process.env, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" },

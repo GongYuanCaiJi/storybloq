@@ -14,10 +14,10 @@
  * names are string literals at every on() call, as the client's source scan
  * requires; the pinned list they are checked against is client-api.ts.
  *
- * The sidebar landed at 72f98679 (T-508); the roster lands with T-507 and
- * wires in at the marked line.
+ * The sidebar landed at 72f98679 (T-508) and the roster with T-507.
  */
 
+import { registerRoster } from "./roster.js";
 import { registerSidebar } from "./sidebar.js";
 
 export type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>;
@@ -29,6 +29,6 @@ export function register(on: On, options: Options): void {
   const roster = options["roster"] === true;
   const sidebar = options["sidebar"] === true;
   if (!roster && !sidebar) return;
-  // T-507 wires here: if (roster) registerRoster(on, options);
+  if (roster) registerRoster(on, options);
   if (sidebar) registerSidebar(on, options);
 }

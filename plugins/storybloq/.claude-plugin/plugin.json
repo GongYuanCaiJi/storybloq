@@ -34,6 +34,6 @@
     }
   },
   "metadata": {
-    "functionHooks": "Early-access Claude Code API (client 2.1.272, see hooks/client-api.ts). Both Mods are off until their userConfig option is set; no product decision on shipping them is implied by their presence here (T-505)."
+    "functionHooks": "Early-access Claude Code API (client 2.1.273, see hooks/client-api.ts). Both Mods are off until their userConfig option is set; no product decision on shipping them is implied by their presence here (T-505)."
   }
 }
