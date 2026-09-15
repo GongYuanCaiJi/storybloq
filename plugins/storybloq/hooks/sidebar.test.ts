@@ -275,12 +275,14 @@ function harness(fixture: Fixture): Harness {
 
 const START = { cwd: "/repo", surface: "terminal", isInteractive: true };
 
-function paneEvent(columns = 160, bodyRows = 30): unknown {
+// The screen defaults to the rows the pane reports, because that is the case
+// the row budget has to survive: a terminal no taller than what was drawn.
+function paneEvent(columns = 160, bodyRows = 30, rows = bodyRows): unknown {
   return {
     surface: "terminal",
     component: "Pane",
     requestId: "storybloq",
-    viewport: { columns, rows: 40 },
+    viewport: { columns, rows },
     props: {
       title: "Storybloq",
       isFocused: false,
@@ -904,6 +906,23 @@ test("caps a column at eight and ends it with dots", async () => {
   expect(headingOf(tree, "board-open")).toBe("Open 17");
 });
 
+test("treats a ninth card as the tail, not as a ninth card", async () => {
+  const h = harness(manyOpen(4));
+  await started(h);
+
+  // Exactly nine open: the cap is eight, so the ninth row is the tail and not
+  // a card. M-NINE-CARDS leaves the count unclamped and the column draws all
+  // nine with nothing to say it was capped, which is the one case where the
+  // heading and the rows disagree without anyone noticing.
+  const tree = await h.render(paneEvent(160, 30));
+  const cards = cardsOf(tree, "board-open");
+
+  expect(headingOf(tree, "board-open")).toBe("Open 9");
+  expect(cards.length).toBe(9);
+  expect(cards[8]).toBe("...");
+  expect(cards.slice(0, 8).every((row) => row.startsWith("T-"))).toBe(true);
+});
+
 test("leaves a column that fits without a tail, and levels the four bodies", async () => {
   const h = harness(newFixture());
   await started(h);
@@ -1062,21 +1081,48 @@ test("emphasises the column being worked, and lets the finished one recede", asy
  * one row, a column Box its children plus its gaps, a row Box the tallest of
  * them, and a border adds one row above and one below.
  */
-function paneHeight(node: unknown): number {
+/** The cells a node asks for: its own width if it names one, else its text. */
+function nodeWidth(node: unknown): number {
+  const props = (node as { props?: Record<string, unknown> })?.props ?? {};
+  return typeof props["width"] === "number" ? (props["width"] as number) : cells(textOf(node));
+}
+
+/** A node that cuts its own text rather than letting the row wrap it. */
+function truncates(node: unknown): boolean {
+  const element = (node as { element?: string })?.element;
+  const props = (node as { props?: Record<string, unknown> })?.props ?? {};
+  return element !== "Box" && typeof props["wrap"] === "string";
+}
+
+// Pass a width and the wrapping is counted too: a Text that names a `wrap`
+// keeps to one row however long it is, and one that does not takes as many
+// rows as its content needs. Without a width nothing wraps, which is what
+// every row-budget test measures.
+function paneHeight(node: unknown, width = Infinity): number {
   if (node === null || node === undefined) return 0;
-  if (Array.isArray(node)) return node.reduce((sum: number, child) => sum + paneHeight(child), 0);
+  if (Array.isArray(node)) return node.reduce((sum: number, child) => sum + paneHeight(child, width), 0);
   if (typeof node !== "object") return 0;
   const element = (node as { element?: string }).element;
   const props = (node as { props?: Record<string, unknown> }).props ?? {};
-  if (element !== "Box") return 1;
+  const own = typeof props["width"] === "number" ? (props["width"] as number) : width;
+  if (element !== "Box") {
+    if (typeof props["wrap"] === "string") return 1;
+    return Math.max(1, Math.ceil(cells(textOf(node)) / own));
+  }
   const children = props["children"];
   const list: unknown[] = Array.isArray(children) ? children : children === undefined ? [] : [children];
   const border = typeof props["borderStyle"] === "string" ? 2 : 0;
   const gap = typeof props["gap"] === "number" ? (props["gap"] as number) : 0;
   if (props["flexDirection"] === "row") {
-    return border + list.reduce((tallest: number, child) => Math.max(tallest, paneHeight(child)), 0);
+    // Children that do not truncate are wrapped by the row they overflow, so
+    // a row wider than its box costs the rows its content needs.
+    const natural = list.reduce((sum: number, child) => sum + nodeWidth(child), 0);
+    if (natural > own && list.some((child) => !truncates(child))) {
+      return border + Math.ceil(natural / own);
+    }
+    return border + list.reduce((tallest: number, child) => Math.max(tallest, paneHeight(child, own)), 0);
   }
-  return border + list.reduce((sum: number, child) => sum + paneHeight(child), 0) + gap * Math.max(0, list.length - 1);
+  return border + list.reduce((sum: number, child) => sum + paneHeight(child, own), 0) + gap * Math.max(0, list.length - 1);
 }
 
 test("draws no more rows than the pane gave it", async () => {
@@ -1095,6 +1141,27 @@ test("draws no more rows than the pane gave it", async () => {
         expect(headingOf(tree, key)).toMatch(/ \d+$/);
       }
     }
+  }
+});
+
+test("draws the whole board on a tall terminal whatever the pane reports", async () => {
+  const h = harness(manyOpen(12));
+  await started(h);
+
+  // The owner's reload: 213 columns on a 61 row terminal, and the pane drew
+  // the compact fallback where the build before drew eight cards a column.
+  // `scroll.bodyRows` is the height of the tree we last drew, not the room we
+  // have, so a short board makes the next budget shorter and the pane never
+  // climbs back out. M-BUDGET-SELF-LIMIT takes the field as the cap again and
+  // every one of these collapses to four counted rows.
+  for (const reported of [0, 4, 6, 16]) {
+    const tree = await h.render(paneEvent(213, reported, 61));
+    const cards = cardsOf(tree, "board-open");
+    expect(nodeByKey(tree, "board-open").element).toBe("Box");
+    expect(cards.length).toBe(9);
+    expect(cards[8]).toBe("...");
+    expect(headingOf(tree, "board-open")).toBe("Open 17");
+    expect(paneRows(tree)[1]).toBe(" ");
   }
 });
 
@@ -1154,13 +1221,65 @@ test("measures a title in terminal cells, not in characters", async () => {
   }
 });
 
+test("cuts a title between glyphs, never inside one", async () => {
+  const h = harness(newFixture());
+  // A joined emoji, an emoji spelled with the variation selector, a letter
+  // carrying a combining mark, and a bare surrogate pair. The measure
+  // suppresses the code point after a zero-width joiner and a cut that walks
+  // code points counts it again, so the two disagree by a code point per
+  // joiner and the cut lands inside the glyph: M-SPLIT-EMOJI walks code
+  // points and the woman is parted from her laptop.
+  const titles: Record<string, string> = {
+    "T-040": "👩‍💻".repeat(14),
+    "T-041": "♥️".repeat(24),
+    "T-042": "é".repeat(40),
+    "T-043": "𝔘".repeat(40),
+  };
+  for (const [id, title] of Object.entries(titles)) {
+    const path = `.story/tickets/${id}.json`;
+    h.fixture.files[path] = ticketText({ id, status: "open", order: Number(id.slice(2)), title });
+    h.fixture.mtimes[path] = 1000;
+  }
+  await started(h);
+
+  for (const columns of [110, 158]) {
+    const rows = cardsOf(await h.render(paneEvent(columns, 30)), "board-open");
+    const row = (id: string): string => rows.find((text) => text.startsWith(id)) ?? "";
+
+    // Every joiner still joins two halves, and none dangles at the cut.
+    const joined = row("T-040");
+    expect(joined).not.toBe("");
+    expect(joined).toContain("👩‍💻");
+    expect([...joined].filter((c) => c === "‍").length).toBe([...joined].filter((c) => c === "👩").length);
+    expect(joined.includes("‍…")).toBe(false);
+    expect(joined.endsWith("‍")).toBe(false);
+
+    // A variation selector belongs to the glyph before it and a combining
+    // mark to the letter before it, so what stands before the ellipsis is a
+    // whole glyph and never its bare base.
+    for (const [id, mark] of [["T-041", "️"], ["T-042", "́"]] as const) {
+      const text = row(id);
+      expect(text.endsWith("…")).toBe(true);
+      expect(text.slice(0, -1).endsWith(mark)).toBe(true);
+    }
+
+    // And a surrogate pair is never halved, which would draw a lone unit.
+    for (const character of row("T-043")) {
+      const point = character.codePointAt(0) ?? 0;
+      expect(point < 0xd800 || point > 0xdfff).toBe(true);
+    }
+  }
+});
+
 test("colours the severities that exist and dims the ones that do not", async () => {
   const h = harness(newFixture());
   h.fixture.files[".story/issues/ISS-002.json"] = issueText({ id: "ISS-002", severity: "high" });
   h.fixture.mtimes[".story/issues/ISS-002.json"] = 1000;
   await started(h);
   const tree = await h.render(paneEvent(160, 30));
-  const parts = (nodeByKey(tree, "issues").props.children as any[]).filter(
+  // The fragments hang inside the one truncating Text that holds the row.
+  const line = (nodeByKey(tree, "issues").props.children as any[])[0];
+  const parts = (line.props.children as any[]).filter(
     (child) => typeof child?.props?.children === "string" && /\d/.test(child.props.children),
   );
 
@@ -1191,6 +1310,28 @@ test("shortens the severity labels when the row is too narrow for them", async (
   expect(text).toContain("1 crit");
   expect(text).not.toContain("critical");
   expect(textOf(nodeByKey(narrow, "context"))).toBe("context 20%");
+});
+
+test("keeps the issues line to one row when the counts outgrow the room", async () => {
+  const fixture = newFixture();
+  // Counts in the hundreds: "234 crit 345 high 456 med 567 low" is far wider
+  // than a forty column pane has left once the context fill has its share.
+  const severities = ["critical", "high", "medium", "low"];
+  for (let i = 0; i < 400; i += 1) {
+    const path = `.story/issues/ISS-${100 + i}.json`;
+    fixture.files[path] = issueText({ id: `ISS-${100 + i}`, severity: severities[i % 4] });
+    fixture.mtimes[path] = 1000;
+  }
+  const h = harness(fixture);
+  await started(h);
+
+  // One row, not two. M-FOOTER-WRAPS drops the truncation and the row wraps,
+  // which spends a row the budget counted for the board.
+  const tree = await h.render(paneEvent(40, 30));
+  expect(textOf(nodeByKey(tree, "context"))).toBe("context 20%");
+  expect(paneHeight(nodeByKey(tree, "footer"), 40)).toBe(1);
+  // And the numbers are still there to be cut, not quietly dropped first.
+  expect(textOf(nodeByKey(tree, "issues"))).toContain("101 crit");
 });
 
 test("keeps the header clear of the cell the engine draws its close mark in", async () => {
@@ -1321,9 +1462,58 @@ test("sweeps for a Bash command that can have written the ledger", async () => {
   h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
   h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
 
-  // A command is opaque, so both halves have to hold: it names the ledger and
-  // it can write. This one does both.
+  // The verb is in subcommand position, so the CLI wrote whatever path it
+  // resolved for itself.
   await h.fire("tool.call", { tool: "Bash", command: "storybloq ticket update T-001 --status complete", tool_use_id: "b1" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("reads the direction of a Bash command, not just the words in it", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // Every command here touches the ledger and none of them writes it. The
+  // ledger has already moved, so a board that moves is a sweep that should
+  // not have happened. M-REDIRECT-FROM-LEDGER takes any mutation beside any
+  // mention of the directory, so the two that read OUT of it sweep;
+  // M-VERB-ANYWHERE takes a writing word anywhere after `storybloq`, so the
+  // tag filter and the quoted line sweep.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  const readers = [
+    "cat .story/tickets/T-001.json > /tmp/x.json",
+    "cp .story/tickets/T-001.json /tmp/x.json",
+    "storybloq note list --tags update",
+    'echo "storybloq ticket update"',
+    "cat .story/config.json\ngrep -c inprogress .story/tickets/T-001.json\nls .story/handovers",
+  ];
+  for (const [index, command] of readers.entries()) {
+    await h.fire("tool.call", { tool: "Bash", command, tool_use_id: `dir-${index}` });
+    await h.tick();
+    expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+
+  // And the same shapes pointed the other way do sweep.
+  await h.fire("tool.call", { tool: "Bash", command: "cp /tmp/x.json .story/tickets/T-099.json", tool_use_id: "dir-in" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("sweeps for the CLI writing under a flag that reads like prose", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // `create` is the subcommand; the `update` in the quoted content is not a
+  // verb and neither decides anything. The write still has to be seen.
+  await h.fire("tool.call", {
+    tool: "Bash",
+    command: 'storybloq note create --content "please update the board"',
+    tool_use_id: "b3",
+  });
   await h.tick();
   expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
 });

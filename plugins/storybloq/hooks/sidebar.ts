@@ -176,13 +176,21 @@ const LEDGER_WRITE_VERB = /_(create|update|set|unset|add|init|snapshot|reinforce
 const MUTATING_FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const BASH_TOOL = "Bash";
 /**
- * The storybloq CLI writing the ledger: a write whatever path it names, since
- * the CLI resolves `.story/` itself and the command line need not mention it.
+ * The storybloq CLI's writing subcommands, the same verbs the tool names end
+ * in, and how far after `storybloq` one still counts as the subcommand
+ * (`storybloq note create`, so two words).
  */
-const BASH_LEDGER_COMMAND =
-  /\bstorybloq\b[^;|&]*\b(create|update|set|unset|add|init|snapshot|reinforce|supersede)\b/;
-/** A shell mutation, which only counts where the command also names .story/. */
-const BASH_MUTATION = />>?|\bmv\s|\bcp\s|\brm\s|\btee\s|\bsed\s+-i/;
+const CLI_NAME = "storybloq";
+const WRITE_VERBS = ["create", "update", "set", "unset", "add", "init", "snapshot", "reinforce", "supersede"];
+const CLI_VERB_DEPTH = 2;
+/** What cuts a command line into pieces each judged on its own. */
+const SEGMENT_BREAK = /[;|&\n]+/;
+/** The shell verbs that write, and the one token a redirect is reduced to. */
+const REDIRECT = ">";
+const COPY_COMMANDS = new Set(["cp", "mv", "install"]);
+const TEE_COMMAND = "tee";
+const REMOVE_COMMAND = "rm";
+const SED_COMMAND = "sed";
 /** Where a path can arrive on a built-in file tool's event. */
 const PATH_ARGUMENTS = ["file_path", "path", "notebook_path"] as const;
 const STORY_DIR = ".story/";
@@ -282,32 +290,58 @@ function reproject(): void {
 }
 
 /**
+ * The graphemes of a string with the cells each one takes.
+ *
+ * One routine, used by both the measuring and the cutting, because two that
+ * disagree is how "👩‍💻abc" cut to four cells came apart in the middle of the
+ * emoji: the measure suppressed the code point after the zero-width joiner
+ * and the cut counted it again. `Intl.Segmenter` gives the clusters (this
+ * runtime has it; where it does not, the fallback is code points, which is
+ * the old behaviour and no worse). A cluster is two cells wide if any code
+ * point in it is wide, or if it carries the emoji variation selector, which
+ * is what makes a text glyph like "♥️" render double.
+ */
+function graphemes(text: string): { cluster: string; cells: number }[] {
+  const out: { cluster: string; cells: number }[] = [];
+  for (const cluster of clustersOf(text)) {
+    let cells = 0;
+    let emoji = false;
+    for (const character of cluster) {
+      const point = character.codePointAt(0) ?? 0;
+      if (point === VARIATION_SELECTOR) emoji = true;
+      if (isCombining(point) || point === VARIATION_SELECTOR || point === ZERO_WIDTH_JOINER) continue;
+      cells = Math.max(cells, isWide(point) ? 2 : 1);
+    }
+    out.push({ cluster, cells: emoji ? 2 : Math.max(cells, cluster === "" ? 0 : 1) });
+  }
+  return out;
+}
+
+/** Grapheme clusters where the runtime has them, code points where it does not. */
+function clustersOf(text: string): string[] {
+  const segmenter = (Intl as unknown as { Segmenter?: any }).Segmenter;
+  if (typeof segmenter === "function") {
+    const out: string[] = [];
+    for (const part of new segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
+      out.push(part.segment as string);
+    }
+    return out;
+  }
+  return [...text];
+}
+
+/**
  * How many terminal cells a string takes, which is not its length.
  *
- * A CJK ideograph or an emoji occupies two cells, a combining mark none, and
- * a zero-width joiner welds what follows onto what came before. Measuring
- * `.length` instead overruns a column by a cell per wide character, and the
- * row wraps, and the board comes apart; measuring code points alone is wrong
- * the other way. This is the usual approximation (the East Asian Wide and
- * Fullwidth blocks plus the emoji planes), not a full Unicode width table,
- * which is more than a sidebar can carry.
+ * A CJK ideograph or an emoji occupies two cells and a combining mark none,
+ * so measuring `.length` overruns a column by a cell per wide character, the
+ * row wraps, and the board comes apart. This is the usual approximation (the
+ * East Asian Wide and Fullwidth blocks plus the emoji planes), not a full
+ * Unicode width table, which is more than a sidebar can carry.
  */
 function cellWidth(text: string): number {
   let width = 0;
-  let joined = false;
-  for (const character of text) {
-    const point = character.codePointAt(0) ?? 0;
-    if (point === ZERO_WIDTH_JOINER) {
-      joined = true;
-      continue;
-    }
-    if (isCombining(point) || point === VARIATION_SELECTOR) continue;
-    if (joined) {
-      joined = false;
-      continue;
-    }
-    width += isWide(point) ? 2 : 1;
-  }
+  for (const { cells } of graphemes(text)) width += cells;
   return width;
 }
 
@@ -350,24 +384,23 @@ function isWide(point: number): boolean {
  * Cuts a string to fit `cells` terminal cells, ending in one ellipsis where
  * anything was cut.
  *
- * Code point by code point, so a surrogate pair is never halved and a
- * combining mark rides along with the character it marks. The ellipsis is
- * U+2026, one cell wide.
+ * Cluster by cluster, on the same measure the width uses, so a family emoji
+ * or an accented letter is either wholly in or wholly out and never halved.
+ * The ellipsis is U+2026, one cell wide.
  */
 function truncate(text: string, cells: number): string {
   if (cells <= 0) return "";
-  if (cellWidth(text) <= cells) return text;
+  const parts = graphemes(text);
+  let total = 0;
+  for (const part of parts) total += part.cells;
+  if (total <= cells) return text;
   const room = cells - 1;
   let width = 0;
   let out = "";
-  for (const character of text) {
-    const point = character.codePointAt(0) ?? 0;
-    const step = isCombining(point) || point === VARIATION_SELECTOR || point === ZERO_WIDTH_JOINER
-      ? 0
-      : isWide(point) ? 2 : 1;
-    if (width + step > room) break;
-    width += step;
-    out += character;
+  for (const part of parts) {
+    if (width + part.cells > room) break;
+    width += part.cells;
+    out += part.cluster;
   }
   return `${out}${ELLIPSIS}`;
 }
@@ -669,6 +702,99 @@ async function readContextFill($: any): Promise<number | null> {
 }
 
 /**
+ * A command line cut into words, quotes honoured and redirects singled out.
+ *
+ * Quoting is what makes `echo "storybloq ticket update"` a single word rather
+ * than a CLI call, so the quoted run is kept whole and never split. `>` and
+ * `>>` come back as one `REDIRECT` token however they were spaced, so the
+ * word after one is the destination.
+ */
+function tokenize(segment: string): string[] {
+  const words: string[] = [];
+  let word = "";
+  let quote = "";
+  const flush = (): void => {
+    if (word !== "") words.push(word);
+    word = "";
+  };
+  for (const character of segment) {
+    if (quote !== "") {
+      if (character === quote) quote = "";
+      else word += character;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === REDIRECT) {
+      flush();
+      if (words[words.length - 1] !== REDIRECT) words.push(REDIRECT);
+      continue;
+    }
+    if (character === " " || character === "\t") {
+      flush();
+      continue;
+    }
+    word += character;
+  }
+  flush();
+  return words;
+}
+
+/** A word that names something inside the ledger directory. */
+function inLedger(word: string | undefined): boolean {
+  return typeof word === "string" && word.includes(STORY_DIR);
+}
+
+/**
+ * Did one pipeline segment write the ledger?
+ *
+ * Direction is the whole question. `cat .story/tickets/T-001.json > /tmp/x`
+ * and `cp .story/tickets/T-001.json /tmp/x` both name the ledger and both
+ * write a file, and neither changes a thing we draw; only where the ledger is
+ * the DESTINATION has anything moved. So a redirect counts at its target, a
+ * copy or a move at its last word, and `tee` at any of its files. `rm` and
+ * `sed -i` are the two that write the path they are given.
+ */
+function segmentWrote(segment: string): boolean {
+  const tokens = tokenize(segment);
+  const words: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index] === REDIRECT) {
+      index += 1;
+      if (inLedger(tokens[index])) return true;
+      continue;
+    }
+    words.push(tokens[index]!);
+  }
+  if (words.length === 0) return false;
+
+  // The CLI resolves `.story/` itself, so the command line need not name it;
+  // what says it writes is the SUBCOMMAND. A verb further along is an
+  // argument (`storybloq note list --tags update`) or prose in a flag's
+  // value, and neither writes anything.
+  const cli = words.findIndex((word) => word === CLI_NAME || word.endsWith(`/${CLI_NAME}`));
+  if (cli !== -1) {
+    for (let index = cli + 1; index <= cli + CLI_VERB_DEPTH && index < words.length; index += 1) {
+      if (WRITE_VERBS.includes(words[index]!)) return true;
+    }
+  }
+
+  const verb = words[0]!;
+  const rest = words.slice(1);
+  if (COPY_COMMANDS.has(verb)) return rest.length >= 2 && inLedger(rest[rest.length - 1]);
+  if (verb === TEE_COMMAND || verb === REMOVE_COMMAND) return rest.some(inLedger);
+  if (verb === SED_COMMAND) return rest.some((word) => word.startsWith("-i")) && rest.some(inLedger);
+  return false;
+}
+
+/** Every segment of a command line, each judged on its own. */
+function commandWroteLedger(command: string): boolean {
+  return command.split(SEGMENT_BREAK).some(segmentWrote);
+}
+
+/**
  * Did this tool call change the ledger?
  *
  * The question has to be answered from the tool NAME first, because a ledger
@@ -677,25 +803,29 @@ async function readContextFill($: any): Promise<number | null> {
  * file all mention the directory and none of them change a thing.
  *
  *   tool                                              scan
- *   storybloq_* / mcp__storybloq__* ending in a       yes
- *     writing verb (ticket_update, meta_set, ...)
+ *   storybloq_* / mcp__storybloq__* whose last word   yes
+ *     is a writing verb (ticket_update, meta_set)
  *   any other storybloq tool (status, list, get)      no
  *   Write, Edit, MultiEdit, NotebookEdit at a         yes
  *     path under .story/
  *   the same four anywhere else                       no
  *   Bash running the storybloq CLI with a writing     yes
- *     verb (it resolves .story/ itself, so the
- *      command line need not name the directory)
- *   Bash whose command names .story/ AND mutates      yes
- *     it (a redirect, mv, cp, rm, tee, sed -i)
+ *     verb in SUBCOMMAND position (it resolves
+ *      .story/ itself, so the command line need
+ *      not name the directory)
+ *   Bash writing INTO .story/ (a redirect whose       yes
+ *     destination is there, cp or mv whose last
+ *      argument is, tee at one, rm or sed -i of one)
+ *   Bash reading .story/ and writing elsewhere        no
+ *     (cat a ticket into /tmp, cp one out of it)
  *   Bash otherwise (cat, ls, grep, git status,        no
  *     storybloq status, storybloq ticket list)
  *   Read, Glob, Grep, LS, anything else               no
  *
- * Bash is conservative by construction: a command is opaque, so the two
- * halves (it touches the ledger, and it can write) both have to hold. A
- * missed write costs one turn of staleness, since turn.complete still scans;
- * a false positive costs a stat sweep of the whole ledger, which is worse.
+ * Bash is conservative by construction: what it cannot read confidently does
+ * not sweep. A missed write costs one turn of staleness, since turn.complete
+ * still scans; a false positive costs a stat sweep of the whole ledger for
+ * every ledger read in the session, which is worse.
  *
  * Pure, and it reads only the few fields a path or a command arrives in, so a
  * Write of a megabyte is not serialized to answer a yes or no question.
@@ -707,9 +837,7 @@ function wroteLedger(e: any): boolean {
   if (bare.startsWith(LEDGER_TOOL_PREFIX)) return LEDGER_WRITE_VERB.test(bare);
   if (tool === BASH_TOOL) {
     const command: unknown = e?.["command"];
-    if (typeof command !== "string") return false;
-    if (BASH_LEDGER_COMMAND.test(command)) return true;
-    return command.includes(STORY_DIR) && BASH_MUTATION.test(command);
+    return typeof command === "string" && commandWroteLedger(command);
   }
   if (!MUTATING_FILE_TOOLS.has(tool)) return false;
   for (const key of PATH_ARGUMENTS) {
@@ -728,8 +856,8 @@ function isStacked(width: number): boolean {
  * How many card rows each column may draw, and whether the pane can afford
  * the blank rows around the board at all.
  *
- * The pane clips at `props.scroll.bodyRows`, silently, so the budget is
- * counted out before anything is drawn:
+ * The pane clips what will not fit, silently, so the budget is counted out
+ * before anything is drawn:
  *
  *   header 1, header gap 1, footer gap 1, footer 1   = 4 chrome rows
  *   the card's border, above and below              = 2
@@ -746,20 +874,42 @@ function isStacked(width: number): boolean {
  * What comes back is the rows one BODY may draw, tail included; the board
  * decides how many of those are cards once it knows whether anything was left
  * out.
+ *
+ * WHY `bodyRows` IS NOT THE ROOM. The owner reloaded a 213 column, 61 row
+ * terminal and got the compact fallback where the build before drew eight
+ * cards a column. `scroll.bodyRows` is not the height the surface has for us:
+ * `SiteScroll` is "where a site's window sits over THE TREE A HOOK DREW in
+ * it", and `ui.scroll` spells the same field "how many rows of the tree the
+ * window shows at once, AS DRAWN NOW", with `contentRows` beside it and
+ * "the window's last offset is `contentRows - bodyRows`, none when the tree
+ * fits". A tree that fits is its own window, so `bodyRows` is the height of
+ * what we last drew. Reading it as a cap is a ratchet: one short board makes
+ * the next budget shorter, the compact fallback draws six rows, and the pane
+ * reports six rows for ever after.
+ *
+ * So the field is allowed to PROVE room and never to deny it. The cap comes
+ * from `viewport.rows`, which is the whole surface and so an honest upper
+ * bound on the pane ("cells down the whole surface, not the room left for
+ * this component"), and `bodyRows` only raises that. Above the rows the whole
+ * board needs neither matters and the layout is the one the owner had before
+ * any budget existed: eight cards, a tail, and the blank rows.
  */
 function rowBudget(e: any, stacked: boolean): { body: number; gaps: boolean; compact: boolean } {
-  const bodyRows: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
-  if (bodyRows <= 0) return { body: COLUMN_CARD_CAP + 1, gaps: true, compact: false };
   const frames = stacked ? COLUMN_FRAME_ROWS * BOARD_COLUMNS : COLUMN_FRAME_ROWS;
   const share = stacked ? BOARD_COLUMNS : 1;
+  const whole = CHROME_ROWS + frames + share * (COLUMN_CARD_CAP + 1);
+  const drawn: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
+  const screen: number = typeof e.viewport?.rows === "number" ? e.viewport.rows : 0;
+  const room = Math.max(drawn, screen);
+  if (room <= 0 || room >= whole) return { body: COLUMN_CARD_CAP + 1, gaps: true, compact: false };
   // With the blank rows first, but only while they are affordable: below
   // GAPS_MIN_BODY rows of cards per column the gaps are costing more than
   // they are worth, and a board with cards in it beats a tidy empty one.
   for (const [gaps, floor] of [[true, GAPS_MIN_BODY], [false, 1]] as const) {
     const chrome = CHROME_ROWS - (gaps ? 0 : GAP_ROWS);
-    const room = bodyRows - chrome - frames;
-    if (room >= share * floor) {
-      return { body: Math.min(COLUMN_CARD_CAP + 1, Math.floor(room / share)), gaps, compact: false };
+    const left = room - chrome - frames;
+    if (left >= share * floor) {
+      return { body: Math.min(COLUMN_CARD_CAP + 1, Math.floor(left / share)), gaps, compact: false };
     }
   }
   return { body: 0, gaps: false, compact: true };
@@ -923,7 +1073,9 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
   // row taller than the rest.
   const columns = [board.blocked, board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
   const longest = Math.max(...columns.map((column) => column.length));
-  let shown = Math.min(body, longest);
+  // Never more than the cap, whatever the budget allows: a body of nine rows
+  // is eight cards and a tail, not nine cards.
+  let shown = Math.min(body, longest, COLUMN_CARD_CAP);
   if (columns.some((column) => column.length > shown)) shown = Math.max(0, Math.min(shown, body - 1));
   const omitted = columns.some((column) => column.length > shown);
   const height = Math.max(1, Math.min(body, shown + (omitted ? 1 : 0)));
@@ -1009,12 +1161,18 @@ function footerNode(
     justifyContent: "space-between",
     alignItems: "center",
     children: [
+      // ONE Text, not a row of them. The coloured fragments are its children,
+      // which keeps each its colour, and the truncation is the parent's: a Box
+      // of Texts has no wrap prop to set, so when even the abbreviated buckets
+      // outgrew the room the row wrapped and the footer took two rows out of a
+      // budget counted for one. The room is the width, so the cut is the
+      // context fill's clearance and not the pane's edge.
       elements.Box({
         key: "issues",
         flexDirection: "row",
         width: Math.min(room, cellWidth(abbreviated ? short : long)),
         overflow: "hidden",
-        children: parts,
+        children: [elements.Text({ wrap: "truncate", children: parts })],
       }),
       elements.Text({ key: "context", wrap: "truncate", children: contextText }),
     ],

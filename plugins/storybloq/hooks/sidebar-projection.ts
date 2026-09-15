@@ -385,14 +385,13 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
   // one shares a default), and Array.prototype.sort is only stable with
   // respect to INPUT order, which here is directory read order. Done sorts
   // the other way, newest first, and breaks its ties the other way too.
-  // Ticket order, then the id as the tie-break, so the columns are stable
-  // between renders and between sessions. Order alone is not enough: the
-  // ledger hands out the same order number freely (every ticket filed without
-  // one shares a default), and Array.prototype.sort is only stable with
-  // respect to INPUT order, which here is directory read order. Done sorts
-  // the other way, newest first, and breaks its ties the other way too.
   const byOrderAscending = (a: SidebarTicket, b: SidebarTicket): number =>
-    (a.order - b.order) || (a.displayId ?? a.id).localeCompare(b.displayId ?? b.id);
+    (a.order - b.order)
+    || (a.displayId ?? a.id).localeCompare(b.displayId ?? b.id)
+    // The canonical id has the last word: two tickets can share an order AND
+    // a display id (`storybloq reconcile` exists for exactly that), and
+    // without this they still compare equal and swap on read order.
+    || a.id.localeCompare(b.id);
   const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
   const board: SidebarBoard = {
     blocked: boardLeaves.filter(waiting).sort(byOrderAscending).map(card),
@@ -410,7 +409,12 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     // rest is history the ledger already keeps.
     done: boardLeaves
       .filter((t) => t.status === "complete")
-      .sort((a, b) => (b.order - a.order) || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id))
+      .sort(
+        (a, b) =>
+          (b.order - a.order)
+          || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id)
+          || b.id.localeCompare(a.id),
+      )
       .map(card),
   };
 

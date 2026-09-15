@@ -359,6 +359,63 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-102"]);
   });
 
+  it("orders every column the same way whatever order the files were read in", async () => {
+    // Blocked and In progress had only the order number to sort on, and the
+    // ledger hands the same number out freely, so two tickets could swap
+    // places between renders for no reason a reader could see.
+    // M-UNORDERED-BLOCKED drops the tie-break and this goes red.
+    const leaf = (over: Partial<SidebarTicket>): SidebarTicket => ({
+      kind: "ticket",
+      id: "x",
+      displayId: null,
+      title: "t",
+      status: "open",
+      phase: "p1",
+      order: 0,
+      blockedBy: [],
+      parentTicket: null,
+      previousDisplayIds: [],
+      lifecycle: null,
+      ...over,
+    });
+    const tickets: SidebarTicket[] = [
+      leaf({ id: "T-003", status: "blocked", blockedBy: ["T-900"] }),
+      leaf({ id: "T-001", status: "blocked", blockedBy: ["T-900"] }),
+      leaf({ id: "T-002", status: "blocked", blockedBy: ["T-900"] }),
+      leaf({ id: "T-006", status: "inprogress" }),
+      leaf({ id: "T-004", status: "inprogress" }),
+      leaf({ id: "T-005", status: "inprogress" }),
+      leaf({ id: "T-009", status: "open" }),
+      leaf({ id: "T-007", status: "open" }),
+    ];
+    const input: SidebarInput = {
+      project: "ties",
+      phases: [{ id: "p1", name: "Phase One" }],
+      tickets,
+      issues: [],
+      handoverFilenames: [],
+    };
+    // Two tickets sharing an order AND a display id, which is what
+    // `storybloq reconcile` exists for: the canonical id is the last word.
+    // M-DUP-ID-UNSTABLE drops it and these two swap on read order.
+    tickets.push(leaf({ id: "t-bb22bb22bb22bb22", displayId: "T-500", status: "open", title: "second" }));
+    tickets.push(leaf({ id: "t-aa11aa11aa11aa11", displayId: "T-500", status: "open", title: "first" }));
+    const forwards = projectSidebar(input);
+    const backwards = projectSidebar({ ...input, tickets: [...tickets].reverse() });
+
+    expect(forwards.board.blocked.map((c) => c.id)).toEqual(["T-001", "T-002", "T-003"]);
+    expect(forwards.board.inProgress.map((c) => c.id)).toEqual(["T-004", "T-005", "T-006"]);
+    expect(forwards.board.open.map((c) => c.id)).toEqual(["T-007", "T-009", "T-500", "T-500"]);
+    // The pair is ordered by canonical id, so the aa11 one comes first, and
+    // the titles say which is which.
+    expect(forwards.board.open.slice(2).map((c) => c.title)).toEqual(["first", "second"]);
+    expect(backwards.board.open.slice(2).map((c) => c.title)).toEqual(["first", "second"]);
+    // Same ledger, opposite read order, same board.
+    expect(backwards.board.blocked.map((c) => c.id)).toEqual(forwards.board.blocked.map((c) => c.id));
+    expect(backwards.board.inProgress.map((c) => c.id)).toEqual(forwards.board.inProgress.map((c) => c.id));
+    expect(backwards.board.open.map((c) => c.id)).toEqual(forwards.board.open.map((c) => c.id));
+  });
+
   it("names the two newest handovers, newest first", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
