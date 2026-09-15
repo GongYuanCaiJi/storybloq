@@ -95,6 +95,15 @@ const tickets: Record<string, Record<string, unknown>> = {
   "T-006.json": ticket({ id: "T-006", title: "Blocked by a ghost", status: "open", phase: "p3", order: 6, blockedBy: ["T-999"] }),
   // Deleted: out of every count.
   "T-007.json": ticket({ id: "T-007", title: "Deleted", status: "open", phase: "p3", order: 7, lifecycle: "deleted" }),
+  // A displayId collision, which is what `storybloq reconcile` exists for.
+  // Two tickets answer to T-010 and a third used to, and a fourth names T-010
+  // as its parent. The CLI's parent resolution falls through the ambiguous
+  // displayId to the unique previous one, so the THIRD is the umbrella; a
+  // resolver that stops at "ambiguous" leaves it counted as a leaf.
+  "t-aa11aa11aa11aa11.json": ticket({ id: "t-aa11aa11aa11aa11", displayId: "T-010", title: "Collides one", status: "open", phase: "p3", order: 10 }),
+  "t-bb22bb22bb22bb22.json": ticket({ id: "t-bb22bb22bb22bb22", displayId: "T-010", title: "Collides two", status: "open", phase: "p3", order: 11 }),
+  "t-cc33cc33cc33cc33.json": ticket({ id: "t-cc33cc33cc33cc33", displayId: "T-011", previousDisplayIds: ["T-010"], title: "Renamed away from T-010", status: "open", phase: "p3", order: 12 }),
+  "T-013.json": ticket({ id: "T-013", title: "Child of the renamed one", parentTicket: "T-010", status: "open", phase: "p3", order: 13 }),
 };
 
 const issues: Record<string, Record<string, unknown>> = {
@@ -209,15 +218,31 @@ describe("sidebar projection (T-508)", () => {
       items: [],
       warnings: [],
     });
-    // T-001 is an umbrella, T-007 is deleted: five leaves remain.
-    expect(compact.totalTickets).toBe(5);
+    // T-001 is an umbrella, T-007 is deleted, and t-cc33 is an umbrella too
+    // because T-013's parent ref T-010 resolves through the historical
+    // displayId: eight leaves remain.
+    expect(compact.totalTickets).toBe(8);
     expect(compact.completeTickets).toBe(2);
-    expect(compact.openTickets).toBe(3);
+    expect(compact.openTickets).toBe(6);
     // t-zz11yy22xx33ww44 is blocked by T-003 (in progress) and T-006 by a ghost ref.
     expect(compact.blockedTickets).toBe(2);
     // ISS-004 is resolved and ISS-005 is deleted: three remain.
     expect(compact.openIssues).toBe(3);
     expect(compact.phases.map((p) => p.status)).toEqual(["inprogress", "inprogress", "notstarted"]);
+  });
+
+  it("resolves a parent through a historical displayId when the current one collides", async () => {
+    // The rule this pins, from ProjectState's localResolve: id, then a
+    // displayId matching exactly one ticket, then a previousDisplayIds
+    // matching exactly one. An ambiguous displayId does not end the search.
+    // M-PARENT-AMBIGUOUS returns ambiguous there and this goes red.
+    root = await writeFixture();
+    const mine = projectSidebar(await readAsTheModDoes(root));
+    const leafIds = mine.inProgressTickets.map((t) => t.id);
+    expect(leafIds).not.toContain("T-011");
+    const { state } = await loadProject(root);
+    expect(state.isUmbrella(state.tickets.find((t) => t.id === "t-cc33cc33cc33cc33")!)).toBe(true);
+    expect(mine.totalTickets).toBe(8);
   });
 
   it("counts open issues by severity", async () => {

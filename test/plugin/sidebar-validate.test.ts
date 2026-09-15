@@ -34,31 +34,16 @@ const EXPECTED_HOOKS = [
 ];
 
 /**
- * The calls the Mod makes. This is `CALLS.sidebar` from client-api.ts with two
- * differences, both deliberate and both to be folded into that pin when the
- * scaffold's owner next touches it:
+ * The calls the Mod makes, taken from the pin rather than restated here.
  *
- *   + $.store.get / $.store.set  the ledger cache the ruling calls for, so a
- *     refresh re-reads only the files whose mtime moved rather than the whole
- *     ledger every turn
- *   - $.ui.close                 never called: the person closes the pane and
- *     the Mod hooks `ui.close` to hear about it, but it never closes one
- *     itself, and a call it does not make must not be declared
+ * `client-api.ts` is the documentary list and this is the reading the client
+ * itself produces, so asserting one against the other is the whole point: a
+ * call added to the Mod and not to the pin fails, and so does a pin that
+ * declares a call the Mod does not make. `$.ui.close` was in that list until
+ * the sidebar landed and it turned out the Mod only HOOKS `ui.close`; the
+ * person closes the pane, the Mod never does.
  */
-const EXPECTED_CALLS = [
-  "$.clock.every",
-  "$.fs.exists",
-  "$.fs.list",
-  "$.fs.read",
-  "$.fs.stat",
-  "$.session.usage",
-  "$.store.get",
-  "$.store.set",
-  "$.ui.invalidate",
-  "$.ui.log",
-  "$.ui.open",
-  "$.ui.resolve",
-];
+const EXPECTED_CALLS = [...CALLS.sidebar].sort();
 
 const FORBIDDEN_CALLS = ["$.fs.write", "$.process.run", "$.mcp.call"];
 
@@ -152,8 +137,8 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
     expect(listAfter(output, "mod.ts hooks")).toEqual(EXPECTED_HOOKS);
   });
 
-  it("makes exactly the calls the design names", () => {
-    expect(listAfter(output, "mod.ts calls")).toEqual(EXPECTED_CALLS);
+  it("makes exactly the calls the pinned list declares", () => {
+    expect(listAfter(output, "mod.ts calls").slice().sort()).toEqual(EXPECTED_CALLS);
   });
 
   it("makes no call that could write, run or reach a server", () => {
@@ -162,14 +147,6 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
     const calls = listAfter(output, "mod.ts calls");
     for (const forbidden of FORBIDDEN_CALLS) {
       expect(calls, `the sidebar is read-only and must not call ${forbidden}`).not.toContain(forbidden);
-    }
-  });
-
-  it("keeps every call the pinned list already declares, apart from the one it does not make", () => {
-    const calls = listAfter(output, "mod.ts calls");
-    for (const pinned of CALLS.sidebar) {
-      if (pinned === "$.ui.close") continue;
-      expect(calls, `client-api.ts pins ${pinned}, so the Mod must still make it`).toContain(pinned);
     }
   });
 

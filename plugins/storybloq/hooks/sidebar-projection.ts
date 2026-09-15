@@ -39,7 +39,9 @@ export type PhaseStatus = "complete" | "inprogress" | "notstarted";
 export interface SidebarTicket {
   readonly kind: "ticket";
   readonly id: string;
-  readonly displayId: string;
+  /** Raw, as the record carries it: absent is null, not the id. The two
+   *  resolvers below differ on exactly that. */
+  readonly displayId: string | null;
   readonly previousDisplayIds: readonly string[];
   readonly title: string;
   readonly status: string;
@@ -54,7 +56,7 @@ export interface SidebarTicket {
 export interface SidebarIssue {
   readonly kind: "issue";
   readonly id: string;
-  readonly displayId: string;
+  readonly displayId: string | null;
   readonly previousDisplayIds: readonly string[];
   readonly title: string;
   readonly status: string;
@@ -139,8 +141,7 @@ export function extractRecord(kind: LedgerKind, text: string): SidebarRecord | n
   const status = asString(raw["status"]);
   if (id === null || status === null) return null;
 
-  const displayIdRaw = asString(raw["displayId"]);
-  const displayId = displayIdRaw !== null && displayIdRaw.trim() !== "" ? displayIdRaw.trim() : id;
+  const displayId = asString(raw["displayId"]);
   const title = (asString(raw["title"]) ?? "").slice(0, TITLE_CAP);
   const lifecycle = asString(raw["lifecycle"]);
   const previousDisplayIds = asStringArray(raw["previousDisplayIds"]);
@@ -184,7 +185,10 @@ function buildResolver(tickets: readonly SidebarTicket[]): (ref: string) => Reso
   for (const t of tickets) {
     // First wins, as the CLI's index does.
     if (!byId.has(t.id)) byId.set(t.id, t);
-    const displayKey = t.displayId.trim() === "" ? t.id : t.displayId.trim();
+    // buildDisplayIndex: the displayId trimmed, and the id where it is blank
+    // or absent.
+    const trimmedDisplay = (t.displayId ?? "").trim();
+    const displayKey = trimmedDisplay === "" ? t.id : trimmedDisplay;
     const atDisplay = byDisplay.get(displayKey);
     if (atDisplay) atDisplay.push(t);
     else byDisplay.set(displayKey, [t]);
@@ -209,6 +213,58 @@ function buildResolver(tickets: readonly SidebarTicket[]): (ref: string) => Reso
   };
 }
 
+/**
+ * Parent references, resolved as `ProjectState`'s own `localResolve` does.
+ *
+ * This is NOT the blocker resolver above, and the difference is load bearing.
+ * `localResolve`'s order, from src/core/project-state.ts:
+ *
+ *   if (localById.has(ref)) return ref;
+ *   const byDisplay = localByDisplay.get(ref);
+ *   if (byDisplay?.length === 1) return byDisplay[0];
+ *   const byPrev = localByPrev.get(ref);
+ *   if (byPrev?.length === 1) return byPrev[0];
+ *   return ref;
+ *
+ * Two things follow that the blocker resolver does the other way. An
+ * AMBIGUOUS displayId does not end the search here: it falls through to the
+ * previous displayIds, so a ref that two tickets currently answer to and one
+ * ticket used to answer to resolves to that one. And the index is built on
+ * the RAW displayId only where a record carries one, with no trimming and no
+ * falling back to the id, so a ticket with no displayId is not indexed under
+ * its own id here even though `buildDisplayIndex` does index it that way.
+ *
+ * A ref that resolves to nothing comes back unchanged, which is what makes an
+ * unresolvable parent name an umbrella id nothing matches: no ticket is
+ * excluded from the leaves by it, and none should be.
+ */
+function buildParentResolver(tickets: readonly SidebarTicket[]): (ref: string) => string {
+  const byId = new Set<string>();
+  const byDisplay = new Map<string, string[]>();
+  const byPrev = new Map<string, string[]>();
+  for (const t of tickets) {
+    byId.add(t.id);
+    if (t.displayId !== null && t.displayId !== "") {
+      const at = byDisplay.get(t.displayId);
+      if (at) at.push(t.id);
+      else byDisplay.set(t.displayId, [t.id]);
+    }
+    for (const prev of t.previousDisplayIds) {
+      const at = byPrev.get(prev);
+      if (at) at.push(t.id);
+      else byPrev.set(prev, [t.id]);
+    }
+  }
+  return (ref: string): string => {
+    if (byId.has(ref)) return ref;
+    const display = byDisplay.get(ref);
+    if (display && display.length === 1) return display[0]!;
+    const prev = byPrev.get(ref);
+    if (prev && prev.length === 1) return prev[0]!;
+    return ref;
+  };
+}
+
 function aggregateStatus(leaves: readonly SidebarTicket[]): PhaseStatus {
   if (leaves.length === 0) return "notstarted";
   if (leaves.every((t) => t.status === "complete")) return "complete";
@@ -225,6 +281,7 @@ function aggregateStatus(leaves: readonly SidebarTicket[]): PhaseStatus {
  */
 export function projectSidebar(input: SidebarInput): SidebarProjection {
   const resolve = buildResolver(input.tickets);
+  const resolveParent = buildParentResolver(input.tickets);
 
   const activeTickets = input.tickets.filter(isActive);
   const activeIssues = input.issues.filter(isActive);
@@ -235,8 +292,7 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
   const umbrellaIds = new Set<string>();
   for (const t of activeTickets) {
     if (t.parentTicket === null) continue;
-    const resolved = resolve(t.parentTicket);
-    umbrellaIds.add(resolved.kind === "found" ? resolved.item.id : t.parentTicket);
+    umbrellaIds.add(resolveParent(t.parentTicket));
   }
 
   const leaves = activeTickets.filter((t) => !umbrellaIds.has(t.id));
@@ -268,7 +324,7 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
   const inProgressTickets = leaves
     .filter((t) => t.status === "inprogress")
     .sort((a, b) => a.order - b.order)
-    .map((t) => ({ id: t.displayId, title: t.title, phase: t.phase }));
+    .map((t) => ({ id: t.displayId ?? t.id, title: t.title, phase: t.phase }));
 
   const handovers = [...input.handoverFilenames].sort();
   const latestHandover = handovers.length > 0 ? handovers[handovers.length - 1]! : null;

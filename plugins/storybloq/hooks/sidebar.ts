@@ -91,14 +91,23 @@ let project = "";
 let phases: { readonly id: string; readonly name: string }[] = [];
 let handoverFilenames: string[] = [];
 let queue: ScanItem[] = [];
-let scanning = false;
+/** A scan is building its worklist, or has one left to drain. */
+let scanInitializing = false;
+let scanActive = false;
+/** A refresh asked for while a scan was in flight, to run when it finishes. */
+let pendingRefresh = false;
 let ticking = false;
+/** One timer for the module's life, not one per scan. */
+let timerStarted = false;
+/** The Mod is on and something is drawn: not the same as the pane existing. */
+let sidebarEnabled = false;
 let paneOpen = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
 let warm = false;
 let uiAvailable = true;
 let saidNoUi = false;
+let saidScanFailed = false;
 
 /** Reset between tests; a session only ever loads this module once. */
 function forgetEverything(): void {
@@ -109,14 +118,19 @@ function forgetEverything(): void {
   phases = [];
   handoverFilenames = [];
   queue = [];
-  scanning = false;
+  scanInitializing = false;
+  scanActive = false;
+  pendingRefresh = false;
   ticking = false;
+  timerStarted = false;
+  sidebarEnabled = false;
   paneOpen = false;
   sessionActive = false;
   contextPercent = null;
   warm = false;
   uiAvailable = true;
   saidNoUi = false;
+  saidScanFailed = false;
 }
 
 function isTicketRecord(record: SidebarRecord): record is SidebarTicket {
@@ -147,8 +161,9 @@ function summaryLine(): string {
   // Until one scan has finished (or a warm cache came out of the store) the
   // numbers are a partial read, and drawing them would be a figure that
   // changes a second later for no reason the reader can see.
+  const busy = scanActive || scanInitializing;
   if (!warm || projection === null) {
-    return scanning
+    return busy
       ? `Storybloq: reading the ledger, ${queue.length} files left`
       : "Storybloq: no ledger read yet";
   }
@@ -160,7 +175,7 @@ function summaryLine(): string {
     `${projection.openIssues} issues`,
   ];
   if (contextPercent !== null) parts.push(`context ${contextPercent}%`);
-  if (scanning) parts.push(`reading ${queue.length}`);
+  if (busy) parts.push(`reading ${queue.length}`);
   return `Storybloq: ${parts.join(", ")}`;
 }
 
@@ -236,14 +251,61 @@ async function saveCache($: any): Promise<void> {
   }
 }
 
+/** One guarded line, once: a failing sidebar must not become a chatty one. */
+function noteFailure($: any, what: string): void {
+  if (saidScanFailed) return;
+  saidScanFailed = true;
+  try {
+    $.ui.log(`storybloq sidebar: ${what}, so the pane may be behind the ledger until a later turn`);
+  } catch {
+    // A refused log is not worth a second failure.
+  }
+}
+
 /**
- * Builds the worklist and starts the ticker. Returns at once: the reading
- * happens a chunk per tick so no dispatch runs long.
+ * ONE timer for the module's life, not one per scan.
+ *
+ * `$.clock.every` runs until its `cancel()`, and a scan that registered its
+ * own would leave it running: two scans, two timers, every later tick paying
+ * for both. The callback returns at once unless a scan is actually draining.
  */
-function startScan($: any): void {
-  if (scanning) return;
-  scanning = true;
-  void (async () => {
+function startTimer($: any): void {
+  if (timerStarted) return;
+  timerStarted = true;
+  $.clock.every(SCAN_TICK_MS, () => {
+    drainChunk($).catch(() => {
+      scanActive = false;
+      ticking = false;
+    });
+  });
+}
+
+/**
+ * Asks for a scan, coalescing.
+ *
+ * A refresh asked for while one is in flight is REMEMBERED, not dropped: the
+ * queue the running scan is draining was listed before the write that
+ * prompted this call, so that write would otherwise never be listed at all.
+ * Many requests during one scan collapse into the single scan that follows it.
+ */
+function requestScan($: any): void {
+  if (scanActive || scanInitializing) {
+    pendingRefresh = true;
+    return;
+  }
+  beginScan($).catch(() => {
+    // The scan is detached, so nothing else would hear this. Leaving the
+    // in-flight flags set is what would wedge every later scan.
+    scanInitializing = false;
+    scanActive = false;
+    noteFailure($, "a ledger scan could not be started");
+  });
+}
+
+/** Lists the ledger and leaves a queue for the ticker to drain. */
+async function beginScan($: any): Promise<void> {
+  scanInitializing = true;
+  try {
     const items: ScanItem[] = [];
     try {
       for (const entry of await $.fs.list(TICKETS_DIR)) {
@@ -270,12 +332,12 @@ function startScan($: any): void {
       if (!present.has(path)) delete cache[path];
     }
     queue = items;
+    scanActive = true;
     reproject();
     $.ui.invalidate("ui.render");
-    $.clock.every(SCAN_TICK_MS, () => {
-      void drainChunk($);
-    });
-  })();
+  } finally {
+    scanInitializing = false;
+  }
 }
 
 /**
@@ -284,7 +346,10 @@ function startScan($: any): void {
  * serving the cached fields without it is the M-STALE-CACHE mutant.
  */
 async function drainChunk($: any): Promise<void> {
-  if (ticking) return;
+  // The idle guard. Without it every tick after the first scan reprojects the
+  // whole ledger, serializes it, writes it to the store and invalidates, for
+  // as long as the session lasts.
+  if (ticking || !scanActive) return;
   ticking = true;
   try {
     let read = 0;
@@ -303,12 +368,21 @@ async function drainChunk($: any): Promise<void> {
       }
     }
     if (queue.length === 0) {
-      scanning = false;
+      scanActive = false;
       warm = true;
       reproject();
       await saveCache($);
       $.ui.invalidate("ui.render");
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        requestScan($);
+      }
     }
+  } catch {
+    // Same reasoning as the detached start: whatever failed, the scan is over,
+    // and leaving it marked in flight would stop every later one.
+    scanActive = false;
+    noteFailure($, "a ledger scan failed part way");
   } finally {
     ticking = false;
   }
@@ -345,10 +419,11 @@ export function registerSidebar(on: On, _options: Options): void {
     }
     // The narrow fallback: the client leaves a plugin's pane undrawn on a
     // small terminal, so the same numbers go out as one line above the prompt.
-    // `paneOpen` is false once the person closes it, and `ui.close` says stop
-    // redrawing: the fallback is for a pane the client will not draw, not for
-    // one they dismissed.
-    if (e.component === "AbovePrompt" && paneOpen) {
+    // Gated on the Mod being on and on the width, and deliberately NOT on
+    // the pane existing. Below DOCK_MIN_COLUMNS the client draws no pane at
+    // all, so this line IS the sidebar; tying it to `paneOpen` would let a
+    // close of something never drawn turn off the only thing that was.
+    if (e.component === "AbovePrompt" && sidebarEnabled) {
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       if (columns > 0 && columns < DOCK_MIN_COLUMNS) {
         const { Text } = $.ui.resolve(e);
@@ -372,25 +447,31 @@ export function registerSidebar(on: On, _options: Options): void {
       return next(e);
     }
     // A `-p` run and the SDK draw nowhere: `surface` is null and nobody is at
-    // the prompt, so opening a pane would be a pane nobody asked for.
-    if (e.surface !== null && e.isInteractive === true) {
+    // the prompt, so there is no pane to open and no ledger worth reading for
+    // a sidebar nobody will see.
+    if (e.surface === null || e.isInteractive !== true) return next(e);
+    sidebarEnabled = true;
+    // `session.start` fires again on a reload, and an open of an open id only
+    // retitles it, but asking twice is still asking twice.
+    if (!paneOpen) {
       await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
       paneOpen = true;
     }
     await readHeader($);
     await loadCache($);
-    startScan($);
+    startTimer($);
+    requestScan($);
     return next(e);
   });
 
   // A turn is the unit the acceptance names: a `.story/` write during it shows
   // up by the next prompt.
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable) return next(e);
+    if (!uiAvailable || !sidebarEnabled) return next(e);
     const usage = await $.session.usage();
     contextPercent = typeof usage?.context?.percent === "number" ? usage.context.percent : null;
     await readHeader($);
-    startScan($);
+    requestScan($);
     return next(e);
   });
 
@@ -399,14 +480,16 @@ export function registerSidebar(on: On, _options: Options): void {
   on("tool.call", ($: any, e: any, next: (e: any) => unknown) => next(e));
 
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable) return next(e);
+    if (!uiAvailable || !sidebarEnabled) return next(e);
     const usage = await $.session.usage();
     contextPercent = typeof usage?.context?.percent === "number" ? usage.context.percent : null;
     $.ui.invalidate("ui.render");
     return next(e);
   });
 
-  // The person closed it. Stop drawing into it; the narrow line still draws.
+  // The person closed the pane: there is no longer one to draw into, and a
+  // later `session.start` may open it again. This does not turn the Mod off,
+  // which is why it touches `paneOpen` and not `sidebarEnabled`.
   on("ui.close", ($: any, e: any, next: (e: any) => unknown) => {
     if (e.requestId === PANE_ID) paneOpen = false;
     return next(e);

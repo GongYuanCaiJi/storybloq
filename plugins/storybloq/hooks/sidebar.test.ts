@@ -67,6 +67,10 @@ interface Harness {
   readonly invalidated: string[];
   readonly logged: string[];
   readonly stored: Record<string, unknown>;
+  /** What the Mod asked of the host, counted: one timer, one save per scan. */
+  readonly counters: { timers: number; storeSets: number };
+  /** Arms one rejection, the way a hook beneath may refuse a call. */
+  failNextInvalidate: boolean;
   reads: number;
   fire(event: string, e: unknown): Promise<unknown>;
   tick(times?: number): Promise<void>;
@@ -85,7 +89,8 @@ function harness(fixture: Fixture): Harness {
   const invalidated: string[] = [];
   const logged: string[] = [];
   const stored: Record<string, unknown> = {};
-  const state = { reads: 0 };
+  const state = { reads: 0, failNextInvalidate: false };
+  const counters = { timers: 0, storeSets: 0 };
 
   const elements = {
     Box: (props: Record<string, unknown>) => ({ element: "Box", props }),
@@ -125,6 +130,10 @@ function harness(fixture: Fixture): Harness {
       close: async (): Promise<void> => {},
       resolve: () => elements,
       invalidate: (event: string): void => {
+        if (state.failNextInvalidate) {
+          state.failNextInvalidate = false;
+          throw new Error("a hook refused ui.invalidate");
+        }
         invalidated.push(event);
       },
       log: (message: string): void => {
@@ -137,11 +146,13 @@ function harness(fixture: Fixture): Harness {
     store: {
       get: async (key: string): Promise<unknown> => stored[key],
       set: async (key: string, value: unknown): Promise<void> => {
+        counters.storeSets += 1;
         stored[key] = JSON.parse(JSON.stringify(value));
       },
     },
     clock: {
       every: (_ms: number, fn: () => void) => {
+        counters.timers += 1;
         timers.push(fn);
         return { cancel: () => {} };
       },
@@ -161,6 +172,13 @@ function harness(fixture: Fixture): Harness {
     invalidated,
     logged,
     stored,
+    counters,
+    get failNextInvalidate() {
+      return state.failNextInvalidate;
+    },
+    set failNextInvalidate(value: boolean) {
+      state.failNextInvalidate = value;
+    },
     get reads() {
       return state.reads;
     },
@@ -355,13 +373,83 @@ test("passes a tool call on untouched", async () => {
   expect(await h.fire("tool.call", event)).toBe(event);
 });
 
-test("stops drawing the fallback once the person closes the pane", async () => {
+test("keeps the narrow fallback after the person closes the pane", async () => {
   const h = harness(newFixture());
   await started(h);
   expect(textOf(await h.render(abovePromptEvent(80)))).toContain("Storybloq:");
 
+  // Closing a pane the client was never going to draw at this width cannot be
+  // what turns the fallback off: at 80 columns the line IS the sidebar, and
+  // the person closed something they could not see. M-CLOSE-KILLS-FALLBACK
+  // ties the two together and this goes red.
   await h.fire("ui.close", { requestId: "storybloq", origin: "person" });
-  expect(textOf(await h.render(abovePromptEvent(80)))).toBe("");
+  expect(textOf(await h.render(abovePromptEvent(80)))).toContain("Storybloq:");
+});
+
+test("registers one timer for the session, not one per scan", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  for (let turn = 0; turn < 3; turn += 1) {
+    await h.fire("turn.complete", {});
+    await h.tick();
+  }
+  // M-TIMER-PER-SCAN: a timer per scan is a timer that is never cancelled, so
+  // every later tick runs the whole callback chain once per scan ever started.
+  expect(h.counters.timers).toBe(1);
+});
+
+test("does nothing on a tick with no scan to run", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const saves = h.counters.storeSets;
+  const invalidations = h.invalidated.length;
+
+  await h.tick(20);
+
+  // M-IDLE-TICK: without the idle guard every tick reprojects, serializes the
+  // whole ledger and writes it to the store, forever.
+  expect(h.counters.storeSets).toBe(saves);
+  expect(h.invalidated.length).toBe(invalidations);
+});
+
+test("picks up a write made while the first scan was still running", async () => {
+  const h = harness(newFixture());
+  // The scan is initialized but nothing has drained yet.
+  await h.fire("session.start", START);
+
+  h.fixture.files[".story/tickets/T-003.json"] = ticketText({
+    id: "T-003",
+    status: "inprogress",
+    title: "Arrived mid scan",
+  });
+  h.fixture.mtimes[".story/tickets/T-003.json"] = 1500;
+  await h.fire("turn.complete", {});
+  await h.tick();
+
+  // M-DROP-REFRESH: a refresh asked for during a scan is dropped by the
+  // in-flight guard, and this file was not in the queue that scan built, so
+  // nothing ever lists it again.
+  expect(textOf(await h.render(paneEvent()))).toContain("Arrived mid scan");
+});
+
+test("a refused invalidate does not wedge every later scan", async () => {
+  const h = harness(newFixture());
+  h.failNextInvalidate = true;
+  await h.fire("session.start", START);
+  await h.tick();
+
+  h.failNextInvalidate = false;
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "complete", title: "Working on it" });
+  h.fixture.mtimes[".story/tickets/T-001.json"] = 2000;
+  await h.fire("turn.complete", {});
+  await h.tick();
+
+  // M-STUCK-SCAN: the throw is what matters a turn LATER, not on the turn it
+  // happened. A detached scan that leaves its in-flight flag set makes every
+  // later request return early, so this write is never picked up. Asserting
+  // the state before the write would pass under the mutant, because the first
+  // scan's queue was already built and still drains.
+  expect(textOf(await h.render(paneEvent()))).toContain("0 in progress");
 });
 
 test("shows the context pressure once a turn has reported it", async () => {
