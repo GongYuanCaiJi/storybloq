@@ -398,7 +398,9 @@ describe("ISS-1211 gate: routing cost, degradation and safety", () => {
     }
   });
 
-  it("a routed root whose telemetry directory cannot be created falls back to the caller's own checkout", () => {
+  // Running as root defeats the 0o500: the write would succeed and the
+  // fallback would never be exercised. Same guard as ruling-loader.test.ts.
+  it.skipIf((process.geteuid?.() ?? process.getuid?.()) === 0)("a routed root whose telemetry directory cannot be created falls back to the caller's own checkout", () => {
     const wt = makeWorktreePair("si-ledger-unwritable-");
     const mainStory = join(wt.main, ".story");
     try {
@@ -433,6 +435,21 @@ describe("ISS-1211 gate: routing cost, degradation and safety", () => {
       expect(readLedger(wt.main)).toHaveLength(2);
     } finally {
       wt.cleanup();
+    }
+  });
+
+  it("a main checkout that is not usable stops the ROUTING, never the sibling reads: stranded entries stay countable", () => {
+    const three = makeWorktreeTriple("si-ledger-nomain-");
+    try {
+      // The repo's main checkout is not a storybloq project (yet): nothing to
+      // route to, but the other worktrees still hold real boundaries.
+      rmSync(join(three.main, ".story"), { recursive: true, force: true });
+      strand(three.linked[0], [entry("stranded", 1)]);
+      expect(boundaryLedgerRoot(three.linked[1])).toBe(three.linked[1]);
+      expect(boundaryLedgerReadRoots(three.linked[1])).toEqual([three.linked[1], three.linked[0]]);
+      expect(readLedger(three.linked[1]).map((e) => e.sessionId)).toEqual(["stranded"]);
+    } finally {
+      three.cleanup();
     }
   });
 

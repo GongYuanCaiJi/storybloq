@@ -99,11 +99,35 @@ const WORKTREE_DISCOVERY_MAX_ROOTS = 64;
  */
 export const WORKTREE_DISCOVERY_FAILURE_TTL_MS = 10_000;
 
+/**
+ * ISS-1211 gate round 2: a SUCCESSFUL discovery expires just as fast, because
+ * the worktree set is not a fixed property of a repository. The orchestrator
+ * working style adds a worktree mid-session and a hook running there writes
+ * its presence record under it; an MCP server that had already listed the
+ * repo would otherwise never see that worktree again, and ISS-1185's whole
+ * point (find the record wherever the hook wrote it) would be undone for the
+ * life of the server. A hook process still pays for git exactly once; a
+ * long-lived server re-lists within seconds.
+ */
+export const WORKTREE_DISCOVERY_SUCCESS_TTL_MS = 10_000;
+
 /** Test seam: `git worktree list` spawns this process has actually made. */
 export const worktreeDiscoveryStats = { spawns: 0 };
 
-const discoveryCache = new Map<string, string[]>();
+const discoveryCache = new Map<string, { readonly roots: string[]; readonly at: number }>();
 const discoveryFailures = new Map<string, number>();
+
+/**
+ * Both memos measure elapsed time against the caller's clock. A NEGATIVE
+ * elapsed means this caller's clock disagrees with the one that wrote the
+ * entry (a test seam, or an injected budget clock), so the entry is treated as
+ * expired and the answer is re-resolved rather than honoured against a
+ * different time base.
+ */
+const withinTtl = (recordedAt: number, now: number, ttlMs: number): boolean => {
+  const elapsed = now - recordedAt;
+  return elapsed >= 0 && elapsed < ttlMs;
+};
 
 /** Forgets both the successful and the failed discoveries. Tests only. */
 export function resetWorktreeDiscoveryCache(): void {
@@ -121,14 +145,16 @@ export function resetWorktreeDiscoveryCache(): void {
  * so a deadline that expires between the check and the read can never turn
  * into a zero (unbounded) `execFileSync` timeout.
  *
- * ISS-1211 gate: the result is memoized per root for the life of the process.
- * The worktree LIST is what is cached, never a verdict about any root's
- * contents, so every caller still re-checks safety and identity at use. This
- * is what lets the boundary-ledger routing and the presence walk share one
- * spawn on a path (`handleSessionIntel`) that reaches both. A deadline that
- * is already spent still returns `[]` before the memo is consulted: the
- * contract is "no work now", and a caller that had no budget gets no answer
- * rather than a cheaper one it did not ask for.
+ * ISS-1211 gate: the result is memoized per root, for a SHORT TTL in both
+ * directions (success and failure). The worktree LIST is what is cached, never
+ * a verdict about any root's contents, so every caller still re-checks safety
+ * and identity at use. The memo is what lets the boundary-ledger routing and
+ * the presence walk share one spawn on a path (`handleSessionIntel`) that
+ * reaches both; the TTL is what keeps a worktree added after the first listing
+ * from being invisible for the life of a long-lived server. A deadline that is
+ * already spent still returns `[]` before the memo is consulted: the contract
+ * is "no work now", and a caller that had no budget gets no answer rather than
+ * a cheaper one it did not ask for.
  */
 export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & { readonly limit?: number } = {}): string[] {
   const clock = opts.clock ?? Date.now;
@@ -138,12 +164,9 @@ export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & 
   const limit = opts.limit ?? WORKTREE_DISCOVERY_DEFAULT_LIMIT;
   if (limit <= 0) return [];
   const cached = discoveryCache.get(root);
-  if (cached !== undefined) return cached.slice(0, limit);
+  if (cached !== undefined && withinTtl(cached.at, now, WORKTREE_DISCOVERY_SUCCESS_TTL_MS)) return cached.roots.slice(0, limit);
   const failedAt = discoveryFailures.get(root);
-  // A negative elapsed means this caller's clock disagrees with the one that
-  // recorded the failure (a test seam, or an injected budget clock): re-resolve
-  // rather than honour a TTL measured against a different time base.
-  if (failedAt !== undefined && now - failedAt >= 0 && now - failedAt < WORKTREE_DISCOVERY_FAILURE_TTL_MS) return [];
+  if (failedAt !== undefined && withinTtl(failedAt, now, WORKTREE_DISCOVERY_FAILURE_TTL_MS)) return [];
   let out: string;
   worktreeDiscoveryStats.spawns++;
   try {
@@ -168,10 +191,11 @@ export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & 
     if (roots.length >= WORKTREE_DISCOVERY_MAX_ROOTS) break;
   }
   if (roots.length === 0) {
+    discoveryCache.delete(root);
     discoveryFailures.set(root, now);
     return [];
   }
-  discoveryCache.set(root, roots);
+  discoveryCache.set(root, { roots, at: now });
   discoveryFailures.delete(root);
   return roots.slice(0, limit);
 }

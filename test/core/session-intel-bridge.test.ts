@@ -57,9 +57,12 @@ vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
 import {
   PENDING_MAX_LISTED,
   PENDING_SUBDIR,
+  WORKTREE_DISCOVERY_SUCCESS_TTL_MS,
   applyAssumedReset,
   applyBoundaryReset,
   discoverWorktreeRoots,
+  resetWorktreeDiscoveryCache,
+  worktreeDiscoveryStats,
   findPresenceRecordAcrossWorktrees,
   judgeSample,
   markCompactPending,
@@ -582,6 +585,41 @@ describe("ISS-1185: worktree fallback", () => {
         renameSync(movedAside, wt.worktree);
       }
     } finally {
+      wt.cleanup();
+    }
+  });
+
+  /**
+   * ISS-1211 gate round 2: the discovery memo introduced for the ledger
+   * routing must not freeze the worktree set. The orchestrator working style
+   * adds a worktree mid-session and a hook running there writes the presence
+   * record under it; a long-lived MCP server that had already listed the repo
+   * would otherwise never find that record again.
+   */
+  it("findPresenceRecordAcrossWorktrees: a worktree added after the first listing is found once the discovery TTL expires, and costs nothing before then", () => {
+    const wt = makeWorktreePair("si-bridge-late-wt-");
+    try {
+      resetWorktreeDiscoveryCache();
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      let t = 2_000_000;
+      const clock = () => t;
+      worktreeDiscoveryStats.spawns = 0;
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID, { clock })).toBeNull();
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      const late = join(wt.base, "wt-late");
+      git(wt.main, ["worktree", "add", "-q", "-b", "wt-late-branch", late]);
+      bareStoryInit(late);
+      seed(late, { era: "1:2" }, SID);
+      // Inside the TTL the memo answers, so the one-spawn property survives.
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID, { clock })).toBeNull();
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      // Past it, the repo is re-listed and the record is found where the hook wrote it.
+      t += WORKTREE_DISCOVERY_SUCCESS_TTL_MS;
+      expect(findPresenceRecordAcrossWorktrees(wt.main, SID, { clock })?.root).toBe(late);
+      expect(worktreeDiscoveryStats.spawns).toBe(2);
+    } finally {
+      resetWorktreeDiscoveryCache();
       wt.cleanup();
     }
   });

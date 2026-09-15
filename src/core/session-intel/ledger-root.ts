@@ -20,9 +20,13 @@
  *     and caches NOTHING, so a repo that gains `.story/` (or a git that starts
  *     working) is picked up on the next call rather than for the life of the
  *     process. The spawn is still bounded, because `discoverWorktreeRoots`
- *     memoizes the worktree list and remembers a failure for a short TTL.
+ *     memoizes the worktree list under a short TTL in both directions.
  *   - THE ROUTED ROOT IS REVALIDATED AT THE WRITE. Discovery proves a root
  *     was safe when git named it, not that it still is.
+ *
+ * A main checkout this module refuses stops the ROUTING, never the reads: the
+ * siblings are still walked so entries stranded in another worktree stay
+ * countable while main has no `.story/` of its own.
  */
 
 import {
@@ -77,8 +81,26 @@ export function resetLedgerRoutingCache(): void {
   resetWorktreeDiscoveryCache();
 }
 
-function localRouting(root: string): LedgerRouting {
-  return { mainRoot: root, mainIdentity: null, linkedRoots: [] };
+function localRouting(root: string, linkedRoots: readonly string[] = []): LedgerRouting {
+  return { mainRoot: root, mainIdentity: null, linkedRoots };
+}
+
+/**
+ * Every checkout from `startIndex` on that is safe to read and is not the
+ * caller itself. `roots[0]` is the main worktree and is always handled by the
+ * caller of this helper, so `startIndex` is 1 in both paths: when main is
+ * usable it becomes `mainRoot`, and when it is not it has nothing readable
+ * under it anyway.
+ */
+function safeSiblings(roots: readonly string[], self: CandidateIdentity | null, startIndex = 1): string[] {
+  const out: string[] = [];
+  for (let i = startIndex; i < roots.length; i++) {
+    const candidate = isSafeCandidateRoot(roots[i]!, LEDGER_ROOT);
+    if (!candidate.ok) continue;
+    if (sameIdentity(candidate.identity, self)) continue;
+    out.push(roots[i]!);
+  }
+  return out;
 }
 
 /**
@@ -93,19 +115,14 @@ function resolveRouting(root: string, opts: WorktreeWalkOptions): { routing: Led
   // spent deadline, and a timeout, and is the signal to stay entirely local.
   const roots = discoverWorktreeRoots(root, { ...opts, limit: LEDGER_WORKTREE_LIMIT });
   if (roots.length === 0) return { routing: localRouting(root), resolved: false };
+  // roots[0] is the main worktree and is validated exactly once, here.
   const main = isSafeCandidateRoot(roots[0]!, LEDGER_ROOT);
-  if (!main.ok) return { routing: localRouting(root), resolved: false };
-  // roots[0] is validated exactly once, here: the loop below starts at 1, so
-  // main is never re-stat'ed as a linked candidate and needs no exclusion of
-  // its own (git lists each worktree exactly once). Only self does, because
-  // when the caller IS a linked worktree it appears in this range.
-  const linkedRoots: string[] = [];
-  for (let i = 1; i < roots.length; i++) {
-    const candidate = isSafeCandidateRoot(roots[i]!, LEDGER_ROOT);
-    if (!candidate.ok) continue;
-    if (sameIdentity(candidate.identity, self)) continue;
-    linkedRoots.push(roots[i]!);
-  }
+  const linkedRoots = safeSiblings(roots, self);
+  // A main checkout this module refuses is a reason not to ROUTE, never a
+  // reason to stop reading the siblings: entries stranded in another worktree
+  // stay countable while main has no `.story/` yet. Unmemoized either way, so
+  // the next call re-resolves once main becomes usable.
+  if (!main.ok) return { routing: localRouting(root, linkedRoots), resolved: false };
   // Self is excluded by dev/ino, never by string: the caller keeps its own
   // spelling of its own checkout even when git names the same directory by
   // its realpath.
