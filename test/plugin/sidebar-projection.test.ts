@@ -400,6 +400,11 @@ describe("sidebar projection (T-508)", () => {
     // M-DUP-ID-UNSTABLE drops it and these two swap on read order.
     tickets.push(leaf({ id: "t-bb22bb22bb22bb22", displayId: "T-500", status: "open", title: "second" }));
     tickets.push(leaf({ id: "t-aa11aa11aa11aa11", displayId: "T-500", status: "open", title: "first" }));
+    // Done sorts the other way and breaks its ties the other way too, so the
+    // same pair among complete tickets comes back reversed. The column had no
+    // assertion of its own, so its tie-break was carried by nothing.
+    tickets.push(leaf({ id: "t-dd44dd44dd44dd44", displayId: "T-600", status: "complete", title: "later" }));
+    tickets.push(leaf({ id: "t-cc33cc33cc33cc33", displayId: "T-600", status: "complete", title: "earlier" }));
     const forwards = projectSidebar(input);
     const backwards = projectSidebar({ ...input, tickets: [...tickets].reverse() });
 
@@ -414,6 +419,12 @@ describe("sidebar projection (T-508)", () => {
     expect(backwards.board.blocked.map((c) => c.id)).toEqual(forwards.board.blocked.map((c) => c.id));
     expect(backwards.board.inProgress.map((c) => c.id)).toEqual(forwards.board.inProgress.map((c) => c.id));
     expect(backwards.board.open.map((c) => c.id)).toEqual(forwards.board.open.map((c) => c.id));
+
+    // Descending canonical id: dd44 before cc33, the same both ways round.
+    expect(forwards.board.done.map((c) => c.id)).toEqual(["T-600", "T-600"]);
+
+    expect(forwards.board.done.map((c) => c.title)).toEqual(["later", "earlier"]);
+    expect(backwards.board.done.map((c) => c.title)).toEqual(["later", "earlier"]);
   });
 
   it("names the two newest handovers, newest first", async () => {

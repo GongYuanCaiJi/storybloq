@@ -67,18 +67,19 @@ const SCAN_TICK_MS = 25;
 /**
  * How many cards a column ever draws, and the line that stands for the rest.
  *
- * A fixed eight, by the owner's ruling, and not a figure derived from
+ * A fixed six, by the owner's ruling, and not a figure derived from
  * `props.scroll.bodyRows`. The derived cap is what produced the bug the owner
  * hit live: a Done column of 27 was headed 27 correctly, drew 18 rows and
  * showed no tail, because the pane clips at `bodyRows` and the tail WAS drawn,
- * below the cut, along with the issues and handover lines under it. Eight
- * bounds the board at ten rows per column whatever the pane reports, so the
- * whole pane is fourteen rows side by side and nothing is silently cut.
+ * below the cut, along with the issues and handover lines under it. Six
+ * bounds every column's body at seven rows whatever the pane reports, so the
+ * board is the same height on every terminal and nothing is silently cut. It
+ * was eight until the owner asked for the height back.
  *
  * The tail is three dots and not "+19 more": the heading already carries the
  * true total, so the tail only has to say that the column goes on.
  */
-const COLUMN_CARD_CAP = 8;
+const COLUMN_CARD_CAP = 6;
 const COLUMN_TAIL = "...";
 const BOARD_COLUMNS = 4;
 /** What a column with nothing in it says, rather than drawing a blank frame. */
@@ -183,11 +184,20 @@ const BASH_TOOL = "Bash";
 const CLI_NAME = "storybloq";
 const WRITE_VERBS = ["create", "update", "set", "unset", "add", "init", "snapshot", "reinforce", "supersede"];
 const CLI_VERB_DEPTH = 2;
-/** What cuts a command line into pieces each judged on its own. */
-const SEGMENT_BREAK = /[;|&\n]+/;
-/** The shell verbs that write, and the one token a redirect is reduced to. */
+/**
+ * The characters that are operators outside a quoted run, the runs of them
+ * that cut one segment from the next, and the one that redirects.
+ */
+const OPERATOR_CHARACTERS = [";", "|", "&", "\n", ">", "<"];
+const SEPARATOR_CHARACTERS = [";", "|", "&", "\n"];
 const REDIRECT = ">";
-const COPY_COMMANDS = new Set(["cp", "mv", "install"]);
+/** A leading `NAME=value`, which is an assignment and not the command. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** The few commands that only lead up to the one that runs. */
+const WRAPPER_COMMANDS = new Set(["env", "npx", "time", "nice", "sudo", "command"]);
+/** The shell commands that write, by what each of them writes. */
+const COPY_COMMANDS = new Set(["cp", "install"]);
+const MOVE_COMMAND = "mv";
 const TEE_COMMAND = "tee";
 const REMOVE_COMMAND = "rm";
 const SED_COMMAND = "sed";
@@ -701,45 +711,88 @@ async function readContextFill($: any): Promise<number | null> {
   }
 }
 
+/** One piece of a command line: an operator, or a word to be read as one. */
+interface Token {
+  readonly text: string;
+  readonly operator: boolean;
+}
+
 /**
- * A command line cut into words, quotes honoured and redirects singled out.
+ * A command line read ONCE, quotes and escapes honoured, operators kept apart
+ * from arguments.
  *
- * Quoting is what makes `echo "storybloq ticket update"` a single word rather
- * than a CLI call, so the quoted run is kept whole and never split. `>` and
- * `>>` come back as one `REDIRECT` token however they were spaced, so the
- * word after one is the destination.
+ * Splitting on separators before reading the quotes was the bug: `echo "x;
+ * storybloq ticket update"` came apart into two segments and the second
+ * looked like a CLI call, and `echo '>' .story/config.json` looked like a
+ * redirect into the ledger. A separator, a redirect and a quote mark only
+ * mean what they say OUTSIDE a quoted run, so there is one pass and it knows
+ * which run it is in.
+ *
+ * An unterminated quote is a line this cannot read, and an unreadable line
+ * does not sweep: no tokens come back.
  */
-function tokenize(segment: string): string[] {
-  const words: string[] = [];
-  let word = "";
+function lex(command: string): Token[] {
+  const tokens: Token[] = [];
+  let text = "";
+  let started = false;
   let quote = "";
   const flush = (): void => {
-    if (word !== "") words.push(word);
-    word = "";
+    if (started) tokens.push({ text, operator: false });
+    text = "";
+    started = false;
   };
-  for (const character of segment) {
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!;
     if (quote !== "") {
+      // Inside single quotes a backslash is a backslash; inside double quotes
+      // it escapes the next character, as the shell reads them.
+      if (character === "\\" && quote === '"' && index + 1 < command.length) {
+        index += 1;
+        text += command[index];
+        started = true;
+        continue;
+      }
       if (character === quote) quote = "";
-      else word += character;
+      else {
+        text += character;
+        started = true;
+      }
+      continue;
+    }
+    if (character === "\\") {
+      index += 1;
+      if (index < command.length) {
+        text += command[index];
+        started = true;
+      }
       continue;
     }
     if (character === '"' || character === "'") {
       quote = character;
+      started = true;
       continue;
     }
-    if (character === REDIRECT) {
-      flush();
-      if (words[words.length - 1] !== REDIRECT) words.push(REDIRECT);
-      continue;
-    }
-    if (character === " " || character === "\t") {
+    if (character === " " || character === "\t" || character === "\r") {
       flush();
       continue;
     }
-    word += character;
+    if (OPERATOR_CHARACTERS.includes(character)) {
+      flush();
+      let run = character;
+      while (index + 1 < command.length && command[index + 1] === character) {
+        run += character;
+        index += 1;
+      }
+      tokens.push({ text: run, operator: true });
+      continue;
+    }
+    text += character;
+    started = true;
   }
   flush();
-  return words;
+  // An unclosed quote means the rest of the line was read as literal text,
+  // which it is not. Ambiguous, so nothing.
+  return quote === "" ? tokens : [];
 }
 
 /** A word that names something inside the ledger directory. */
@@ -747,51 +800,102 @@ function inLedger(word: string | undefined): boolean {
   return typeof word === "string" && word.includes(STORY_DIR);
 }
 
+/** The last path segment of a word, which is the name a command runs under. */
+function basename(word: string): string {
+  const cut = word.lastIndexOf("/");
+  return cut === -1 ? word : word.slice(cut + 1);
+}
+
 /**
- * Did one pipeline segment write the ledger?
+ * The command a segment actually runs, past the wrappers that only lead up to
+ * one, and the arguments it was given.
+ *
+ * `storybloq` counts as the CLI only HERE, in executable position: `echo
+ * storybloq ticket update` prints a sentence and writes nothing, and the two
+ * read identically to anything that only looks for the word. The wrappers are
+ * a named few (`env`, `npx`, `time`, `nice`, `sudo`, `command`) with their own
+ * options and any leading `NAME=value` assignments stepped over. Anything
+ * else in front of the command (`xargs`, a subshell, a substitution) is a
+ * line this cannot read, and it returns nothing rather than guess.
+ */
+function executableOf(words: readonly string[]): { name: string; args: string[] } | null {
+  let index = 0;
+  for (;;) {
+    while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
+    if (index < words.length && WRAPPER_COMMANDS.has(basename(words[index]!))) {
+      index += 1;
+      while (index < words.length && words[index]!.startsWith("-")) index += 1;
+      continue;
+    }
+    break;
+  }
+  if (index >= words.length) return null;
+  return { name: words[index]!, args: words.slice(index + 1) };
+}
+
+/**
+ * Did one segment of a command line write the ledger?
  *
  * Direction is the whole question. `cat .story/tickets/T-001.json > /tmp/x`
  * and `cp .story/tickets/T-001.json /tmp/x` both name the ledger and both
  * write a file, and neither changes a thing we draw; only where the ledger is
- * the DESTINATION has anything moved. So a redirect counts at its target, a
- * copy or a move at its last word, and `tee` at any of its files. `rm` and
- * `sed -i` are the two that write the path they are given.
+ * the DESTINATION has anything moved. So a redirect counts at its target and
+ * a copy at its last operand. `mv` counts at either end, because moving a
+ * ticket OUT of the ledger takes it off the board as surely as moving one in;
+ * `tee` counts at any of its files, and `rm` and `sed -i` at the path they
+ * are given.
  */
-function segmentWrote(segment: string): boolean {
-  const tokens = tokenize(segment);
+function segmentWrote(tokens: readonly Token[]): boolean {
   const words: string[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    if (tokens[index] === REDIRECT) {
-      index += 1;
-      if (inLedger(tokens[index])) return true;
+    const token = tokens[index]!;
+    if (!token.operator) {
+      words.push(token.text);
       continue;
     }
-    words.push(tokens[index]!);
+    // A redirect writes what follows it; `<` reads it, and the rest of the
+    // operators never reach here (they are what the segments were cut on).
+    if (token.text.startsWith(REDIRECT)) {
+      const target = tokens[index + 1];
+      if (target !== undefined && !target.operator && inLedger(target.text)) return true;
+      index += 1;
+    }
   }
-  if (words.length === 0) return false;
+
+  const run = executableOf(words);
+  if (run === null) return false;
+  const name = basename(run.name);
+  const args = run.args;
 
   // The CLI resolves `.story/` itself, so the command line need not name it;
   // what says it writes is the SUBCOMMAND. A verb further along is an
   // argument (`storybloq note list --tags update`) or prose in a flag's
   // value, and neither writes anything.
-  const cli = words.findIndex((word) => word === CLI_NAME || word.endsWith(`/${CLI_NAME}`));
-  if (cli !== -1) {
-    for (let index = cli + 1; index <= cli + CLI_VERB_DEPTH && index < words.length; index += 1) {
-      if (WRITE_VERBS.includes(words[index]!)) return true;
+  if (name === CLI_NAME) {
+    for (let index = 0; index < CLI_VERB_DEPTH && index < args.length; index += 1) {
+      if (WRITE_VERBS.includes(args[index]!)) return true;
     }
+    return false;
   }
 
-  const verb = words[0]!;
-  const rest = words.slice(1);
-  if (COPY_COMMANDS.has(verb)) return rest.length >= 2 && inLedger(rest[rest.length - 1]);
-  if (verb === TEE_COMMAND || verb === REMOVE_COMMAND) return rest.some(inLedger);
-  if (verb === SED_COMMAND) return rest.some((word) => word.startsWith("-i")) && rest.some(inLedger);
+  if (name === MOVE_COMMAND || name === TEE_COMMAND || name === REMOVE_COMMAND) return args.some(inLedger);
+  if (COPY_COMMANDS.has(name)) return args.length >= 2 && inLedger(args[args.length - 1]);
+  if (name === SED_COMMAND) return args.some((word) => word.startsWith("-i")) && args.some(inLedger);
   return false;
 }
 
-/** Every segment of a command line, each judged on its own. */
+/** Every segment of a command line, cut on the separators, each on its own. */
 function commandWroteLedger(command: string): boolean {
-  return command.split(SEGMENT_BREAK).some(segmentWrote);
+  let segment: Token[] = [];
+  for (const token of lex(command)) {
+    if (token.operator && SEPARATOR_CHARACTERS.includes(token.text[0]!)) {
+      if (segmentWrote(segment)) return true;
+      segment = [];
+      continue;
+    }
+    segment.push(token);
+  }
+  return segmentWrote(segment);
 }
 
 /**
@@ -809,15 +913,21 @@ function commandWroteLedger(command: string): boolean {
  *   Write, Edit, MultiEdit, NotebookEdit at a         yes
  *     path under .story/
  *   the same four anywhere else                       no
- *   Bash running the storybloq CLI with a writing     yes
- *     verb in SUBCOMMAND position (it resolves
- *      .story/ itself, so the command line need
- *      not name the directory)
+ *   Bash running the storybloq CLI in EXECUTABLE      yes
+ *     position with a writing verb in SUBCOMMAND
+ *      position (it resolves .story/ itself, so the
+ *      command line need not name the directory)
  *   Bash writing INTO .story/ (a redirect whose       yes
- *     destination is there, cp or mv whose last
- *      argument is, tee at one, rm or sed -i of one)
+ *     destination is there, cp whose last argument
+ *      is, tee at one, rm or sed -i of one)
+ *   Bash moving a file at either end of .story/       yes
+ *     (mv out of it takes a ticket off the board
+ *      as surely as mv into it puts one on)
  *   Bash reading .story/ and writing elsewhere        no
  *     (cat a ticket into /tmp, cp one out of it)
+ *   Bash naming the CLI anywhere but executable       no
+ *     position (echo storybloq ticket update), or
+ *      inside quotes, or in a line this cannot read
  *   Bash otherwise (cat, ls, grep, git status,        no
  *     storybloq status, storybloq ticket list)
  *   Read, Glob, Grep, LS, anything else               no
@@ -892,7 +1002,7 @@ function isStacked(width: number): boolean {
  * bound on the pane ("cells down the whole surface, not the room left for
  * this component"), and `bodyRows` only raises that. Above the rows the whole
  * board needs neither matters and the layout is the one the owner had before
- * any budget existed: eight cards, a tail, and the blank rows.
+ * any budget existed: the capped cards, a tail, and the blank rows.
  */
 function rowBudget(e: any, stacked: boolean): { body: number; gaps: boolean; compact: boolean } {
   const frames = stacked ? COLUMN_FRAME_ROWS * BOARD_COLUMNS : COLUMN_FRAME_ROWS;
@@ -1073,8 +1183,8 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
   // row taller than the rest.
   const columns = [board.blocked, board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
   const longest = Math.max(...columns.map((column) => column.length));
-  // Never more than the cap, whatever the budget allows: a body of nine rows
-  // is eight cards and a tail, not nine cards.
+  // Never more than the cap, whatever the budget allows: a body of seven rows
+  // is six cards and a tail, not seven cards.
   let shown = Math.min(body, longest, COLUMN_CARD_CAP);
   if (columns.some((column) => column.length > shown)) shown = Math.max(0, Math.min(shown, body - 1));
   const omitted = columns.some((column) => column.length > shown);

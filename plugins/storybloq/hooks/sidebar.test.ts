@@ -793,7 +793,7 @@ test("orders the columns as the work moves", async () => {
 test("heads every column with the whole count, not the rows that fit", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Seventeen open tickets, of which eight are drawn. The heading still says
+  // Seventeen open tickets, of which six are drawn. The heading still says
   // seventeen: M-COUNT-MISMATCH heads it with the drawn rows instead, and a
   // capped column then under-reports the phase. This is the figure the owner
   // read live, where Done said 27 over eighteen drawn rows.
@@ -890,37 +890,39 @@ test("keeps the handover names off the board", async () => {
   expect(text).toContain("issues: 1 critical");
 });
 
-test("caps a column at eight and ends it with dots", async () => {
+test("caps a column at six and ends it with dots", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Seventeen open tickets: eight rows and a dotted tail, in a pane with the
+  // Seventeen open tickets: six rows and a dotted tail, in a pane with the
   // rows to spare. M-CAP-IGNORED draws all seventeen and writes no tail,
-  // which is the column that ran off the bottom of the owner's pane, and
-  // M-ROW-OVERFLOW ignores the budget that keeps the tail on screen.
+  // which is the column that ran off the bottom of the owner's pane;
+  // M-ROW-OVERFLOW ignores the budget that keeps the tail on screen, and
+  // M-CAP-EIGHT leaves the cap at the eight it was before the owner asked
+  // for the height back.
   const tree = await h.render(paneEvent(160, 30));
   const cards = cardsOf(tree, "board-open");
 
-  expect(cards.length).toBe(9);
-  expect(cards[8]).toBe("...");
-  expect(cards.slice(0, 8).every((row) => row.startsWith("T-"))).toBe(true);
+  expect(cards.length).toBe(7);
+  expect(cards[6]).toBe("...");
+  expect(cards.slice(0, 6).every((row) => row.startsWith("T-"))).toBe(true);
   expect(headingOf(tree, "board-open")).toBe("Open 17");
 });
 
-test("treats a ninth card as the tail, not as a ninth card", async () => {
-  const h = harness(manyOpen(4));
+test("treats a seventh card as the tail, not as a seventh card", async () => {
+  const h = harness(manyOpen(2));
   await started(h);
 
-  // Exactly nine open: the cap is eight, so the ninth row is the tail and not
-  // a card. M-NINE-CARDS leaves the count unclamped and the column draws all
-  // nine with nothing to say it was capped, which is the one case where the
-  // heading and the rows disagree without anyone noticing.
+  // Exactly seven open: the cap is six, so the seventh row is the tail and
+  // not a card. M-NINE-CARDS leaves the count unclamped and the column draws
+  // all seven with nothing to say it was capped, which is the one case where
+  // the heading and the rows disagree without anyone noticing.
   const tree = await h.render(paneEvent(160, 30));
   const cards = cardsOf(tree, "board-open");
 
-  expect(headingOf(tree, "board-open")).toBe("Open 9");
-  expect(cards.length).toBe(9);
-  expect(cards[8]).toBe("...");
-  expect(cards.slice(0, 8).every((row) => row.startsWith("T-"))).toBe(true);
+  expect(headingOf(tree, "board-open")).toBe("Open 7");
+  expect(cards.length).toBe(7);
+  expect(cards[6]).toBe("...");
+  expect(cards.slice(0, 6).every((row) => row.startsWith("T-"))).toBe(true);
 });
 
 test("leaves a column that fits without a tail, and levels the four bodies", async () => {
@@ -1087,11 +1089,18 @@ function nodeWidth(node: unknown): number {
   return typeof props["width"] === "number" ? (props["width"] as number) : cells(textOf(node));
 }
 
-/** A node that cuts its own text rather than letting the row wrap it. */
+/**
+ * A node that cuts its own text rather than letting the row wrap it.
+ *
+ * The client's `wrap` takes seven values and exactly one of them wraps, so a
+ * test that took any string for truncation would call `wrap: "wrap"` safe.
+ */
+const TRUNCATING_WRAPS = ["end", "middle", "truncate", "truncate-start", "truncate-middle", "truncate-end"];
+
 function truncates(node: unknown): boolean {
   const element = (node as { element?: string })?.element;
   const props = (node as { props?: Record<string, unknown> })?.props ?? {};
-  return element !== "Box" && typeof props["wrap"] === "string";
+  return element !== "Box" && TRUNCATING_WRAPS.includes(props["wrap"] as string);
 }
 
 // Pass a width and the wrapping is counted too: a Text that names a `wrap`
@@ -1106,7 +1115,7 @@ function paneHeight(node: unknown, width = Infinity): number {
   const props = (node as { props?: Record<string, unknown> }).props ?? {};
   const own = typeof props["width"] === "number" ? (props["width"] as number) : width;
   if (element !== "Box") {
-    if (typeof props["wrap"] === "string") return 1;
+    if (truncates(node)) return 1;
     return Math.max(1, Math.ceil(cells(textOf(node)) / own));
   }
   const children = props["children"];
@@ -1149,7 +1158,7 @@ test("draws the whole board on a tall terminal whatever the pane reports", async
   await started(h);
 
   // The owner's reload: 213 columns on a 61 row terminal, and the pane drew
-  // the compact fallback where the build before drew eight cards a column.
+  // the compact fallback where the build before drew a full column of cards.
   // `scroll.bodyRows` is the height of the tree we last drew, not the room we
   // have, so a short board makes the next budget shorter and the pane never
   // climbs back out. M-BUDGET-SELF-LIMIT takes the field as the cap again and
@@ -1158,8 +1167,8 @@ test("draws the whole board on a tall terminal whatever the pane reports", async
     const tree = await h.render(paneEvent(213, reported, 61));
     const cards = cardsOf(tree, "board-open");
     expect(nodeByKey(tree, "board-open").element).toBe("Box");
-    expect(cards.length).toBe(9);
-    expect(cards[8]).toBe("...");
+    expect(cards.length).toBe(7);
+    expect(cards[6]).toBe("...");
     expect(headingOf(tree, "board-open")).toBe("Open 17");
     expect(paneRows(tree)[1]).toBe(" ");
   }
@@ -1222,7 +1231,16 @@ test("measures a title in terminal cells, not in characters", async () => {
 });
 
 test("cuts a title between glyphs, never inside one", async () => {
-  const h = harness(newFixture());
+  // Its own open column, four tickets and no more: with the fixture's own
+  // open leaves beside them the last of these falls past the cap, the row is
+  // absent, and an assertion that walks its characters walks nothing and
+  // passes whatever the cut did.
+  const fixture = newFixture();
+  for (const id of ["T-002", "T-010", "T-011", "T-012", "T-013", "T-014"]) {
+    delete fixture.files[`.story/tickets/${id}.json`];
+    delete fixture.mtimes[`.story/tickets/${id}.json`];
+  }
+  const h = harness(fixture);
   // A joined emoji, an emoji spelled with the variation selector, a letter
   // carrying a combining mark, and a bare surrogate pair. The measure
   // suppresses the code point after a zero-width joiner and a cut that walks
@@ -1246,9 +1264,11 @@ test("cuts a title between glyphs, never inside one", async () => {
     const rows = cardsOf(await h.render(paneEvent(columns, 30)), "board-open");
     const row = (id: string): string => rows.find((text) => text.startsWith(id)) ?? "";
 
+    // Every one of them is on the board: an absent row asserts nothing.
+    for (const id of Object.keys(titles)) expect(row(id)).not.toBe("");
+
     // Every joiner still joins two halves, and none dangles at the cut.
     const joined = row("T-040");
-    expect(joined).not.toBe("");
     expect(joined).toContain("👩‍💻");
     expect([...joined].filter((c) => c === "‍").length).toBe([...joined].filter((c) => c === "👩").length);
     expect(joined.includes("‍…")).toBe(false);
@@ -1488,6 +1508,16 @@ test("reads the direction of a Bash command, not just the words in it", async ()
     "storybloq note list --tags update",
     'echo "storybloq ticket update"',
     "cat .story/config.json\ngrep -c inprogress .story/tickets/T-001.json\nls .story/handovers",
+    // A separator inside quotes is text, not a separator: M-QUOTED-SEPARATOR
+    // cuts the line before it reads the quotes and the tail looks like a call.
+    'echo "x; storybloq ticket update T-001"',
+    // And so is a redirect: M-QUOTED-REDIRECT reads this as a write into the
+    // ledger when it prints a greater-than sign and a filename.
+    "echo '>' .story/config.json",
+    // The CLI writes only where it RUNS. M-CLI-AS-ARGUMENT takes the word
+    // wherever it falls, and printing a sentence sweeps the whole ledger.
+    "echo storybloq ticket update",
+    "printf '%s\\n' storybloq note create",
   ];
   for (const [index, command] of readers.entries()) {
     await h.fire("tool.call", { tool: "Bash", command, tool_use_id: `dir-${index}` });
@@ -1499,6 +1529,22 @@ test("reads the direction of a Bash command, not just the words in it", async ()
   await h.fire("tool.call", { tool: "Bash", command: "cp /tmp/x.json .story/tickets/T-099.json", tool_use_id: "dir-in" });
   await h.tick();
   expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("sweeps when a move takes a ticket out of the ledger", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+
+  // A move out of `.story/` takes a ticket off the board as surely as a move
+  // in puts one on, and the board has to lose it in the same turn. A rule
+  // that only watches the destination leaves the ticket drawn until the turn
+  // ends, which is the staleness the mid-turn scan exists to end.
+  delete h.fixture.files[".story/tickets/T-001.json"];
+  delete h.fixture.mtimes[".story/tickets/T-001.json"];
+  await h.fire("tool.call", { tool: "Bash", command: "mv .story/tickets/T-001.json /tmp/x.json", tool_use_id: "mv-out" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
 test("sweeps for the CLI writing under a flag that reads like prose", async () => {

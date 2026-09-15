@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { CALLS, EVENTS, CLIENT_API_VERSION } from "../../plugins/storybloq/hooks/client-api.js";
 
 /**
@@ -57,44 +56,19 @@ function clientAvailable(): boolean {
 }
 
 /**
- * Validates the plugin as the client will load it. The scaffold's `mod.ts` is
- * another session's file and wires the sidebar in its own commit, so until it
- * does, this validates a copy with the wiring added: the scan follows imports,
- * so what it prints for the copy is what it will print for the real one.
+ * Validates the plugin as the client will load it, at its real path.
+ *
+ * It once validated a repaired COPY, because `mod.ts` was another session's
+ * file and had not wired the sidebar in yet. That wiring landed with T-507, so
+ * the fallback is gone: a copy that validates proves nothing about the plugin
+ * the client actually loads, and the day the real wiring broke the copy would
+ * still have passed.
  */
 function validateOutput(): string {
-  const realMod = readFileSync(join(PLUGIN_DIR, "hooks", "mod.ts"), "utf8");
-  const alreadyWired = realMod.includes('from "./sidebar.js"');
-  if (alreadyWired) {
-    return execFileSync("claude", ["plugin", "validate", PLUGIN_DIR], {
-      encoding: "utf8",
-      env: { ...process.env, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" },
-    });
-  }
-
-  const dir = mkdtempSync(join(tmpdir(), "storybloq-sidebar-validate-"));
-  try {
-    mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
-    mkdirSync(join(dir, "hooks"), { recursive: true });
-    // `skills` points at a directory this copy does not carry.
-    const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, ".claude-plugin", "plugin.json"), "utf8")) as Record<string, unknown>;
-    delete manifest["skills"];
-    writeFileSync(join(dir, ".claude-plugin", "plugin.json"), JSON.stringify(manifest, null, 2));
-    for (const name of ["hooks.json", "client-api.ts", "sidebar.ts", "sidebar-projection.ts"]) {
-      copyFileSync(join(PLUGIN_DIR, "hooks", name), join(dir, "hooks", name));
-    }
-    const wired = realMod
-      .replace("type Options = Readonly<", 'import { registerSidebar } from "./sidebar.js";\n\ntype Options = Readonly<')
-      .replace("// T-508 wires here: if (sidebar) registerSidebar(on, options);", "if (sidebar) registerSidebar(on, options);");
-    expect(wired, "mod.ts no longer carries the T-508 wiring comment").not.toBe(realMod);
-    writeFileSync(join(dir, "hooks", "mod.ts"), wired);
-    return execFileSync("claude", ["plugin", "validate", dir], {
-      encoding: "utf8",
-      env: { ...process.env, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" },
-    });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return execFileSync("claude", ["plugin", "validate", PLUGIN_DIR], {
+    encoding: "utf8",
+    env: { ...process.env, CLAUDE_CODE_ENABLE_FUNCTION_HOOKS: "1" },
+  });
 }
 
 /**
@@ -163,6 +137,19 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
       userConfig?: { sidebar?: { default?: unknown } };
     };
     expect(manifest.userConfig?.sidebar?.default).toBe(false);
+  });
+
+  it("registers the Mod only where the option says so", () => {
+    // The manifest defaults the option off, and this is the other half of
+    // that: the wiring reads the option and registers behind it. M-SIDEBAR
+    // -ALWAYS-ON drops the condition and every session that loads the plugin
+    // gets a pane it never asked for.
+    const mod = readFileSync(join(PLUGIN_DIR, "hooks", "mod.ts"), "utf8");
+    expect(mod).toContain('import { registerSidebar } from "./sidebar.js";');
+    expect(mod).toContain('const sidebar = options["sidebar"] === true;');
+    expect(mod).toContain("if (sidebar) registerSidebar(on, options);");
+    // And nowhere else: one registration, one gate.
+    expect(mod.split("registerSidebar(on").length - 1).toBe(1);
   });
 
   it("ships the Mod's own tests beside it", () => {
