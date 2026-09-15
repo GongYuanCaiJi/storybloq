@@ -429,6 +429,7 @@ describe("tool description contract (T-460)", () => {
     // degraded set for the same reason: a user with no `.story/` yet is
     // exactly the one running a stale CLI with no review bridge. No _list
     // tool; the six check ids are a closed enum in the schema.
-    expect(result.tools.length).toBe(78);
+    // T-507 adds storybloq_roster_get (78 -> 79), f2c12b23.
+    expect(result.tools.length).toBe(79);
   });
 });
