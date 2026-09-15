@@ -2444,7 +2444,7 @@ export function registerHealthTool(server: McpServer, ledgerRoot: string | null,
     // sentence that is not already in `storybloq reference` and settings.md,
     // plus the relay instruction, which is the only part a client acts on.
     description:
-      "Tooling check: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session message delivery. Works without .story/, read-only. Relay each advise message and its fix verbatim.",
+      "Tooling check: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session message delivery. Works without .story/, read-only. Relay each advise message and its fix verbatim.",
     inputSchema: {
       format: z.enum(["md", "json"]).optional().describe("default: md"),
       only: z.array(z.enum(HEALTH_CHECK_IDS)).optional(),

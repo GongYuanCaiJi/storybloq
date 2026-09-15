@@ -350,7 +350,7 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "health",
-    description: "Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it",
+    description: "Check the tooling around this project: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it",
     usage: "storybloq health [--only <ids>] [--refresh] [--format json|md] [--raw]",
     flags: ["--only", "--refresh", "--format"],
   },
@@ -883,7 +883,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_ruling_create", description: "Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction", params: ["text","attribution","date","scopeTags?","cites?","clientTaskId?"] },
   { name: "storybloq_ruling_supersede", description: "Supersede a ruling: link an existing one with `with`, or record a new superseding ruling", params: ["id","with?","text?","attribution?","date?","scopeTags?","clientTaskId?"] },
   { name: "storybloq_selftest", description: "Integration smoke test: create/update/delete cycle", params: [] },
-  { name: "storybloq_health", description: "Tooling check: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session message delivery. Works without .story/, read-only", params: ["format?","only?","refresh?"] },
+  { name: "storybloq_health", description: "Tooling check: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session message delivery. Works without .story/, read-only", params: ["format?","only?","refresh?"] },
   { name: "storybloq_review_lenses_prepare", description: "Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, cited-ruling delivery, complete lens prompts", params: ["stage","diff","changedFiles","ticketDescription?","reviewRound?","priorDeferrals?","sessionId?","target?"] },
   { name: "storybloq_review_lenses_synthesize", description: "Run the @storybloq/lenses merger pipeline programmatically over raw lens outputs; returns the ReviewVerdict envelope (no merger agent). Echo prepare's citedRulingsUndelivered here; without a sessionId it is the only route a delivery hold has", params: ["stage?","lensResults","activeLenses","skippedLenses","reviewRound?","reviewId?","diff?","changedFiles?","sessionId?","citedRulingsUndelivered?"] },
   { name: "storybloq_review_lenses_judge", description: "Deterministic three-value verdict mapping over the synthesize ReviewVerdict plus convergence history (no judge agent). Returns capReasons, coverageOnlyCap and uncoveredCoreLenses; report capReasons with the round or a coverage cap is routed like a findings cap", params: ["reviewVerdict?","convergenceHistory?"] },

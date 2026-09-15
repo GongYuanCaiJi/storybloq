@@ -64,7 +64,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **recommend** (--format?, --count?, --with-actionability?) - Context-aware work suggestions
 - **reference** (--format?) - Print CLI command and MCP tool reference
 - **selftest** (--format?) - Run integration smoke test: create/update/delete cycle across all entity types
-- **health** (--only?, --refresh?, --format?) - Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it
+- **health** (--only?, --refresh?, --format?) - Check the tooling around this project: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it
 - **codex-review <kind>** (--session, --format?) - Run native Codex plan or code review for an autonomous session
 - **limit-status** (--cancel?, --requeue?, --recent?, --format?) - Show pending usage-limit auto-resumes (global across projects); cancel or requeue records
 - **session intel-start** (--client?) - Capture the auto-compact setting for the current process era (SessionStart hook)
@@ -198,7 +198,7 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?, clientTaskId?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction
 - **storybloq_ruling_supersede** (id, with?, text?, attribution?, date?, scopeTags?, clientTaskId?) - Supersede a ruling: link an existing one with `with`, or record a new superseding ruling
 - **storybloq_selftest** - Integration smoke test: create/update/delete cycle
-- **storybloq_health** (format?, only?, refresh?) - Tooling check: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session message delivery. Works without .story/, read-only
+- **storybloq_health** (format?, only?, refresh?) - Tooling check: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session message delivery. Works without .story/, read-only
 - **storybloq_review_lenses_prepare** (stage, diff, changedFiles, ticketDescription?, reviewRound?, priorDeferrals?, sessionId?, target?) - Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, cited-ruling delivery, complete lens prompts
 - **storybloq_review_lenses_synthesize** (stage?, lensResults, activeLenses, skippedLenses, reviewRound?, reviewId?, diff?, changedFiles?, sessionId?, citedRulingsUndelivered?) - Run the @storybloq/lenses merger pipeline programmatically over raw lens outputs; returns the ReviewVerdict envelope (no merger agent). Echo prepare's citedRulingsUndelivered here; without a sessionId it is the only route a delivery hold has
 - **storybloq_review_lenses_judge** (reviewVerdict?, convergenceHistory?) - Deterministic three-value verdict mapping over the synthesize ReviewVerdict plus convergence history (no judge agent). Returns capReasons, coverageOnlyCap and uncoveredCoreLenses; report capReasons with the round or a coverage cap is routed like a findings cap

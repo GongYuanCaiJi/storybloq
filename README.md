@@ -61,7 +61,7 @@ storybloq setup --client all
 
 Requires Node.js 20+ and at least one AI client: Claude Code or Codex CLI 0.130.0+. Package lives on npm at [**@storybloq/storybloq**](https://www.npmjs.com/package/@storybloq/storybloq); releases are tagged on this repo at [github.com/Storybloq/storybloq/releases](https://github.com/Storybloq/storybloq/releases).
 
-`setup --client all` installs the Storybloq skill for Claude and Codex, registers this package as an MCP server, and configures available client hooks. Re-running it is safe. Codex reports installed hooks with trust `unknown`; open `/hooks` in Codex to review and trust them. `setup-skill` remains as a compatibility alias for Claude-only setup.
+`setup --client all` installs the Storybloq skill for Claude and Codex, registers this package as an MCP server, and configures available client hooks. It also registers the bundled [codex-claude-bridge](https://www.npmjs.com/package/codex-claude-bridge) review backend as the `codex-bridge` MCP server when Codex is installed; the bridge ships as an optional dependency of this package, so a copy you registered yourself is left alone and `storybloq health` launches whichever one is registered and reports whether it answers. The bridge needs a Codex CLI login to review (or `agy` for its Gemini failover); without one it registers but reviews fail. Re-running it is safe. Codex reports installed hooks with trust `unknown`; open `/hooks` in Codex to review and trust them. `setup-skill` remains as a compatibility alias for Claude-only setup.
 
 ## Your first two sessions
 
