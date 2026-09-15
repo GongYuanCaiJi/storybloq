@@ -132,7 +132,7 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
     // temp dir would collect a persistent database instead.
     let scratch: string | null = null;
     try {
-      scratch = (opts.mkScratch ?? (() => fs.mkdtempSync(join(tmpdir(), "storybloq-probe-"))))();
+      scratch = (opts.mkScratch ?? (() => fs.mkdtempSync(join(tmpdir(), "storybloq-mcp-probe-"))))();
     } catch (err: unknown) {
       resolveProbe({ kind: "failed", reason: `scratch directory: ${err instanceof Error ? err.message : String(err)}`, code: null, signal: null, stderr: "", allocatedMs });
       return;
