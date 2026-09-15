@@ -31,12 +31,18 @@ export function resolveBundledBridge(opts: ResolveOptions = {}): BundledBridge {
     if (code === "MODULE_NOT_FOUND") return { kind: "absent" };
     return { kind: "unusable", reason: err instanceof Error ? err.message : String(err) };
   }
-  let pkg: { version?: unknown; bin?: unknown; main?: unknown };
+  let parsed: unknown;
   try {
-    pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as typeof pkg;
+    parsed = JSON.parse(readFileSync(pkgPath, "utf-8"));
   } catch (err: unknown) {
     return { kind: "unusable", reason: `package.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
   }
+  // Valid JSON is not necessarily an object (`null`, an array): say so
+  // instead of throwing on the first field read.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { kind: "unusable", reason: "package.json is not an object" };
+  }
+  const pkg = parsed as { version?: unknown; bin?: unknown; main?: unknown };
   const rel = binOf(pkg.bin) ?? (typeof pkg.main === "string" ? pkg.main : null) ?? "dist/index.js";
   // The entry is later EXECUTED by whoever registers it, so it must be a
   // regular file inside the package: no absolute bin, no `..` escape, and no

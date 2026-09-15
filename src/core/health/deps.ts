@@ -109,9 +109,10 @@ const KILL_MAX_WAIT_MS = 3000;
 export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: number, opts: ProbeMcpOptions): Promise<McpProbe> {
   const now = opts.now ?? (() => Date.now());
   const platform = opts.platform ?? process.platform;
-  const remaining = deadlineAt - now();
-  if (remaining < BRIDGE_PROBE_MIN_MS) return Promise.resolve({ kind: "not-attempted", reason: "budget exhausted" });
-  const allocatedMs = Math.max(BRIDGE_PROBE_MIN_MS, Math.min(capMs, remaining));
+  // The allocation is min(cap, remaining), never more than either; under the
+  // floor there is no launch at all, whichever of the two is the reason.
+  const allocatedMs = Math.min(capMs, deadlineAt - now());
+  if (allocatedMs < BRIDGE_PROBE_MIN_MS) return Promise.resolve({ kind: "not-attempted", reason: "budget exhausted" });
   const startedAt = now();
   const [command, ...args] = launch.argv;
   if (command === undefined) return Promise.resolve({ kind: "failed", reason: "empty command", code: null, signal: null, stderr: "", allocatedMs });
@@ -213,7 +214,24 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
           finish({ kind: "failed", reason: "output limit", code: null, signal: null, stderr: stderrTail, allocatedMs });
           return;
         }
-        const verdict = judgeLine(line, allocatedMs, stderrTail);
+        const message = parseMessage(line);
+        if (message === null) continue;
+        const request = serverRequest(message);
+        if (request !== null) {
+          // Request ids are independent per direction: a server may send its
+          // own request with id 1 while ours is pending. Answer a ping (empty
+          // result) so a server that waits for it can proceed; anything else
+          // is left unanswered, as a real client that lacks the capability would.
+          if (request.method === "ping") {
+            try {
+              child.stdin?.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: {} }) + "\n");
+            } catch {
+              // best effort
+            }
+          }
+          continue;
+        }
+        const verdict = judgeResponse(message, allocatedMs, stderrTail);
         if (verdict === null) continue;
         if (verdict.kind === "ok") {
           answered = true;
@@ -262,8 +280,7 @@ function spawnFailure(err: unknown, allocatedMs: number): McpProbe {
   return { kind: "failed", reason, code: null, signal: null, stderr: "", allocatedMs };
 }
 
-/** Null for a line that is not the id 1 answer (noise, notifications, other ids). */
-function judgeLine(line: string, allocatedMs: number, stderr: string): McpProbe | null {
+function parseMessage(line: string): Record<string, unknown> | null {
   let msg: unknown;
   try {
     msg = JSON.parse(line);
@@ -271,8 +288,20 @@ function judgeLine(line: string, allocatedMs: number, stderr: string): McpProbe 
     return null;
   }
   if (!msg || typeof msg !== "object" || Array.isArray(msg)) return null;
-  const m = msg as Record<string, unknown>;
+  return msg as Record<string, unknown>;
+}
+
+/** A server-initiated REQUEST (has a method and an id); notifications and responses are null. */
+function serverRequest(m: Record<string, unknown>): { id: unknown; method: string } | null {
+  if (typeof m["method"] !== "string" || m["id"] === undefined || m["id"] === null) return null;
+  return { id: m["id"], method: m["method"] };
+}
+
+/** Null for a message that is not the RESPONSE to our id 1 (notifications, requests, other ids). */
+function judgeResponse(m: Record<string, unknown>, allocatedMs: number, stderr: string): McpProbe | null {
   if (m["id"] !== 1) return null;
+  // A message carrying a method is a request or notification, never a response.
+  if (m["method"] !== undefined) return null;
   const failed = (reason: string): McpProbe => ({ kind: "failed", reason, code: null, signal: null, stderr, allocatedMs });
   if (m["jsonrpc"] !== "2.0") return failed("malformed initialize result (jsonrpc)");
   if (m["error"] !== undefined) {

@@ -384,9 +384,33 @@ describe("T-509 codex-bridge check: the probe", () => {
     expect(check.status).toBe("advise");
     expect(check.message).toContain("`codex-bridge` (user scope)");
     expect(check.message).toContain("did not answer the initialize request within 2500 ms");
+    expect(check.message).toContain("launch it by hand (node /opt/codex-claude-bridge/dist/index.js) and check it prints a JSON-RPC answer");
     expect(check.message).not.toContain("`codex-bridge-local` (local scope) did not");
     const bridges = JSON.parse(String(check.detail.bridges)) as Array<{ name: string; probe: string }>;
     expect(bridges.map((b) => [b.name, b.probe])).toEqual([["codex-bridge-local", "ok"], ["codex-bridge", "timeout"]]);
+  });
+
+  // M-STOP-AT-FIRST-FAILURE: an implementation that stops probing once a
+  // bridge fails still passes the case above (ok first). Fail FIRST here.
+  it("keeps probing after a failure: first fails, second answers, both launched and both in the detail", async () => {
+    const probe = probeStub({ kind: "enoent", allocatedMs: 5000 }, PROBE_OK);
+    const check = await checkCodexBridge(
+      ctxFor(),
+      bridgeDeps(
+        { [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": NODE_BRIDGE }, projects: { [PROJECT]: { mcpServers: { "codex-bridge-local": NPX_BRIDGE } } } }) },
+        { probeMcp: probe },
+      ),
+    );
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(probe.mock.calls.map(([launch]) => launch.argv)).toEqual([
+      ["npx", "-y", "codex-claude-bridge@latest"],
+      ["node", "/opt/codex-claude-bridge/dist/index.js"],
+    ]);
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("`codex-bridge-local` (local scope) cannot be launched");
+    expect(check.message).not.toContain("`codex-bridge` (user scope) cannot");
+    const bridges = JSON.parse(String(check.detail.bridges)) as Array<{ name: string; probe: string }>;
+    expect(bridges.map((b) => [b.name, b.probe])).toEqual([["codex-bridge-local", "enoent"], ["codex-bridge", "ok"]]);
   });
 
   it("two answering bridges are ok naming both", async () => {
@@ -472,6 +496,7 @@ describe("T-509 codex-bridge check: the probe", () => {
     const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
     expect(check.status).toBe("advise");
     expect(check.message).toContain("was not probed (budget exhausted)");
+    expect(check.message).toContain("re-run storybloq health --only codex-bridge");
     expect(check.message).not.toMatch(/broken|failed/);
   });
 
@@ -480,6 +505,7 @@ describe("T-509 codex-bridge check: the probe", () => {
     const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
     expect(check.status).toBe("advise");
     expect(check.message).toContain("cannot be launched: node was not found (registered as node /opt/codex-claude-bridge/dist/index.js)");
+    expect(check.message).toContain("install it or fix the registered command (claude mcp remove codex-bridge -s user, then storybloq setup-skill registers the bundled bridge)");
   });
 
   it("a malformed shadowing codex-bridge entry never crashes the repair text", async () => {
@@ -539,7 +565,7 @@ describe("T-509 codex-bridge check: no registered bridge, the bundle decides", (
       ),
     );
     expect(check.status).toBe("advise");
-    expect(check.message).toContain("remove the local-scope `codex-bridge` entry first (claude mcp remove codex-bridge -s local), then run storybloq setup-skill");
+    expect(check.message).toContain("remove the local-scope `codex-bridge` entry first (claude mcp remove codex-bridge -s local), then the failing registration (claude mcp remove codex-bridge-local -s user), then run storybloq setup-skill");
     // The foreign python entry was never launched: one probe, the bridge's argv.
     expect(probe).toHaveBeenCalledTimes(1);
     expect(probe.mock.calls[0]![0]!.argv).toEqual(["npx", "-y", "codex-claude-bridge@latest"]);

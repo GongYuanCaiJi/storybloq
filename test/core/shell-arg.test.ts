@@ -16,9 +16,15 @@ describe("shellArg", () => {
     expect(shellArg("~/x", "linux")).toBe("'~/x'");
     expect(shellArg("", "linux")).toBe("''");
   });
-  it("double-quotes on win32 with inner quotes doubled", () => {
+  it("double-quotes on win32 per CRT argv rules: backslashes before a quote or the end are doubled, quotes are backslash-escaped", () => {
     expect(shellArg("C:\\Users\\a b\\index.js", "win32")).toBe('"C:\\Users\\a b\\index.js"');
-    expect(shellArg('say "hi"', "win32")).toBe('"say ""hi"""');
+    expect(shellArg('say "hi"', "win32")).toBe('"say \\"hi\\""');
+    // A spaced path ending in a backslash: the trailing backslash is doubled so it cannot escape the closing quote.
+    expect(shellArg("C:\\Program Files\\", "win32")).toBe('"C:\\Program Files\\\\"');
+    // Backslashes before an embedded quote are doubled, then the quote is escaped.
+    expect(shellArg('a b\\"c', "win32")).toBe('"a b\\\\\\"c"');
+    // Backslashes NOT before a quote are left alone (they are literal in CRT parsing).
+    expect(shellArg("a b\\c\\d", "win32")).toBe('"a b\\c\\d"');
     expect(shellArg("C:/plain/index.js", "win32")).toBe("C:/plain/index.js");
     expect(shellArg("C:\\plain\\index.js", "win32")).toBe("C:\\plain\\index.js");
     expect(shellArg("a&b", "win32")).toBe('"a&b"');
@@ -31,5 +37,9 @@ describe("shellArg", () => {
     expect(winShellArgv(["mcp", "add", "x", "--", "node", "C:\\Users\\a b\\index.js"])).toEqual(["mcp", "add", "x", "--", "node", '"C:\\Users\\a b\\index.js"']);
     expect(winShellArgv(["node", "C:\\Users\\%USERNAME%\\index.js"])).toBeNull();
     expect(winShellArgv(["100%"])).toBeNull();
+    // An embedded double quote flips cmd.exe's quoting state no matter how the
+    // CRT escaping reads, so `&whoami&` would run: refused outright.
+    expect(winShellArgv(["node", 'a"&whoami&"b'])).toBeNull();
+    expect(cmdExpands('x"y')).toBe(true);
   });
 });

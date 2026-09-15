@@ -296,6 +296,11 @@ function firstErrorLine(stderr: string): string {
   return lines.find((l) => /^(\w*Error\b|error:)/i.test(l)) ?? lines[0] ?? "";
 }
 
+/** The replace steps for one failing registration: drop it, let setup register the bundled bridge. */
+function reregister(r: { name: string; scope: Scope }): string {
+  return `claude mcp remove ${shellArg(r.name)} -s ${r.scope}, then storybloq setup-skill registers the bundled bridge`;
+}
+
 /** The executable whose owning package a rebuild would run in, per launcher grammar; null for npx/bunx. */
 function executableOf(launch: McpLaunch): string | null {
   const [command, ...args] = launch.argv;
@@ -324,11 +329,11 @@ function describeFailure(
       return `answers but cannot load its native module, so reviews run without history. ${fix}`;
     }
     case "not-attempted":
-      return `was not probed (${p.reason}).`;
+      return `was not probed (${p.reason}); re-run storybloq health --only codex-bridge to give it the full budget.`;
     case "timeout":
-      return `did not answer the initialize request within ${p.allocatedMs} ms.`;
+      return `did not answer the initialize request within ${p.allocatedMs} ms; launch it by hand (${argv}) and check it prints a JSON-RPC answer to an initialize line, or replace it: ${reregister(r)}.`;
     case "enoent":
-      return `cannot be launched: ${shellArg(r.launch.argv[0] ?? "")} was not found (registered as ${argv}).`;
+      return `cannot be launched: ${shellArg(r.launch.argv[0] ?? "")} was not found (registered as ${argv}); install it or fix the registered command (${reregister(r)}).`;
     case "failed": {
       if (NATIVE_BINDING_RE.test(p.stderr)) {
         const exe = executableOf(r.launch);
@@ -337,9 +342,12 @@ function describeFailure(
           return `failed to load its native module. Run: (cd ${shellArg(dir)} && npm rebuild better-sqlite3)`;
         }
         const shadow = foreignCodexBridge(winners);
+        // Replacing means removing BOTH the entry that would shadow the bundled
+        // registration and the failing registration itself; otherwise the next
+        // health run probes and advises on the same broken bridge again.
         const replace = shadow !== null && shadow.scope !== "user"
-          ? `remove the ${shadow.scope}-scope \`codex-bridge\` entry first (claude mcp remove codex-bridge -s ${shadow.scope}), then run storybloq setup-skill`
-          : `claude mcp remove ${shellArg(r.name)} -s ${r.scope}, then storybloq setup-skill to register the bundled bridge`;
+          ? `remove the ${shadow.scope}-scope \`codex-bridge\` entry first (claude mcp remove codex-bridge -s ${shadow.scope}), then the failing registration (claude mcp remove ${shellArg(r.name)} -s ${r.scope}), then run storybloq setup-skill`
+          : reregister(r);
         return `failed to load its native module, and the bridge's package directory could not be established from this registration (${r.scope} ${r.name}: ${argv}); rebuild inside the copy that registration runs, or replace it: ${replace}.`;
       }
       const line = firstErrorLine(p.stderr);

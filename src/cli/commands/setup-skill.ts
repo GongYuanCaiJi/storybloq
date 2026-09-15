@@ -1298,7 +1298,7 @@ function defaultBridgeExec(file: string, args: readonly string[]): BridgeExecRes
   if (win) {
     const quoted = winShellArgv(args);
     if (quoted === null) {
-      return { kind: "failed", status: null, stderr: "an argument contains '%' or '!', which cmd.exe would expand; register by hand" };
+      return { kind: "failed", status: null, stderr: "an argument contains '%', '!' or a double quote, which cmd.exe would rewrite; register by hand" };
     }
     argv = quoted;
   }
@@ -1320,7 +1320,7 @@ function defaultBridgeExec(file: string, args: readonly string[]): BridgeExecRes
  */
 export function manualBridgeAdd(entry: string, claudeJsonPath: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32" && cmdExpands(entry)) {
-    return `add to ${claudeJsonPath} under "mcpServers": ${JSON.stringify({ [BRIDGE_MCP_NAME]: { command: "node", args: [entry] } })} (the path contains % or !, which cmd.exe would expand, so no shell command is shown)`;
+    return `add to ${claudeJsonPath} under "mcpServers": ${JSON.stringify({ [BRIDGE_MCP_NAME]: { command: "node", args: [entry] } })} (the path contains %, ! or a double quote, which cmd.exe would rewrite, so no shell command is shown)`;
   }
   return `claude mcp add ${BRIDGE_MCP_NAME} -s user -- node ${shellArg(entry, platform)}`;
 }
@@ -1339,7 +1339,7 @@ function samePath(a: string, b: string): boolean {
 type UserBridgeEntry =
   | { readonly kind: "absent" }
   | { readonly kind: "indeterminate"; readonly reason: string }
-  | { readonly kind: "present"; readonly command: string; readonly args: readonly string[] };
+  | { readonly kind: "present"; readonly command: string; readonly args: readonly string[]; readonly hasCwd: boolean };
 
 /**
  * Three-valued read of `mcpServers["codex-bridge"]` at user scope. Shares the
@@ -1359,7 +1359,7 @@ function readUserBridgeEntry(claudeJsonPath: string): UserBridgeEntry {
   const command = typeof e["command"] === "string" ? e["command"] : "";
   const rawArgs = e["args"];
   const args = Array.isArray(rawArgs) ? rawArgs.map((a): string => (typeof a === "string" ? a : JSON.stringify(a) ?? String(a))) : [];
-  return { kind: "present", command, args };
+  return { kind: "present", command, args, hasCwd: e["cwd"] !== undefined };
 }
 
 /**
@@ -1383,12 +1383,16 @@ export function registerBridgeMcp(opts: RegisterBridgeOptions): BridgeRegistrati
 
   const classify = (existing: Extract<UserBridgeEntry, { kind: "present" }>): "exists" | "foreign" => {
     const isNode = basename(existing.command) === "node" || basename(existing.command) === "node.exe";
-    const matches = isNode && existing.args.length === 1 && samePath(existing.args[0]!, entry);
+    // A cwd on the entry breaks the no-cwd contract (the bridge's own cwd
+    // argument must govern where a review runs), so it is foreign even when
+    // the command matches.
+    const matches = isNode && existing.args.length === 1 && samePath(existing.args[0]!, entry) && !existing.hasCwd;
     if (matches) {
       log(`  Codex review bridge already registered as ${BRIDGE_MCP_NAME}`);
       return "exists";
     }
-    log(`  ${BRIDGE_MCP_NAME} is registered at user scope with a different command (${[existing.command, ...existing.args].map((a) => shellArg(a)).join(" ")}); left alone.`);
+    const why = existing.hasCwd && isNode ? "with a cwd, which the bundled registration must not have" : "with a different command";
+    log(`  ${BRIDGE_MCP_NAME} is registered at user scope ${why} (${[existing.command, ...existing.args].map((a) => shellArg(a)).join(" ")}); left alone.`);
     log(`  To use the bundled bridge: claude mcp remove ${BRIDGE_MCP_NAME} -s user, then re-run storybloq setup-skill`);
     return "foreign";
   };

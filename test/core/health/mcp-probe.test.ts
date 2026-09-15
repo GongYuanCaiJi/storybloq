@@ -29,11 +29,20 @@ function launchFor(name: string, tok: string, envOverrides: Record<string, strin
   return { argv: [process.execPath, fixture(name), tok], envOverrides };
 }
 
-/** Processes whose command line carries this launch's token. */
+/**
+ * Processes whose command line carries this launch's token. The inspector
+ * itself must work: a missing or crashing pgrep THROWS rather than reading
+ * as "nothing survived", since that is the assertion every case relies on.
+ * pgrep exits 1 for "no match" and 0 for matches; anything else is an error.
+ */
 function survivors(tok: string): string[] {
-  const out = spawnSync("pgrep", ["-fl", tok], { encoding: "utf-8" }).stdout ?? "";
+  const res = spawnSync("pgrep", ["-fl", tok], { encoding: "utf-8" });
+  if (res.error) throw new Error(`pgrep unavailable: ${res.error.message}`);
+  if (res.signal) throw new Error(`pgrep killed by ${res.signal}`);
+  if (res.status === 1) return [];
+  if (res.status !== 0) throw new Error(`pgrep exited ${res.status}: ${res.stderr}`);
   // pgrep -f also matches itself on some platforms; drop the pgrep line.
-  return out.split("\n").filter((l) => l.trim().length > 0 && !l.includes("pgrep"));
+  return res.stdout.split("\n").filter((l) => l.trim().length > 0 && !l.includes("pgrep"));
 }
 
 function alive(pid: number): boolean {
@@ -140,6 +149,21 @@ describe("T-509 probeMcpServer", () => {
     expect(r.kind).toBe("timeout");
     expect((r as { allocatedMs: number }).allocatedMs).toBeLessThanOrEqual(700);
     expect((r as { allocatedMs: number }).allocatedMs).toBeGreaterThanOrEqual(BRIDGE_PROBE_MIN_MS);
+  });
+
+  it("allocates min(cap, remaining), never more than the cap, and a cap under the floor is not attempted", async () => {
+    const { r } = await probe("mcp-hang", 400);
+    expect(r).toEqual({ kind: "timeout", allocatedMs: 400 });
+    const spawned: string[] = [];
+    const fakeSpawn = ((cmd: string) => { spawned.push(cmd); throw new Error("must not spawn"); }) as unknown as typeof spawnFn;
+    const under = await probeMcpServer({ argv: ["fake"], envOverrides: {} }, far(), BRIDGE_PROBE_MIN_MS - 50, { env: process.env, spawn: fakeSpawn });
+    expect(under).toEqual({ kind: "not-attempted", reason: "budget exhausted" });
+    expect(spawned).toEqual([]);
+  });
+
+  it("answers a server's own ping request that reuses id 1 and still accepts the real initialize result", async () => {
+    const { r } = await probe("mcp-ping");
+    expect(r).toMatchObject({ kind: "ok", serverName: "fixture-bridge" });
   });
 
   it("is not attempted when the remaining budget is under the floor, and spawns nothing", async () => {
@@ -280,12 +304,19 @@ describe("T-509 probeMcpServer", () => {
     expect(spawned).toEqual([]);
   });
 
-  it("merges envOverrides over the inherited environment", async () => {
-    // A fixture-free check: `node -e` echoes the variable as a valid answer.
-    const script = `process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:1,result:{protocolVersion:"2024-11-05",capabilities:{},serverInfo:{name:process.env.SB_PROBE_NAME,version:"1"}}})+"\\n");setInterval(()=>{},1000)`;
+  it("merges envOverrides over the inherited environment, keeping the rest of it", async () => {
+    // A fixture-free check: `node -e` echoes the override as the name and an
+    // inherited-only sentinel as the version, so replacing the environment
+    // wholesale (instead of merging) is caught as well as the precedence.
+    const script = `process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:1,result:{protocolVersion:"2024-11-05",capabilities:{},serverInfo:{name:process.env.SB_PROBE_NAME,version:String(process.env.SB_PROBE_INHERITED)}}})+"\\n");setInterval(()=>{},1000)`;
     const tok = token();
-    const r = await probeMcpServer({ argv: [process.execPath, "-e", script, tok], envOverrides: { SB_PROBE_NAME: "from-override" } }, far(), 5_000, { env: { ...process.env, SB_PROBE_NAME: "inherited" } });
-    expect(r).toMatchObject({ kind: "ok", serverName: "from-override" });
+    const r = await probeMcpServer(
+      { argv: [process.execPath, "-e", script, tok], envOverrides: { SB_PROBE_NAME: "from-override" } },
+      far(),
+      5_000,
+      { env: { ...process.env, SB_PROBE_NAME: "inherited", SB_PROBE_INHERITED: "kept" } },
+    );
+    expect(r).toMatchObject({ kind: "ok", serverName: "from-override", serverVersion: "kept" });
     await expectReaped(tok);
   });
 });

@@ -112,6 +112,19 @@ describe("registerBridgeMcp", () => {
     expect(h.lines.join("\n")).toContain("Codex review bridge already registered as codex-bridge");
   });
 
+  it("matching command and args but with a cwd: foreign (the no-cwd contract), file untouched", () => {
+    const dir = tempDir();
+    const bundled = installed(dir);
+    const path = join(dir, ".claude.json");
+    const before = JSON.stringify({ mcpServers: { [BRIDGE_MCP_NAME]: { command: "node", args: [bundled.entry], cwd: "/somewhere" } } });
+    writeFileSync(path, before);
+    const h = harness();
+    expect(registerBridgeMcp({ bundled, claudeJsonPath: path, exec: h.exec, log: h.log })).toBe("foreign");
+    expect(h.calls).toEqual([]);
+    expect(readFileSync(path, "utf-8")).toBe(before);
+    expect(h.lines.join("\n")).toContain("with a cwd");
+  });
+
   it("foreign entry: left byte-identical, names scope, command and args, and the two steps", () => {
     const dir = tempDir();
     const bundled = installed(dir);

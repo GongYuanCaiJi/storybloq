@@ -63,6 +63,15 @@ describe("resolveBundledBridge", () => {
     symlinkSync(outside, f.entry);
     expect(resolveBundledBridge({ from: f.from })).toMatchObject({ kind: "unusable", reason: expect.stringMatching(/escapes the package/) });
   });
+  it("unusable: a package.json that is valid JSON but not an object (null, an array)", () => {
+    const f = fakeInstall({ bin: "dist/index.js" });
+    // Node's resolver may reject the file first ("Invalid package config");
+    // either way the answer is unusable with a reason, never a throw.
+    writeFileSync(join(f.pkgDir, "package.json"), "null");
+    expect(resolveBundledBridge({ from: f.from })).toMatchObject({ kind: "unusable", reason: expect.stringMatching(/package.json is not an object|Invalid package config/) });
+    writeFileSync(join(f.pkgDir, "package.json"), "[1]");
+    expect(resolveBundledBridge({ from: f.from })).toMatchObject({ kind: "unusable", reason: expect.stringMatching(/package.json is not an object|Invalid package config/) });
+  });
   it("unusable: installed but the entry file is missing, with the reason", () => {
     const f = fakeInstall({ bin: { "codex-claude-bridge": "dist/index.js" }, writeEntry: false });
     const r = resolveBundledBridge({ from: f.from });
