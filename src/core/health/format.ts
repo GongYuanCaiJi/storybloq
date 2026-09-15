@@ -11,6 +11,7 @@
  * than the one Claude has open must be able to see which files were read.
  */
 
+import { successEnvelope } from "../output-formatter.js";
 import type { HealthResult } from "./types.js";
 
 export function formatHealthResult(result: HealthResult): string {
@@ -41,6 +42,11 @@ export function formatHealthResult(result: HealthResult): string {
   return lines.join("\n");
 }
 
+/**
+ * ISS-1223: the shared `{version, data}` envelope every other `--format json`
+ * command emits, with the whole result under `data`, so a caller that
+ * unwraps `.data` (the skill, a hook, `--raw`) reads health the same way.
+ */
 export function healthResultJson(result: HealthResult): string {
-  return JSON.stringify({ version: 1, ...result }, null, 2);
+  return JSON.stringify(successEnvelope(result), null, 2);
 }

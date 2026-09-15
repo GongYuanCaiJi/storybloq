@@ -64,7 +64,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **recommend** (--format?, --count?, --with-actionability?) - Context-aware work suggestions
 - **reference** (--format?) - Print CLI command and MCP tool reference
 - **selftest** (--format?) - Run integration smoke test: create/update/delete cycle across all entity types
-- **health** (--only?, --refresh?, --format?) - Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging
+- **health** (--only?, --refresh?, --format?) - Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it
 - **codex-review <kind>** (--session, --format?) - Run native Codex plan or code review for an autonomous session
 - **limit-status** (--cancel?, --requeue?, --recent?, --format?) - Show pending usage-limit auto-resumes (global across projects); cancel or requeue records
 - **session intel-start** (--client?) - Capture the auto-compact setting for the current process era (SessionStart hook)

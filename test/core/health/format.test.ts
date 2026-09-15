@@ -62,11 +62,16 @@ describe("T-502 health formatting", () => {
     expect(lateOnly).not.toContain("did not run");
   });
 
-  it("json is the version-1 envelope carrying the whole result", () => {
+  it("json is the shared {version, data} envelope with the whole result under data (ISS-1223)", () => {
     const parsed = JSON.parse(healthResultJson(result));
+    // Silent no-op class: the old shape spread the result at the top level, so
+    // a caller unwrapping .data like every other command got nothing.
+    expect(Object.keys(parsed).sort()).toEqual(["data", "version"]);
     expect(parsed.version).toBe(1);
-    expect(parsed.checks).toHaveLength(5);
-    expect(parsed.projectDir).toBe("/repo/app");
-    expect(parsed.ranAt).toBe("2026-09-10T12:00:00.000Z");
+    expect(parsed.data.checks).toHaveLength(5);
+    expect(parsed.data.projectDir).toBe("/repo/app");
+    expect(parsed.data.ranAt).toBe("2026-09-10T12:00:00.000Z");
+    expect(parsed.data.durationMs).toBe(result.durationMs);
+    expect(parsed.data.budgetExhausted).toBe(result.budgetExhausted);
   });
 });

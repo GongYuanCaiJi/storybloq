@@ -772,7 +772,8 @@ const MATRIX: Coverage[] = [
     check: (dir) => {
       const res = run(dir, "health", "--only", "cli-version,cross-session-inbound", "--format", "json");
       expect(res.code, res.out).toBe(0);
-      const ids = (JSON.parse(res.out) as { checks: Array<{ id: string }> }).checks.map((c) => c.id);
+      // ISS-1223: health json is the shared {version, data} envelope.
+      const ids = (JSON.parse(res.out) as { data: { checks: Array<{ id: string }> } }).data.checks.map((c) => c.id);
       expect(ids).toEqual(["cli-version", "cross-session-inbound"]);
       expectRejected(run(dir, "health", "--only", "--format", "json"));
     },

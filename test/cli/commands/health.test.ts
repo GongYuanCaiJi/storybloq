@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, realpathSync, statSync, existsSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleHealth } from "../../../src/cli/commands/health.js";
+import { configureRawMode, rawRejectionPending, resetRawMode, transformForRawMode } from "../../../src/cli/raw-mode.js";
 import { commandTokensFrom, shouldSkipHousekeeping } from "../../../src/cli/housekeeping.js";
 import { initProject } from "../../../src/core/init.js";
 import { readAutoCompactWindowDiagnostic } from "../../../src/core/claude-settings.js";
@@ -74,15 +75,42 @@ async function pinnedDeps(): Promise<Partial<HealthDeps>> {
   };
 }
 
-const parsed = (output: string) => JSON.parse(output) as {
-  version: number;
+interface HealthBody {
   projectDir: string;
   cliVersion: string;
   client: string;
   checks: Array<{ id: string; status: string; message: string; advice: string | null; detail: Record<string, unknown> }>;
+}
+// ISS-1223: the CLI json is the shared {version, data} envelope; `parsed`
+// unwraps it the way every caller of the other commands does.
+const envelope = (output: string) => JSON.parse(output) as { version: number; data: HealthBody };
+const parsed = (output: string): HealthBody & { version: number } => {
+  const e = envelope(output);
+  return { version: e.version, ...e.data };
 };
 
 describe("storybloq health (CLI)", () => {
+  it("json is the shared {version, data} envelope, and --raw unwraps it to the result alone (ISS-1223)", async () => {
+    const root = await tempDir("health-cli-envelope-");
+    await initProject(root, { name: "p", type: "npm" });
+    const result = await handleHealth({ ledgerRoot: root, projectDir: root }, "json", { deps: await pinnedDeps() });
+    const body = envelope(result.output);
+    expect(Object.keys(body).sort()).toEqual(["data", "version"]);
+    expect(body.version).toBe(1);
+    expect(body.data.projectDir).toBe(root);
+    expect(body.data.checks).toHaveLength(6);
+    // The write seam's --raw unwrap accepts this shape; before ISS-1223 it
+    // rejected health as a deviant top-level shape.
+    configureRawMode(true, "json");
+    try {
+      const raw = transformForRawMode(result.output);
+      expect(rawRejectionPending()).toBe(false);
+      expect(JSON.parse(raw)).toEqual(body.data);
+    } finally {
+      resetRawMode();
+    }
+  });
+
   it("lists the six checks in json and exits 0", async () => {
     const root = await tempDir("health-cli-");
     await initProject(root, { name: "p", type: "npm" });

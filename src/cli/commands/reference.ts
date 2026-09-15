@@ -350,8 +350,8 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "health",
-    description: "Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging",
-    usage: "storybloq health [--only <ids>] [--refresh] [--format json|md]",
+    description: "Check the tooling around this project: auto-compact window, CLI version, Codex review bridge, /story skill, cross-session messaging, duplicate hook rows. --format json is the shared {version, data} envelope with the result under data; --raw unwraps it",
+    usage: "storybloq health [--only <ids>] [--refresh] [--format json|md] [--raw]",
     flags: ["--only", "--refresh", "--format"],
   },
   {

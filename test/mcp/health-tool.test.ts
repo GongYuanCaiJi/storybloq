@@ -52,14 +52,21 @@ const callHealth = async (registry: Registry, args: Record<string, unknown> = {}
   const tool = registry.tools.get("storybloq_health");
   expect(tool).toBeDefined();
   const out = await tool!.handler({ format: "json", ...args });
-  return JSON.parse(out.content[0]!.text) as {
+  // ISS-1223: the tool renders through the same seam as the CLI, so its json
+  // is the shared {version, data} envelope every other tool returns.
+  const envelope = JSON.parse(out.content[0]!.text) as {
     version: number;
-    projectDir: string;
-    checks: Array<{ id: string; status: string; detail: Record<string, unknown> }>;
-    cliVersion: string;
-    client: string;
-    budgetExhausted: boolean;
+    data: {
+      projectDir: string;
+      checks: Array<{ id: string; status: string; detail: Record<string, unknown> }>;
+      cliVersion: string;
+      client: string;
+      budgetExhausted: boolean;
+    };
   };
+  expect(Object.keys(envelope).sort()).toEqual(["data", "version"]);
+  expect(envelope.version).toBe(1);
+  return envelope.data;
 };
 
 describe("storybloq_health registration", () => {
@@ -70,7 +77,6 @@ describe("storybloq_health registration", () => {
     const { registry, server } = makeRegistry();
     registerAllTools(server, root, { launchDir });
     const result = await callHealth(registry);
-    expect(result.version).toBe(1);
     expect(result.checks.map((c) => c.id)).toEqual([
       "usage-window",
       "cli-version",
