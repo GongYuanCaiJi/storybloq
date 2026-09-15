@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,13 @@ import {
   trimLedger,
   type LedgerEntry,
 } from "../../src/core/session-intel/boundary-ledger.js";
+import {
+  boundaryLedgerReadRoots,
+  boundaryLedgerRoot,
+  resetLedgerRoutingCache,
+} from "../../src/core/session-intel/ledger-root.js";
+import { discoverWorktreeRoots } from "../../src/core/session-intel/presence-bridge.js";
+import { bareStoryInit, makeWorktreePair, symlinkSync } from "./session-intel-fixtures.js";
 
 const T0 = Date.parse("2026-09-09T12:00:00Z");
 const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
@@ -110,5 +117,149 @@ describe("ingestBoundaries / readLedger", () => {
       expect(read).toHaveLength(7);
       expect(read.map((e) => e.timestamp)).toEqual(Array.from({ length: 7 }, (_, i) => at(23 + i)));
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISS-1211
+// ---------------------------------------------------------------------------
+
+const ledgerPath = (root: string) => join(root, ".story", "telemetry", LEDGER_SUBDIR, LEDGER_FILE);
+
+/** Writes a ledger file directly, standing in for a boundary stranded by the old cwd routing. */
+function strand(root: string, entries: LedgerEntry[]): void {
+  const dir = join(root, ".story", "telemetry", LEDGER_SUBDIR);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(ledgerPath(root), JSON.stringify({ version: 1, entries }) + "\n");
+}
+
+describe("ISS-1211: one repo, one boundary series", () => {
+  beforeEach(() => { resetLedgerRoutingCache(); });
+  afterEach(() => { resetLedgerRoutingCache(); });
+
+  it("git lists the MAIN worktree first, which is the ordering the routing relies on", () => {
+    const wt = makeWorktreePair("si-ledger-order-");
+    try {
+      // git-worktree(1): "The main worktree is listed first, followed by each
+      // of the linked worktrees." Asked from the LINKED worktree, which is the
+      // side that has to find main.
+      expect(discoverWorktreeRoots(wt.worktree)[0]).toBe(wt.main);
+      expect(discoverWorktreeRoots(wt.worktree)).toContain(wt.worktree);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("a boundary ingested from a linked worktree lands in the MAIN checkout's ledger and nowhere else", () => {
+    const wt = makeWorktreePair("si-ledger-write-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      expect(ingestBoundaries(wt.worktree, [entry("ce6fc81c", 1)], 20)).toBe("written");
+      expect(existsSync(ledgerPath(wt.main))).toBe(true);
+      expect(existsSync(ledgerPath(wt.worktree))).toBe(false);
+      expect(readLedger(wt.main).map((e) => e.sessionId)).toEqual(["ce6fc81c"]);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("a plain checkout, a non-repo, and a main checkout without .story all route to the caller's own root", () => {
+    const wt = makeWorktreePair("si-ledger-self-");
+    try {
+      bareStoryInit(wt.main);
+      // The main checkout is its own main.
+      expect(boundaryLedgerRoot(wt.main)).toBe(wt.main);
+      expect(boundaryLedgerReadRoots(wt.main)[0]).toBe(wt.main);
+      // Reached through a symlinked ancestor, the SAME checkout keeps its own
+      // spelling: self is excluded by dev/ino, never by string comparison, so
+      // a caller is never routed to an equivalent path under another name
+      // (git reports realpaths, which would never string-match).
+      const alias = join(wt.base, "main-alias");
+      symlinkSync(wt.main, alias);
+      resetLedgerRoutingCache();
+      expect(boundaryLedgerRoot(alias)).toBe(alias);
+      expect(boundaryLedgerReadRoots(alias)).toEqual([alias]);
+    } finally {
+      wt.cleanup();
+    }
+    resetLedgerRoutingCache();
+    // A main checkout with no `.story/` is never given one: the worktree keeps
+    // its own ledger rather than seeding a project directory next door.
+    const noStory = makeWorktreePair("si-ledger-nostory-");
+    try {
+      bareStoryInit(noStory.worktree);
+      expect(boundaryLedgerRoot(noStory.worktree)).toBe(noStory.worktree);
+      expect(ingestBoundaries(noStory.worktree, [entry("a", 1)], 20)).toBe("written");
+      expect(existsSync(join(noStory.main, ".story"))).toBe(false);
+      expect(existsSync(ledgerPath(noStory.worktree))).toBe(true);
+    } finally {
+      noStory.cleanup();
+    }
+    resetLedgerRoutingCache();
+    // Not a git repository at all: git fails, the routing stays local.
+    const bare = mkdtempSync(join(tmpdir(), "si-ledger-norepo-"));
+    try {
+      mkdirSync(join(bare, ".story"), { recursive: true });
+      expect(boundaryLedgerRoot(bare)).toBe(bare);
+      expect(boundaryLedgerReadRoots(bare)).toEqual([bare]);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it("readLedger merges the shared ledger with entries stranded in a worktree, read from either side", () => {
+    const wt = makeWorktreePair("si-ledger-merge-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      strand(wt.main, [entry("main-session", 1)]);
+      strand(wt.worktree, [entry("ce6fc81c", 2)]);
+      // Acceptance 2 + 3: main reports the boundary that only the worktree saw.
+      expect(readLedger(wt.main).map((e) => e.sessionId).sort()).toEqual(["ce6fc81c", "main-session"]);
+      resetLedgerRoutingCache();
+      // And the worktree still sees both: neither side loses history.
+      expect(readLedger(wt.worktree).map((e) => e.sessionId).sort()).toEqual(["ce6fc81c", "main-session"]);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("the merge gains a classification and never loses one, and dedupes the same boundary seen in two checkouts", () => {
+    const wt = makeWorktreePair("si-ledger-dedupe-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      strand(wt.main, [entry("a", 1, { era: null, captureKind: null }), entry("a", 2)]);
+      strand(wt.worktree, [entry("a", 1), entry("a", 2, { era: "9:9" })]);
+      const read = readLedger(wt.main);
+      expect(read).toHaveLength(2);
+      expect(read.find((e) => e.timestamp === at(1))!.era).toBe("1:2");
+      expect(read.find((e) => e.timestamp === at(2))!.era).toBe("1:2");
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("refuses a main checkout whose telemetry path runs through a symlink and keeps the ledger local", () => {
+    const wt = makeWorktreePair("si-ledger-symlink-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      // `.story/` is a real directory, but `telemetry` under it is a symlink
+      // pointing outside the checkout: the routing must not write or read
+      // through a path component it cannot prove is a real directory.
+      const elsewhere = join(wt.base, "elsewhere");
+      mkdirSync(elsewhere, { recursive: true });
+      symlinkSync(elsewhere, join(wt.main, ".story", "telemetry"));
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.worktree);
+      expect(boundaryLedgerReadRoots(wt.worktree)).toEqual([wt.worktree]);
+      expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
+      expect(existsSync(ledgerPath(wt.worktree))).toBe(true);
+      expect(existsSync(join(elsewhere, LEDGER_SUBDIR, LEDGER_FILE))).toBe(false);
+    } finally {
+      wt.cleanup();
+    }
   });
 });

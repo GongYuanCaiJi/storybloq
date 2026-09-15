@@ -20,6 +20,7 @@ import { sampleSession } from "../../src/core/session-intel/query.js";
 import { PENDING_SUBDIR, markCompactPending, readPresenceRecord, stampHandover } from "../../src/core/session-intel/presence-bridge.js";
 import { presenceFileBase } from "../../src/presence/types.js";
 import { readLedger } from "../../src/core/session-intel/boundary-ledger.js";
+import { resetLedgerRoutingCache } from "../../src/core/session-intel/ledger-root.js";
 import { createEraIfAbsent } from "../../src/core/session-intel/era-store.js";
 import { processEra } from "../../src/core/session-intel/process-era.js";
 import { applyPresenceEnrichment, LIFECYCLE_LOCK_BUDGET_MS } from "../../src/core/presence-enrichment.js";
@@ -356,22 +357,23 @@ describe("handleSessionIntel (the shared CLI/MCP handler)", () => {
   });
 });
 
-describe("ISS-1185: handleSessionIntel's worktree diagnostic", () => {
-  function withWorktreeFixture(fn: (f: { base: string; main: string; worktree: string; projects: string }) => void): void {
-    const wt = makeWorktreePair("si-query-wt-");
-    try {
-      for (const root of [wt.main, wt.worktree]) {
-        mkdirSync(join(root, ".story"), { recursive: true });
-        writeFileSync(join(root, ".story", "config.json"), "{}\n");
-      }
-      const projects = join(wt.base, "home", ".claude", "projects");
-      mkdirSync(projects, { recursive: true });
-      fn({ base: wt.base, main: wt.main, worktree: wt.worktree, projects });
-    } finally {
-      wt.cleanup();
+function withWorktreeFixture(fn: (f: { base: string; main: string; worktree: string; projects: string }) => void): void {
+  const wt = makeWorktreePair("si-query-wt-");
+  try {
+    for (const root of [wt.main, wt.worktree]) {
+      mkdirSync(join(root, ".story"), { recursive: true });
+      writeFileSync(join(root, ".story", "config.json"), "{}\n");
     }
+    const projects = join(wt.base, "home", ".claude", "projects");
+    mkdirSync(projects, { recursive: true });
+    fn({ base: wt.base, main: wt.main, worktree: wt.worktree, projects });
+  } finally {
+    resetLedgerRoutingCache();
+    wt.cleanup();
   }
+}
 
+describe("ISS-1185: handleSessionIntel's worktree diagnostic", () => {
   it("reports recordRoot (JSON and MD) only when the record lives under a different root than the one sampled; sampleSession's own binding decision is untouched (still unbound, still read-only)", () => {
     withWorktreeFixture((f) => {
       bindCaller(f.worktree);
@@ -392,6 +394,78 @@ describe("ISS-1185: handleSessionIntel's worktree diagnostic", () => {
       const direct = JSON.parse(handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).output) as { data: { recordRoot: string | null } };
       expect(direct.data.recordRoot).toBeNull();
       expect(handleSessionIntel({ cwd: f.main, format: "md", projectsDir: f.projects }).output).not.toMatch(/Record found under a different root/);
+    });
+  });
+});
+
+describe("ISS-1211: the boundary series is the repo's, not the cwd's", () => {
+  const boundariesAt = (root: string) => join(root, ".story", "telemetry", "session-intel", "boundaries.json");
+
+  it("a boundary seen while cwd was a worktree is written to the MAIN checkout and is in evidence from either side", () => {
+    withWorktreeFixture((f) => {
+      const era = bindCaller(f.worktree);
+      const lines = [...growingSession(2, 100_000, 5_000), boundaryRecord({ ts: at(1), pre: 417_000 }), assistantRecord({ ts: at(2), read: 266_709 })];
+      writeTranscript(f.projects, encoded(f.worktree), SID, lines);
+      const r = sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: T0 + 5 * 60_000 });
+      expect(r.binding).toBe("bound");
+      expect(r.presence).toBe("persisted");
+      // One repo, one series: written to main, never to the checkout the hook
+      // happened to be standing in.
+      expect(existsSync(boundariesAt(f.main))).toBe(true);
+      expect(existsSync(boundariesAt(f.worktree))).toBe(false);
+      // Classification survives the routing. The era store stays per-checkout
+      // and `stampBoundaries` reads it under the cwd root, so the entry is
+      // already attributed by the time it is routed.
+      expect(readLedger(f.main)[0]).toMatchObject({ sessionId: SID, era, captureKind: "startup", preTokens: 417_000, trigger: "auto" });
+      // Read back through the routing: the session measures itself from the
+      // shared file even though its own checkout holds nothing.
+      const r2 = sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: T0 + 6 * 60_000 });
+      expect(r2.pressure?.ceiling.source).toBe("measured-session");
+      expect(r2.pressure?.ceiling.ceiling).toBe(417_000);
+      // Acceptance 2: run from MAIN, the session's compaction is evidence
+      // instead of a session that reads as never having compacted.
+      const fromMain = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).result;
+      expect(fromMain.pressure?.ceiling.basis).toMatch(/raised to observed boundary 417000/);
+    });
+  });
+
+  /**
+   * Known gap, deliberately NOT fixed by ISS-1211 and not the pen's ruling to
+   * make here: the ledger is now per repo but the ERA STORE is still per
+   * checkout. `stampBoundaries` classifies a boundary by reading the era under
+   * the cwd root, so a session that captured its era in one checkout and then
+   * hopped into another (exactly what the orchestrator working style does)
+   * records an unclassified entry: era, captureKind and window all null, which
+   * the resolver can never use for `measured-session` or `measured-project`.
+   * Moving the era store with the ledger is the fix; it needs its own ruling.
+   */
+  it.skip("GAP: an era captured in the main checkout cannot classify a boundary stamped from a worktree", () => {
+    withWorktreeFixture((f) => {
+      const era = processEra.current()!.id;
+      // Captured while cwd was main...
+      expect(createEraIfAbsent(f.main, { era, pid: process.pid, startedAt: processEra.current()!.startedAt, captureKind: "startup", autoCompactWindowAtStart: 450_000, autoCompactWindowSource: "user", capturedAt: at(-30), endedAt: null, lastVerifiedAt: at(-30), unverifiableStreak: 0, sessionIds: [SID] })).toBe("created");
+      // ...and the session then works from the worktree.
+      applyPresenceEnrichment(f.worktree, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...emptySessionIntel(), era, captureKind: "startup", autoCompactWindowAtStart: 450_000, capturedAt: at(-30) } }));
+      writeTranscript(f.projects, encoded(f.worktree), SID, [...growingSession(2, 100_000, 5_000), boundaryRecord({ ts: at(1), pre: 417_000 }), assistantRecord({ ts: at(2), read: 266_709 })]);
+      sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: T0 + 5 * 60_000 });
+      expect(readLedger(f.main)[0]).toMatchObject({ era, captureKind: "startup", autoCompactWindowAtStart: 450_000 });
+    });
+  });
+
+  it("entries stranded in a worktree by the old cwd routing are still counted from main", () => {
+    withWorktreeFixture((f) => {
+      // Exactly the field state ISS-1211 was filed from: the only record of
+      // the boundary sits under the worktree.
+      const dir = join(f.worktree, ".story", "telemetry", "session-intel");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "boundaries.json"), JSON.stringify({
+        version: 1,
+        entries: [{ sessionId: SID, era: "1:2", captureKind: "startup", timestamp: at(1), trigger: "auto", preTokens: 417_000, postTokens: 20_902, autoCompactWindowAtStart: 450_000 }],
+      }) + "\n");
+      expect(readLedger(f.main).map((e) => e.preTokens)).toEqual([417_000]);
+      writeTranscript(f.projects, encoded(f.main), SID, [assistantRecord({ ts: at(2), read: 100_000 })]);
+      const fromMain = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).result;
+      expect(fromMain.pressure?.ceiling.basis).toMatch(/raised to observed boundary 417000/);
     });
   });
 });
