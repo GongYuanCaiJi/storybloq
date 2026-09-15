@@ -240,7 +240,7 @@ export function errorCheck(id: HealthCheckId, errorClass: string): HealthCheck {
  * rule lives here, in the one place every JSON layer goes through.
  */
 export function readJsonObject(
-  deps: HealthDeps,
+  deps: Pick<HealthDeps, "readFile">,
   path: string,
   maxBytes: number,
 ):

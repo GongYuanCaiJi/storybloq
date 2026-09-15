@@ -1,11 +1,16 @@
 import { mkdir, writeFile, readFile, readdir, copyFile, rm, rename, lstat } from "node:fs/promises";
 import { existsSync, accessSync, readdirSync, realpathSync, constants as fsConstants } from "node:fs";
-import { join, dirname, delimiter as pathDelimiter, win32 as winPath, posix as posixPath } from "node:path";
+import { join, dirname, basename, delimiter as pathDelimiter, win32 as winPath, posix as posixPath } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteFollowingSymlink, resolveSymlinkTarget } from "../../core/symlink-write.js";
+import { resolveBundledBridge, type BundledBridge } from "../../core/bridge-resolve.js";
+import { cmdExpands, shellArg, winShellArgv } from "../../core/shell-arg.js";
+import { readFileThreeValued } from "../../core/health/deps.js";
+import { CLAUDE_JSON_MAX_BYTES } from "../../core/health/codex-bridge.js";
+import { readJsonObject } from "../../core/health/types.js";
 import {
   coverageCovers,
   coverageOverlaps,
@@ -1258,6 +1263,168 @@ function pruneEmptyMatcherGroups(
   return removed;
 }
 
+
+// ---------------------------------------------------------------------------
+// T-509: registering the bundled codex-claude-bridge with Claude Code.
+// ---------------------------------------------------------------------------
+
+/** The MCP server name the bundled bridge is registered under. */
+export const BRIDGE_MCP_NAME = "codex-bridge";
+
+export type BridgeExecResult =
+  | { readonly kind: "ok" }
+  | { readonly kind: "enoent" }
+  | { readonly kind: "failed"; readonly status: number | null; readonly stderr: string };
+
+/** Runs `file args...` with piped stdio; the only spawn seam of the registration. */
+export type BridgeExec = (file: string, args: readonly string[]) => BridgeExecResult;
+
+export type BridgeRegistration = "skipped" | "unusable" | "exists" | "foreign" | "registered" | "unverifiable" | "failed";
+
+export interface RegisterBridgeOptions {
+  readonly bundled: BundledBridge;
+  /** `~/.claude.json`, the user-scope MCP registry. */
+  readonly claudeJsonPath: string;
+  readonly exec: BridgeExec;
+  readonly log: (line: string) => void;
+}
+
+function defaultBridgeExec(file: string, args: readonly string[]): BridgeExecResult {
+  // On win32 the npm-installed claude CLI is a .cmd shim, which needs a shell
+  // (same rule as runNpmRootG). A shell re-splits the argv, so every argument
+  // is quoted with the same formatter used for displayed commands.
+  const win = process.platform === "win32";
+  let argv: string[] = [...args];
+  if (win) {
+    const quoted = winShellArgv(args);
+    if (quoted === null) {
+      return { kind: "failed", status: null, stderr: "an argument contains '%' or '!', which cmd.exe would expand; register by hand" };
+    }
+    argv = quoted;
+  }
+  try {
+    execFileSync(file, argv, { stdio: "pipe", timeout: 10000, shell: win });
+    return { kind: "ok" };
+  } catch (err: unknown) {
+    const e = err as { code?: unknown; status?: unknown; stderr?: unknown; message?: unknown };
+    if (e.code === "ENOENT") return { kind: "enoent" };
+    const stderr = Buffer.isBuffer(e.stderr) ? e.stderr.toString("utf-8") : typeof e.stderr === "string" ? e.stderr : String(e.message ?? "");
+    return { kind: "failed", status: typeof e.status === "number" ? e.status : null, stderr };
+  }
+}
+
+/**
+ * The recovery instruction. On win32 a path cmd.exe would expand gets no
+ * pasteable command at all (quoting cannot protect it); the user edits the
+ * user-scope JSON entry instead, which is exactly what `claude mcp add` writes.
+ */
+export function manualBridgeAdd(entry: string, claudeJsonPath: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === "win32" && cmdExpands(entry)) {
+    return `add to ${claudeJsonPath} under "mcpServers": ${JSON.stringify({ [BRIDGE_MCP_NAME]: { command: "node", args: [entry] } })} (the path contains % or !, which cmd.exe would expand, so no shell command is shown)`;
+  }
+  return `claude mcp add ${BRIDGE_MCP_NAME} -s user -- node ${shellArg(entry, platform)}`;
+}
+
+function samePath(a: string, b: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  return a === b || real(a) === real(b);
+}
+
+type UserBridgeEntry =
+  | { readonly kind: "absent" }
+  | { readonly kind: "indeterminate"; readonly reason: string }
+  | { readonly kind: "present"; readonly command: string; readonly args: readonly string[] };
+
+/**
+ * Three-valued read of `mcpServers["codex-bridge"]` at user scope. Shares the
+ * health check's bounded reader so both features agree on what is readable.
+ */
+function readUserBridgeEntry(claudeJsonPath: string): UserBridgeEntry {
+  const doc = readJsonObject({ readFile: readFileThreeValued }, claudeJsonPath, CLAUDE_JSON_MAX_BYTES);
+  if (doc.kind === "absent") return { kind: "absent" };
+  if (doc.kind === "indeterminate") return { kind: "indeterminate", reason: doc.reason };
+  const servers = doc.value["mcpServers"];
+  if (servers === undefined || servers === null) return { kind: "absent" };
+  if (typeof servers !== "object" || Array.isArray(servers)) return { kind: "indeterminate", reason: "mcpServers is not an object" };
+  const entry = (servers as Record<string, unknown>)[BRIDGE_MCP_NAME];
+  if (entry === undefined || entry === null) return { kind: "absent" };
+  if (typeof entry !== "object" || Array.isArray(entry)) return { kind: "indeterminate", reason: `${BRIDGE_MCP_NAME} entry is not an object` };
+  const e = entry as Record<string, unknown>;
+  const command = typeof e["command"] === "string" ? e["command"] : "";
+  const rawArgs = e["args"];
+  const args = Array.isArray(rawArgs) ? rawArgs.map((a): string => (typeof a === "string" ? a : JSON.stringify(a) ?? String(a))) : [];
+  return { kind: "present", command, args };
+}
+
+/**
+ * Registers the bundled bridge as `codex-bridge` at user scope, launched as
+ * `node <entry>` with no cwd (the bridge's own cwd argument governs where a
+ * review runs). An entry already present under that name is never modified:
+ * a matching one is reported as existing, anything else as foreign with the
+ * exact steps to replace it.
+ */
+export function registerBridgeMcp(opts: RegisterBridgeOptions): BridgeRegistration {
+  const { bundled, claudeJsonPath, exec, log } = opts;
+  if (bundled.kind === "absent") {
+    log("Codex review bridge skipped: codex-claude-bridge did not install (optional dependency; see README)");
+    return "skipped";
+  }
+  if (bundled.kind === "unusable") {
+    log(`Codex review bridge skipped: codex-claude-bridge is installed but unusable (${bundled.reason}); reinstall with npm install -g @storybloq/storybloq@latest`);
+    return "unusable";
+  }
+  const { entry, version } = bundled;
+
+  const classify = (existing: Extract<UserBridgeEntry, { kind: "present" }>): "exists" | "foreign" => {
+    const isNode = basename(existing.command) === "node" || basename(existing.command) === "node.exe";
+    const matches = isNode && existing.args.length === 1 && samePath(existing.args[0]!, entry);
+    if (matches) {
+      log(`  Codex review bridge already registered as ${BRIDGE_MCP_NAME}`);
+      return "exists";
+    }
+    log(`  ${BRIDGE_MCP_NAME} is registered at user scope with a different command (${[existing.command, ...existing.args].map((a) => shellArg(a)).join(" ")}); left alone.`);
+    log(`  To use the bundled bridge: claude mcp remove ${BRIDGE_MCP_NAME} -s user, then re-run storybloq setup-skill`);
+    return "foreign";
+  };
+
+  const unverifiable = (reason: string): "unverifiable" => {
+    log(`Codex review bridge not registered: ${claudeJsonPath} could not be read (${reason}), so an existing ${BRIDGE_MCP_NAME} entry cannot be ruled out.`);
+    log(`  Register by hand: ${manualBridgeAdd(entry, claudeJsonPath)}`);
+    return "unverifiable";
+  };
+
+  const existing = readUserBridgeEntry(claudeJsonPath);
+  if (existing.kind === "present") return classify(existing);
+  if (existing.kind === "indeterminate") return unverifiable(existing.reason);
+
+  const result = exec("claude", ["mcp", "add", BRIDGE_MCP_NAME, "-s", "user", "--", "node", entry]);
+  if (result.kind === "ok") {
+    log(`  Codex review bridge registered as ${BRIDGE_MCP_NAME} (bundled ${version})`);
+    return "registered";
+  }
+  if (result.kind === "enoent") {
+    log("");
+    log("Codex review bridge not registered -- `claude` CLI not found in PATH.");
+    log(`  To register manually: ${manualBridgeAdd(entry, claudeJsonPath)}`);
+    return "failed";
+  }
+  if (result.stderr.includes("already exists")) {
+    const again = readUserBridgeEntry(claudeJsonPath);
+    if (again.kind === "present") return classify(again);
+    return unverifiable(again.kind === "indeterminate" ? again.reason : `claude reported an existing ${BRIDGE_MCP_NAME} entry that the file does not show`);
+  }
+  log("");
+  log(`Codex review bridge registration failed: ${result.stderr.split("\n")[0] ?? ""}`);
+  log(`  To register manually: ${manualBridgeAdd(entry, claudeJsonPath)}`);
+  return "failed";
+}
+
 /**
  * Installs the /story skill globally for Claude Code.
  *
@@ -1388,6 +1555,14 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
     log("  npm install -g @storybloq/storybloq@latest");
     log("  claude mcp add storybloq -s user -- storybloq --mcp");
   }
+
+  // T-509: the bundled Codex review bridge, registered beside the storybloq server.
+  registerBridgeMcp({
+    bundled: resolveBundledBridge(),
+    claudeJsonPath: join(homedir(), ".claude.json"),
+    exec: defaultBridgeExec,
+    log,
+  });
 
   // Hook registration (ISS-032: hook-driven compaction; ISS-560: absolute bin path)
   // Gate on `resolveStorybloqBin()` -- Claude Code hooks run under a shell
