@@ -47,8 +47,8 @@ function settle(p: Promise<unknown>): Promise<unknown> {
   return p.then(() => undefined, () => undefined);
 }
 
-/** Polls `cond` every 10 ms; fails after `timeoutMs` so a broken lock cannot hang the suite. */
-async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+/** Polls `cond` every 10 ms; fails after `timeoutMs` (well inside the test timeout, leaving room for cleanup) so a broken lock cannot hang the suite. */
+async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error("waitFor: condition not met in time");
@@ -259,7 +259,7 @@ describe("installMods (T-507 D)", () => {
       if (pending !== null) await pending; // nothing runs on past teardown
     }
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
-  });
+  }, 15_000);
 
   it("a reclaim lock with a dead pid is never removed: the install waits, then fails closed naming the path (M-RECLAIM-DEAD-AUTO)", async () => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
@@ -287,7 +287,7 @@ describe("installMods (T-507 D)", () => {
     expect(existsSync(reclaimPath)).toBe(true); // never auto-removed
     expect(existsSync(lockPath)).toBe(true);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
-  });
+  }, 15_000);
 
   it("a reclaim lock released while the install waits lets the reclaim of the main lock proceed", async () => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
@@ -317,7 +317,7 @@ describe("installMods (T-507 D)", () => {
     expect(existsSync(lockPath)).toBe(false);
     expect(existsSync(reclaimPath)).toBe(false);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
-  });
+  }, 15_000);
 
   it("a stale reclaim lock whose holder cannot be judged fails closed, naming the path (M-RECLAIM-AUTO)", async () => {
     const { installMods, modsDir, MODS_LOCK_STALE_MS, __installModsTestHooks } = await import("../../src/core/mods-install.js");
@@ -344,7 +344,7 @@ describe("installMods (T-507 D)", () => {
     expect(existsSync(reclaimPath)).toBe(true); // never auto-removed
     expect(existsSync(lockPath)).toBe(true);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
-  });
+  }, 15_000);
 
   it("a lock read that fails for a reason other than ENOENT is an error, not a ten-second wait", async (ctx) => {
     const { installMods, modsDir } = await import("../../src/core/mods-install.js");
@@ -406,7 +406,7 @@ describe("installMods (T-507 D)", () => {
     }
     expect(settled).toBe(true);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
-  });
+  }, 15_000);
 
   it("a second install in this process waits for the first, even while the first holds the lock past the swap", async () => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
@@ -426,7 +426,9 @@ describe("installMods (T-507 D)", () => {
     try {
       const first = installMods({ bin: a }).then(() => order.push("first"));
       running.push(settle(first));
-      await firstPaused; // the first is staged and holding the lock
+      // The first is staged and holding the lock; if it rejects before the
+      // pause, that rejection surfaces here instead of a hang.
+      await Promise.race([firstPaused, first]);
       __installModsTestHooks.beforeSwap = null; // only the first install pauses
       const second = installMods({ bin: b }).then(() => order.push("second"));
       running.push(settle(second));
@@ -444,7 +446,7 @@ describe("installMods (T-507 D)", () => {
     expect(order).toEqual(["first", "second"]);
     expect(await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8")).toContain(`return ${JSON.stringify(b)};`);
     expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
-  });
+  }, 15_000);
 
   it("the lock is released even when the staging directory cannot be removed", async (ctx) => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
@@ -493,7 +495,7 @@ describe("installMods (T-507 D)", () => {
     for (const entry of await readdir(parent)) {
       if (entry.startsWith("storybloq.stage-")) await rm(join(parent, entry), { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("a holder's release never removes a lock a successor has since taken (M-RELEASE-ANY)", async () => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
