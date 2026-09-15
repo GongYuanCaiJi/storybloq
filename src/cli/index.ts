@@ -76,6 +76,7 @@ async function runCli(): Promise<void> {
     registerLimitStatusCommand,
     registerConfigCommand,
     registerSessionCommand,
+    registerRosterCommand,
     registerRepairCommand,
     registerReconcileCommand,
     registerConflictsCommand,
@@ -252,6 +253,7 @@ async function runCli(): Promise<void> {
   cli = registerConfigCommand(cli);
   cli = registerNodeCommand(cli);
   cli = registerSessionCommand(cli);
+  cli = registerRosterCommand(cli);
   cli = registerFeedbackCommand(cli);
 
   function handleUnexpectedError(err: unknown): void {

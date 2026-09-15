@@ -5694,6 +5694,124 @@ export function registerSessionCommand(yargs: Argv): Argv {
   );
 }
 
+// MARK: - Roster Command (T-507)
+
+/**
+ * `storybloq roster start|heartbeat|end|list`. The three writes are the Claude
+ * Code Mod's path (`plugins/storybloq/hooks/roster.ts` runs them through
+ * `$.process.run` with `--stdin --format json`); they never load project
+ * state and always answer with one JSON envelope on stdout, `no_project`
+ * included. `list` is the human and MCP read, Bus merged, terminal seats
+ * hidden unless `--all`.
+ */
+export const ROSTER_BODY_MAX_BYTES = 4096;
+
+export function registerRosterCommand(yargs: Argv): Argv {
+  const write = (kind: "start" | "heartbeat" | "end", description: string) =>
+    (y: Argv) =>
+      y.command(
+        kind,
+        description,
+        (y2) => {
+          // Each operation exposes exactly the fields its strict body schema
+          // accepts (a flag the schema rejects would answer invalid_input).
+          let y3 = y2
+            .option("stdin", { type: "boolean", default: false, describe: `Read the JSON body from stdin (${ROSTER_BODY_MAX_BYTES} bytes max)` })
+            .option("client-task-id", { type: "string", describe: "Seat identity; default: CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID" })
+            .option("agent-id", { type: "string", describe: "Subagent id for a subagent seat" });
+          if (kind === "start") {
+            y3 = y3
+              .option("session-id", { type: "string", describe: "The client session id (default: the task id)" })
+              .option("description", { type: "string", describe: "A short label (200 bytes)" });
+          } else {
+            y3 = y3.option("generation", { type: "number", describe: "The generation from the start result" });
+          }
+          if (kind === "end") {
+            y3 = y3.option("state", { type: "string", choices: ["completed", "failed", "killed", "detached"] as const, describe: "The terminal state" });
+          }
+          return y3.option("format", { type: "string", choices: ["json"] as const, default: "json", describe: "JSON only" });
+        },
+        async (argv) => {
+          const { handleRosterWrite, parseRosterBody, identityFallbackFromEnvironment } = await import("./commands/roster.js");
+          const { ExitCode, errorEnvelope } = await import("../core/output-formatter.js");
+          const answer = (output: string, exitCode: number): void => {
+            process.stdout.write(output + "\n");
+            if (exitCode !== 0) process.exitCode = exitCode;
+          };
+          let body: Record<string, unknown> = {};
+          if (argv.stdin) {
+            // Bounded read: the body's fields are byte-capped, so the whole
+            // body is too; past the ceiling the read stops and the answer is
+            // invalid_input rather than an unbounded buffer.
+            const chunks: Buffer[] = [];
+            let total = 0;
+            for await (const chunk of process.stdin) {
+              const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+              total += buf.length;
+              if (total > ROSTER_BODY_MAX_BYTES) {
+                answer(JSON.stringify(errorEnvelope("invalid_input", `roster body exceeds ${ROSTER_BODY_MAX_BYTES} bytes`), null, 2), ExitCode.USER_ERROR);
+                return;
+              }
+              chunks.push(buf);
+            }
+            const parsed = parseRosterBody(Buffer.concat(chunks).toString("utf-8"));
+            if (!parsed.ok) {
+              answer(JSON.stringify(errorEnvelope("invalid_input", parsed.message), null, 2), ExitCode.USER_ERROR);
+              return;
+            }
+            body = parsed.body;
+          }
+          // Flags fill in what the body left out; the body wins.
+          const a = argv as Record<string, unknown>;
+          const flagged: Record<string, unknown> = {
+            ...(a["client-task-id"] !== undefined ? { clientTaskId: a["client-task-id"] } : {}),
+            ...(a["agent-id"] !== undefined ? { agentId: a["agent-id"] } : {}),
+            ...(a["session-id"] !== undefined ? { sessionId: a["session-id"] } : {}),
+            ...(a.description !== undefined ? { description: a.description } : {}),
+            ...(a.generation !== undefined ? { generation: a.generation } : {}),
+            ...(a.state !== undefined ? { state: a.state } : {}),
+          };
+          const { discoverProjectRoot } = await import("../core/project-root-discovery.js");
+          // `null` (no ledger above the cwd) is the only no_project answer. A
+          // throw is an unreadable .story/ and is said as io_error, so a Mod
+          // never caches "no project here" over a permissions failure.
+          let root: string | null;
+          try {
+            root = discoverProjectRoot();
+          } catch (err) {
+            answer(JSON.stringify(errorEnvelope("io_error", err instanceof Error ? err.message : String(err)), null, 2), ExitCode.USER_ERROR);
+            return;
+          }
+          const result = handleRosterWrite(root, kind, { ...flagged, ...body }, identityFallbackFromEnvironment());
+          answer(result.output, result.exitCode);
+        },
+      );
+  return yargs.command(
+    "roster",
+    "Seat roster: who is working this ledger right now (T-507)",
+    (y) =>
+      write("start", "Start (or restart) a seat: a session or one of its subagents")(
+        write("heartbeat", "Refresh a running seat's lastSeenAt")(
+          write("end", "End a seat with a terminal state")(y),
+        ),
+      )
+        .command(
+          "list",
+          "List seats: running by default, every seat with --all",
+          (y2) =>
+            addFormatOption(y2).option("all", { type: "boolean", default: false, describe: "Include terminal seats (completed/failed/killed/detached)" }),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const { handleRosterList } = await import("./commands/roster.js");
+            await runReadCommand(format, (ctx) => handleRosterList(ctx, { all: argv.all as boolean }));
+          },
+        )
+        .demandCommand(1, "Specify a roster subcommand: start, heartbeat, end, list")
+        .strict(),
+    () => {},
+  );
+}
+
 // MARK: - Feedback Command
 
 export function registerFeedbackCommand(yargs: Argv): Argv {

@@ -805,6 +805,30 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--gate-name", "--note", "--client-task-id", "--format"],
   },
   {
+    name: "roster start",
+    description: "Start (or restart) a seat on the roster: a session or one of its subagents. JSON envelope; no_project outside a ledger",
+    usage: "storybloq roster start [--stdin] [--client-task-id <value>] [--agent-id <value>] [--session-id <value>] [--description <value>] [--format <json>]",
+    flags: ["--stdin", "--client-task-id", "--agent-id", "--session-id", "--description", "--format"],
+  },
+  {
+    name: "roster heartbeat",
+    description: "Refresh a running seat's lastSeenAt; --generation from the start result is required",
+    usage: "storybloq roster heartbeat --generation <number> [--stdin] [--client-task-id <value>] [--agent-id <value>] [--format <json>]",
+    flags: ["--stdin", "--client-task-id", "--agent-id", "--generation", "--format"],
+  },
+  {
+    name: "roster end",
+    description: "End a seat with a terminal state (completed/failed/killed/detached); --generation required",
+    usage: "storybloq roster end --generation <number> --state <value> [--stdin] [--client-task-id <value>] [--agent-id <value>] [--format <json>]",
+    flags: ["--stdin", "--client-task-id", "--agent-id", "--generation", "--state", "--format"],
+  },
+  {
+    name: "roster list",
+    description: "List seats (Bus endpoints merged): running by default, every seat including terminal ones with --all",
+    usage: "storybloq roster list [--all] [--format <json|md>]",
+    flags: ["--all", "--format"],
+  },
+  {
     name: "team config show",
     description: "Show current team configuration",
     usage: "storybloq team config show [--format <json|md>]",
@@ -838,6 +862,7 @@ export const COMMANDS: readonly CommandEntry[] = [
 
 export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_status", description: "Project summary; markdown default, JSON includes session ownership/leases. clientTaskId enriches this session's arrangementPresence/ownerIdentity; omit to inherit environment identity. compact always returns reduced JSON: see CLI status for retained/dropped fields.", params: ["format?","clientTaskId?","compact?"] },
+  { name: "storybloq_roster_get", description: "Seat roster: live sessions and subagents (Bus endpoints merged) with live/stale/terminal counts; terminal seats hidden unless all. Read-only; writes are CLI-only.", params: ["format?","all?"] },
   { name: "storybloq_phase_list", description: "All phases with derived status", params: [] },
   { name: "storybloq_phase_current", description: "First non-complete phase", params: [] },
   { name: "storybloq_phase_tickets", description: "Leaf tickets for a specific phase", params: ["phaseId","node?"] },

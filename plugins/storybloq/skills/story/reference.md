@@ -140,6 +140,10 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **session health [sessionId]** - Derive and display session health state
 - **session watch [sessionId]** (--events?, --quiet?) - Stream session health state changes
 - **session milestone <kind>** (--gate-name?, --note?, --client-task-id?, --format?) - Report a self-described work milestone for presence display (duet/arrangement sessions)
+- **roster start** (--stdin?, --client-task-id?, --agent-id?, --session-id?, --description?, --format?) - Start (or restart) a seat on the roster: a session or one of its subagents. JSON envelope; no_project outside a ledger
+- **roster heartbeat** (--stdin?, --client-task-id?, --agent-id?, --generation, --format?) - Refresh a running seat's lastSeenAt; --generation from the start result is required
+- **roster end** (--stdin?, --client-task-id?, --agent-id?, --generation, --state, --format?) - End a seat with a terminal state (completed/failed/killed/detached); --generation required
+- **roster list** (--all?, --format?) - List seats (Bus endpoints merged): running by default, every seat including terminal ones with --all
 - **team config show** (--format?) - Show current team configuration
 - **team config set <key> <value>** (--format?) - Set a team configuration value
 - **ticket move <id>** (--after?, --before?, --format?) - Move a ticket relative to another (fractional rank)
@@ -153,6 +157,7 @@ The base tools below are registered in full mode (inside a .story/ project). The
 Arguments marked ? are optional in the registered schema; handlers may require combinations depending on the action. Use the client’s tool schema for types and constraints.
 
 - **storybloq_status** (format?, clientTaskId?, compact?) - Project summary; markdown default, JSON includes session ownership/leases. clientTaskId enriches this session's arrangementPresence/ownerIdentity; omit to inherit environment identity. compact always returns reduced JSON: see CLI status for retained/dropped fields.
+- **storybloq_roster_get** (format?, all?) - Seat roster: live sessions and subagents (Bus endpoints merged) with live/stale/terminal counts; terminal seats hidden unless all. Read-only; writes are CLI-only.
 - **storybloq_phase_list** - All phases with derived status
 - **storybloq_phase_current** - First non-complete phase
 - **storybloq_phase_tickets** (phaseId, node?) - Leaf tickets for a specific phase

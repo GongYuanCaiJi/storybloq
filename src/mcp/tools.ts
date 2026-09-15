@@ -96,6 +96,7 @@ import { withProjectLock } from "../core/project-loader.js";
 
 // Handler imports -- pure functions, no run.ts side effects
 import { handleStatus } from "../cli/commands/status.js";
+import { handleRosterList } from "../cli/commands/roster.js";
 import { handleValidateWithSourceRefs } from "../cli/commands/validate.js";
 import {
   handleHandoverList,
@@ -653,6 +654,7 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
 
   registerSessionGuardTool(server, pinnedRoot);
   registerSessionMilestoneTool(server, pinnedRoot);
+  registerRosterGetTool(server, pinnedRoot);
   registerSessionIntelTool(server, pinnedRoot);
   registerHealthTool(server, pinnedRoot, ctx?.launchDir ?? realpathSync(process.cwd()));
 
@@ -2464,6 +2466,24 @@ export function registerHealthTool(server: McpServer, ledgerRoot: string | null,
       const message = err instanceof Error ? err.message : String(err);
       return { content: [{ type: "text" as const, text: formatMcpError("io_error", message, format) }], isError: true };
     }
+  });
+}
+
+/**
+ * T-507: the seat roster, read-only. Writes stay CLI-only (`storybloq roster
+ * start|heartbeat|end`), the Mod's path; an agent that wants the roster
+ * changed by hand shells out, so a hand write is never mistaken for a Mod's.
+ */
+export function registerRosterGetTool(server: McpServer, root: string) {
+  return server.registerTool("storybloq_roster_get", {
+    description:
+      "Seat roster: live sessions and subagents (Bus merged) with live/stale/terminal counts; terminal hidden unless all. Read-only.",
+    inputSchema: {
+      format: z.enum(["md", "json"]).optional().describe("default: md"),
+      all: z.boolean().optional().describe("Include terminal seats"),
+    },
+  }, async (args) => {
+    return runMcpReadTool(root, (ctx) => handleRosterList(ctx, { all: args.all === true }), undefined, args.format ?? "md");
   });
 }
 

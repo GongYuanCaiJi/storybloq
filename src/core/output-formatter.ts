@@ -24,6 +24,7 @@ import type { SectionRecord, TrajectoryEntry } from "./markdown-sections.js";
 import type { ReconcileResult } from "./reconcile.js";
 import type { DoctorResult } from "./team-doctor.js";
 import type { ActiveSessionSummary, SessionScanDiagnostic } from "./session-scan.js";
+import type { StatusRoster } from "./roster-view.js";
 import type { Arrangement, ArrangementLifecycle, ArrangementRole } from "../models/arrangement.js";
 import type { GateAck } from "../models/gate-ack.js";
 import type { LandingsResult } from "./landings.js";
@@ -823,6 +824,19 @@ export function buildCompactStatusData(
   };
 }
 
+/** T-507: one line, live and stale only; terminal seats are hidden from status (they stay in `roster list --all`). */
+function rosterStatusLines(roster: StatusRoster | undefined): string[] {
+  if (!roster) return [];
+  // An unreadable roster is not an empty one, and a cut scan is not the
+  // population: the line says so instead of presenting the counts as whole.
+  if (roster.diagnostics.some((d) => d.startsWith("roster unreadable"))) {
+    return ["Seats: unknown (roster unreadable; see roster list)"];
+  }
+  const partial = roster.scanTruncated || roster.resultTruncated || roster.busScanTruncated || roster.diagnostics.length > 0;
+  const qualifier = partial ? " (partial; see roster list)" : "";
+  return [`Seats: ${roster.live} live, ${roster.stale} stale${qualifier}`];
+}
+
 export function formatStatus(
   state: ProjectState,
   format: OutputFormat,
@@ -849,6 +863,11 @@ export function formatStatus(
   // defines no Markdown compact rendering. Omitting it (or passing `false`)
   // leaves every prior positional caller byte-identical.
   compact: boolean = false,
+  // T-507, same APPENDED-LAST discipline. The seat roster (running seats plus
+  // counts), non-compact JSON and one Markdown line only: the compact payload
+  // is T-320's pinned schema and does not gain a key. Omitted means unknown,
+  // not empty, so a bare formatter call carries no `roster` key at all.
+  roster?: StatusRoster,
 ): string {
   if (compact) {
     return JSON.stringify(
@@ -936,6 +955,9 @@ export function formatStatus(
     // command's exit code reads from.
     arrangements: arrangements.items,
     arrangementWarnings: arrangements.warnings,
+    // T-507: present only when the caller read the roster (handleStatus
+    // always does); an absent key means "not read", never "no seats".
+    ...(roster ? { roster } : {}),
   };
 
   if (format === "json") {
@@ -950,6 +972,7 @@ export function formatStatus(
     `Notes: ${state.activeNoteCount} active, ${state.archivedNoteCount} archived`,
     `Lessons: ${state.activeLessonCount} active, ${state.deprecatedLessonCount} deprecated`,
     `Handovers: ${state.handoverFilenames.length}`,
+    ...rosterStatusLines(roster),
     ...busStatusLines(bus),
     "",
     ...formatConfigHints(state),
@@ -1047,6 +1070,8 @@ export function formatFederatedStatus(
   expiredLeaseSessions: readonly ActiveSessionSummary[] = [],
   // T-473: appended last, matching `formatStatus`'s placement, same reasons.
   arrangements: StatusArrangements = { items: [], warnings: [] },
+  // T-507: appended last, matching `formatStatus`'s placement, same reasons.
+  roster?: StatusRoster,
 ): string {
   // NO ISSUE-FLOW LINE HERE, deliberately, and this comment is the plan's
   // "or an explicit comment saying why not".
@@ -1110,6 +1135,9 @@ export function formatFederatedStatus(
     // command's exit code reads from.
     arrangements: arrangements.items,
     arrangementWarnings: arrangements.warnings,
+    // T-507: present only when the caller read the roster (handleStatus
+    // always does); an absent key means "not read", never "no seats".
+    ...(roster ? { roster } : {}),
   };
 
   if (format === "json") {
@@ -1121,6 +1149,7 @@ export function formatFederatedStatus(
     "",
     `Federation: ${fedState.nodeCount} nodes (${fedState.reachableCount} reachable${fedState.unreachableCount > 0 ? `, ${fedState.unreachableCount} unreachable` : ""})`,
     `Tickets: ${fedState.totalCompleteTickets}/${fedState.totalTickets} across all nodes | Issues: ${fedState.totalOpenIssues} open`,
+    ...rosterStatusLines(roster),
     ...busStatusLines(bus),
     "",
   ];
