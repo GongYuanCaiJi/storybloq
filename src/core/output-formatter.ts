@@ -770,8 +770,16 @@ function reduceBusForCompact(bus: BusStatusInput): unknown {
  * only, by the ticket's own text -- callers reach this branch regardless of
  * the `format` argument, since no Markdown compact rendering exists to keep
  * byte-compatible.
+ *
+ * T-508: exported so the ledger sidebar Mod's projection can be checked
+ * against it rather than forked. A hooks module cannot import this file (the
+ * client admits only relative imports inside the plugin's own folder, and
+ * this module's graph reaches `node:` code), so the sidebar carries its own
+ * pure projection and one vitest asserts the two agree on a fixture `.story/`.
+ * That test is what "do not fork the projection" means here; this export
+ * exists to give it the other side of the equality.
  */
-function buildCompactStatusData(
+export function buildCompactStatusData(
   state: ProjectState,
   activeSessions: readonly ActiveSessionSummary[],
   resumableSessions: readonly ActiveSessionSummary[],
