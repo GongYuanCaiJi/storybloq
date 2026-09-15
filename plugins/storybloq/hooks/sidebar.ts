@@ -535,26 +535,23 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean): 
 }
 
 /**
- * The header row: the wordmark and the phase the board is showing on the
- * left, the context fill pushed to the right of the same row.
+ * The header row: the wordmark on the left, the context fill pushed to the
+ * right of the same row.
  *
- * No mark: the owner had the rasterized S here and took it out, so the
- * wordmark is the brand and the row costs one terminal row instead of three.
- * The phase rides next to it because the board below is scoped to that phase
- * and nothing else on the pane says so.
+ * No mark and no phase. The owner had the rasterized S here and took it out,
+ * so the wordmark is the brand and the row costs one terminal row instead of
+ * three; the phase went with it once the board became the whole project's
+ * rather than one phase's, where naming a phase would have been a lie about
+ * what is under it.
  */
-function headerNode(elements: any, phase: string | null, context: number | null): unknown {
-  const left: unknown[] = [elements.Text({ bold: true, children: "Storybloq" })];
-  if (phase !== null && phase !== "") {
-    left.push(elements.Text({ dimColor: true, children: `Phase: ${phase}` }));
-  }
+function headerNode(elements: any, context: number | null): unknown {
   return elements.Box({
     key: "header",
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     children: [
-      elements.Box({ key: "brand", flexDirection: "row", gap: 2, alignItems: "center", children: left }),
+      elements.Text({ bold: true, children: "Storybloq" }),
       elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
     ],
   });
@@ -571,10 +568,12 @@ export function registerSidebar(on: On, _options: Options): void {
       const elements = $.ui.resolve(e);
       const { Box, Text } = elements;
       const width: number = typeof e.props?.bodyColumns === "number" ? e.props.bodyColumns : 40;
-      const phaseName = projection === null || projection.board.phaseName === null
-        ? null
-        : projection.board.phaseName;
-      const rows: unknown[] = [headerNode(elements, phaseName, contextPercent)];
+      // The header, then one empty row: the break the owner asked for, so the
+      // wordmark does not read as part of the first column heading.
+      const rows: unknown[] = [
+        headerNode(elements, contextPercent),
+        Text({ key: "header-gap", children: "" }),
+      ];
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
         rows.push(Text({ children: truncate(summaryLine(false), width) }));
@@ -584,7 +583,7 @@ export function registerSidebar(on: On, _options: Options): void {
         rows.push(
           Text({
             dimColor: true,
-            children: `  issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`,
+            children: `issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`,
           }),
         );
         for (const [index, name] of projection.latestHandovers.entries()) {
@@ -592,7 +591,7 @@ export function registerSidebar(on: On, _options: Options): void {
             Text({ dimColor: true, children: truncate(`${index === 0 ? "handovers: " : "           "}${name}`, width) }),
           );
         }
-        if (sessionActive) rows.push(Text({ dimColor: true, children: "  an autonomous session is active" }));
+        if (sessionActive) rows.push(Text({ dimColor: true, children: "an autonomous session is active" }));
       }
       return Box({ flexDirection: "column", children: rows });
     }
@@ -636,6 +635,12 @@ export function registerSidebar(on: On, _options: Options): void {
       await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
       paneOpen = true;
     }
+    // The context figures belong to the window, not to the turn: they are
+    // readable the moment the Mod loads into a session that has already had a
+    // response. Reading them only on `turn.complete` is why the owner's header
+    // was blank after a reload, with the fill only appearing a turn later.
+    const usage = await $.session.usage();
+    contextPercent = contextFill(usage);
     await readHeader($);
     await loadCache($);
     startTimer($);

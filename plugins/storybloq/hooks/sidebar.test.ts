@@ -318,6 +318,13 @@ function rowsOf(tree: unknown, key: string): string[] {
   return list.map((child) => textOf(child));
 }
 
+/** One row per line the pane draws, top to bottom. */
+function paneRows(tree: unknown): string[] {
+  const children = (tree as { props?: Record<string, unknown> })?.props?.["children"];
+  const list: unknown[] = Array.isArray(children) ? children : children === undefined ? [] : [children];
+  return list.map((child) => textOf(child));
+}
+
 /** The heading line of one column. */
 function headingOf(tree: unknown, key: string): string {
   return rowsOf(tree, key)[0] ?? "";
@@ -365,8 +372,6 @@ test("draws the pane with the ledger's numbers", async () => {
 
   const tree = await h.render(paneEvent());
   const text = textOf(tree);
-  // The phase rides in the header now that the summary line is gone.
-  expect(text).toContain("Phase: Phase One");
   // One leaf in progress; one open issue, at critical.
   expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
   expect(text).toContain("1 critical");
@@ -657,7 +662,7 @@ test("recovers when the scan timer could not be registered at first", async () =
   expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
 });
 
-test("draws a board of the current phase, in four columns", async () => {
+test("draws a board of the whole project, in four columns", async () => {
   const h = harness(newFixture());
   await started(h);
   const text = textOf(await h.render(paneEvent()));
@@ -685,15 +690,15 @@ test("keeps each status to its own column", async () => {
   expect(columnText(tree, "board-done")).not.toContain("T-010");
 });
 
-test("shows only the current phase, never another phase's ticket", async () => {
+test("shows every phase's leaves, not just the current phase's", async () => {
   const h = harness(newFixture());
   await started(h);
   const tree = await h.render(paneEvent());
 
-  // T-002 is the only ticket of phase two. M-PHASE-LEAK lets it through.
-  for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
-    expect(columnText(tree, key)).not.toContain("T-002");
-  }
+  // T-002 is the only ticket of phase two, and the board is the project's:
+  // M-PHASE-ONLY filters back to the current phase and loses it.
+  expect(columnText(tree, "board-open")).toContain("T-002");
+  expect(headingOf(tree, "board-open")).toBe("Open 5");
 });
 
 test("gives a blocked ticket its own column, out of Open", async () => {
@@ -724,11 +729,11 @@ test("orders the columns as the work moves", async () => {
 test("heads every column with the whole count, not the rows that fit", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Sixteen open tickets, of which eight are drawn. The heading still says
-  // sixteen: M-COUNT-MISMATCH heads it with the drawn rows instead, and a
+  // Seventeen open tickets, of which eight are drawn. The heading still says
+  // seventeen: M-COUNT-MISMATCH heads it with the drawn rows instead, and a
   // capped column then under-reports the phase. This is the figure the owner
   // read live, where Done said 27 over eighteen drawn rows.
-  expect(headingOf(await h.render(paneEvent()), "board-open")).toBe("Open 16");
+  expect(headingOf(await h.render(paneEvent()), "board-open")).toBe("Open 17");
 });
 
 test("keeps a three digit count when the column is too narrow for the heading", async () => {
@@ -756,7 +761,7 @@ test("keeps a four digit count whole as well", async () => {
   expect(heading.endsWith(" 1000")).toBe(true);
 });
 
-test("heads the pane with the wordmark and the phase, context to the right", async () => {
+test("heads the pane with the wordmark alone, context to the right", async () => {
   const h = harness(newFixture());
   await started(h);
   await h.fire("turn.complete", {});
@@ -764,11 +769,11 @@ test("heads the pane with the wordmark and the phase, context to the right", asy
   const header = textOf(nodeByKey(tree, "header"));
 
   expect(header).toContain("Storybloq");
-  // The board is scoped to one phase and the header is what says which.
-  expect(header).toContain("Phase: Phase One");
   expect(header).toContain("context 20%");
-  // The owner took the rasterized mark out; the wordmark is the brand.
+  // The owner took the rasterized mark out; the wordmark is the brand. The
+  // phase went with it once the board stopped being one phase's.
   expect(nodeByKey(tree, "logo")).toBe(null);
+  expect(header).not.toContain("Phase");
 });
 
 test("works out the context fill from the fields the usage actually carries", async () => {
@@ -821,8 +826,8 @@ test("names the two newest handovers, one per line, newest first", async () => {
 test("caps a column at eight and ends it with dots", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Sixteen open tickets: eight rows and a dotted tail, on any pane height.
-  // M-CAP-IGNORED draws all sixteen and writes no tail, which is the column
+  // Seventeen open tickets: eight rows and a dotted tail, on any pane height.
+  // M-CAP-IGNORED draws all seventeen and writes no tail, which is the column
   // that ran off the bottom of the owner's pane.
   const tree = await h.render(paneEvent());
   const rows = rowsOf(tree, "board-open");
@@ -831,16 +836,50 @@ test("caps a column at eight and ends it with dots", async () => {
   expect(rows.length).toBe(10);
   expect(rows[9]).toBe("...");
   expect(rows.slice(1, 9).every((row) => row.startsWith("T-"))).toBe(true);
-  expect(columnText(tree, "board-open")).toContain("Open 16");
+  expect(columnText(tree, "board-open")).toContain("Open 17");
 });
 
 test("leaves a column that fits without a tail", async () => {
   const h = harness(newFixture());
   await started(h);
-  // Four open tickets, so nothing is left out and there is nothing to say.
+  // Five open tickets, so nothing is left out and there is nothing to say.
   const rows = rowsOf(await h.render(paneEvent()), "board-open");
-  expect(rows.length).toBe(5);
+  expect(rows.length).toBe(6);
   expect(rows).not.toContain("...");
+});
+
+test("sets the issues line flush left, like the handovers under it", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const rows = paneRows(await h.render(paneEvent()));
+  const issues = rows.find((row) => row.trimStart().startsWith("issues:")) ?? "";
+
+  // It was indented two spaces, which read as a hanging line under a board
+  // that is itself flush left.
+  expect(issues).toBe("issues: 1 critical, 0 high, 0 medium, 0 low");
+  expect(rows.some((row) => row.startsWith("handovers: "))).toBe(true);
+});
+
+test("breaks the header off the board with one empty row", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const rows = paneRows(await h.render(paneEvent()));
+
+  expect(rows[0]).toContain("Storybloq");
+  expect(rows[1]).toBe("");
+  // And the board comes straight after the break, not another blank.
+  expect(rows[2]).toContain("Blocked");
+  expect(rows[2]).toContain("Done");
+});
+
+test("shows the context fill on a session that had already run a turn", async () => {
+  const h = harness(newFixture());
+  // No turn.complete: the Mod is loading into a session that has been going a
+  // while, which is what a reload is. The context figures belong to the
+  // window, not to the turn, so they are readable the moment it loads, and
+  // waiting for the next turn to end leaves the header blank until then.
+  await started(h);
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 20%");
 });
 
 test("leaves the narrow fallback a single line, board or no board", async () => {

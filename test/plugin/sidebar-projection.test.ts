@@ -251,32 +251,53 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.totalTickets).toBe(11);
   });
 
-  it("splits the current phase's leaves into four columns that partition them", async () => {
+  it("splits the whole project's leaves into four columns that partition them", async () => {
     root = await writeFixture();
     const { state } = await loadProject(root);
+    const compact = buildCompactStatusData(state, [], [], undefined, [], undefined, [], {
+      items: [],
+      warnings: [],
+    });
     const mine = projectSidebar(await readAsTheModDoes(root));
-
-    expect(mine.board.phaseId).toBe("p1");
     const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
     const ids = columns.map((card) => card.id).sort();
 
-    // The other side of the partition, read from the CLI: every leaf of the
-    // current phase, once each.
-    const leaves = state.phaseTickets("p1").map((t) => (t as { displayId?: string }).displayId ?? t.id).sort();
+    // The board is the project's, so its columns are the CLI's own figures:
+    // the three unfinished ones add up to openTickets, Done is completeTickets
+    // and the four together are every leaf, once each.
+    expect(mine.board.blocked.length + mine.board.open.length + mine.board.inProgress.length).toBe(
+      compact.openTickets,
+    );
+    expect(mine.board.done.length).toBe(compact.completeTickets);
+    expect(columns.length).toBe(compact.totalTickets);
+    expect(mine.board.blocked.length).toBe(compact.blockedTickets);
+
+    // The other side of the partition, read from the CLI: every active leaf
+    // of the project, once each. A multiset and not a set, because this
+    // fixture has two tickets answering to the display id T-010 and the board
+    // must show both rather than quietly collapse them.
+    const leaves = state.tickets
+      .filter((t) => {
+        const lifecycle = (t as { lifecycle?: string | null }).lifecycle;
+        return (lifecycle === undefined || lifecycle === null || lifecycle === "active") && !state.isUmbrella(t);
+      })
+      .map((t) => (t as { displayId?: string }).displayId ?? t.id)
+      .sort();
     expect(ids).toEqual(leaves);
-    expect(new Set(ids).size).toBe(ids.length);
-    // M-PHASE-LEAK puts another phase's ticket in a column and this fails.
-    expect(ids).not.toContain("T-004");
-    expect(ids).not.toContain("T-006");
+    // Phases two and three are on the board too. M-PHASE-ONLY filters back to
+    // the current phase and every one of these equalities breaks.
+    expect(ids).toContain("T-004");
+    expect(ids).toContain("T-006");
   });
 
   it("puts each status in its own column, newest done first", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
-    // M-COLUMN-MIX puts a complete ticket in Open and this fails.
-    expect(mine.board.open.map((c) => c.id)).toEqual(["T-020"]);
+    // M-COLUMN-MIX puts a complete ticket in Open and this fails. Open is in
+    // ticket order, Done in reverse: the last thing finished reads first.
+    expect(mine.board.open.map((c) => c.id)).toEqual(["T-010", "T-010", "T-013", "T-020"]);
     expect(mine.board.inProgress.map((c) => c.id)).toEqual(["T-003"]);
-    expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-002"]);
+    expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-004", "T-002"]);
   });
 
   it("gives a blocked ticket its own column rather than leaving it among the open", async () => {
@@ -285,7 +306,7 @@ describe("sidebar projection (T-508)", () => {
     // T-021 is open and waits on T-003, which is in progress. Blocked and Open
     // are disjoint: M-BLOCKED-UNMARKED drops the split and T-021 turns up in
     // Open, where nothing says it cannot be started.
-    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-021"]);
+    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-005", "T-006", "T-021"]);
     expect(mine.board.open.map((c) => c.id)).not.toContain("T-021");
   });
 

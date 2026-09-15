@@ -85,11 +85,13 @@ export interface SidebarBoardCard {
 }
 
 /**
- * The current phase's leaves, split by status.
+ * The PROJECT's leaves, split by status: every active leaf of every phase,
+ * not just the current one, by the owner's ruling.
  *
- * A partition, deliberately: every leaf of the phase appears in exactly one
- * column, so the four lengths add up to the phase's leafCount and the board
- * cannot quietly lose a ticket.
+ * A partition, deliberately: every leaf appears in exactly one column, so the
+ * four lengths add up to totalTickets and the board cannot quietly lose a
+ * ticket. It holds against the CLI too: blocked + open + inProgress is
+ * `storybloq status`'s openTickets, and done is its completeTickets.
  *
  * Blocked is a column and not a mark on an Open row. The question the board
  * answers is what can be picked up now, and a blocked ticket cannot be,
@@ -101,8 +103,6 @@ export interface SidebarBoardCard {
  * "open". That last part is what makes this a partition of a raw ledger.
  */
 export interface SidebarBoard {
-  readonly phaseId: string | null;
-  readonly phaseName: string | null;
   readonly blocked: readonly SidebarBoardCard[];
   readonly open: readonly SidebarBoardCard[];
   readonly inProgress: readonly SidebarBoardCard[];
@@ -369,10 +369,11 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     ?? phases.find((p) => p.status === "notstarted")
     ?? null;
 
-  // Only the current phase, and only its leaves: the board is a working view,
-  // not the ledger. On a mature project the complete tickets alone run to
-  // hundreds, and none of them belong on screen.
-  const phaseLeaves = currentPhase === null ? [] : leaves.filter((t) => t.phase === currentPhase.id);
+  // The whole project, every phase: the owner wants the board to be the
+  // ledger's shape, so its counts are the ones `storybloq status` prints. The
+  // column cap is what keeps a thousand complete tickets off the screen, not
+  // a filter that changes what the numbers mean.
+  const boardLeaves = leaves;
   const card = (t: SidebarTicket): SidebarBoardCard => ({
     id: t.displayId ?? t.id,
     title: t.title,
@@ -381,22 +382,20 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
   const byOrderAscending = (a: SidebarTicket, b: SidebarTicket): number => a.order - b.order;
   const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
   const board: SidebarBoard = {
-    phaseId: currentPhase === null ? null : currentPhase.id,
-    phaseName: currentPhase === null ? null : currentPhase.name,
-    blocked: phaseLeaves.filter(waiting).sort(byOrderAscending).map(card),
+    blocked: boardLeaves.filter(waiting).sort(byOrderAscending).map(card),
     // Open is the REMAINDER, not a status match. The ledger is hand-editable
     // JSON and this reads it raw, so a leaf can carry a status the CLI's enum
     // does not have ("blocked" and "deferred" both occur); matching on "open"
     // drops those leaves out of every column while they still count in
     // leafCount, and the board then does not add up.
-    open: phaseLeaves
+    open: boardLeaves
       .filter((t) => t.status !== "complete" && t.status !== "inprogress" && !waiting(t))
       .sort(byOrderAscending)
       .map(card),
-    inProgress: phaseLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
+    inProgress: boardLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
     // Newest first: the last thing finished is the useful one to see, and the
     // rest is history the ledger already keeps.
-    done: phaseLeaves
+    done: boardLeaves
       .filter((t) => t.status === "complete")
       .sort((a, b) => (b.order - a.order) || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id))
       .map(card),
