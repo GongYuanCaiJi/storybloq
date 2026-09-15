@@ -1658,6 +1658,77 @@ test("sweeps when a move takes a ticket out of the ledger", async () => {
   expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
+test("judges the segments it could read when a quote is left open", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // A write, then a comment carrying an apostrophe: the quote that opens
+  // there never closes, and the write on the line before it still has to
+  // sweep. M-BAIL-WHOLE-LINE throws the whole command away on any
+  // unterminated quote and the board goes stale for the turn.
+  await h.fire("tool.call", {
+    tool: "Bash",
+    command: "storybloq ticket update T-001 --status complete\n# that's the lot",
+    tool_use_id: "comment",
+  });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+
+  // And the shape it was reported as: a heredoc writing a ticket, whose body
+  // carries an apostrophe of its own.
+  const second = harness(newFixture());
+  await started(second);
+  second.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  second.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await second.fire("tool.call", {
+    tool: "Bash",
+    command: "cat > .story/tickets/T-099.json <<'EOF'\nthe pen's ruling\nEOF",
+    tool_use_id: "heredoc",
+  });
+  await second.tick();
+  expect(headingOf(await second.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("reads a heredoc's head and never its body", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // The body is a document, not shell: a line of it that reads like a write
+  // is prose someone is filing, and sweeping the whole ledger for it would
+  // happen on every note that quotes a command. M-HEREDOC-BODY reads the body
+  // as segments and this line writes a ticket that was never touched.
+  await h.fire("tool.call", {
+    tool: "Bash",
+    command: "cat > /tmp/notes.md <<EOF\nrm .story/tickets/T-001.json\nEOF",
+    tool_use_id: "body",
+  });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+});
+
+test("does not sweep when the bad quote is in the only segment there is", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // Nothing closed before the quote opened, so there is no segment this could
+  // have read: scoping the bail must not turn an unreadable line into a
+  // readable one.
+  for (const [index, command] of [
+    "cp '/tmp/x .story/tickets/T-099.json",
+    'storybloq ticket update "T-001',
+  ].entries()) {
+    await h.fire("tool.call", { tool: "Bash", command, tool_use_id: `bad-${index}` });
+    await h.tick();
+    expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+});
+
 test("sweeps for the CLI writing under a flag that reads like prose", async () => {
   const h = harness(newFixture());
   await started(h);

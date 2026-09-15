@@ -200,6 +200,8 @@ const CLI_VERB_DEPTH = 2;
 const OPERATOR_CHARACTERS = [";", "|", "&", "\n", ">", "<"];
 const SEPARATOR_CHARACTERS = [";", "|", "&", "\n"];
 const REDIRECT = ">";
+/** `<<` and `<<<`: past one, the line is a document rather than a command. */
+const HEREDOC = "<<";
 /** A leading `NAME=value`, which is an assignment and not the command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** The few commands that only lead up to the one that runs. */
@@ -737,14 +739,25 @@ interface Token {
  * mean what they say OUTSIDE a quoted run, so there is one pass and it knows
  * which run it is in.
  *
- * An unterminated quote is a line this cannot read, and an unreadable line
- * does not sweep: no tokens come back.
+ * An unterminated quote makes the REST of the line unreadable, not the whole
+ * of it. Dropping everything was a regression: a heredoc writing a ticket
+ * (`cat > .story/tickets/T-001.json <<'EOF'`) has a body full of apostrophes,
+ * and so does a trailing `# that's it` comment, and the write on the line
+ * before them stopped sweeping. So the tokens read before the bad quote
+ * opened come back with `ok: false`, and the caller judges every segment that
+ * closed before it and discards the one the quote is in.
+ *
+ * A heredoc operator ends the read for the same reason from the other side:
+ * its head is a command and its body is data, so reading the body as shell
+ * would take words out of a document and call them a write.
  */
-function lex(command: string): Token[] {
+function lex(command: string): { tokens: Token[]; ok: boolean } {
   const tokens: Token[] = [];
   let text = "";
   let started = false;
   let quote = "";
+  /** How many tokens were whole when the quote now open was opened. */
+  let opened = 0;
   const flush = (): void => {
     if (started) tokens.push({ text, operator: false });
     text = "";
@@ -777,7 +790,10 @@ function lex(command: string): Token[] {
       continue;
     }
     if (character === '"' || character === "'") {
+      // Where the quote opened, so an unclosed one can give back what was
+      // whole before it rather than nothing at all.
       quote = character;
+      opened = tokens.length;
       started = true;
       continue;
     }
@@ -792,6 +808,9 @@ function lex(command: string): Token[] {
         run += character;
         index += 1;
       }
+      // `<<` and `<<<`: the head is a command, the rest of the line and the
+      // body after it are a document. Stop, and judge the head.
+      if (run.startsWith(HEREDOC)) return { tokens, ok: true };
       tokens.push({ text: run, operator: true });
       continue;
     }
@@ -799,9 +818,10 @@ function lex(command: string): Token[] {
     started = true;
   }
   flush();
-  // An unclosed quote means the rest of the line was read as literal text,
-  // which it is not. Ambiguous, so nothing.
-  return quote === "" ? tokens : [];
+  // An unclosed quote: give back what was already whole when it opened. The
+  // word it started, and everything after, is not shell this can read.
+  if (quote !== "") return { tokens: tokens.slice(0, opened), ok: false };
+  return { tokens, ok: true };
 }
 
 /** A word that names something inside the ledger directory. */
@@ -893,10 +913,17 @@ function segmentWrote(tokens: readonly Token[]): boolean {
   return false;
 }
 
-/** Every segment of a command line, cut on the separators, each on its own. */
+/**
+ * Every segment of a command line, cut on the separators, each on its own.
+ *
+ * The last segment is judged only when the line was read to its end: where an
+ * unterminated quote stopped the read, that segment is the one the quote is
+ * in and there is no telling what it says.
+ */
 function commandWroteLedger(command: string): boolean {
+  const { tokens, ok } = lex(command);
   let segment: Token[] = [];
-  for (const token of lex(command)) {
+  for (const token of tokens) {
     if (token.operator && SEPARATOR_CHARACTERS.includes(token.text[0]!)) {
       if (segmentWrote(segment)) return true;
       segment = [];
@@ -904,7 +931,7 @@ function commandWroteLedger(command: string): boolean {
     }
     segment.push(token);
   }
-  return segmentWrote(segment);
+  return ok && segmentWrote(segment);
 }
 
 /**
@@ -936,7 +963,10 @@ function commandWroteLedger(command: string): boolean {
  *     (cat a ticket into /tmp, cp one out of it)
  *   Bash naming the CLI anywhere but executable       no
  *     position (echo storybloq ticket update), or
- *      inside quotes, or in a line this cannot read
+ *      inside quotes, or in a heredoc's body, or in
+ *      the segment an unterminated quote is in
+ *      (the segments that closed before it still
+ *      count, one at a time)
  *   Bash otherwise (cat, ls, grep, git status,        no
  *     storybloq status, storybloq ticket list)
  *   Read, Glob, Grep, LS, anything else               no

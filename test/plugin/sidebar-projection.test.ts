@@ -359,7 +359,7 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.board.open.map((c) => c.id)).not.toContain("T-021");
   });
 
-  it("keeps a leaf whose status is none of the three in a column", async () => {
+  it("keeps a record whose status is none of the ledger's in a column", async () => {
     // The ledger is hand-editable JSON and the Mod reads it raw, so a leaf can
     // carry a status the CLI's enum does not have: "blocked" and "deferred"
     // both turn up in real projects. Open is therefore the REMAINDER (not
@@ -392,18 +392,40 @@ describe("sidebar projection (T-508)", () => {
         leaf({ id: "T-103", status: "inprogress", order: 4 }),
         leaf({ id: "T-200", status: "complete", order: 5 }),
       ],
-      issues: [],
+      // The same on the issue side, and for the same reason: `wontfix` is not
+      // one of the CLI's three, it is still counted in openIssues, and a
+      // column set built from status equality would leave it off a board that
+      // claims to partition. M-ISSUE-STATUS-EXACT matches Open on
+      // status === "open" and ISS-101 lands in no column at all.
+      issues: [
+        { kind: "issue", id: "ISS-100", displayId: null, previousDisplayIds: [], title: "Open one", status: "open", severity: "high", lifecycle: null },
+        { kind: "issue", id: "ISS-101", displayId: null, previousDisplayIds: [], title: "Neither", status: "wontfix", severity: "low", lifecycle: null },
+        { kind: "issue", id: "ISS-102", displayId: null, previousDisplayIds: [], title: "Resolved one", status: "resolved", severity: "low", lifecycle: null },
+      ],
       handoverFilenames: [],
     };
     const mine = projectSidebar(input);
     const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
 
-    // The partition: five leaves in, five cards out, once each.
-    expect(columns.map((c) => c.id).sort()).toEqual(["T-100", "T-101", "T-102", "T-103", "T-200"]);
-    expect(mine.totalTickets).toBe(columns.length);
+    // The partition: five leaves and three issues in, eight cards out, once
+    // each.
+    expect(columns.map((c) => c.id).sort()).toEqual([
+      "ISS-100",
+      "ISS-101",
+      "ISS-102",
+      "T-100",
+      "T-101",
+      "T-102",
+      "T-103",
+      "T-200",
+    ]);
+    expect(mine.totalTickets).toBe(columns.filter((c) => c.kind === "ticket").length);
+    // Everything the projection calls an open issue is on the board in one of
+    // the two live columns.
+    expect(mine.openIssues).toBe(2);
     // No blocker at all, and a blocker that is already complete: both are
     // pickable, so both are Open whatever their stored status says.
-    expect(mine.board.open.map((c) => c.id)).toEqual(["T-100", "T-101"]);
+    expect(mine.board.open.map((c) => c.id)).toEqual(["T-100", "T-101", "ISS-100", "ISS-101"]);
     // An unmet blocker still wins over the odd status.
     expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-102"]);
   });
