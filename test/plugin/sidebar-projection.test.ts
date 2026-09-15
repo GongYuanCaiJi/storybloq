@@ -95,6 +95,11 @@ const tickets: Record<string, Record<string, unknown>> = {
   "T-006.json": ticket({ id: "T-006", title: "Blocked by a ghost", status: "open", phase: "p3", order: 6, blockedBy: ["T-999"] }),
   // Deleted: out of every count.
   "T-007.json": ticket({ id: "T-007", title: "Deleted", status: "open", phase: "p3", order: 7, lifecycle: "deleted" }),
+  // Phase one, so the board has something in every column: an open ticket, an
+  // open one that is blocked, and a second complete one for the Done order.
+  "T-020.json": ticket({ id: "T-020", title: "Open one", status: "open", phase: "p1", order: 20 }),
+  "T-021.json": ticket({ id: "T-021", title: "Blocked open one", status: "open", phase: "p1", order: 21, blockedBy: ["T-003"] }),
+  "T-022.json": ticket({ id: "T-022", title: "Done newer", status: "complete", phase: "p1", order: 22 }),
   // A displayId collision, which is what `storybloq reconcile` exists for.
   // Two tickets answer to T-010 and a third used to, and a fourth names T-010
   // as its parent. The CLI's parent resolution falls through the ambiguous
@@ -221,11 +226,12 @@ describe("sidebar projection (T-508)", () => {
     // T-001 is an umbrella, T-007 is deleted, and t-cc33 is an umbrella too
     // because T-013's parent ref T-010 resolves through the historical
     // displayId: eight leaves remain.
-    expect(compact.totalTickets).toBe(8);
-    expect(compact.completeTickets).toBe(2);
-    expect(compact.openTickets).toBe(6);
-    // t-zz11yy22xx33ww44 is blocked by T-003 (in progress) and T-006 by a ghost ref.
-    expect(compact.blockedTickets).toBe(2);
+    expect(compact.totalTickets).toBe(11);
+    expect(compact.completeTickets).toBe(3);
+    expect(compact.openTickets).toBe(8);
+    // t-zz11yy22xx33ww44 is blocked by T-003 (in progress), T-006 by a ghost
+    // ref, and T-021 by T-003 as well.
+    expect(compact.blockedTickets).toBe(3);
     // ISS-004 is resolved and ISS-005 is deleted: three remain.
     expect(compact.openIssues).toBe(3);
     expect(compact.phases.map((p) => p.status)).toEqual(["inprogress", "inprogress", "notstarted"]);
@@ -242,7 +248,51 @@ describe("sidebar projection (T-508)", () => {
     expect(leafIds).not.toContain("T-011");
     const { state } = await loadProject(root);
     expect(state.isUmbrella(state.tickets.find((t) => t.id === "t-cc33cc33cc33cc33")!)).toBe(true);
-    expect(mine.totalTickets).toBe(8);
+    expect(mine.totalTickets).toBe(11);
+  });
+
+  it("splits the current phase's leaves into four columns that partition them", async () => {
+    root = await writeFixture();
+    const { state } = await loadProject(root);
+    const mine = projectSidebar(await readAsTheModDoes(root));
+
+    expect(mine.board.phaseId).toBe("p1");
+    const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
+    const ids = columns.map((card) => card.id).sort();
+
+    // The other side of the partition, read from the CLI: every leaf of the
+    // current phase, once each.
+    const leaves = state.phaseTickets("p1").map((t) => (t as { displayId?: string }).displayId ?? t.id).sort();
+    expect(ids).toEqual(leaves);
+    expect(new Set(ids).size).toBe(ids.length);
+    // M-PHASE-LEAK puts another phase's ticket in a column and this fails.
+    expect(ids).not.toContain("T-004");
+    expect(ids).not.toContain("T-006");
+  });
+
+  it("puts each status in its own column, newest done first", async () => {
+    root = await writeFixture();
+    const mine = projectSidebar(await readAsTheModDoes(root));
+    // M-COLUMN-MIX puts a complete ticket in Open and this fails.
+    expect(mine.board.open.map((c) => c.id)).toEqual(["T-020"]);
+    expect(mine.board.inProgress.map((c) => c.id)).toEqual(["T-003"]);
+    expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-002"]);
+  });
+
+  it("gives a blocked ticket its own column rather than leaving it among the open", async () => {
+    root = await writeFixture();
+    const mine = projectSidebar(await readAsTheModDoes(root));
+    // T-021 is open and waits on T-003, which is in progress. Blocked and Open
+    // are disjoint: M-BLOCKED-UNMARKED drops the split and T-021 turns up in
+    // Open, where nothing says it cannot be started.
+    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-021"]);
+    expect(mine.board.open.map((c) => c.id)).not.toContain("T-021");
+  });
+
+  it("names the two newest handovers, newest first", async () => {
+    root = await writeFixture();
+    const mine = projectSidebar(await readAsTheModDoes(root));
+    expect(mine.latestHandovers).toEqual(["2026-01-03-latest.md", "2026-01-02-middle.md"]);
   });
 
   it("counts open issues by severity", async () => {
@@ -257,10 +307,10 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.inProgressTickets.map((t) => t.id)).toEqual(["T-003"]);
   });
 
-  it("takes the newest handover by filename, not the newest read", async () => {
+  it("takes the newest handovers by filename, not by the order they were read", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
-    expect(mine.latestHandover).toBe("2026-01-03-latest.md");
+    expect(mine.latestHandovers[0]).toBe("2026-01-03-latest.md");
   });
 
   it("names the first phase still in progress as the current one", async () => {

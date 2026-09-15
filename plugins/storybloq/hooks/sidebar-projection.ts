@@ -28,6 +28,9 @@
 /** How long a title may be once cached. The store holds 4 MiB for the whole plugin. */
 const TITLE_CAP = 80;
 
+/** How many handover names the sidebar names below the board. */
+const HANDOVERS_SHOWN = 2;
+
 /** The severities the ledger uses, in the order the sidebar shows them. */
 const SEVERITIES = ["critical", "high", "medium", "low"] as const;
 
@@ -73,6 +76,37 @@ export interface SidebarPhase {
   readonly leafCount: number;
 }
 
+/** One ticket as a board row: what the column shows and how it is marked. */
+export interface SidebarBoardCard {
+  readonly id: string;
+  readonly title: string;
+  /** An open ticket whose blockedBy still points at something unfinished. */
+  readonly blocked: boolean;
+}
+
+/**
+ * The current phase's leaves, split by status.
+ *
+ * A partition, deliberately: every leaf of the phase appears in exactly one
+ * column, so the four lengths add up to the phase's leafCount and the board
+ * cannot quietly lose a ticket.
+ *
+ * Blocked is a column and not a mark on an Open row. The question the board
+ * answers is what can be picked up now, and a blocked ticket cannot be,
+ * whatever its stored status says; keeping it in Open and decorating it makes
+ * the reader do the filtering. So Blocked takes every non-complete leaf whose
+ * blockedBy still points at something unfinished, and Open and In progress
+ * hold what is left of each status.
+ */
+export interface SidebarBoard {
+  readonly phaseId: string | null;
+  readonly phaseName: string | null;
+  readonly blocked: readonly SidebarBoardCard[];
+  readonly open: readonly SidebarBoardCard[];
+  readonly inProgress: readonly SidebarBoardCard[];
+  readonly done: readonly SidebarBoardCard[];
+}
+
 export interface SidebarTicketRef {
   readonly id: string;
   readonly title: string;
@@ -98,7 +132,9 @@ export interface SidebarProjection {
   readonly phases: readonly SidebarPhase[];
   readonly currentPhase: SidebarPhase | null;
   readonly inProgressTickets: readonly SidebarTicketRef[];
-  readonly latestHandover: string | null;
+  readonly board: SidebarBoard;
+  /** The newest handovers, newest first, at most HANDOVERS_SHOWN of them. */
+  readonly latestHandovers: readonly string[];
 }
 
 function asString(value: unknown): string | null {
@@ -326,8 +362,38 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     .sort((a, b) => a.order - b.order)
     .map((t) => ({ id: t.displayId ?? t.id, title: t.title, phase: t.phase }));
 
-  const handovers = [...input.handoverFilenames].sort();
-  const latestHandover = handovers.length > 0 ? handovers[handovers.length - 1]! : null;
+  const currentPhase =
+    phases.find((p) => p.status === "inprogress")
+    ?? phases.find((p) => p.status === "notstarted")
+    ?? null;
+
+  // Only the current phase, and only its leaves: the board is a working view,
+  // not the ledger. On a mature project the complete tickets alone run to
+  // hundreds, and none of them belong on screen.
+  const phaseLeaves = currentPhase === null ? [] : leaves.filter((t) => t.phase === currentPhase.id);
+  const card = (t: SidebarTicket): SidebarBoardCard => ({
+    id: t.displayId ?? t.id,
+    title: t.title,
+    blocked: t.status !== "complete" && isBlocked(t),
+  });
+  const byOrderAscending = (a: SidebarTicket, b: SidebarTicket): number => a.order - b.order;
+  const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
+  const board: SidebarBoard = {
+    phaseId: currentPhase === null ? null : currentPhase.id,
+    phaseName: currentPhase === null ? null : currentPhase.name,
+    blocked: phaseLeaves.filter(waiting).sort(byOrderAscending).map(card),
+    open: phaseLeaves.filter((t) => t.status === "open" && !waiting(t)).sort(byOrderAscending).map(card),
+    inProgress: phaseLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
+    // Newest first: the last thing finished is the useful one to see, and the
+    // rest is history the ledger already keeps.
+    done: phaseLeaves
+      .filter((t) => t.status === "complete")
+      .sort((a, b) => (b.order - a.order) || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id))
+      .map(card),
+  };
+
+  // Names are date-led, so a reverse sort is newest first.
+  const latestHandovers = [...input.handoverFilenames].sort().reverse().slice(0, HANDOVERS_SHOWN);
 
   return {
     project: input.project,
@@ -338,11 +404,9 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     openIssues,
     issuesBySeverity,
     phases,
-    currentPhase:
-      phases.find((p) => p.status === "inprogress")
-      ?? phases.find((p) => p.status === "notstarted")
-      ?? null,
+    currentPhase,
     inProgressTickets,
-    latestHandover,
+    board,
+    latestHandovers,
   };
 }

@@ -53,6 +53,13 @@ function newFixture(): Fixture {
     ".story/status.json": JSON.stringify({ sessionActive: false }),
     ".story/tickets/T-001.json": ticketText({ id: "T-001", status: "inprogress", title: "Working on it" }),
     ".story/tickets/T-002.json": ticketText({ id: "T-002", status: "open", phase: "p2", order: 2 }),
+    ".story/tickets/T-010.json": ticketText({ id: "T-010", status: "open", order: 10, title: "Open ten" }),
+    ".story/tickets/T-011.json": ticketText({ id: "T-011", status: "open", order: 11, title: "Open eleven", blockedBy: ["T-001"] }),
+    ".story/tickets/T-012.json": ticketText({ id: "T-012", status: "open", order: 12, title: "Open twelve" }),
+    ".story/tickets/T-013.json": ticketText({ id: "T-013", status: "open", order: 13, title: "Open thirteen" }),
+    ".story/tickets/T-014.json": ticketText({ id: "T-014", status: "open", order: 14, title: "Open fourteen" }),
+    ".story/tickets/T-020.json": ticketText({ id: "T-020", status: "complete", order: 20, title: "Done twenty" }),
+    ".story/tickets/T-021.json": ticketText({ id: "T-021", status: "complete", order: 21, title: "Done twentyone" }),
     ".story/issues/ISS-001.json": issueText({ severity: "critical" }),
     ".story/handovers/2026-01-02-latest.md": "# Latest",
   };
@@ -99,6 +106,7 @@ function harness(fixture: Fixture): Harness {
     Text: (props: Record<string, unknown>) => ({ element: "Text", props }),
     Button: (props: Record<string, unknown>) => ({ element: "Button", props }),
     Code: (props: Record<string, unknown>) => ({ element: "Code", props }),
+    Raster: (props: Record<string, unknown>) => ({ element: "Raster", props }),
   };
 
   const $ = {
@@ -216,14 +224,59 @@ function harness(fixture: Fixture): Harness {
 
 const START = { cwd: "/repo", surface: "terminal", isInteractive: true };
 
-function paneEvent(columns = 160): unknown {
+function paneEvent(columns = 160, bodyRows = 30): unknown {
   return {
     surface: "terminal",
     component: "Pane",
     requestId: "storybloq",
     viewport: { columns, rows: 40 },
-    props: { title: "Storybloq", isFocused: false, bodyColumns: columns - 4, placement: "dock" },
+    props: {
+      title: "Storybloq",
+      isFocused: false,
+      bodyColumns: columns - 4,
+      placement: "dock",
+      scroll: { offset: 0, bodyRows },
+    },
   };
+}
+
+/** The keys of the board's columns, left to right as drawn. */
+function columnOrder(node: unknown): string[] {
+  if (node === null || typeof node !== "object") return [];
+  if (Array.isArray(node)) return node.flatMap(columnOrder);
+  const props = (node as { props?: Record<string, unknown> }).props ?? {};
+  if (props["key"] === "board") {
+    const children = props["children"];
+    return (Array.isArray(children) ? children : []).map((child) => {
+      const childProps = (child as { props?: Record<string, unknown> }).props ?? {};
+      return String(childProps["key"] ?? "");
+    });
+  }
+  return columnOrder(props["children"]);
+}
+
+/** One node found by the key it carries, or null. */
+function nodeByKey(node: unknown, key: string): any {
+  if (node === null || typeof node !== "object") return null;
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = nodeByKey(child, key);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  const props = (node as { props?: Record<string, unknown> }).props ?? {};
+  if (props["key"] === key) return node;
+  return nodeByKey(props["children"], key);
+}
+
+/** The text of one board column, found by the key its Box carries. */
+function columnText(node: unknown, key: string): string {
+  if (node === null || typeof node !== "object") return "";
+  if (Array.isArray(node)) return node.map((child) => columnText(child, key)).join(" ");
+  const props = (node as { props?: Record<string, unknown> }).props ?? {};
+  if (props["key"] === key) return textOf(node);
+  return columnText(props["children"], key);
 }
 
 function abovePromptEvent(columns: number): unknown {
@@ -476,6 +529,13 @@ test("keeps the ledger cache in the store, so the next session starts warm", asy
     ".story/issues/ISS-001.json",
     ".story/tickets/T-001.json",
     ".story/tickets/T-002.json",
+    ".story/tickets/T-010.json",
+    ".story/tickets/T-011.json",
+    ".story/tickets/T-012.json",
+    ".story/tickets/T-013.json",
+    ".story/tickets/T-014.json",
+    ".story/tickets/T-020.json",
+    ".story/tickets/T-021.json",
   ]);
   expect(cache[".story/tickets/T-001.json"]!.mtimeMs).toBe(1000);
 });
@@ -541,4 +601,130 @@ test("recovers when the scan timer could not be registered at first", async () =
   // returns means no later attempt is ever made, so a scan is begun with
   // nothing to drain it and the pane never leaves its loading line.
   expect(textOf(await h.render(paneEvent()))).toContain("1 in progress");
+});
+
+test("draws a board of the current phase, in four columns", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const text = textOf(await h.render(paneEvent()));
+
+  expect(text).toContain("Blocked");
+  expect(text).toContain("Open");
+  expect(text).toContain("In progress");
+  expect(text).toContain("Done");
+  expect(text).toContain("T-010");
+  expect(text).toContain("T-001");
+  expect(text).toContain("T-021");
+});
+
+test("keeps each status to its own column", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent());
+
+  // M-COLUMN-MIX puts a complete ticket in Open and this fails.
+  expect(columnText(tree, "board-open")).toContain("T-010");
+  expect(columnText(tree, "board-open")).not.toContain("T-020");
+  expect(columnText(tree, "board-blocked")).toContain("T-011");
+  expect(columnText(tree, "board-inprogress")).toContain("T-001");
+  expect(columnText(tree, "board-done")).toContain("T-020");
+  expect(columnText(tree, "board-done")).not.toContain("T-010");
+});
+
+test("shows only the current phase, never another phase's ticket", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent());
+
+  // T-002 is the only ticket of phase two. M-PHASE-LEAK lets it through.
+  for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
+    expect(columnText(tree, key)).not.toContain("T-002");
+  }
+});
+
+test("gives a blocked ticket its own column, out of Open", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent());
+
+  // T-011 waits on T-001, which is in progress; T-010 waits on nothing.
+  // M-BLOCKED-UNMARKED drops the split and T-011 sits in Open, where nothing
+  // tells the reader it cannot be picked up.
+  expect(columnText(tree, "board-blocked")).toContain("T-011");
+  expect(columnText(tree, "board-open")).not.toContain("T-011");
+  expect(columnText(tree, "board-open")).toContain("T-010");
+});
+
+test("orders the columns as the work moves", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // M-COLUMN-ORDER shuffles them and this fails.
+  expect(columnOrder(await h.render(paneEvent()))).toEqual([
+    "board-blocked",
+    "board-open",
+    "board-inprogress",
+    "board-done",
+  ]);
+});
+
+test("heads every column with the whole count, not the rows that fit", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // Four open tickets, of which three are drawn in a short pane. The heading
+  // still says four: M-COUNT-MISMATCH heads it with the drawn rows instead,
+  // and a capped column then under-reports the phase.
+  const open = columnText(await h.render(paneEvent(160, 8)), "board-open");
+  expect(open).toContain("Open 4");
+  expect(open).toContain("+1 more");
+});
+
+test("draws the brand mark and the wordmark in the header, context to the right", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  await h.fire("session.compact", {});
+  const tree = await h.render(paneEvent());
+
+  const logo = nodeByKey(tree, "logo");
+  expect(logo.element).toBe("Raster");
+  expect(logo.props.columns).toBe(10);
+  expect(logo.props.rows).toBe(3);
+  expect(typeof logo.props.cells).toBe("string");
+  expect(textOf(nodeByKey(tree, "header"))).toContain("Storybloq");
+  expect(textOf(nodeByKey(tree, "header"))).toContain("context 20%");
+});
+
+test("names the two newest handovers, one per line, newest first", async () => {
+  const h = harness(newFixture());
+  h.fixture.files[".story/handovers/2026-01-03-newest.md"] = "# Newest";
+  h.fixture.files[".story/handovers/2026-01-01-oldest.md"] = "# Oldest";
+  h.fixture.mtimes[".story/handovers/2026-01-03-newest.md"] = 1000;
+  h.fixture.mtimes[".story/handovers/2026-01-01-oldest.md"] = 1000;
+  await started(h);
+
+  const text = textOf(await h.render(paneEvent()));
+  expect(text).toContain("2026-01-03-newest.md");
+  expect(text).toContain("2026-01-02-latest.md");
+  expect(text).not.toContain("2026-01-01-oldest.md");
+  expect(text.indexOf("2026-01-03-newest.md")).toBeLessThan(text.indexOf("2026-01-02-latest.md"));
+});
+
+test("caps a column and says how many it left out", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // A short pane: five open tickets do not fit, so three show and the tail
+  // says so. M-CAP-IGNORED draws all five and never writes the tail.
+  const open = columnText(await h.render(paneEvent(160, 8)), "board-open");
+
+  expect(open).toContain("T-010");
+  expect(open).toContain("+1 more");
+  expect(open).not.toContain("T-014");
+});
+
+test("leaves the narrow fallback a single line, board or no board", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const narrow = textOf(await h.render(abovePromptEvent(80)));
+  expect(narrow).toContain("Storybloq:");
+  expect(narrow).not.toContain("Blocked");
+  expect(narrow.length).toBeLessThanOrEqual(80);
 });

@@ -35,6 +35,7 @@ import type { On } from "./mod.js";
 import {
   extractRecord,
   projectSidebar,
+  type SidebarBoardCard,
   type SidebarIssue,
   type SidebarProjection,
   type SidebarRecord,
@@ -62,6 +63,46 @@ const STORE_BUDGET_BYTES = 3_000_000;
 /** Files per tick, and the tick, so no single dispatch sits on the budget. */
 const SCAN_CHUNK = 25;
 const SCAN_TICK_MS = 25;
+
+/**
+ * The board's row budget per column, derived from the rows the surface gave
+ * the pane body (`props.scroll.bodyRows`) less the chrome around the board:
+ * the summary line, the column headings, the issues line and the handover
+ * line. A pane that reports no rows gets the default.
+ */
+const DEFAULT_COLUMN_ROWS = 8;
+const MIN_COLUMN_ROWS = 3;
+const MAX_COLUMN_ROWS = 20;
+const BOARD_CHROME_ROWS = 5;
+
+/**
+ * Narrower than this and three columns are shredded rather than laid out, so
+ * the same three sections stack instead. Well below the 110 the client needs
+ * to dock a pane at all, so this is the in-between case: a pane that exists
+ * but is too narrow to be a board.
+ */
+const BOARD_MIN_COLUMNS = 60;
+
+/**
+ * The brand mark, rasterized from web/public/brand/logo.png at authoring time.
+ *
+ * `Raster` takes every cell as a little-endian u32 triplet of code point,
+ * foreground and background, base64 encoded. Each row here is one terminal row
+ * carrying two pixel rows: the glyph is an upper half block (U+2580), so the
+ * foreground paints the top pixel and the background the bottom one, and ten
+ * columns by three rows is a twenty by six pixel S. The colour is the mark's
+ * own #925834; a pixel the mark does not cover is the terminal's default
+ * (0x01000000), so the logo sits on whatever background the person has.
+ *
+ * A constant and not a fetch: a hooks module has no network, the plugin ships
+ * no binary, and reading the PNG would need an $.fs call this Mod does not
+ * make. Regenerate by resizing that PNG to 20x6 with its alpha thresholded at
+ * 55 and re-encoding.
+ */
+const LOGO_COLUMNS = 10;
+const LOGO_ROWS = 3;
+const LOGO_CELLS =
+  "gCUAAAAAAAEAAAABgCUAAAAAAAE0WJIAgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgA0WJIAgCUAADRYkgAAAAABgCUAAAAAAAEAAAABgCUAADRYkgAAAAABgCUAADRYkgA0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAEAAAABgCUAAAAAAAE0WJIAgCUAADRYkgA0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAADRYkgAAAAABgCUAAAAAAAEAAAAB";
 
 const TICKETS_DIR = ".story/tickets";
 const ISSUES_DIR = ".story/issues";
@@ -157,7 +198,7 @@ function truncate(text: string, width: number): string {
 }
 
 /** The one line the narrow fallback draws, and the pane's own summary row. */
-function summaryLine(): string {
+function summaryLine(withContext: boolean): string {
   // Until one scan has finished (or a warm cache came out of the store) the
   // numbers are a partial read, and drawing them would be a figure that
   // changes a second later for no reason the reader can see.
@@ -174,7 +215,7 @@ function summaryLine(): string {
     `${projection.blockedTickets} blocked`,
     `${projection.openIssues} issues`,
   ];
-  if (contextPercent !== null) parts.push(`context ${contextPercent}%`);
+  if (withContext && contextPercent !== null) parts.push(`context ${contextPercent}%`);
   if (busy) parts.push(`reading ${queue.length}`);
   return `Storybloq: ${parts.join(", ")}`;
 }
@@ -415,6 +456,90 @@ async function drainChunk($: any): Promise<void> {
   finalizeScan($, outcome);
 }
 
+/** How many rows one column may draw before it starts counting the rest. */
+function columnCap(e: any): number {
+  const bodyRows: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
+  if (bodyRows <= 0) return DEFAULT_COLUMN_ROWS;
+  return Math.max(MIN_COLUMN_ROWS, Math.min(MAX_COLUMN_ROWS, bodyRows - BOARD_CHROME_ROWS));
+}
+
+/**
+ * One column: a heading carrying the full count, the rows that fit, and a
+ * tail saying how many did not.
+ *
+ * The count in the heading is the WHOLE column, not the rows drawn, so a
+ * capped column still tells the truth about the phase; the tail says what the
+ * cap cost. Titles are truncated to the column's width, not the pane's.
+ *
+ * Takes the resolved element table rather than `$`: these are plain
+ * constructors, and the client's scan is strict about where `$` may travel.
+ */
+function boardColumn(
+  elements: any,
+  key: string,
+  heading: string,
+  cards: readonly SidebarBoardCard[],
+  width: number,
+  cap: number,
+): unknown {
+  const rows: unknown[] = [
+    elements.Text({ bold: true, children: truncate(`${heading} ${cards.length}`, width) }),
+  ];
+  for (const card of cards.slice(0, cap)) {
+    rows.push(elements.Text({ children: truncate(`${card.id} ${card.title}`, width) }));
+  }
+  const hidden = cards.length - Math.min(cards.length, cap);
+  if (hidden > 0) rows.push(elements.Text({ dimColor: true, children: `+${hidden} more` }));
+  return elements.Box({ key, flexDirection: "column", width, overflow: "hidden", children: rows });
+}
+
+/**
+ * The three columns, side by side where there is room and stacked where there
+ * is not. The keys stay the same either way, so what a column contains does
+ * not depend on how it was laid out.
+ */
+function boardNode(elements: any, board: any, width: number, cap: number): unknown {
+  const stacked = width < BOARD_MIN_COLUMNS;
+  const columnWidth = stacked ? width : Math.max(12, Math.floor((width - 3) / 4));
+  // Left to right in the order the work moves: what is stuck, what can be
+  // picked up, what is being done, what is finished.
+  return elements.Box({
+    key: "board",
+    flexDirection: stacked ? "column" : "row",
+    gap: 1,
+    children: [
+      boardColumn(elements, "board-blocked", "Blocked", board.blocked, columnWidth, cap),
+      boardColumn(elements, "board-open", "Open", board.open, columnWidth, cap),
+      boardColumn(elements, "board-inprogress", "In progress", board.inProgress, columnWidth, cap),
+      boardColumn(elements, "board-done", "Done", board.done, columnWidth, cap),
+    ],
+  });
+}
+
+/**
+ * The header: the mark and the wordmark on the left, the context fill pushed
+ * to the right of the same row.
+ *
+ * `Raster` is a terminal element; a surface whose table does not carry one
+ * gets a bordered letter instead, which is why the table is read for it
+ * rather than assumed.
+ */
+function headerNode(elements: any, context: number | null): unknown {
+  const brand = elements.Raster
+    ? elements.Raster({ key: "logo", columns: LOGO_COLUMNS, rows: LOGO_ROWS, cells: LOGO_CELLS })
+    : elements.Box({ key: "logo", borderStyle: "round", children: [elements.Text({ bold: true, children: "S" })] });
+  return elements.Box({
+    key: "header",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    children: [
+      elements.Box({ key: "brand", flexDirection: "row", gap: 1, alignItems: "center", children: [brand, elements.Text({ bold: true, children: "Storybloq" })] }),
+      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
+    ],
+  });
+}
+
 export function registerSidebar(on: On, _options: Options): void {
   forgetEverything();
 
@@ -423,13 +548,15 @@ export function registerSidebar(on: On, _options: Options): void {
   // hooks have already computed: it awaits nothing.
   (on("ui.render", ($: any, e: any, next: (e: any) => unknown) => {
     if (e.component === "Pane" && e.requestId === PANE_ID) {
-      const { Box, Text } = $.ui.resolve(e);
+      const elements = $.ui.resolve(e);
+      const { Box, Text } = elements;
       const width: number = typeof e.props?.bodyColumns === "number" ? e.props.bodyColumns : 40;
-      const rows: unknown[] = [Text({ bold: true, children: summaryLine() })];
+      const rows: unknown[] = [
+        headerNode(elements, contextPercent),
+        Text({ children: truncate(summaryLine(false), width) }),
+      ];
       if (projection !== null) {
-        for (const ticket of projection.inProgressTickets.slice(0, 6)) {
-          rows.push(Text({ children: truncate(`  ${ticket.id} ${ticket.title}`, width) }));
-        }
+        rows.push(boardNode(elements, projection.board, width, columnCap(e)));
         const bySeverity = projection.issuesBySeverity;
         rows.push(
           Text({
@@ -437,8 +564,10 @@ export function registerSidebar(on: On, _options: Options): void {
             children: `  issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`,
           }),
         );
-        if (projection.latestHandover !== null) {
-          rows.push(Text({ dimColor: true, children: truncate(`  handover: ${projection.latestHandover}`, width) }));
+        for (const [index, name] of projection.latestHandovers.entries()) {
+          rows.push(
+            Text({ dimColor: true, children: truncate(`${index === 0 ? "handovers: " : "           "}${name}`, width) }),
+          );
         }
         if (sessionActive) rows.push(Text({ dimColor: true, children: "  an autonomous session is active" }));
       }
@@ -454,7 +583,7 @@ export function registerSidebar(on: On, _options: Options): void {
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       if (columns > 0 && columns < DOCK_MIN_COLUMNS) {
         const { Text } = $.ui.resolve(e);
-        return Text({ dimColor: true, children: truncate(summaryLine(), columns) });
+        return Text({ dimColor: true, children: truncate(summaryLine(true), columns) });
       }
     }
     return next(e);
