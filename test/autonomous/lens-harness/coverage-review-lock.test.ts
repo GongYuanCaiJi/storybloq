@@ -64,8 +64,8 @@ const DOCS_DIFF = [
 
 /**
  * The child driver. It runs the REAL `handleSynthesize` in its own process and
- * prints the one coverage entry under test plus whatever the call disclosed
- * about its own degradation.
+ * prints either the one coverage entry under test or, when the call refused to
+ * run at all, the error that refused it.
  */
 const CHILD_SOURCE = `
 import { writeFileSync } from "node:fs";
@@ -77,32 +77,37 @@ const a = JSON.parse(process.argv[2]);
 // everything after it is the call under test, and an implementation that does
 // not wait for the lock reads the memory within microseconds of this line.
 if (a.readyFile) writeFileSync(a.readyFile, "ready");
-const out = handleSynthesize({
-  stage: "CODE_REVIEW",
-  lensResults: a.lenses.map((lens) => ({
-    lens,
-    output: lens === a.lens
-      ? { status: "skipped", findings: [], error: null, notes: "nothing in my domain" }
-      : { status: "ok", findings: [], error: null, notes: null },
-  })),
-  metadata: {
-    activeLenses: a.lenses,
-    skippedLenses: [],
-    reviewRound: a.round,
-    reviewId: a.reviewId,
-  },
-  projectRoot: a.root,
-  sessionDir: a.sessionDir,
-  sessionId: "sess-1",
-  diff: a.diff,
-  changedFiles: a.changedFiles,
-});
-const entry = out.reviewVerdict.lensCoverage.find((e) => e.lensId === a.lens);
-process.stdout.write(JSON.stringify({
-  basis: entry ? entry.basis : null,
-  verdict: out.reviewVerdict.verdict,
-  coverageNotes: out.coverageNotes ?? [],
-}));
+try {
+  const out = handleSynthesize({
+    stage: "CODE_REVIEW",
+    lensResults: a.lenses.map((lens) => ({
+      lens,
+      output: lens === a.lens
+        ? { status: "skipped", findings: [], error: null, notes: "nothing in my domain" }
+        : { status: "ok", findings: [], error: null, notes: null },
+    })),
+    metadata: {
+      activeLenses: a.lenses,
+      skippedLenses: [],
+      reviewRound: a.round,
+      reviewId: a.reviewId,
+    },
+    projectRoot: a.root,
+    sessionDir: a.sessionDir,
+    sessionId: "sess-1",
+    diff: a.diff,
+    changedFiles: a.changedFiles,
+  });
+  const entry = out.reviewVerdict.lensCoverage.find((e) => e.lensId === a.lens);
+  process.stdout.write(JSON.stringify({
+    basis: entry ? entry.basis : null,
+    verdict: out.reviewVerdict.verdict,
+  }));
+} catch (e) {
+  // A refusal is a RESULT here, not a crash: the whole question is whether the
+  // contender declines to produce a verdict at all.
+  process.stdout.write(JSON.stringify({ errorName: e.name, errorMessage: e.message }));
+}
 `;
 
 /** The restriction a peer call establishes: this lens skipped when it mattered. */
@@ -114,16 +119,28 @@ let root: string;
 let sessionDir: string;
 let childPath: string;
 
-function runChild(args: Record<string, unknown>): Promise<{
-  basis: string | null;
-  verdict: string;
-  coverageNotes: string[];
-}> {
+interface ChildResult {
+  basis?: string | null;
+  verdict?: string;
+  errorName?: string;
+  errorMessage?: string;
+}
+
+/**
+ * `env` overrides the review-lock budget so a contender exhausts in
+ * milliseconds. The production budget is 1.2s, which is right for a lock held
+ * across a whole synthesize and wrong for a test that only needs the exhaustion
+ * branch to be reachable.
+ */
+function runChild(
+  args: Record<string, unknown>,
+  env: Record<string, string> = {},
+): Promise<ChildResult> {
   return new Promise((res, rej) => {
     const child = spawn(
       process.execPath,
       [join(pkgRoot, "node_modules", "tsx", "dist", "cli.mjs"), childPath, JSON.stringify(args)],
-      { cwd: pkgRoot, stdio: ["ignore", "pipe", "pipe"] },
+      { cwd: pkgRoot, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env } },
     );
     let out = "";
     let err = "";
@@ -203,9 +220,9 @@ describe("the per-review lock closes the read-side window (ISS-950)", () => {
       // B waited, read A's restriction, and paid the cap.
       expect(result.basis).toBe("self-reported");
       expect(result.verdict).toBe("revise");
-      // And it waited rather than degrading: a self-reported reached by giving
-      // up on the lock would be the right answer for the wrong reason.
-      expect(result.coverageNotes).toEqual([]);
+      // And it WAITED rather than being refused: a contender that exhausted
+      // its budget throws instead, which is a different outcome entirely.
+      expect(result.errorName).toBeUndefined();
     },
     20_000,
   );
@@ -227,9 +244,9 @@ describe("the per-review lock closes the read-side window (ISS-950)", () => {
           diff: DOCS_DIFF,
           changedFiles: ["docs/guide.md"],
         });
-        // Unblocked, and undegraded: an honest skip on a docs-only change.
+        // Unblocked, and not refused: an honest skip on a docs-only change.
+        expect(result.errorName).toBeUndefined();
         expect(result.basis).toBe("not-applicable");
-        expect(result.coverageNotes).toEqual([]);
         expect(result.verdict).toBe("approve");
       } finally {
         if (lock.kind === "held") lock.release();
@@ -239,13 +256,94 @@ describe("the per-review lock closes the read-side window (ISS-950)", () => {
   );
 });
 
-describe("an unavailable review lock degrades, never escapes (ISS-950)", () => {
-  it("M-UNLOCKED-FALLBACK: every skip is self-reported and the reason is disclosed", () => {
+
+/**
+ * ISS-950 gate round 3: an exhausted review lock refuses the round outright.
+ *
+ * The previous revision degraded instead -- it ran the pipeline with every skip
+ * forced to `self-reported` and persisted the result -- and that did not close
+ * the window. The persist lock protects the FILE, not the holder's verdict: a
+ * contender that writes through it while the holder is mid-flight still changes
+ * what the holder reads on its next round, and the holder itself, having read
+ * before that write, can still return `not-applicable`. Making only the
+ * contender's own answer stricter never bought the guarantee.
+ *
+ * So a contender that cannot take the lock runs nothing and writes nothing. It
+ * throws, and the agent retries the identical call once the holder finishes.
+ */
+describe("an exhausted review lock refuses the round (ISS-950)", () => {
+  /** Small enough that the exhaustion branch is reached in milliseconds. */
+  const FAST_BUDGET = {
+    STORYBLOQ_REVIEW_LOCK_RETRIES: "2",
+    STORYBLOQ_REVIEW_LOCK_RETRY_MS: "5",
+  };
+
+  it("M-DEGRADED-RUN: lock exhaustion throws the typed error and writes nothing", async () => {
     const reviewId = "rid-jammed";
     const lock = acquireReviewCoverageLock(sessionDir, reviewId);
     expect(lock.kind).toBe("held");
     try {
-      // The same docs-only change that approves when the lock is available.
+      const result = await runChild(
+        {
+          root,
+          sessionDir,
+          reviewId,
+          round: 1,
+          lens: LENS,
+          lenses: [...CORE],
+          // The docs-only change that would otherwise APPROVE. A contender that
+          // runs at all produces a verdict here, which is the escape.
+          diff: DOCS_DIFF,
+          changedFiles: ["docs/guide.md"],
+        },
+        FAST_BUDGET,
+      );
+
+      expect(result.verdict).toBeUndefined();
+      expect(result.basis).toBeUndefined();
+      expect(result.errorName).toBe("ReviewCoverageLockUnavailableError");
+      // The message has to be actionable on its own: it names the review and
+      // says the retry is the same call, not a different one.
+      expect(result.errorMessage).toContain(reviewId);
+      expect(result.errorMessage).toMatch(/retry/i);
+      // Nothing was persisted: a refused round leaves no trace to be read as a
+      // decision later.
+      expect(existsSync(coverageMemoryPath(sessionDir))).toBe(false);
+    } finally {
+      if (lock.kind === "held") lock.release();
+    }
+  }, 20_000);
+
+  it(
+    "M-DEGRADED-PERSIST: a contender cannot change what the holder reads or returns",
+    async () => {
+      const reviewId = "rid-holder";
+      // The holder, mid-flight: it has the lock and has read the memory, which
+      // is empty. Its answer for a docs-only change is `not-applicable`.
+      const lock = acquireReviewCoverageLock(sessionDir, reviewId);
+      expect(lock.kind).toBe("held");
+
+      const result = await runChild(
+        {
+          root,
+          sessionDir,
+          reviewId,
+          round: 2,
+          lens: LENS,
+          lenses: [...CORE],
+          diff: CODE_DIFF,
+          changedFiles: ["src/example.ts"],
+        },
+        FAST_BUDGET,
+      );
+      expect(result.errorName).toBe("ReviewCoverageLockUnavailableError");
+      // THE ASSERTION THAT MATTERS. A contender that degraded instead of
+      // refusing would have written `self-reported` for this lens through the
+      // persist lock while the holder was still mid-flight.
+      expect(existsSync(coverageMemoryPath(sessionDir))).toBe(false);
+
+      // The holder now finishes its own round against the same review.
+      if (lock.kind === "held") lock.release();
       const out = handleSynthesize({
         stage: "CODE_REVIEW",
         lensResults: CORE.map((lens) => ({
@@ -265,57 +363,24 @@ describe("an unavailable review lock degrades, never escapes (ISS-950)", () => {
         changedFiles: ["docs/guide.md"],
       });
 
-      for (const lens of CORE) {
-        const entry = out.reviewVerdict.lensCoverage.find((e) => e.lensId === lens);
-        expect(entry?.basis, `${lens} basis`).toBe("self-reported");
-      }
-      expect(out.reviewVerdict.verdict).toBe("revise");
-      expect(out.coverageNotes.join(" ")).toMatch(/lock/i);
-    } finally {
-      if (lock.kind === "held") lock.release();
-    }
-  }, 20_000);
-
-  it("M-UNLOCKED-FALLBACK: no relabel is judged when the lock could not be taken", () => {
-    const reviewId = "rid-jammed-relabel";
-    // On the record: this lens skipped earlier. Normally the zero-finding `ok`
-    // below is a relabel. Without the lock the harness cannot trust what it
-    // read, so it makes no such claim rather than a claim it cannot stand up.
-    writeFileSync(
-      coverageMemoryPath(sessionDir),
-      JSON.stringify({ [reviewId]: { [LENS]: { everSkipped: true, basis: "self-reported" } } }),
-    );
-    const lock = acquireReviewCoverageLock(sessionDir, reviewId);
-    expect(lock.kind).toBe("held");
-    try {
-      const out = handleSynthesize({
-        stage: "CODE_REVIEW",
-        lensResults: CORE.map((lens) => ({
-          lens,
-          output: { status: "ok", findings: [], error: null, notes: null },
-        })),
-        metadata: {
-          activeLenses: [...CORE],
-          skippedLenses: [],
-          reviewRound: 2,
-          reviewId,
-        },
-        projectRoot: root,
-        sessionDir,
-        sessionId: "sess-1",
-        diff: CODE_DIFF,
-        changedFiles: ["src/example.ts"],
-      });
-
+      // Its verdict is the one it was always entitled to. A contender's write
+      // would have pinned this lens at `self-reported` and turned the approve
+      // into a revise, over a round that never should have run.
       const entry = out.reviewVerdict.lensCoverage.find((e) => e.lensId === LENS);
-      expect(entry?.relabeled).toBeUndefined();
-      expect(out.coverageNotes.join(" ")).toMatch(/lock/i);
-    } finally {
-      if (lock.kind === "held") lock.release();
-    }
-  }, 20_000);
+      expect(entry?.basis).toBe("not-applicable");
+      expect(out.reviewVerdict.verdict).toBe("approve");
 
-  it("a sessionless synthesize takes no lock and discloses nothing", () => {
+      // And the persisted memory records the holder's decision, nobody else's.
+      const memory = JSON.parse(readFileSync(coverageMemoryPath(sessionDir), "utf-8"));
+      expect(memory[reviewId][LENS]).toEqual({
+        everSkipped: true,
+        basis: "not-applicable",
+      });
+    },
+    20_000,
+  );
+
+  it("a sessionless synthesize takes no lock and cannot be refused", () => {
     const out = handleSynthesize({
       stage: "CODE_REVIEW",
       lensResults: CORE.map((lens) => ({
@@ -329,17 +394,16 @@ describe("an unavailable review lock degrades, never escapes (ISS-950)", () => {
     });
     // No session directory means no memory to race over: the tables alone
     // decide, exactly as before.
-    expect(out.coverageNotes).toEqual([]);
     expect(out.reviewVerdict.verdict).toBe("approve");
   });
 
-  it("the lock file is scoped to the review and lives in the session telemetry dir", () => {
+  it("the lock file is scoped to the review and never escapes the telemetry dir", () => {
     const lock = acquireReviewCoverageLock(sessionDir, "rid/../with spaces");
     expect(lock.kind).toBe("held");
     if (lock.kind === "held") lock.release();
-    // A reviewId is caller-supplied text; it must never reach the filesystem
-    // as a path. Nothing escaped the telemetry directory.
-    const memory = coverageMemoryPath(sessionDir);
-    expect(() => readFileSync(memory)).toThrow();
+    // A reviewId is caller-supplied text; it must never reach the filesystem as
+    // a path. Nothing was created outside the telemetry directory.
+    expect(existsSync(join(root, ".story", "sessions", "with spaces"))).toBe(false);
+    expect(existsSync(coverageMemoryPath(sessionDir))).toBe(false);
   });
 });

@@ -68,6 +68,52 @@ const LOCK_RETRY_MS = 10;
 const REVIEW_LOCK_RETRIES = 30;
 const REVIEW_LOCK_RETRY_MS = 40;
 
+/**
+ * Test seam. A contender has to wait out the whole budget to reach the refusal
+ * branch, and 1.2s per test case buys nothing a few milliseconds does not.
+ *
+ * Read per call rather than at module load so a test can set it after import,
+ * and clamped so a stray value in a real environment cannot turn the wait into
+ * either zero (every contender refused on the first collision) or minutes.
+ */
+function envInt(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function reviewLockRetries(): number {
+  return envInt("STORYBLOQ_REVIEW_LOCK_RETRIES", REVIEW_LOCK_RETRIES, 1, 1000);
+}
+
+function reviewLockRetryMs(): number {
+  return envInt("STORYBLOQ_REVIEW_LOCK_RETRY_MS", REVIEW_LOCK_RETRY_MS, 1, 1000);
+}
+
+/**
+ * Thrown when a synthesize call cannot take its review's lock.
+ *
+ * ITS OWN TYPE, because the caller has to be able to tell this apart from a
+ * malformed payload: this one is retryable as-is and nothing about the request
+ * was wrong. The message is the whole remedy, so it names the review and says
+ * the retry is the SAME call rather than a corrected one.
+ */
+export class ReviewCoverageLockUnavailableError extends Error {
+  readonly reviewId: string;
+
+  constructor(reviewId: string) {
+    super(
+      `another synthesize call for reviewId ${reviewId} holds the review lock, so this round was ` +
+        `not run: no verdict was computed and nothing was recorded. Retry this same call once the ` +
+        `other call finishes.`,
+    );
+    this.name = "ReviewCoverageLockUnavailableError";
+    this.reviewId = reviewId;
+  }
+}
+
 /** A synchronous wait. `updateCoverageMemory` is called from a sync tool path. */
 function sleepSync(ms: number): void {
   try {
@@ -207,11 +253,18 @@ export type ReviewCoverageLock =
  * shared-file lock inside `updateCoverageMemory` still serializes the write
  * itself, which is the only thing they do share.
  *
- * UNAVAILABLE IS NOT A LICENCE TO PROCEED. A caller that cannot take this lock
- * must not read the memory and act on it -- that is precisely the unsynchronized
- * read this exists to prevent. It degrades instead: every skip is treated as
- * `self-reported` and no relabel is judged, which is a weaker verdict and never
- * an escaped one. See `handleSynthesize`.
+ * UNAVAILABLE MEANS RUN NOTHING AND PERSIST NOTHING. An earlier revision ran
+ * the round anyway with every skip forced to `self-reported`, on the reasoning
+ * that a stricter verdict can never be an escaped one. That reasoning was about
+ * the CONTENDER's verdict and the guarantee is about the HOLDER's: a contender
+ * that completes still writes through the persist lock, and that write changes
+ * what the holder reads on its next round, while the holder -- which read before
+ * the write -- can still return the `not-applicable` this whole mechanism
+ * exists to refuse. The persist lock protects the file, not a verdict.
+ *
+ * So the caller refuses: `handleSynthesize` throws
+ * `ReviewCoverageLockUnavailableError` and the agent retries the identical call
+ * once the holder finishes.
  */
 export function acquireReviewCoverageLock(
   sessionDir: string | undefined,
@@ -220,7 +273,9 @@ export function acquireReviewCoverageLock(
   if (!sessionDir) return { kind: "not-needed" };
   const tDir = telemetryDirPath(sessionDir);
   const target = reviewLockPath(sessionDir, reviewId);
-  for (let attempt = 0; attempt <= REVIEW_LOCK_RETRIES; attempt += 1) {
+  const retries = reviewLockRetries();
+  const retryMs = reviewLockRetryMs();
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       mkdirSync(tDir, { recursive: true });
       const release = lockfile.lockSync(target, {
@@ -240,8 +295,8 @@ export function acquireReviewCoverageLock(
         },
       };
     } catch {
-      if (attempt === REVIEW_LOCK_RETRIES) return { kind: "unavailable" };
-      sleepSync(REVIEW_LOCK_RETRY_MS);
+      if (attempt === retries) return { kind: "unavailable" };
+      sleepSync(retryMs);
     }
   }
   return { kind: "unavailable" };
