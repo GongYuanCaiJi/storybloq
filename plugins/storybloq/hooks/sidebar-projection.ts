@@ -95,8 +95,10 @@ export interface SidebarBoardCard {
  * answers is what can be picked up now, and a blocked ticket cannot be,
  * whatever its stored status says; keeping it in Open and decorating it makes
  * the reader do the filtering. So Blocked takes every non-complete leaf whose
- * blockedBy still points at something unfinished, and Open and In progress
- * hold what is left of each status.
+ * blockedBy still points at something unfinished, In progress takes what is
+ * left of that status, and OPEN IS THE REMAINDER: whatever is neither
+ * complete, in progress nor waiting, whether or not its status is the word
+ * "open". That last part is what makes this a partition of a raw ledger.
  */
 export interface SidebarBoard {
   readonly phaseId: string | null;
@@ -382,7 +384,15 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     phaseId: currentPhase === null ? null : currentPhase.id,
     phaseName: currentPhase === null ? null : currentPhase.name,
     blocked: phaseLeaves.filter(waiting).sort(byOrderAscending).map(card),
-    open: phaseLeaves.filter((t) => t.status === "open" && !waiting(t)).sort(byOrderAscending).map(card),
+    // Open is the REMAINDER, not a status match. The ledger is hand-editable
+    // JSON and this reads it raw, so a leaf can carry a status the CLI's enum
+    // does not have ("blocked" and "deferred" both occur); matching on "open"
+    // drops those leaves out of every column while they still count in
+    // leafCount, and the board then does not add up.
+    open: phaseLeaves
+      .filter((t) => t.status !== "complete" && t.status !== "inprogress" && !waiting(t))
+      .sort(byOrderAscending)
+      .map(card),
     inProgress: phaseLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
     // Newest first: the last thing finished is the useful one to see, and the
     // rest is history the ledger already keeps.
@@ -392,7 +402,12 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
       .map(card),
   };
 
-  // Names are date-led, so a reverse sort is newest first.
+  // Names are date-led, so a reverse sort is newest first. It is exact
+  // between two names of the same shape and deterministic always, but it
+  // cannot order a date-only name against a timestamped one from the same day
+  // (2026-01-02-x sorts before 2026-01-02-193000-y whatever their real order).
+  // Reading each file's mtime to do better would cost a $.fs.stat per
+  // handover on every refresh, which is not worth the tie.
   const latestHandovers = [...input.handoverFilenames].sort().reverse().slice(0, HANDOVERS_SHOWN);
 
   return {

@@ -65,44 +65,30 @@ const SCAN_CHUNK = 25;
 const SCAN_TICK_MS = 25;
 
 /**
- * The board's row budget per column, derived from the rows the surface gave
- * the pane body (`props.scroll.bodyRows`) less the chrome around the board:
- * the summary line, the column headings, the issues line and the handover
- * line. A pane that reports no rows gets the default.
+ * How many cards a column ever draws, and the line that stands for the rest.
+ *
+ * A fixed eight, by the owner's ruling, and not a figure derived from
+ * `props.scroll.bodyRows`. The derived cap is what produced the bug the owner
+ * hit live: a Done column of 27 was headed 27 correctly, drew 18 rows and
+ * showed no tail, because the pane clips at `bodyRows` and the tail WAS drawn,
+ * below the cut, along with the issues and handover lines under it. Eight
+ * bounds the board at ten rows per column whatever the pane reports, so the
+ * whole pane is fourteen rows side by side and nothing is silently cut.
+ *
+ * The tail is three dots and not "+19 more": the heading already carries the
+ * true total, so the tail only has to say that the column goes on.
  */
-const DEFAULT_COLUMN_ROWS = 8;
-const MIN_COLUMN_ROWS = 3;
-const MAX_COLUMN_ROWS = 20;
-const BOARD_CHROME_ROWS = 5;
+const COLUMN_CARD_CAP = 8;
+const COLUMN_TAIL = "...";
+const BOARD_COLUMNS = 4;
 
 /**
- * Narrower than this and three columns are shredded rather than laid out, so
- * the same three sections stack instead. Well below the 110 the client needs
+ * Narrower than this and four columns are shredded rather than laid out, so
+ * the same four sections stack instead. Well below the 110 the client needs
  * to dock a pane at all, so this is the in-between case: a pane that exists
  * but is too narrow to be a board.
  */
 const BOARD_MIN_COLUMNS = 60;
-
-/**
- * The brand mark, rasterized from web/public/brand/logo.png at authoring time.
- *
- * `Raster` takes every cell as a little-endian u32 triplet of code point,
- * foreground and background, base64 encoded. Each row here is one terminal row
- * carrying two pixel rows: the glyph is an upper half block (U+2580), so the
- * foreground paints the top pixel and the background the bottom one, and ten
- * columns by three rows is a twenty by six pixel S. The colour is the mark's
- * own #925834; a pixel the mark does not cover is the terminal's default
- * (0x01000000), so the logo sits on whatever background the person has.
- *
- * A constant and not a fetch: a hooks module has no network, the plugin ships
- * no binary, and reading the PNG would need an $.fs call this Mod does not
- * make. Regenerate by resizing that PNG to 20x6 with its alpha thresholded at
- * 55 and re-encoding.
- */
-const LOGO_COLUMNS = 10;
-const LOGO_ROWS = 3;
-const LOGO_CELLS =
-  "gCUAAAAAAAEAAAABgCUAAAAAAAE0WJIAgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgAAAAABgCUAADRYkgA0WJIAgCUAADRYkgAAAAABgCUAAAAAAAEAAAABgCUAADRYkgAAAAABgCUAADRYkgA0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAEAAAABgCUAAAAAAAE0WJIAgCUAADRYkgA0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAAAAAAAE0WJIAgCUAADRYkgAAAAABgCUAAAAAAAEAAAAB";
 
 const TICKETS_DIR = ".story/tickets";
 const ISSUES_DIR = ".story/issues";
@@ -456,20 +442,49 @@ async function drainChunk($: any): Promise<void> {
   finalizeScan($, outcome);
 }
 
-/** How many rows one column may draw before it starts counting the rest. */
-function columnCap(e: any): number {
-  const bodyRows: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
-  if (bodyRows <= 0) return DEFAULT_COLUMN_ROWS;
-  return Math.max(MIN_COLUMN_ROWS, Math.min(MAX_COLUMN_ROWS, bodyRows - BOARD_CHROME_ROWS));
+/**
+ * The context fill from what `$.session.usage()` actually answers.
+ *
+ * `SessionContextUsage` carries `window` always, `tokens` and `percent` only
+ * "from the first API response of the live window": a fresh session or one
+ * just compacted has neither until its next response. Live, the owner's
+ * header stayed empty because this read `percent` alone, so the percent is
+ * computed from `tokens` over `window` whenever the engine did not state it,
+ * and null (draw nothing) only when there is no reading at all.
+ */
+function contextFill(usage: any): number | null {
+  const context = usage?.context;
+  if (typeof context?.percent === "number") return Math.round(context.percent);
+  const tokens = context?.tokens;
+  const window = context?.window;
+  if (typeof tokens !== "number" || typeof window !== "number" || window <= 0) return null;
+  return Math.round((tokens / window) * 100);
+}
+
+/** Side by side, or one column after another on a narrow pane. */
+function isStacked(width: number): boolean {
+  return width < BOARD_MIN_COLUMNS;
 }
 
 /**
- * One column: a heading carrying the full count, the rows that fit, and a
- * tail saying how many did not.
+ * A heading that keeps its count when the column is too narrow for both.
+ *
+ * The count is the point of the heading, so the label is what gets cut:
+ * "In progress 100" at fourteen columns is "In progr… 100", never
+ * "In progress 1…", which would quietly report a different number.
+ */
+function headingText(label: string, count: number, width: number): string {
+  const tail = ` ${count}`;
+  return `${truncate(label, Math.max(1, width - tail.length))}${tail}`;
+}
+
+/**
+ * One column: a heading carrying the full count, at most COLUMN_CARD_CAP
+ * cards, and a tail line when there are more.
  *
  * The count in the heading is the WHOLE column, not the rows drawn, so a
- * capped column still tells the truth about the phase; the tail says what the
- * cap cost. Titles are truncated to the column's width, not the pane's.
+ * capped column still tells the truth about the phase; the tail says the
+ * column goes on. Titles are truncated to the column's width, not the pane's.
  *
  * Takes the resolved element table rather than `$`: these are plain
  * constructors, and the client's scan is strict about where `$` may travel.
@@ -480,61 +495,66 @@ function boardColumn(
   heading: string,
   cards: readonly SidebarBoardCard[],
   width: number,
-  cap: number,
 ): unknown {
   const rows: unknown[] = [
-    elements.Text({ bold: true, children: truncate(`${heading} ${cards.length}`, width) }),
+    elements.Text({ bold: true, children: headingText(heading, cards.length, width) }),
   ];
-  for (const card of cards.slice(0, cap)) {
+  for (const card of cards.slice(0, COLUMN_CARD_CAP)) {
     rows.push(elements.Text({ children: truncate(`${card.id} ${card.title}`, width) }));
   }
-  const hidden = cards.length - Math.min(cards.length, cap);
-  if (hidden > 0) rows.push(elements.Text({ dimColor: true, children: `+${hidden} more` }));
+  if (cards.length > COLUMN_CARD_CAP) {
+    rows.push(elements.Text({ dimColor: true, children: COLUMN_TAIL }));
+  }
   return elements.Box({ key, flexDirection: "column", width, overflow: "hidden", children: rows });
 }
 
 /**
- * The three columns, side by side where there is room and stacked where there
+ * The four columns, side by side where there is room and stacked where there
  * is not. The keys stay the same either way, so what a column contains does
  * not depend on how it was laid out.
+ *
+ * Stacked the columns run down the pane, so they take no gap row between
+ * them: a blank row there costs a card and the bold headings already separate
+ * them. Side by side the gap is the column of space between them.
  */
-function boardNode(elements: any, board: any, width: number, cap: number): unknown {
-  const stacked = width < BOARD_MIN_COLUMNS;
-  const columnWidth = stacked ? width : Math.max(12, Math.floor((width - 3) / 4));
+function boardNode(elements: any, board: any, width: number, stacked: boolean): unknown {
+  const columnWidth = stacked ? width : Math.max(12, Math.floor((width - 3) / BOARD_COLUMNS));
   // Left to right in the order the work moves: what is stuck, what can be
   // picked up, what is being done, what is finished.
   return elements.Box({
     key: "board",
     flexDirection: stacked ? "column" : "row",
-    gap: 1,
+    gap: stacked ? 0 : 1,
     children: [
-      boardColumn(elements, "board-blocked", "Blocked", board.blocked, columnWidth, cap),
-      boardColumn(elements, "board-open", "Open", board.open, columnWidth, cap),
-      boardColumn(elements, "board-inprogress", "In progress", board.inProgress, columnWidth, cap),
-      boardColumn(elements, "board-done", "Done", board.done, columnWidth, cap),
+      boardColumn(elements, "board-blocked", "Blocked", board.blocked, columnWidth),
+      boardColumn(elements, "board-open", "Open", board.open, columnWidth),
+      boardColumn(elements, "board-inprogress", "In progress", board.inProgress, columnWidth),
+      boardColumn(elements, "board-done", "Done", board.done, columnWidth),
     ],
   });
 }
 
 /**
- * The header: the mark and the wordmark on the left, the context fill pushed
- * to the right of the same row.
+ * The header row: the wordmark and the phase the board is showing on the
+ * left, the context fill pushed to the right of the same row.
  *
- * `Raster` is a terminal element; a surface whose table does not carry one
- * gets a bordered letter instead, which is why the table is read for it
- * rather than assumed.
+ * No mark: the owner had the rasterized S here and took it out, so the
+ * wordmark is the brand and the row costs one terminal row instead of three.
+ * The phase rides next to it because the board below is scoped to that phase
+ * and nothing else on the pane says so.
  */
-function headerNode(elements: any, context: number | null): unknown {
-  const brand = elements.Raster
-    ? elements.Raster({ key: "logo", columns: LOGO_COLUMNS, rows: LOGO_ROWS, cells: LOGO_CELLS })
-    : elements.Box({ key: "logo", borderStyle: "round", children: [elements.Text({ bold: true, children: "S" })] });
+function headerNode(elements: any, phase: string | null, context: number | null): unknown {
+  const left: unknown[] = [elements.Text({ bold: true, children: "Storybloq" })];
+  if (phase !== null && phase !== "") {
+    left.push(elements.Text({ dimColor: true, children: `Phase: ${phase}` }));
+  }
   return elements.Box({
     key: "header",
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     children: [
-      elements.Box({ key: "brand", flexDirection: "row", gap: 1, alignItems: "center", children: [brand, elements.Text({ bold: true, children: "Storybloq" })] }),
+      elements.Box({ key: "brand", flexDirection: "row", gap: 2, alignItems: "center", children: left }),
       elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
     ],
   });
@@ -551,12 +571,15 @@ export function registerSidebar(on: On, _options: Options): void {
       const elements = $.ui.resolve(e);
       const { Box, Text } = elements;
       const width: number = typeof e.props?.bodyColumns === "number" ? e.props.bodyColumns : 40;
-      const rows: unknown[] = [
-        headerNode(elements, contextPercent),
-        Text({ children: truncate(summaryLine(false), width) }),
-      ];
-      if (projection !== null) {
-        rows.push(boardNode(elements, projection.board, width, columnCap(e)));
+      const phaseName = projection === null || projection.board.phaseName === null
+        ? null
+        : projection.board.phaseName;
+      const rows: unknown[] = [headerNode(elements, phaseName, contextPercent)];
+      if (projection === null) {
+        // Nothing to draw a board from yet: the one line that says why.
+        rows.push(Text({ children: truncate(summaryLine(false), width) }));
+      } else {
+        rows.push(boardNode(elements, projection.board, width, isStacked(width)));
         const bySeverity = projection.issuesBySeverity;
         rows.push(
           Text({
@@ -625,7 +648,7 @@ export function registerSidebar(on: On, _options: Options): void {
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
     const usage = await $.session.usage();
-    contextPercent = typeof usage?.context?.percent === "number" ? usage.context.percent : null;
+    contextPercent = contextFill(usage);
     await readHeader($);
     requestScan($);
     return next(e);
@@ -638,7 +661,7 @@ export function registerSidebar(on: On, _options: Options): void {
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
     const usage = await $.session.usage();
-    contextPercent = typeof usage?.context?.percent === "number" ? usage.context.percent : null;
+    contextPercent = contextFill(usage);
     $.ui.invalidate("ui.render");
     return next(e);
   });

@@ -68,6 +68,28 @@ function newFixture(): Fixture {
   return { files, mtimes };
 }
 
+/** The fixture plus `count` more open leaves in the current phase. */
+function manyOpen(count: number): Fixture {
+  const fixture = newFixture();
+  for (let i = 0; i < count; i += 1) {
+    const id = `T-1${String(i).padStart(3, "0")}`;
+    fixture.files[`.story/tickets/${id}.json`] = ticketText({ id, status: "open", order: 100 + i, title: `Open ${i}` });
+    fixture.mtimes[`.story/tickets/${id}.json`] = 1000;
+  }
+  return fixture;
+}
+
+/** The same, in progress, which is the longest column heading. */
+function manyInProgress(count: number): Fixture {
+  const fixture = newFixture();
+  for (let i = 0; i < count; i += 1) {
+    const id = `T-2${String(i).padStart(4, "0")}`;
+    fixture.files[`.story/tickets/${id}.json`] = ticketText({ id, status: "inprogress", order: 200 + i, title: `Doing ${i}` });
+    fixture.mtimes[`.story/tickets/${id}.json`] = 1000;
+  }
+  return fixture;
+}
+
 interface Harness {
   readonly fixture: Fixture;
   readonly opened: unknown[];
@@ -80,6 +102,8 @@ interface Harness {
   failNextInvalidate: boolean;
   /** Refuses every timer registration while set, the same way. */
   failTimer: boolean;
+  /** What `$.session.usage()` answers, in the client's own shape. */
+  usage: any;
   reads: number;
   fire(event: string, e: unknown): Promise<unknown>;
   tick(times?: number): Promise<void>;
@@ -98,7 +122,16 @@ function harness(fixture: Fixture): Harness {
   const invalidated: string[] = [];
   const logged: string[] = [];
   const stored: Record<string, unknown> = {};
-  const state = { reads: 0, failNextInvalidate: false, failTimer: false };
+  // The real shape `$.session.usage()` answers on this client: `window` is
+  // always there, `percent` and `tokens` only once the live window has had an
+  // API response. The owner's live run had no `percent`, which is why this
+  // default carries none.
+  const state = {
+    reads: 0,
+    failNextInvalidate: false,
+    failTimer: false,
+    usage: { context: { window: 200_000, tokens: 40_000 }, rateLimits: [] } as any,
+  };
   const counters = { timers: 0, storeSets: 0 };
 
   const elements = {
@@ -151,7 +184,7 @@ function harness(fixture: Fixture): Harness {
       },
     },
     session: {
-      usage: async () => ({ context: { window: 200000, tokens: 40000, percent: 20 }, rateLimits: [] }),
+      usage: async () => state.usage,
     },
     store: {
       get: async (key: string): Promise<unknown> => stored[key],
@@ -195,6 +228,12 @@ function harness(fixture: Fixture): Harness {
     },
     set failTimer(value: boolean) {
       state.failTimer = value;
+    },
+    get usage() {
+      return state.usage;
+    },
+    set usage(value: any) {
+      state.usage = value;
     },
     get reads() {
       return state.reads;
@@ -270,6 +309,20 @@ function nodeByKey(node: unknown, key: string): any {
   return nodeByKey(props["children"], key);
 }
 
+/** One row per drawn line of a column, heading first. */
+function rowsOf(tree: unknown, key: string): string[] {
+  const column = nodeByKey(tree, key);
+  if (!column) return [];
+  const children = column.props?.children;
+  const list: unknown[] = Array.isArray(children) ? children : children === undefined ? [] : [children];
+  return list.map((child) => textOf(child));
+}
+
+/** The heading line of one column. */
+function headingOf(tree: unknown, key: string): string {
+  return rowsOf(tree, key)[0] ?? "";
+}
+
 /** The text of one board column, found by the key its Box carries. */
 function columnText(node: unknown, key: string): string {
   if (node === null || typeof node !== "object") return "";
@@ -310,11 +363,12 @@ test("draws the pane with the ledger's numbers", async () => {
   const h = harness(newFixture());
   await started(h);
 
-  const text = textOf(await h.render(paneEvent()));
-  expect(text).toContain("Phase One");
-  // Two leaves, one in progress; one open issue, at critical.
-  expect(text).toContain("1 in progress");
-  expect(text).toContain("1 issues");
+  const tree = await h.render(paneEvent());
+  const text = textOf(tree);
+  // The phase rides in the header now that the summary line is gone.
+  expect(text).toContain("Phase: Phase One");
+  // One leaf in progress; one open issue, at critical.
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
   expect(text).toContain("1 critical");
   expect(text).toContain("T-001");
   expect(text).toContain("2026-01-02-latest.md");
@@ -336,7 +390,7 @@ test("opens no pane where nothing is drawn and nobody is at the prompt", async (
 test("a .story/ write shows up after the turn that made it", async () => {
   const h = harness(newFixture());
   await started(h);
-  expect(textOf(await h.render(paneEvent()))).toContain("1 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
 
   // Someone completes the in-progress ticket. Its mtime moves, which is the
   // only signal the Mod has: serving the cached fields regardless is the
@@ -347,7 +401,7 @@ test("a .story/ write shows up after the turn that made it", async () => {
   await h.fire("turn.complete", {});
   await h.tick();
 
-  expect(textOf(await h.render(paneEvent()))).toContain("0 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
 test("re-reads only the file whose mtime moved", async () => {
@@ -511,7 +565,7 @@ test("a refused invalidate does not wedge every later scan", async () => {
   // later request return early, so this write is never picked up. Asserting
   // the state before the write would pass under the mutant, because the first
   // scan's queue was already built and still drains.
-  expect(textOf(await h.render(paneEvent()))).toContain("0 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
 test("shows the context pressure once a turn has reported it", async () => {
@@ -550,13 +604,13 @@ test("says how much is left while the first scan runs", async () => {
 test("drops a ticket that left the ledger", async () => {
   const h = harness(newFixture());
   await started(h);
-  expect(textOf(await h.render(paneEvent()))).toContain("1 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
 
   delete h.fixture.files[".story/tickets/T-001.json"];
   await h.fire("turn.complete", {});
   await h.tick();
 
-  expect(textOf(await h.render(paneEvent()))).toContain("0 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
 test("runs the refresh that was asked for during a scan that then failed", async () => {
@@ -600,7 +654,7 @@ test("recovers when the scan timer could not be registered at first", async () =
   // M-TIMER-FLAG-EARLY: marking the timer started before the registration
   // returns means no later attempt is ever made, so a scan is begun with
   // nothing to drain it and the pane never leaves its loading line.
-  expect(textOf(await h.render(paneEvent()))).toContain("1 in progress");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
 });
 
 test("draws a board of the current phase, in four columns", async () => {
@@ -668,29 +722,85 @@ test("orders the columns as the work moves", async () => {
 });
 
 test("heads every column with the whole count, not the rows that fit", async () => {
-  const h = harness(newFixture());
+  const h = harness(manyOpen(12));
   await started(h);
-  // Four open tickets, of which three are drawn in a short pane. The heading
-  // still says four: M-COUNT-MISMATCH heads it with the drawn rows instead,
-  // and a capped column then under-reports the phase.
-  const open = columnText(await h.render(paneEvent(160, 8)), "board-open");
-  expect(open).toContain("Open 4");
-  expect(open).toContain("+1 more");
+  // Sixteen open tickets, of which eight are drawn. The heading still says
+  // sixteen: M-COUNT-MISMATCH heads it with the drawn rows instead, and a
+  // capped column then under-reports the phase. This is the figure the owner
+  // read live, where Done said 27 over eighteen drawn rows.
+  expect(headingOf(await h.render(paneEvent()), "board-open")).toBe("Open 16");
 });
 
-test("draws the brand mark and the wordmark in the header, context to the right", async () => {
+test("keeps a three digit count when the column is too narrow for the heading", async () => {
+  const h = harness(manyInProgress(99));
+  await h.fire("session.start", START);
+  await h.tick(80);
+  // A hundred in progress at sixty columns: each of the four columns is
+  // fourteen wide and "In progress 100" is fifteen. The LABEL is what gives
+  // way, never the count. M-COUNT-CUT truncates the whole heading, which
+  // leaves "In progress 1…" and reports a number the column does not have.
+  const heading = headingOf(await h.render(paneEvent(64)), "board-inprogress");
+
+  expect(heading.endsWith(" 100")).toBe(true);
+  expect(heading).not.toContain("In progress");
+  expect(heading.length).toBeLessThanOrEqual(14);
+});
+
+test("keeps a four digit count whole as well", async () => {
+  const h = harness(manyInProgress(999));
+  await h.fire("session.start", START);
+  await h.tick(200);
+  // The count grows a digit and the label gives up another character rather
+  // than the count losing one.
+  const heading = headingOf(await h.render(paneEvent(64)), "board-inprogress");
+  expect(heading.endsWith(" 1000")).toBe(true);
+});
+
+test("heads the pane with the wordmark and the phase, context to the right", async () => {
   const h = harness(newFixture());
   await started(h);
-  await h.fire("session.compact", {});
+  await h.fire("turn.complete", {});
   const tree = await h.render(paneEvent());
+  const header = textOf(nodeByKey(tree, "header"));
 
-  const logo = nodeByKey(tree, "logo");
-  expect(logo.element).toBe("Raster");
-  expect(logo.props.columns).toBe(10);
-  expect(logo.props.rows).toBe(3);
-  expect(typeof logo.props.cells).toBe("string");
-  expect(textOf(nodeByKey(tree, "header"))).toContain("Storybloq");
-  expect(textOf(nodeByKey(tree, "header"))).toContain("context 20%");
+  expect(header).toContain("Storybloq");
+  // The board is scoped to one phase and the header is what says which.
+  expect(header).toContain("Phase: Phase One");
+  expect(header).toContain("context 20%");
+  // The owner took the rasterized mark out; the wordmark is the brand.
+  expect(nodeByKey(tree, "logo")).toBe(null);
+});
+
+test("works out the context fill from the fields the usage actually carries", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // This is the live shape: SessionContextUsage states `window` always and
+  // `percent` only once the window has had an API response, so the header
+  // stayed empty against a read that wanted `percent`. M-PERCENT-ONLY puts
+  // that read back and this goes red.
+  h.usage = { context: { window: 200_000, tokens: 50_000 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 25%");
+});
+
+test("prefers the percent the engine states over its own arithmetic", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // The engine's own figure counts the window the way the status line does,
+  // so where it exists it wins.
+  h.usage = { context: { window: 200_000, tokens: 50_000, percent: 73 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 73%");
+});
+
+test("says nothing about context on a window that has had no response yet", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // A fresh session, or one just compacted: neither figure exists, and a made
+  // up zero would read as an empty window rather than an unknown one.
+  h.usage = { context: { window: 200_000 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).not.toContain("context");
 });
 
 test("names the two newest handovers, one per line, newest first", async () => {
@@ -708,16 +818,29 @@ test("names the two newest handovers, one per line, newest first", async () => {
   expect(text.indexOf("2026-01-03-newest.md")).toBeLessThan(text.indexOf("2026-01-02-latest.md"));
 });
 
-test("caps a column and says how many it left out", async () => {
+test("caps a column at eight and ends it with dots", async () => {
+  const h = harness(manyOpen(12));
+  await started(h);
+  // Sixteen open tickets: eight rows and a dotted tail, on any pane height.
+  // M-CAP-IGNORED draws all sixteen and writes no tail, which is the column
+  // that ran off the bottom of the owner's pane.
+  const tree = await h.render(paneEvent());
+  const rows = rowsOf(tree, "board-open");
+
+  // One heading, eight cards, one tail.
+  expect(rows.length).toBe(10);
+  expect(rows[9]).toBe("...");
+  expect(rows.slice(1, 9).every((row) => row.startsWith("T-"))).toBe(true);
+  expect(columnText(tree, "board-open")).toContain("Open 16");
+});
+
+test("leaves a column that fits without a tail", async () => {
   const h = harness(newFixture());
   await started(h);
-  // A short pane: five open tickets do not fit, so three show and the tail
-  // says so. M-CAP-IGNORED draws all five and never writes the tail.
-  const open = columnText(await h.render(paneEvent(160, 8)), "board-open");
-
-  expect(open).toContain("T-010");
-  expect(open).toContain("+1 more");
-  expect(open).not.toContain("T-014");
+  // Four open tickets, so nothing is left out and there is nothing to say.
+  const rows = rowsOf(await h.render(paneEvent()), "board-open");
+  expect(rows.length).toBe(5);
+  expect(rows).not.toContain("...");
 });
 
 test("leaves the narrow fallback a single line, board or no board", async () => {

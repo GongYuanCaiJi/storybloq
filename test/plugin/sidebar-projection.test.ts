@@ -289,6 +289,55 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.board.open.map((c) => c.id)).not.toContain("T-021");
   });
 
+  it("keeps a leaf whose status is none of the three in a column", async () => {
+    // The ledger is hand-editable JSON and the Mod reads it raw, so a leaf can
+    // carry a status the CLI's enum does not have: "blocked" and "deferred"
+    // both turn up in real projects. Open is therefore the REMAINDER (not
+    // complete, not in progress, not waiting on anything), because a column
+    // set built from status equality drops those leaves off the board while
+    // they still count in leafCount and openTickets, and the reader sees a
+    // board that does not add up. M-STATUS-DROPPED filters Open on
+    // status === "open" and this goes red.
+    const leaf = (over: Partial<SidebarTicket>): SidebarTicket => ({
+      kind: "ticket",
+      id: "x",
+      displayId: null,
+      title: "t",
+      status: "open",
+      phase: "p1",
+      order: 1,
+      blockedBy: [],
+      parentTicket: null,
+      previousDisplayIds: [],
+      lifecycle: null,
+      ...over,
+    });
+    const input: SidebarInput = {
+      project: "odd-statuses",
+      phases: [{ id: "p1", name: "Phase One" }],
+      tickets: [
+        leaf({ id: "T-100", status: "blocked", order: 1, blockedBy: [] }),
+        leaf({ id: "T-101", status: "deferred", order: 2, blockedBy: ["T-200"] }),
+        leaf({ id: "T-102", status: "blocked", order: 3, blockedBy: ["T-103"] }),
+        leaf({ id: "T-103", status: "inprogress", order: 4 }),
+        leaf({ id: "T-200", status: "complete", order: 5 }),
+      ],
+      issues: [],
+      handoverFilenames: [],
+    };
+    const mine = projectSidebar(input);
+    const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
+
+    // The partition: five leaves in, five cards out, once each.
+    expect(columns.map((c) => c.id).sort()).toEqual(["T-100", "T-101", "T-102", "T-103", "T-200"]);
+    expect(mine.totalTickets).toBe(columns.length);
+    // No blocker at all, and a blocker that is already complete: both are
+    // pickable, so both are Open whatever their stored status says.
+    expect(mine.board.open.map((c) => c.id)).toEqual(["T-100", "T-101"]);
+    // An unmet blocker still wins over the odd status.
+    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-102"]);
+  });
+
   it("names the two newest handovers, newest first", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
