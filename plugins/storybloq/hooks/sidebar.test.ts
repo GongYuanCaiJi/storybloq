@@ -104,6 +104,8 @@ interface Harness {
   failTimer: boolean;
   /** What `$.session.usage()` answers, in the client's own shape. */
   usage: any;
+  /** Refuses every usage read while set, the way a host without it would. */
+  failUsage: boolean;
   reads: number;
   fire(event: string, e: unknown): Promise<unknown>;
   tick(times?: number): Promise<void>;
@@ -130,6 +132,7 @@ function harness(fixture: Fixture): Harness {
     reads: 0,
     failNextInvalidate: false,
     failTimer: false,
+    failUsage: false,
     usage: { context: { window: 200_000, tokens: 40_000 }, rateLimits: [] } as any,
   };
   const counters = { timers: 0, storeSets: 0 };
@@ -184,7 +187,10 @@ function harness(fixture: Fixture): Harness {
       },
     },
     session: {
-      usage: async () => state.usage,
+      usage: async () => {
+        if (state.failUsage) throw new Error("the host refused session.usage");
+        return state.usage;
+      },
     },
     store: {
       get: async (key: string): Promise<unknown> => stored[key],
@@ -228,6 +234,12 @@ function harness(fixture: Fixture): Harness {
     },
     set failTimer(value: boolean) {
       state.failTimer = value;
+    },
+    get failUsage() {
+      return state.failUsage;
+    },
+    set failUsage(value: boolean) {
+      state.failUsage = value;
     },
     get usage() {
       return state.usage;
@@ -880,6 +892,35 @@ test("shows the context fill on a session that had already run a turn", async ()
   // waiting for the next turn to end leaves the header blank until then.
   await started(h);
   expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 20%");
+});
+
+test("draws the board even when the usage call is refused", async () => {
+  const h = harness(newFixture());
+  // The context fill is telemetry on the header's right. A host that refuses
+  // it, or has no such call, must cost that one figure and nothing else:
+  // M-USAGE-BLOCKS leaves the read unguarded in session.start, where it
+  // rejects after the pane is opened and takes the ledger read, the board and
+  // next(e) down with it.
+  h.failUsage = true;
+  const passed = await h.fire("session.start", START);
+  await h.tick();
+  const tree = await h.render(paneEvent());
+
+  // The hook still handed the event on.
+  expect(passed).toBe(START);
+  // The scan ran to the end and the board has the ledger's numbers.
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
+  expect(headingOf(tree, "board-open")).toBe("Open 5");
+  // And the header's right side is simply empty.
+  expect(textOf(nodeByKey(tree, "header"))).not.toContain("context");
+
+  // The refusal does not stop a later refresh either.
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "complete", title: "Working on it" });
+  h.fixture.mtimes[".story/tickets/T-001.json"] = 2000;
+  const passedTurn = await h.fire("turn.complete", {});
+  await h.tick();
+  expect(passedTurn).toEqual({});
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 0");
 });
 
 test("leaves the narrow fallback a single line, board or no board", async () => {

@@ -461,6 +461,24 @@ function contextFill(usage: any): number | null {
   return Math.round((tokens / window) * 100);
 }
 
+/**
+ * The context fill, or null, and never a rejection.
+ *
+ * The fill is telemetry on the header's right, and `$.session.usage` is a call
+ * a host may not have or may refuse. Unguarded in `session.start` it rejects
+ * AFTER the pane is opened, which takes the ledger read, the board and
+ * `next(e)` with it: a missing figure would cost the whole sidebar. One helper
+ * for all three call sites so the shape cannot drift between them.
+ */
+async function readContextFill($: any): Promise<number | null> {
+  try {
+    const usage = await $.session.usage();
+    return contextFill(usage);
+  } catch {
+    return null;
+  }
+}
+
 /** Side by side, or one column after another on a narrow pane. */
 function isStacked(width: number): boolean {
   return width < BOARD_MIN_COLUMNS;
@@ -639,8 +657,7 @@ export function registerSidebar(on: On, _options: Options): void {
     // readable the moment the Mod loads into a session that has already had a
     // response. Reading them only on `turn.complete` is why the owner's header
     // was blank after a reload, with the fill only appearing a turn later.
-    const usage = await $.session.usage();
-    contextPercent = contextFill(usage);
+    contextPercent = await readContextFill($);
     await readHeader($);
     await loadCache($);
     startTimer($);
@@ -652,8 +669,7 @@ export function registerSidebar(on: On, _options: Options): void {
   // up by the next prompt.
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
-    const usage = await $.session.usage();
-    contextPercent = contextFill(usage);
+    contextPercent = await readContextFill($);
     await readHeader($);
     requestScan($);
     return next(e);
@@ -665,8 +681,7 @@ export function registerSidebar(on: On, _options: Options): void {
 
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
-    const usage = await $.session.usage();
-    contextPercent = contextFill(usage);
+    contextPercent = await readContextFill($);
     $.ui.invalidate("ui.render");
     return next(e);
   });
