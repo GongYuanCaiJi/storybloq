@@ -199,6 +199,10 @@ export function computeActionability(
           source: "heuristic",
         };
       }
+      // ISS-1225: a related ticket that is itself finished is evidence the
+      // issue is NOT covered by in-flight work, whatever its umbrella is doing;
+      // the parent clause applies only while the related ticket is still open.
+      if (t.status === "complete") continue;
       const parent = ctx.state.resolvedParent(t);
       if (parent && ctx.state.umbrellaIDs.has(parent.id) && ctx.state.umbrellaStatus(parent.id) === "inprogress") {
         return {

@@ -1385,6 +1385,44 @@ describe("computeActionability", () => {
     expect(result.source).toBe("heuristic");
   });
 
+  it("ISS-1225: a COMPLETE leaf under an in-progress umbrella is evidence the issue is not covered -> actionable", () => {
+    // T-285/T-286 shape from the field: the related ticket is done, the
+    // umbrella still has other children in flight. The parent clause must
+    // not fire for a finished related ticket.
+    const umbrella = makeTicket({ id: "T-001", status: "inprogress" });
+    const done = makeTicket({ id: "T-002", status: "complete", parentTicket: "T-001" });
+    const inflight = makeTicket({ id: "T-003", status: "inprogress", parentTicket: "T-001" });
+    const issue = makeIssue({ id: "ISS-001", relatedTickets: ["T-002"] });
+    const state = makeState({ tickets: [umbrella, done, inflight], issues: [issue] });
+    const result = computeActionability("issue", issue, ctx(state));
+    expect(result.status).toBe("actionable");
+    expect(result.source).toBe("ledger");
+  });
+
+  it("ISS-1225: an OPEN or in-progress leaf under an in-progress umbrella still yields duplicate, and a direct in-progress umbrella reference is unchanged", () => {
+    for (const leafStatus of ["open", "inprogress"] as const) {
+      // Umbrella status is derived from its children, so a sibling in flight
+      // keeps the umbrella in progress while the related leaf is merely open.
+      const umbrella = makeTicket({ id: "T-001", status: "inprogress" });
+      const leaf = makeTicket({ id: "T-002", status: leafStatus, parentTicket: "T-001" });
+      const sibling = makeTicket({ id: "T-009", status: "inprogress", parentTicket: "T-001" });
+      const issue = makeIssue({ id: "ISS-001", relatedTickets: ["T-002"] });
+      const state = makeState({ tickets: [umbrella, leaf, sibling], issues: [issue] });
+      const result = computeActionability("issue", issue, ctx(state));
+      expect(result.status, leafStatus).toBe("duplicate");
+      expect(result.reason).toContain("parent umbrella T-001 is in progress");
+    }
+    // Direct reference to the in-progress umbrella itself: unchanged.
+    const umbrella = makeTicket({ id: "T-001", status: "inprogress" });
+    const leaf = makeTicket({ id: "T-002", status: "complete", parentTicket: "T-001" });
+    const inflight = makeTicket({ id: "T-003", status: "inprogress", parentTicket: "T-001" });
+    const issue = makeIssue({ id: "ISS-001", relatedTickets: ["T-001"] });
+    const state = makeState({ tickets: [umbrella, leaf, inflight], issues: [issue] });
+    const direct = computeActionability("issue", issue, ctx(state));
+    expect(direct.status).toBe("duplicate");
+    expect(direct.reason).toContain("is itself an in-progress umbrella");
+  });
+
   it("stale completed umbrella does NOT match the heuristic tier", () => {
     const umbrella = makeTicket({ id: "T-001", status: "complete" });
     const child = makeTicket({ id: "T-002", status: "complete", parentTicket: "T-001" });
