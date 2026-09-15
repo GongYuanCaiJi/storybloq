@@ -37,6 +37,16 @@ async function fakeBin(dir: string): Promise<string> {
   return bin;
 }
 
+/**
+ * An install a test leaves running while it asserts: the rejection handler is
+ * attached at creation so a failure before the test reaches `await` is never
+ * an unhandled rejection, and the returned promise always settles so the
+ * test's finally can wait for the install before teardown.
+ */
+function settle(p: Promise<unknown>): Promise<unknown> {
+  return p.then(() => undefined, () => undefined);
+}
+
 /** Polls `cond` every 10 ms; fails after `timeoutMs` so a broken lock cannot hang the suite. */
 async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -236,7 +246,7 @@ describe("installMods (T-507 D)", () => {
     let pending: Promise<unknown> | null = null;
     try {
       await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
-      pending = installMods({ bin });
+      pending = settle(installMods({ bin }));
       await waitFor(() => heldSeen > 0);
       expect(await readFile(lockPath, "utf-8")).toBe(rival);
       expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
@@ -245,6 +255,8 @@ describe("installMods (T-507 D)", () => {
     } finally {
       __installModsTestHooks.pidAlive = null;
       __installModsTestHooks.onLockHeld = null;
+      await rm(lockPath, { force: true }); // never leave a test-owned lock for a still-polling install
+      if (pending !== null) await pending; // nothing runs on past teardown
     }
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
   });
@@ -340,8 +352,9 @@ describe("installMods (T-507 D)", () => {
     let settled = false;
     let heldSeen = 0;
     __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    let pending: Promise<unknown> | null = null;
     try {
-      const pending = installMods({ bin }).then(() => { settled = true; });
+      pending = settle(installMods({ bin }).then(() => { settled = true; }));
       await waitFor(() => heldSeen >= 3); // reached the held lock and kept waiting
       expect(settled).toBe(false);
       expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
@@ -349,6 +362,8 @@ describe("installMods (T-507 D)", () => {
       await pending;
     } finally {
       __installModsTestHooks.onLockHeld = null;
+      await rm(lockPath, { force: true });
+      if (pending !== null) await pending;
     }
     expect(settled).toBe(true);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
@@ -368,11 +383,14 @@ describe("installMods (T-507 D)", () => {
       return new Promise<void>((resolve) => { releaseFirst = resolve; });
     };
     __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    const running: Promise<unknown>[] = [];
     try {
       const first = installMods({ bin: a }).then(() => order.push("first"));
+      running.push(settle(first));
       await firstPaused; // the first is staged and holding the lock
       __installModsTestHooks.beforeSwap = null; // only the first install pauses
       const second = installMods({ bin: b }).then(() => order.push("second"));
+      running.push(settle(second));
       await waitFor(() => heldSeen >= 3); // the second reached the held lock and is waiting on it
       expect(order).toEqual([]); // it neither overtook nor reclaimed the first's live lock
       expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
@@ -381,6 +399,8 @@ describe("installMods (T-507 D)", () => {
     } finally {
       __installModsTestHooks.beforeSwap = null;
       __installModsTestHooks.onLockHeld = null;
+      if (releaseFirst !== null) (releaseFirst as () => void)(); // always release the pause
+      await Promise.allSettled(running); // both installs are done before teardown
     }
     expect(order).toEqual(["first", "second"]);
     expect(await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8")).toContain(`return ${JSON.stringify(b)};`);
@@ -411,7 +431,13 @@ describe("installMods (T-507 D)", () => {
       rejection = await installMods({ bin }).then(() => null, (err: unknown) => err);
     } finally {
       __installModsTestHooks.beforeSwap = null;
-      for (const locked of lockedDirs) await chmod(locked, 0o755);
+      for (const locked of lockedDirs) {
+        // Where the read-only directory did not block the removal, the stage
+        // (and this directory with it) is already gone; the skip below runs.
+        await chmod(locked, 0o755).catch((err: NodeJS.ErrnoException) => {
+          if (err.code !== "ENOENT") throw err;
+        });
+      }
     }
     expect(lockedDirs).toHaveLength(1);
     if (rejection === null) {
