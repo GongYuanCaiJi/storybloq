@@ -76,22 +76,34 @@ export interface SidebarPhase {
   readonly leafCount: number;
 }
 
-/** One ticket as a board row: what the column shows and how it is marked. */
+/** One ledger item as a board row: what the column shows and how it is marked. */
 export interface SidebarBoardCard {
   readonly id: string;
   readonly title: string;
   /** An open ticket whose blockedBy still points at something unfinished. */
   readonly blocked: boolean;
+  /** Which side of the ledger the row came from. */
+  readonly kind: LedgerKind;
+  /** An issue's severity; null on a ticket, which has none. */
+  readonly severity: string | null;
 }
 
 /**
- * The PROJECT's leaves, split by status: every active leaf of every phase,
- * not just the current one, by the owner's ruling.
+ * The PROJECT's leaves and its issues, split by status: every active leaf of
+ * every phase and every active issue, not just the current phase's, by the
+ * owner's ruling.
  *
- * A partition, deliberately: every leaf appears in exactly one column, so the
- * four lengths add up to totalTickets and the board cannot quietly lose a
- * ticket. It holds against the CLI too: blocked + open + inProgress is
- * `storybloq status`'s openTickets, and done is its completeTickets.
+ * A partition, deliberately: every leaf and every issue appears in exactly
+ * one column, so the four lengths add up to the tickets plus the issues and
+ * the board cannot quietly lose either. It holds against the CLI too, on the
+ * ticket side of the cards: blocked + open + inProgress TICKETS is
+ * `storybloq status`'s openTickets, and done tickets its completeTickets.
+ *
+ * Issues take three of the four columns and never Blocked: the ledger gives
+ * an issue open, inprogress or resolved and no blockedBy at all, so there is
+ * nothing for a Blocked column to mean. open goes to Open, inprogress to In
+ * progress, and resolved to Done, where the cap and the ordering keep nine
+ * hundred resolved issues down to a row or two.
  *
  * Blocked is a column and not a mark on an Open row. The question the board
  * answers is what can be picked up now, and a blocked ticket cannot be,
@@ -141,6 +153,17 @@ export interface SidebarProjection {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Where a severity sits in the order the board reads them, worst first.
+ *
+ * One the ledger does not use sorts after all of them rather than throwing
+ * the column's order away: this reads a hand-editable file.
+ */
+function severityRank(severity: string): number {
+  const at = (SEVERITIES as readonly string[]).indexOf(severity);
+  return at === -1 ? SEVERITIES.length : at;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -378,6 +401,17 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     id: t.displayId ?? t.id,
     title: t.title,
     blocked: t.status !== "complete" && isBlocked(t),
+    kind: "ticket",
+    severity: null,
+  });
+  const issueCard = (i: SidebarIssue): SidebarBoardCard => ({
+    id: i.displayId ?? i.id,
+    title: i.title,
+    // An issue is never blocked: it carries no blockedBy for anything to
+    // point at.
+    blocked: false,
+    kind: "issue",
+    severity: i.severity,
   });
   // Ticket order, then the id as the tie-break, so the columns are stable
   // between renders and between sessions. Order alone is not enough: the
@@ -393,29 +427,57 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     // without this they still compare equal and swap on read order.
     || a.id.localeCompare(b.id);
   const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
+  // Issues sort by how much they matter and then by id, in every column: an
+  // issue has no order field to sort on, and severity is the only ranking the
+  // ledger gives. The id is the tie-break for the same reason it is on a
+  // ticket, and the canonical id has the last word for the same reason again.
+  const bySeverityThenId = (a: SidebarIssue, b: SidebarIssue): number =>
+    (severityRank(a.severity) - severityRank(b.severity))
+    || (a.displayId ?? a.id).localeCompare(b.displayId ?? b.id)
+    || a.id.localeCompare(b.id);
+  // Tickets first, then issues: the two are different things and a column
+  // that interleaves them reads as one list of neither.
+  const withIssues = (
+    tickets: readonly SidebarBoardCard[],
+    status: string,
+  ): readonly SidebarBoardCard[] => [
+    ...tickets,
+    ...activeIssues.filter((i) => i.status === status).slice().sort(bySeverityThenId).map(issueCard),
+  ];
   const board: SidebarBoard = {
+    // No issues here: an issue carries no blockedBy, so nothing of it could
+    // ever be waiting on anything.
     blocked: boardLeaves.filter(waiting).sort(byOrderAscending).map(card),
     // Open is the REMAINDER, not a status match. The ledger is hand-editable
     // JSON and this reads it raw, so a leaf can carry a status the CLI's enum
     // does not have ("blocked" and "deferred" both occur); matching on "open"
     // drops those leaves out of every column while they still count in
     // leafCount, and the board then does not add up.
-    open: boardLeaves
-      .filter((t) => t.status !== "complete" && t.status !== "inprogress" && !waiting(t))
-      .sort(byOrderAscending)
-      .map(card),
-    inProgress: boardLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
+    open: withIssues(
+      boardLeaves
+        .filter((t) => t.status !== "complete" && t.status !== "inprogress" && !waiting(t))
+        .sort(byOrderAscending)
+        .map(card),
+      "open",
+    ),
+    inProgress: withIssues(
+      boardLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
+      "inprogress",
+    ),
     // Newest first: the last thing finished is the useful one to see, and the
     // rest is history the ledger already keeps.
-    done: boardLeaves
-      .filter((t) => t.status === "complete")
-      .sort(
-        (a, b) =>
-          (b.order - a.order)
-          || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id)
-          || b.id.localeCompare(a.id),
-      )
-      .map(card),
+    done: withIssues(
+      boardLeaves
+        .filter((t) => t.status === "complete")
+        .sort(
+          (a, b) =>
+            (b.order - a.order)
+            || (b.displayId ?? b.id).localeCompare(a.displayId ?? a.id)
+            || b.id.localeCompare(a.id),
+        )
+        .map(card),
+      "resolved",
+    ),
   };
 
   // Names are date-led, so a reverse sort is newest first. It is exact

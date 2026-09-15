@@ -117,6 +117,10 @@ const issues: Record<string, Record<string, unknown>> = {
   "ISS-003.json": issue({ id: "ISS-003", title: "Medium one", severity: "medium" }),
   "ISS-004.json": issue({ id: "ISS-004", title: "Resolved one", severity: "low", status: "resolved", resolvedDate: "2026-01-02" }),
   "ISS-005.json": issue({ id: "ISS-005", title: "Deleted one", severity: "low", lifecycle: "deleted" }),
+  // Open and the least severe, and FIRST alphabetically: without it the
+  // severity order and the id order agree on this fixture and M-ISSUE-ORDER
+  // survives the column assertions below.
+  "ISS-000.json": issue({ id: "ISS-000", title: "Low open", severity: "low" }),
 };
 
 const handovers: Record<string, string> = {
@@ -233,7 +237,7 @@ describe("sidebar projection (T-508)", () => {
     // ref, and T-021 by T-003 as well.
     expect(compact.blockedTickets).toBe(3);
     // ISS-004 is resolved and ISS-005 is deleted: three remain.
-    expect(compact.openIssues).toBe(3);
+    expect(compact.openIssues).toBe(4);
     expect(compact.phases.map((p) => p.status)).toEqual(["inprogress", "inprogress", "notstarted"]);
   });
 
@@ -260,17 +264,30 @@ describe("sidebar projection (T-508)", () => {
     });
     const mine = projectSidebar(await readAsTheModDoes(root));
     const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
-    const ids = columns.map((card) => card.id).sort();
+    // T-513 put issues on the board, and the CLI's compact payload carries no
+    // issue identity at all, so the equalities below are restated rather than
+    // extended: the TICKET cards are what the CLI's ticket figures answer to,
+    // and the issue side is pinned against a direct read of `.story/issues`
+    // further down. Both sides are still multisets by display id, because the
+    // fixture deliberately collides two of them.
+    const ticketsOf = (cards: readonly { kind: string; id: string }[]): string[] =>
+      cards.filter((card) => card.kind === "ticket").map((card) => card.id);
+    const issuesOf = (cards: readonly { kind: string; id: string }[]): string[] =>
+      cards.filter((card) => card.kind === "issue").map((card) => card.id);
+    const ids = ticketsOf(columns).sort();
 
-    // The board is the project's, so its columns are the CLI's own figures:
-    // the three unfinished ones add up to openTickets, Done is completeTickets
-    // and the four together are every leaf, once each.
-    expect(mine.board.blocked.length + mine.board.open.length + mine.board.inProgress.length).toBe(
-      compact.openTickets,
-    );
-    expect(mine.board.done.length).toBe(compact.completeTickets);
-    expect(columns.length).toBe(compact.totalTickets);
-    expect(mine.board.blocked.length).toBe(compact.blockedTickets);
+    // The board is the project's, so its ticket columns are the CLI's own
+    // figures: the three unfinished ones add up to openTickets, Done is
+    // completeTickets and the four together are every leaf, once each.
+    expect(
+      ticketsOf(mine.board.blocked).length + ticketsOf(mine.board.open).length + ticketsOf(mine.board.inProgress).length,
+    ).toBe(compact.openTickets);
+    expect(ticketsOf(mine.board.done).length).toBe(compact.completeTickets);
+    expect(ids.length).toBe(compact.totalTickets);
+    expect(ticketsOf(mine.board.blocked).length).toBe(compact.blockedTickets);
+    // No issue is ever blocked: one carries no blockedBy for anything to
+    // point at. M-ISSUE-IN-BLOCKED files one there and this fails.
+    expect(issuesOf(mine.board.blocked)).toEqual([]);
 
     // The other side of the partition, read from the CLI: every active leaf
     // of the project, once each. A multiset and not a set, because this
@@ -288,6 +305,29 @@ describe("sidebar projection (T-508)", () => {
     // the current phase and every one of these equalities breaks.
     expect(ids).toContain("T-004");
     expect(ids).toContain("T-006");
+
+    // The issue side, read from the ledger the same way: every active issue
+    // once each, open and in progress in the two live columns and resolved in
+    // Done. M-ISSUES-ABSENT leaves the board a ticket board and the first of
+    // these fails; M-RESOLVED-IN-OPEN moves the resolved one and the last two
+    // do.
+    const active = state.issues.filter((i) => {
+      const lifecycle = (i as { lifecycle?: string | null }).lifecycle;
+      return lifecycle === undefined || lifecycle === null || lifecycle === "active";
+    });
+    const named = (status: string): string[] =>
+      active
+        .filter((i) => i.status === status)
+        .map((i) => (i as { displayId?: string }).displayId ?? i.id)
+        .sort();
+    expect(issuesOf(columns).slice().sort()).toEqual(
+      active.map((i) => (i as { displayId?: string }).displayId ?? i.id).sort(),
+    );
+    expect(issuesOf(mine.board.open).slice().sort()).toEqual(named("open"));
+    expect(issuesOf(mine.board.inProgress).slice().sort()).toEqual(named("inprogress"));
+    expect(issuesOf(mine.board.done).slice().sort()).toEqual(named("resolved"));
+    // And the two live columns hold exactly the issues the CLI calls open.
+    expect(issuesOf(mine.board.open).length + issuesOf(mine.board.inProgress).length).toBe(compact.openIssues);
   });
 
   it("puts each status in its own column, newest done first", async () => {
@@ -295,9 +335,18 @@ describe("sidebar projection (T-508)", () => {
     const mine = projectSidebar(await readAsTheModDoes(root));
     // M-COLUMN-MIX puts a complete ticket in Open and this fails. Open is in
     // ticket order, Done in reverse: the last thing finished reads first.
-    expect(mine.board.open.map((c) => c.id)).toEqual(["T-010", "T-010", "T-013", "T-020"]);
-    expect(mine.board.inProgress.map((c) => c.id)).toEqual(["T-003"]);
-    expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-004", "T-002"]);
+    // Tickets first in every column, then the issues, worst severity first.
+    expect(mine.board.open.map((c) => c.id)).toEqual([
+      "T-010",
+      "T-010",
+      "T-013",
+      "T-020",
+      "ISS-001",
+      "ISS-003",
+      "ISS-000",
+    ]);
+    expect(mine.board.inProgress.map((c) => c.id)).toEqual(["T-003", "ISS-002"]);
+    expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-004", "T-002", "ISS-004"]);
   });
 
   it("gives a blocked ticket its own column rather than leaving it among the open", async () => {
@@ -436,7 +485,7 @@ describe("sidebar projection (T-508)", () => {
   it("counts open issues by severity", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
-    expect(mine.issuesBySeverity).toEqual({ critical: 1, high: 1, medium: 1, low: 0 });
+    expect(mine.issuesBySeverity).toEqual({ critical: 1, high: 1, medium: 1, low: 1 });
   });
 
   it("names the in-progress leaf tickets, and never an umbrella", async () => {

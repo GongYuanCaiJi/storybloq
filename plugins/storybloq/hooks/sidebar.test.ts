@@ -347,6 +347,26 @@ function cardsOf(tree: unknown, key: string): string[] {
   return rowsOf(tree, key).slice(2);
 }
 
+/** The same rows as nodes, so a row's own colours can be read. */
+function cardNodesOf(tree: unknown, key: string): any[] {
+  const rows: any[] = [];
+  const walk = (node: unknown): void => {
+    if (node === null || node === undefined) return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (typeof node !== "object") return;
+    if ((node as { element?: string }).element !== "Box") {
+      rows.push(node);
+      return;
+    }
+    walk((node as { props?: Record<string, unknown> }).props?.["children"]);
+  };
+  walk(nodeByKey(tree, key));
+  return rows.slice(2);
+}
+
 /** One row per line the pane draws, top to bottom. */
 function paneRows(tree: unknown): string[] {
   const children = (tree as { props?: Record<string, unknown> })?.props?.["children"];
@@ -762,7 +782,7 @@ test("shows every phase's leaves, not just the current phase's", async () => {
   // T-002 is the only ticket of phase two, and the board is the project's:
   // M-PHASE-ONLY filters back to the current phase and loses it.
   expect(columnText(tree, "board-open")).toContain("T-002");
-  expect(headingOf(tree, "board-open")).toBe("Open 5");
+  expect(headingOf(tree, "board-open")).toBe("Open 6");
 });
 
 test("gives a blocked ticket its own column, out of Open", async () => {
@@ -797,7 +817,7 @@ test("heads every column with the whole count, not the rows that fit", async () 
   // seventeen: M-COUNT-MISMATCH heads it with the drawn rows instead, and a
   // capped column then under-reports the phase. This is the figure the owner
   // read live, where Done said 27 over eighteen drawn rows.
-  expect(headingOf(await h.render(paneEvent()), "board-open")).toBe("Open 17");
+  expect(headingOf(await h.render(paneEvent()), "board-open")).toBe("Open 18");
 });
 
 test("keeps a three digit count when the column is too narrow for the heading", async () => {
@@ -905,11 +925,12 @@ test("caps a column at six and ends it with dots", async () => {
   expect(cards.length).toBe(7);
   expect(cards[6]).toBe("...");
   expect(cards.slice(0, 6).every((row) => row.startsWith("T-"))).toBe(true);
-  expect(headingOf(tree, "board-open")).toBe("Open 17");
+  expect(headingOf(tree, "board-open")).toBe("Open 18");
 });
 
 test("treats a seventh card as the tail, not as a seventh card", async () => {
-  const h = harness(manyOpen(2));
+  // Six open tickets and the fixture's one open issue: seven rows of work.
+  const h = harness(manyOpen(1));
   await started(h);
 
   // Exactly seven open: the cap is six, so the seventh row is the tail and
@@ -930,13 +951,15 @@ test("leaves a column that fits without a tail, and levels the four bodies", asy
   await started(h);
   const tree = await h.render(paneEvent(160, 30));
 
-  // Five open tickets, so nothing is left out and there is nothing to say.
+  // Five open tickets and one open issue, so nothing is left out and there is
+  // nothing to say. The tickets come first and the issue after them.
   expect(cardsOf(tree, "board-open")).toEqual([
     "T-002 A ticket",
     "T-010 Open ten",
     "T-012 Open twelve",
     "T-013 Open thirteen",
     "T-014 Open fourteen",
+    "ISS-001 An issue",
   ]);
   // And every body draws the same number of rows, the shorter ones padded,
   // so the four cards end level. M-RAGGED-BODIES lets them end where they
@@ -944,7 +967,95 @@ test("leaves a column that fits without a tail, and levels the four bodies", asy
   const heights = ["board-blocked", "board-open", "board-inprogress", "board-done"].map(
     (key) => cardsOf(tree, key).length,
   );
-  expect(heights).toEqual([5, 5, 5, 5]);
+  expect(heights).toEqual([6, 6, 6, 6]);
+});
+
+/**
+ * The fixture plus four issues, one per column the board can put them in, and
+ * fewer open leaves so the issues are inside the six-card cap rather than
+ * behind the tail.
+ */
+function withIssues(): Fixture {
+  const fixture = newFixture();
+  for (const id of ["T-002", "T-013", "T-014"]) {
+    delete fixture.files[`.story/tickets/${id}.json`];
+    delete fixture.mtimes[`.story/tickets/${id}.json`];
+  }
+  const issues: Record<string, Record<string, unknown>> = {
+    "ISS-010": { severity: "medium", status: "open", title: "Medium open" },
+    "ISS-011": { severity: "critical", status: "open", title: "Critical open" },
+    "ISS-012": { severity: "high", status: "inprogress", title: "High in progress" },
+    "ISS-013": { severity: "low", status: "resolved", title: "Low resolved" },
+  };
+  for (const [id, over] of Object.entries(issues)) {
+    const path = `.story/issues/${id}.json`;
+    fixture.files[path] = issueText({ id, ...over });
+    fixture.mtimes[path] = 1000;
+  }
+  return fixture;
+}
+
+test("puts issues in the three columns an issue can be in, and never in Blocked", async () => {
+  const h = harness(withIssues());
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+
+  // An issue is open, in progress or resolved and carries no blockedBy, so
+  // Blocked has nothing to say about one. M-ISSUES-ABSENT leaves the board a
+  // ticket board, M-ISSUE-IN-BLOCKED files one under Blocked, and
+  // M-RESOLVED-IN-OPEN leaves a resolved issue among the open work.
+  expect(cardsOf(tree, "board-open")).toContain("ISS-011 Critical open");
+  expect(cardsOf(tree, "board-inprogress")).toContain("ISS-012 High in progress");
+  expect(cardsOf(tree, "board-done")).toContain("ISS-013 Low resolved");
+  expect(cardsOf(tree, "board-blocked").join(" ")).not.toContain("ISS-");
+  expect(cardsOf(tree, "board-open").join(" ")).not.toContain("ISS-013");
+
+  // Tickets first, then issues: the open leaves lead and the three open
+  // issues follow, worst first, two criticals between them settled by id.
+  // M-ISSUE-ORDER drops the rank and the medium one comes back first, in
+  // read order.
+  const open = cardsOf(tree, "board-open");
+  expect(open.slice(0, 2)).toEqual(["T-010 Open ten", "T-012 Open twelve"]);
+  expect(open.slice(2)).toEqual(["ISS-001 An issue", "ISS-011 Critical open", "ISS-010 Medium open"]);
+});
+
+test("counts the issues in the column headings", async () => {
+  const h = harness(withIssues());
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+
+  // Two open leaves and three open issues; one in-progress leaf and one
+  // in-progress issue; two complete leaves and one resolved issue. The
+  // heading says what the column holds, so it counts both.
+  // M-COUNT-TICKETS-ONLY heads them with the ticket count and the board
+  // disagrees with its own rows.
+  expect(headingOf(tree, "board-open")).toBe("Open 5");
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 2");
+  expect(headingOf(tree, "board-done")).toBe("Done 3");
+  expect(headingOf(tree, "board-blocked")).toBe("Blocked 1");
+});
+
+test("marks a severe issue on its id and nowhere else", async () => {
+  const h = harness(withIssues());
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+  const idOf = (row: any): any => (row.props.children as any[])[0];
+  const titleOf = (row: any): any => (row.props.children as any[])[1];
+  const rowFor = (key: string, id: string): any =>
+    cardNodesOf(tree, key).find((row) => textOf(row).startsWith(id));
+
+  // The id carries the mark and the title never does, so the row still reads
+  // as a row. Critical is red, high yellow, and the two that do not ask to be
+  // acted on carry no colour at all. Every id stays dim, ticket or issue.
+  const critical = rowFor("board-open", "ISS-011");
+  expect(idOf(critical).props.color).toBe("red");
+  expect(idOf(critical).props.dimColor).toBe(true);
+  expect(titleOf(critical).props.color).toBeUndefined();
+  expect(idOf(rowFor("board-inprogress", "ISS-012")).props.color).toBe("yellow");
+  expect(idOf(rowFor("board-open", "ISS-010")).props.color).toBeUndefined();
+  expect(idOf(rowFor("board-done", "ISS-013")).props.color).toBeUndefined();
+  expect(idOf(rowFor("board-open", "T-010")).props.color).toBeUndefined();
+  expect(idOf(rowFor("board-open", "T-010")).props.dimColor).toBe(true);
 });
 
 test("says so in a column with nothing in it", async () => {
@@ -1169,7 +1280,7 @@ test("draws the whole board on a tall terminal whatever the pane reports", async
     expect(nodeByKey(tree, "board-open").element).toBe("Box");
     expect(cards.length).toBe(7);
     expect(cards[6]).toBe("...");
-    expect(headingOf(tree, "board-open")).toBe("Open 17");
+    expect(headingOf(tree, "board-open")).toBe("Open 18");
     expect(paneRows(tree)[1]).toBe(" ");
   }
 });
@@ -1198,7 +1309,7 @@ test("falls back to four counted rows when no frame will fit", async () => {
   // still the board.
   const tree = await h.render(paneEvent(50, 12));
   expect(paneHeight(tree)).toBeLessThanOrEqual(12);
-  expect(headingOf(tree, "board-open")).toBe("Open 17");
+  expect(headingOf(tree, "board-open")).toBe("Open 18");
   expect(nodeByKey(tree, "board-open").element).toBe("Text");
 });
 
@@ -1385,7 +1496,7 @@ test("moves a ticket on the board during the turn that moved it", async () => {
 
   const tree = await h.render(paneEvent());
   expect(headingOf(tree, "board-inprogress")).toBe("In progress 2");
-  expect(headingOf(tree, "board-open")).toBe("Open 4");
+  expect(headingOf(tree, "board-open")).toBe("Open 5");
   expect(columnText(tree, "board-inprogress")).toContain("T-010");
   expect(columnText(tree, "board-open")).not.toContain("T-010");
 });
@@ -1608,7 +1719,7 @@ test("draws the board even when the usage call is refused", async () => {
   expect(passed).toBe(START);
   // The scan ran to the end and the board has the ledger's numbers.
   expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
-  expect(headingOf(tree, "board-open")).toBe("Open 5");
+  expect(headingOf(tree, "board-open")).toBe("Open 6");
   // And the right of the footer row is simply empty.
   expect(textOf(nodeByKey(tree, "footer"))).not.toContain("context");
 

@@ -125,6 +125,15 @@ const SEVERITY_ORDER = [
 ] as const;
 
 /**
+ * The colour an issue's id carries on a board row, by severity.
+ *
+ * The same two tones the footer already uses for the same two buckets, so one
+ * red on the board means what a red in the issues line means. Medium and low
+ * carry none: a column where every row is coloured marks nothing.
+ */
+const SEVERITY_TONES: Readonly<Record<string, string>> = { critical: "red", high: "yellow" };
+
+/**
  * How each column's heading is drawn.
  *
  * One column is emphasised and it is the one that says what is happening
@@ -1041,12 +1050,19 @@ function headingText(label: string, count: number, width: number): string {
 function cardRow(elements: any, card: SidebarBoardCard, width: number): unknown {
   const room = width - cellWidth(card.id) - 1;
   const title = room > 0 ? truncate(card.title, room) : "";
+  // The id is dim on every row, ticket or issue, so the eye runs down the
+  // titles; a severe issue colours ITS ID and nothing else, which marks the
+  // row without turning the column into a traffic light. Only the two that
+  // mean act on this are coloured: medium and low read as any other row.
+  const idProps: Record<string, unknown> = { dimColor: true, children: truncate(card.id, width) };
+  const tone = card.kind === "issue" && card.severity !== null ? SEVERITY_TONES[card.severity] : undefined;
+  if (tone !== undefined) idProps["color"] = tone;
   return elements.Text({
     wrap: "truncate",
     children: [
       // The id whole, never cut: a half id is worse than no id. The title
       // takes what is left, and the eye runs down the titles.
-      elements.Text({ dimColor: true, children: truncate(card.id, width) }),
+      elements.Text(idProps),
       elements.Text({ children: title === "" ? "" : ` ${title}` }),
     ],
   });
