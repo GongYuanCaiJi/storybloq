@@ -36,6 +36,7 @@
  * answer.
  */
 
+import type { BundledBridge } from "../bridge-resolve.js";
 import type { AutoCompactWindowDiagnostic } from "../claude-settings.js";
 import type { SessionIntelConfig } from "../session-intel/config.js";
 import type { SkillTargetInfo } from "../skill-version-marker.js";
@@ -138,6 +139,30 @@ export type HealthRun =
   | { readonly kind: "timeout" }
   | { readonly kind: "failed"; readonly code: number | null };
 
+/**
+ * T-509: an MCP server launch exactly as registered. `argv` is
+ * `[command, ...args]` with no re-tokenising; `envOverrides` is the
+ * registration's own env map, merged over the inherited environment by the
+ * default adapter (the check never reads `process.env`).
+ */
+export interface McpLaunch {
+  readonly argv: readonly string[];
+  readonly envOverrides: Readonly<Record<string, string>>;
+}
+
+/**
+ * The outcome of one JSON-RPC `initialize` handshake over stdio. `ok` means
+ * the server answered a well-formed initialize result; `not-attempted` means
+ * the probe was never launched (budget exhausted), which the check must
+ * report as "not probed", never as "broken".
+ */
+export type McpProbe =
+  | { readonly kind: "ok"; readonly serverName: string; readonly serverVersion: string; readonly protocolVersion: string; readonly allocatedMs: number }
+  | { readonly kind: "enoent"; readonly allocatedMs: number }
+  | { readonly kind: "timeout"; readonly allocatedMs: number }
+  | { readonly kind: "failed"; readonly reason: string; readonly code: number | null; readonly signal: string | null; readonly stderr: string; readonly allocatedMs: number }
+  | { readonly kind: "not-attempted"; readonly reason: string };
+
 /** What the health check needs from T-501's read-only caller acquisition. */
 export interface HealthCallerSample {
   readonly oneMillionFlag: boolean | null;
@@ -180,6 +205,16 @@ export interface HealthDeps {
     readonly marker: (target: SkillTargetInfo) => HealthMarkerRead;
   };
   readonly globalConfig: () => { healthCheck?: { enabled?: unknown } } | null;
+  /** T-509: the optional bundled codex-claude-bridge, resolved without spawning. */
+  readonly bundledBridge: () => BundledBridge;
+  /** T-509: the package directory that owns an executable, or null. */
+  readonly ownerPackageDir: (executablePath: string) => string | null;
+  /**
+   * T-509: launch an MCP server and run the initialize handshake, bounded by
+   * `capMs` and never past `deadlineAt`. The adapter owns the process tree:
+   * whatever it started is gone when the promise settles.
+   */
+  readonly probeMcp: (launch: McpLaunch, deadlineAt: number, capMs: number) => Promise<McpProbe>;
 }
 
 export interface HealthContext {

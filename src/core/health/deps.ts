@@ -10,9 +10,10 @@
  */
 
 import fs from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { ownerPackageDir, resolveBundledBridge } from "../bridge-resolve.js";
 import { readAutoCompactWindowDiagnostic } from "../claude-settings.js";
 import { readBoundedFileDetailed } from "../limit-config.js";
 import { isHealthCheckGloballyDisabled } from "../limit-ledger.js";
@@ -20,7 +21,7 @@ import { readPresenceRecord, resolveCallerBinding } from "../session-intel/prese
 import { readSessionIntelConfig, resolveSessionIntelConfig } from "../session-intel/config.js";
 import { SKILL_MARKER_FILE, SKILL_MARKER_MAX_BYTES, skillTargets } from "../skill-version-marker.js";
 import { readUpdateCacheSync, refreshUpdateCache } from "../update-check.js";
-import type { HealthDeps, HealthMarkerRead, HealthRead, HealthRun } from "./types.js";
+import type { HealthDeps, HealthMarkerRead, HealthRead, HealthRun, McpLaunch, McpProbe } from "./types.js";
 
 /**
  * Three-valued bounded read, delegating to the shared
@@ -63,6 +64,287 @@ export function runBounded(cmd: string, args: readonly string[], timeoutMs: numb
   if (result.signal !== null) return { kind: "failed", code: null };
   if (result.status !== 0) return { kind: "failed", code: result.status ?? null };
   return { kind: "ok", stdout: result.stdout ?? "" };
+}
+
+// ---------------------------------------------------------------------------
+// T-509: the MCP initialize probe.
+// ---------------------------------------------------------------------------
+
+/** Below this much remaining budget a probe is not launched at all. */
+export const BRIDGE_PROBE_MIN_MS = 250;
+const LINE_LIMIT = 64 * 1024;
+const TOTAL_LIMIT = 256 * 1024;
+const STDERR_TAIL = 4 * 1024;
+const TERM_GRACE_MS = 200;
+const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
+
+export interface ProbeMcpOptions {
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly now?: () => number;
+  readonly platform?: NodeJS.Platform;
+  readonly clientVersion?: string;
+  /** Test seam: the spawn function (default `child_process.spawn`). */
+  readonly spawn?: typeof spawn;
+}
+
+const KILL_POLL_MS = 100;
+const KILL_MAX_WAIT_MS = 3000;
+
+/**
+ * Launch an MCP server exactly as registered, send `initialize`, and judge the
+ * first message that answers id 1. The server is never left running: one
+ * idempotent finalizer clears the timer, closes the streams and kills the
+ * process GROUP (the launch is detached on POSIX so an npx/bunx launcher's
+ * descendants die with it; `taskkill /T` on win32), then waits for the exit.
+ *
+ * Cleanup exits are intentional and never reported as failures; only an exit
+ * observed BEFORE the answer is. A crash after the handshake but before
+ * cleanup starts is "answered then exited", because that server is not
+ * healthy either.
+ */
+export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: number, opts: ProbeMcpOptions): Promise<McpProbe> {
+  const now = opts.now ?? (() => Date.now());
+  const platform = opts.platform ?? process.platform;
+  const remaining = deadlineAt - now();
+  if (remaining < BRIDGE_PROBE_MIN_MS) return Promise.resolve({ kind: "not-attempted", reason: "budget exhausted" });
+  const allocatedMs = Math.max(BRIDGE_PROBE_MIN_MS, Math.min(capMs, remaining));
+  const [command, ...args] = launch.argv;
+  if (command === undefined) return Promise.resolve({ kind: "failed", reason: "empty command", code: null, signal: null, stderr: "", allocatedMs });
+
+  return new Promise<McpProbe>((resolveProbe) => {
+    let settled = false;
+    let answered = false;
+    let exited: { code: number | null; signal: NodeJS.Signals | null } | null = null;
+    let stdoutBuf = "";
+    let stdoutTotal = 0;
+    let stderrTail = "";
+    let timer: NodeJS.Timeout | null = null;
+
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = (opts.spawn ?? spawn)(command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...opts.env, ...launch.envOverrides },
+        detached: platform !== "win32",
+        windowsHide: true,
+      });
+    } catch (err: unknown) {
+      resolveProbe(spawnFailure(err, allocatedMs));
+      return;
+    }
+
+    const finish = (result: McpProbe): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      void teardown(child, exited !== null, platform).then(() => resolveProbe(result));
+    };
+
+    child.once("error", (err: NodeJS.ErrnoException) => {
+      finish(spawnFailure(err, allocatedMs));
+    });
+    child.once("exit", (code, signal) => {
+      exited = { code, signal };
+      if (settled) return;
+      if (answered) {
+        // Answered, then died on its own before cleanup started.
+        finish({ kind: "failed", reason: `answered then exited ${code ?? signal ?? "?"}`, code, signal, stderr: stderrTail, allocatedMs });
+        return;
+      }
+      finish({ kind: "failed", reason: "exited before answering", code, signal, stderr: stderrTail, allocatedMs });
+    });
+
+    child.stdin?.on("error", () => {
+      // EPIPE when the server closed stdin: nothing to do, the exit or the
+      // timer reports the outcome.
+    });
+    child.stderr?.setEncoding("utf-8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL);
+    });
+    child.stdout?.setEncoding("utf-8");
+    child.stdout?.on("data", (chunk: string) => {
+      if (settled) return;
+      // Limits are BYTES: the decoded string undercounts multibyte output.
+      stdoutTotal += Buffer.byteLength(chunk, "utf-8");
+      stdoutBuf += chunk;
+      if (stdoutTotal > TOTAL_LIMIT || (!stdoutBuf.includes("\n") && Buffer.byteLength(stdoutBuf, "utf-8") > LINE_LIMIT)) {
+        finish({ kind: "failed", reason: "output limit", code: null, signal: null, stderr: stderrTail, allocatedMs });
+        return;
+      }
+      let nl: number;
+      while (!settled && (nl = stdoutBuf.indexOf("\n")) >= 0) {
+        const line = stdoutBuf.slice(0, nl);
+        stdoutBuf = stdoutBuf.slice(nl + 1);
+        if (Buffer.byteLength(line, "utf-8") > LINE_LIMIT) {
+          finish({ kind: "failed", reason: "output limit", code: null, signal: null, stderr: stderrTail, allocatedMs });
+          return;
+        }
+        const verdict = judgeLine(line, allocatedMs, stderrTail);
+        if (verdict === null) continue;
+        if (verdict.kind === "ok") {
+          answered = true;
+          if (exited !== null) {
+            finish({ kind: "failed", reason: `answered then exited ${exited.code ?? exited.signal ?? "?"}`, code: exited.code, signal: exited.signal, stderr: stderrTail, allocatedMs });
+            return;
+          }
+          try {
+            child.stdin?.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+          } catch {
+            // best effort
+          }
+        }
+        finish(verdict);
+      }
+    });
+
+    timer = setTimeout(() => finish({ kind: "timeout", allocatedMs }), allocatedMs);
+
+    const init = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "storybloq", version: opts.clientVersion ?? "unknown" } },
+    };
+    try {
+      child.stdin?.write(JSON.stringify(init) + "\n");
+    } catch {
+      // EPIPE surfaces on the error listener above.
+    }
+  });
+}
+
+function spawnFailure(err: unknown, allocatedMs: number): McpProbe {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "ENOENT") return { kind: "enoent", allocatedMs };
+  const reason = typeof code === "string" ? code : err instanceof Error ? err.message : String(err);
+  return { kind: "failed", reason, code: null, signal: null, stderr: "", allocatedMs };
+}
+
+/** Null for a line that is not the id 1 answer (noise, notifications, other ids). */
+function judgeLine(line: string, allocatedMs: number, stderr: string): McpProbe | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return null;
+  const m = msg as Record<string, unknown>;
+  if (m["id"] !== 1) return null;
+  const failed = (reason: string): McpProbe => ({ kind: "failed", reason, code: null, signal: null, stderr, allocatedMs });
+  if (m["jsonrpc"] !== "2.0") return failed("malformed initialize result (jsonrpc)");
+  if (m["error"] !== undefined) {
+    const message = (m["error"] as { message?: unknown } | null)?.message;
+    return failed(`protocol error: ${typeof message === "string" ? message : JSON.stringify(m["error"])}`);
+  }
+  const result = m["result"];
+  if (!result || typeof result !== "object" || Array.isArray(result)) return failed("malformed initialize result (result)");
+  const r = result as Record<string, unknown>;
+  if (typeof r["protocolVersion"] !== "string") return failed("malformed initialize result (protocolVersion)");
+  if (!SUPPORTED_PROTOCOLS.has(r["protocolVersion"])) return failed(`unsupported protocol version ${r["protocolVersion"]}`);
+  if (!r["capabilities"] || typeof r["capabilities"] !== "object" || Array.isArray(r["capabilities"])) return failed("malformed initialize result (capabilities)");
+  const info = r["serverInfo"];
+  if (!info || typeof info !== "object" || Array.isArray(info)) return failed("malformed initialize result (serverInfo)");
+  const name = (info as Record<string, unknown>)["name"];
+  const version = (info as Record<string, unknown>)["version"];
+  if (typeof name !== "string") return failed("malformed initialize result (serverInfo.name)");
+  if (typeof version !== "string") return failed("malformed initialize result (serverInfo.version)");
+  return { kind: "ok", serverName: name, serverVersion: version, protocolVersion: r["protocolVersion"], allocatedMs };
+}
+
+/**
+ * Idempotent: safe to call whether or not the child already exited. The
+ * direct child's exit is NOT proof of cleanup: a detached launcher (npx)
+ * can die on SIGTERM while a descendant in its process group ignores it.
+ * On POSIX the group's liveness is checked independently (signal 0 to the
+ * group) and SIGKILL is re-sent to the group on every poll until the group
+ * is gone or KILL_MAX_WAIT_MS elapse. On win32 `taskkill /T /F` kills the
+ * tree and the direct child's exit is the only observable, so that is what
+ * is awaited there. Nothing here blocks the event loop.
+ */
+function teardown(child: ReturnType<typeof spawn>, alreadyExited: boolean, platform: NodeJS.Platform): Promise<void> {
+  for (const s of [child.stdin, child.stdout, child.stderr]) {
+    try {
+      s?.removeAllListeners("data");
+      s?.destroy();
+    } catch {
+      // already closed
+    }
+  }
+  if (child.pid === undefined) return Promise.resolve();
+  const pid = child.pid;
+  const childExited = (): boolean => alreadyExited || child.exitCode !== null || child.signalCode !== null;
+  const groupAlive = (): boolean => {
+    if (platform === "win32") return false;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (err: unknown) {
+      // ESRCH: no such group. EPERM: something in the group still exists.
+      return (err as NodeJS.ErrnoException).code === "EPERM";
+    }
+  };
+  const gone = (): boolean => childExited() && !groupAlive();
+  const kill = (signal: NodeJS.Signals): void => {
+    try {
+      if (platform === "win32") {
+        const tk = spawn("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+        tk.once("error", () => {
+          try {
+            child.kill(signal);
+          } catch {
+            // gone
+          }
+        });
+      } else {
+        process.kill(-pid, signal);
+      }
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {
+        // gone
+      }
+    }
+  };
+  if (gone()) return Promise.resolve();
+  return new Promise<void>((done) => {
+    let finished = false;
+    // The pending timer stays REFERENCED: once the direct child has exited
+    // it may be the only handle keeping the event loop alive, and a pending
+    // promise alone does not. An unref'd timer here would let the process
+    // exit before the SIGKILL that the group still needs.
+    let timer: NodeJS.Timeout | null = null;
+    const end = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      done();
+    };
+    // The direct child's exit alone ends the wait only when nothing else in
+    // the group is left; otherwise the poll below keeps killing the group.
+    child.once("exit", () => {
+      if (!groupAlive()) end();
+    });
+    kill("SIGTERM");
+    const started = Date.now();
+    const poll = (): void => {
+      timer = null;
+      if (finished || gone()) return end();
+      if (Date.now() - started >= KILL_MAX_WAIT_MS) return end();
+      kill("SIGKILL");
+      timer = setTimeout(poll, KILL_POLL_MS);
+    };
+    timer = setTimeout(() => {
+      timer = null;
+      if (finished || gone()) return end();
+      kill("SIGKILL");
+      timer = setTimeout(poll, KILL_POLL_MS);
+    }, TERM_GRACE_MS);
+  });
 }
 
 export function defaultHealthDeps(opts: { ledgerRoot: string | null }): HealthDeps {
@@ -126,6 +408,11 @@ export function defaultHealthDeps(opts: { ledgerRoot: string | null }): HealthDe
     // for them); this dep is the injection point that lets a test express the
     // switch as a plain object.
     globalConfig: () => (isHealthCheckGloballyDisabled() ? { healthCheck: { enabled: false } } : null),
+    bundledBridge: () => resolveBundledBridge(),
+    ownerPackageDir: (executablePath) => ownerPackageDir(executablePath),
+    // The inherited environment is this deps object's own `env`, merged under
+    // the registration's overrides here so the check never reads process.env.
+    probeMcp: (launch, deadlineAt, capMs) => probeMcpServer(launch, deadlineAt, capMs, { env: process.env }),
   };
 }
 

@@ -20,13 +20,17 @@
  */
 
 import { basename, join } from "node:path";
-import { readJsonObject, skipCheck, adviseCheck, okCheck, type HealthCheck, type HealthContext, type HealthDeps } from "./types.js";
+import { shellArg } from "../shell-arg.js";
+import { readJsonObject, skipCheck, adviseCheck, okCheck, type HealthCheck, type HealthContext, type HealthDeps, type McpLaunch, type McpProbe } from "./types.js";
 
 const ID = "codex-bridge" as const;
 
 /** `~/.claude.json` holds project state and is routinely hundreds of KiB. */
 export const CLAUDE_JSON_MAX_BYTES = 4 * 1024 * 1024;
 export const CODEX_PROBE_CAP_MS = 2000;
+/** T-509: per-bridge cap on the initialize handshake, bounded by the run budget. */
+export const BRIDGE_PROBE_CAP_MS = 5000;
+export const NATIVE_BINDING_RE = /Could not locate the bindings file|better-sqlite3|NODE_MODULE_VERSION|compiled against a different Node\.js version|ERR_DLOPEN_FAILED/i;
 
 const BRIDGE_PACKAGE = "codex-claude-bridge";
 const BRIDGE_NAMES = new Set(["codex-bridge", "codex-bridge-local"]);
@@ -142,19 +146,19 @@ export async function checkCodexBridge(ctx: HealthContext, deps: HealthDeps): Pr
     .filter((s): s is { scope: Scope; read: Extract<ScopeRead, { kind: "indeterminate" }> } => s.read.kind === "indeterminate")
     .map((s) => ({ path: s.read.path, highest: PRECEDENCE[s.scope] }));
 
+  // T-509: registration is not health. Every trustworthy bridge winner is
+  // collected (precedence order) and LAUNCHED below; a bridge that is
+  // registered but cannot answer initialize is exactly what this check is for.
+  const bridges: Array<{ name: string; scope: Scope; entry: Record<string, unknown> }> = [];
   for (const [name, { scope, entry }] of winners) {
     if (classify(name, entry) !== "bridge") continue;
     if (unreadable.some((u) => u.highest < PRECEDENCE[scope])) continue; // could be shadowed
-    return okCheck(ID, `Codex is installed and the codex-claude-bridge review backend is registered as \`${name}\`.`, {
-      ...base,
-      scope,
-      name,
-    });
+    bridges.push({ name, scope, entry: entry as Record<string, unknown> });
   }
 
   // No trustworthy bridge. An unreadable source now decides the answer: it
   // could shadow what we did find, or supply the bridge we did not.
-  if (unreadable.length > 0) {
+  if (bridges.length === 0 && unreadable.length > 0) {
     const { path } = unreadable[0]!;
     return skipCheck(
       ID,
@@ -164,22 +168,160 @@ export async function checkCodexBridge(ctx: HealthContext, deps: HealthDeps): Pr
     );
   }
 
-  for (const [name, { scope, entry }] of winners) {
-    if (classify(name, entry) === "unverifiable") {
-      return skipCheck(
-        ID,
-        `The MCP server \`${name}\` looks like the codex-claude-bridge but Storybloq does not recognise how it is launched, so it cannot confirm the review backend is working.`,
-        `cannot verify ${name}`,
-        { ...base, scope, name },
-      );
+  if (bridges.length === 0) {
+    for (const [name, { scope, entry }] of winners) {
+      if (classify(name, entry) === "unverifiable") {
+        return skipCheck(
+          ID,
+          `The MCP server \`${name}\` looks like the codex-claude-bridge but Storybloq does not recognise how it is launched, so it cannot confirm the review backend is working.`,
+          `cannot verify ${name}`,
+          { ...base, scope, name },
+        );
+      }
     }
+    return noBridgeRegistered(deps, winners, base);
   }
 
-  return adviseCheck(
+  // Probe sequentially so each bridge gets what the budget still allows; the
+  // adapter itself refuses to launch under the floor and says so.
+  const results: Array<{ name: string; scope: Scope; launch: McpLaunch; probe: McpProbe }> = [];
+  for (const b of bridges) {
+    const launch = normaliseLaunch(b.entry);
+    const capMs = Math.max(1, Math.min(BRIDGE_PROBE_CAP_MS, ctx.deadline - deps.now()));
+    const probe = await deps.probeMcp(launch, ctx.deadline, capMs);
+    results.push({ name: b.name, scope: b.scope, launch, probe });
+  }
+  const first = results[0]!;
+  const detail = {
+    ...base,
+    scope: first.scope,
+    name: first.name,
+    bridges: JSON.stringify(results.map((r) => ({
+      name: r.name,
+      scope: r.scope,
+      probe: r.probe.kind,
+      ...(r.probe.kind === "ok" ? { serverName: r.probe.serverName } : {}),
+      ...("allocatedMs" in r.probe ? { allocatedMs: r.probe.allocatedMs } : {}),
+    }))),
+  };
+
+  if (results.every((r) => r.probe.kind === "ok")) {
+    const names = results.map((r) => `\`${r.name}\` (${r.scope} scope)`).join(" and ");
+    return okCheck(ID, `Codex is installed and the codex-claude-bridge review backend answers as ${names}.`, detail);
+  }
+
+  const clauses = results
+    .filter((r) => r.probe.kind !== "ok")
+    .map((r) => `\`${r.name}\` (${r.scope} scope) ${describeFailure(r, deps, winners)}`);
+  return adviseCheck(ID, `Codex is installed but the codex-claude-bridge review backend is registered and not answering: ${clauses.join(" ")}`, detail);
+}
+
+/** The registration as an argv, verbatim, with its env map as overrides. */
+function normaliseLaunch(entry: Record<string, unknown>): McpLaunch {
+  const command = entry["command"] as string;
+  const args = Array.isArray(entry["args"]) ? (entry["args"] as string[]) : [];
+  const envOverrides: Record<string, string> = {};
+  const env = entry["env"];
+  if (env && typeof env === "object" && !Array.isArray(env)) {
+    for (const [k, v] of Object.entries(env as Record<string, unknown>)) {
+      if (typeof v === "string") envOverrides[k] = v;
+    }
+  }
+  return { argv: [command, ...args], envOverrides };
+}
+
+/** The `codex-bridge` name's effective winner when it is NOT the bridge, for repair text. */
+function foreignCodexBridge(winners: Map<string, { scope: Scope; entry: unknown }>): { scope: Scope; argv: string } | null {
+  const w = winners.get("codex-bridge");
+  if (!w || isBridgeLaunch(w.entry)) return null;
+  const e = (w.entry ?? {}) as Record<string, unknown>;
+  const args = Array.isArray(e["args"]) ? (e["args"] as unknown[]).map(String) : [];
+  const command = typeof e["command"] === "string" ? e["command"] : JSON.stringify(e["command"] ?? null);
+  const argv = [command, ...args].map((a) => shellArg(a)).join(" ");
+  return { scope: w.scope, argv };
+}
+
+/** How to get the bundled bridge registered, naming whatever would shadow it first. */
+function setupRepair(winners: Map<string, { scope: Scope; entry: unknown }>): string {
+  const foreign = foreignCodexBridge(winners);
+  if (foreign !== null) {
+    return `\`codex-bridge\` is registered at ${foreign.scope} scope as ${foreign.argv}, which is not the bridge; remove it (claude mcp remove codex-bridge -s ${foreign.scope}) and run storybloq setup-skill.`;
+  }
+  return "Run storybloq setup-skill.";
+}
+
+function noBridgeRegistered(
+  deps: HealthDeps,
+  winners: Map<string, { scope: Scope; entry: unknown }>,
+  base: Record<string, string>,
+): HealthCheck {
+  const bundled = deps.bundledBridge();
+  if (bundled.kind === "installed") {
+    // A non-bridge entry NAMED codex-bridge never reaches here: the name is
+    // bridge-related, so the T-502 "cannot verify" skip above already
+    // answered. setupRepair's removal clause therefore only ever names a
+    // shadowing entry from the probe path.
+    return adviseCheck(ID, `Codex is installed but the bundled codex-claude-bridge review backend is not registered for Claude Code. ${setupRepair(winners)}`, { ...base, bundled: bundled.version });
+  }
+  if (bundled.kind === "unusable") {
+    return adviseCheck(
+      ID,
+      `Codex is installed but the bundled codex-claude-bridge is unusable (${bundled.reason}); reinstall with npm install -g @storybloq/storybloq@latest.`,
+      { ...base, bundled: "unusable" },
+    );
+  }
+  return skipCheck(
     ID,
-    "Codex is installed but the codex-claude-bridge review backend is not registered for Claude Code. Register it with `claude mcp add codex-bridge -s user -- npx -y codex-claude-bridge@latest`.",
+    "No codex-claude-bridge is registered and the bundled copy did not install, so there is no Codex review backend to check.",
+    "no bridge resolves",
     base,
   );
+}
+
+/** The executable whose owning package a rebuild would run in, per launcher grammar; null for npx/bunx. */
+function executableOf(launch: McpLaunch): string | null {
+  const [command, ...args] = launch.argv;
+  if (command === undefined) return null;
+  const b = basename(command);
+  if (b === BRIDGE_PACKAGE) return command;
+  if (b === "node" || b === "bun") return args[0] ?? null;
+  return null;
+}
+
+function describeFailure(
+  r: { name: string; scope: Scope; launch: McpLaunch; probe: McpProbe },
+  deps: HealthDeps,
+  winners: Map<string, { scope: Scope; entry: unknown }>,
+): string {
+  const p = r.probe;
+  const argv = r.launch.argv.map((a) => shellArg(a)).join(" ");
+  switch (p.kind) {
+    case "ok":
+      return "answers.";
+    case "not-attempted":
+      return `was not probed (${p.reason}).`;
+    case "timeout":
+      return `did not answer the initialize request within ${p.allocatedMs} ms.`;
+    case "enoent":
+      return `cannot be launched: ${shellArg(r.launch.argv[0] ?? "")} was not found (registered as ${argv}).`;
+    case "failed": {
+      if (NATIVE_BINDING_RE.test(p.stderr)) {
+        const exe = executableOf(r.launch);
+        const dir = exe === null ? null : deps.ownerPackageDir(exe);
+        if (dir !== null) {
+          return `failed to load its native module. Run: (cd ${shellArg(dir)} && npm rebuild better-sqlite3)`;
+        }
+        const shadow = foreignCodexBridge(winners);
+        const replace = shadow !== null && shadow.scope !== "user"
+          ? `remove the ${shadow.scope}-scope \`codex-bridge\` entry first (claude mcp remove codex-bridge -s ${shadow.scope}), then run storybloq setup-skill`
+          : `claude mcp remove ${shellArg(r.name)} -s ${r.scope}, then storybloq setup-skill to register the bundled bridge`;
+        return `failed to load its native module, and the bridge's package directory could not be established from this registration (${r.scope} ${r.name}: ${argv}); rebuild inside the copy that registration runs, or replace it: ${replace}.`;
+      }
+      const line = p.stderr.split("\n").find((l) => l.trim().length > 0) ?? "";
+      const exit = p.code !== null ? `exit code ${p.code}` : p.signal !== null ? `signal ${p.signal}` : p.reason;
+      return `${p.reason} (${exit}${line ? `: ${line.trim()}` : ""}); launch it by hand to see the error.`;
+    }
+  }
 }
 
 /** A scope's server map, or an admission that we could not establish it. */

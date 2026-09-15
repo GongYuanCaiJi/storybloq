@@ -1,7 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { checkCodexBridge } from "../../../src/core/health/codex-bridge.js";
-import { ctxFor, stubDeps, runStub, HOME, PROJECT, type FileMap } from "./stub-deps.js";
-import type { HealthRead } from "../../../src/core/health/types.js";
+import { ctxFor, stubDeps, runStub, probeStub, PROBE_OK, HOME, PROJECT, type FileMap, type StubOptions } from "./stub-deps.js";
+import type { HealthRead, McpProbe } from "../../../src/core/health/types.js";
+import type { BundledBridge } from "../../../src/core/bridge-resolve.js";
 
 const CLAUDE_JSON = `${HOME}/.claude.json`;
 const MCP_JSON = `${PROJECT}/.mcp.json`;
@@ -9,8 +10,11 @@ const NODE_BRIDGE = { command: "node", args: ["/opt/codex-claude-bridge/dist/ind
 const NPX_BRIDGE = { command: "npx", args: ["-y", "codex-claude-bridge@latest"] };
 const UNREADABLE: HealthRead = { kind: "indeterminate", reason: "EACCES" };
 
-function bridgeDeps(files: FileMap) {
-  return stubDeps({ files, run: runStub({ kind: "ok", stdout: "codex 1.0.0\n" }) });
+const INSTALLED: BundledBridge = { kind: "installed", packageDir: "/opt/sb/node_modules/codex-claude-bridge", entry: "/opt/sb/node_modules/codex-claude-bridge/dist/index.js", version: "1.8.0" };
+
+/** Codex present, the bundle installed, every probe answering ok, unless overridden. */
+function bridgeDeps(files: FileMap, over: Partial<StubOptions> = {}) {
+  return stubDeps({ files, run: runStub({ kind: "ok", stdout: "codex 1.0.0\n" }), bundledBridge: INSTALLED, probeMcp: probeStub(PROBE_OK), ...over });
 }
 
 function claudeJson(body: Record<string, unknown>): string {
@@ -121,11 +125,11 @@ describe("T-502 codex-bridge check: registration evidence", () => {
     expect(check.detail.scope).toBe("user");
   });
 
-  it("advises with the pinned text when nothing bridge-shaped is registered", async () => {
+  it("advises with the pinned text when nothing bridge-shaped is registered and the bundle is installed", async () => {
     const check = await run({ [CLAUDE_JSON]: claudeJson({ mcpServers: {} }) });
     expect(check.status).toBe("advise");
     expect(check.message).toBe(
-      "Codex is installed but the codex-claude-bridge review backend is not registered for Claude Code. Register it with `claude mcp add codex-bridge -s user -- npx -y codex-claude-bridge@latest`.",
+      "Codex is installed but the bundled codex-claude-bridge review backend is not registered for Claude Code. Run storybloq setup-skill.",
     );
     expect(check.advice).toBe(check.message);
   });
@@ -288,5 +292,235 @@ describe("T-502 codex-bridge check: malformed nested shapes", () => {
     const check = await run({ [CLAUDE_JSON]: claudeJson({ projects: null, mcpServers: { "codex-bridge": NODE_BRIDGE } }) });
     expect(check.status).toBe("ok");
     expect(check.detail.scope).toBe("user");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-509 part 3: registration is not health. Every trustworthy bridge is
+// LAUNCHED and must answer initialize; the bundled copy decides the no-bridge
+// answer.
+// ---------------------------------------------------------------------------
+describe("T-509 codex-bridge check: the probe", () => {
+  const USER_BRIDGE = { [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": NODE_BRIDGE } }) };
+
+  it("ok names the answering server and records the probe detail", async () => {
+    const check = await run(USER_BRIDGE);
+    expect(check.status).toBe("ok");
+    expect(check.message).toContain("answers");
+    expect(check.message).toContain("`codex-bridge`");
+    expect(check.detail).toMatchObject({ scope: "user", name: "codex-bridge" });
+    expect(JSON.parse(String(check.detail.bridges))).toEqual([
+      { name: "codex-bridge", scope: "user", probe: "ok", serverName: "codex-claude-bridge", allocatedMs: 5000 },
+    ]);
+  });
+
+  // M-REGISTRATION-ONLY: a check that reports ok from the registration alone
+  // never calls the probe; this pins one call per bridge and a failure on it.
+  it("calls the probe exactly once per bridge and cannot be ok when the probe fails", async () => {
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "boom\nmore", allocatedMs: 5000 });
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("`codex-bridge` (user scope)");
+    expect(check.message).toContain("boom");
+    expect(check.message).not.toContain("more");
+    expect(check.message).toContain("exit code 1");
+    expect(check.message).toContain("launch it by hand to see the error");
+  });
+
+  it("hands the probe the registered argv verbatim and the entry's env as overrides", async () => {
+    const probe = probeStub(PROBE_OK);
+    const entry = { command: "npx", args: ["-y", "codex-claude-bridge@latest", "--port", "1"], env: { CODEX_HOME: "/x", N: 5 } };
+    await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": entry } }) }, { probeMcp: probe }));
+    expect(probe.mock.calls[0]![0]).toEqual({ argv: ["npx", "-y", "codex-claude-bridge@latest", "--port", "1"], envOverrides: { CODEX_HOME: "/x" } });
+  });
+
+  for (const [label, entry] of [
+    ["the binary", { command: "/usr/local/bin/codex-claude-bridge", args: ["--verbose"] }],
+    ["node", { command: "node", args: ["/opt/codex-claude-bridge/dist/index.js"] }],
+    ["bun", { command: "bun", args: ["/opt/codex-claude-bridge/dist/index.js"] }],
+    ["npx without -y", { command: "npx", args: ["codex-claude-bridge"] }],
+    ["bunx", { command: "bunx", args: ["-y", "codex-claude-bridge@1.8.0"] }],
+  ] as const) {
+    it(`argv fidelity for ${label}`, async () => {
+      const probe = probeStub(PROBE_OK);
+      await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": entry } }) }, { probeMcp: probe }));
+      expect(probe.mock.calls[0]![0]!.argv).toEqual([entry.command, ...entry.args]);
+      expect(probe.mock.calls[0]![0]!.envOverrides).toEqual({});
+    });
+  }
+
+  it("passes the run deadline and a 5000 ms cap bounded by the remaining budget", async () => {
+    const probe = probeStub(PROBE_OK);
+    await checkCodexBridge(ctxFor({ deadline: 90_000 }), bridgeDeps(USER_BRIDGE, { probeMcp: probe, now: () => 1_000 }));
+    expect(probe.mock.calls[0]![1]).toBe(90_000);
+    expect(probe.mock.calls[0]![2]).toBe(5000);
+    const probe2 = probeStub(PROBE_OK);
+    await checkCodexBridge(ctxFor({ deadline: 4_000 }), bridgeDeps(USER_BRIDGE, { probeMcp: probe2, now: () => 1_000 }));
+    expect(probe2.mock.calls[0]![2]).toBe(3000);
+  });
+
+  // M-FIRST-ONLY: probing only the first winner reddens this.
+  it("probes every trustworthy bridge and advises naming the one that failed with its scope", async () => {
+    const probe = probeStub(PROBE_OK, { kind: "timeout", allocatedMs: 2500 });
+    const check = await checkCodexBridge(
+      ctxFor(),
+      bridgeDeps(
+        {
+          [CLAUDE_JSON]: claudeJson({
+            mcpServers: { "codex-bridge": NODE_BRIDGE },
+            projects: { [PROJECT]: { mcpServers: { "codex-bridge-local": NPX_BRIDGE } } },
+          }),
+        },
+        { probeMcp: probe },
+      ),
+    );
+    expect(probe).toHaveBeenCalledTimes(2);
+    // Exactly these launches, in precedence order (local before user).
+    expect(probe.mock.calls.map(([launch]) => launch.argv)).toEqual([
+      ["npx", "-y", "codex-claude-bridge@latest"],
+      ["node", "/opt/codex-claude-bridge/dist/index.js"],
+    ]);
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("`codex-bridge` (user scope)");
+    expect(check.message).toContain("did not answer the initialize request within 2500 ms");
+    expect(check.message).not.toContain("`codex-bridge-local` (local scope) did not");
+    const bridges = JSON.parse(String(check.detail.bridges)) as Array<{ name: string; probe: string }>;
+    expect(bridges.map((b) => [b.name, b.probe])).toEqual([["codex-bridge-local", "ok"], ["codex-bridge", "timeout"]]);
+  });
+
+  it("two answering bridges are ok naming both", async () => {
+    const check = await run({
+      [CLAUDE_JSON]: claudeJson({
+        mcpServers: { "codex-bridge": NODE_BRIDGE },
+        projects: { [PROJECT]: { mcpServers: { "codex-bridge-local": NPX_BRIDGE } } },
+      }),
+    });
+    expect(check.status).toBe("ok");
+    expect(check.message).toContain("`codex-bridge-local`");
+    expect(check.message).toContain("`codex-bridge`");
+  });
+
+  it("never probes for the Codex client, a shadowed bridge, an unverifiable name or an unreadable scope", async () => {
+    const cases: Array<[FileMap, Partial<StubOptions>]> = [
+      [USER_BRIDGE, { }],
+      [{ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": NODE_BRIDGE }, projects: { [PROJECT]: { mcpServers: { "codex-bridge": { command: "false", args: [] } } } } }) }, {}],
+      [{ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": { command: "sh", args: ["-c", "codex-claude-bridge"] } } }) }, {}],
+      [{ [CLAUDE_JSON]: UNREADABLE, [MCP_JSON]: claudeJson({ mcpServers: { "codex-bridge": NODE_BRIDGE } }) }, {}],
+      [{ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": NODE_BRIDGE } }), [MCP_JSON]: UNREADABLE }, {}],
+    ];
+    const probe0 = probeStub(PROBE_OK);
+    await checkCodexBridge(ctxFor({ client: "codex" }), bridgeDeps(cases[0]![0], { probeMcp: probe0 }));
+    expect(probe0).not.toHaveBeenCalled();
+    for (const [files, over] of cases.slice(1)) {
+      const probe = probeStub(PROBE_OK);
+      const check = await checkCodexBridge(ctxFor(), bridgeDeps(files, { ...over, probeMcp: probe }));
+      expect(probe).not.toHaveBeenCalled();
+      expect(check.status).toBe("skip");
+    }
+  });
+
+  it("a native-binding failure advises the rebuild inside the owning package dir, shell-quoted", async () => {
+    const stderr = "Error: Could not locate the bindings file. Tried:\n -> /x/better_sqlite3.node";
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr, allocatedMs: 5000 });
+    const owner = vi.fn(() => "/opt/my bridge/node_modules/codex-claude-bridge");
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe, ownerPackageDir: owner }));
+    expect(owner).toHaveBeenCalledWith("/opt/codex-claude-bridge/dist/index.js");
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("Run: (cd '/opt/my bridge/node_modules/codex-claude-bridge' && npm rebuild better-sqlite3)");
+  });
+
+  it("the binary grammar asks the owner of the command itself", async () => {
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "NODE_MODULE_VERSION 115", allocatedMs: 5000 });
+    const owner = vi.fn(() => "/opt/b");
+    await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": { command: "/usr/local/bin/codex-claude-bridge", args: [] } } }) }, { probeMcp: probe, ownerPackageDir: owner }));
+    expect(owner).toHaveBeenCalledWith("/usr/local/bin/codex-claude-bridge");
+  });
+
+  it("a native-binding failure with no owning package names the registration and the replace steps", async () => {
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "ERR_DLOPEN_FAILED", allocatedMs: 5000 });
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": NPX_BRIDGE } }) }, { probeMcp: probe }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("could not be established from this registration (user codex-bridge: npx -y codex-claude-bridge@latest)");
+    expect(check.message).toContain("claude mcp remove codex-bridge -s user");
+    expect(check.message).toContain("storybloq setup-skill");
+  });
+
+  it("a not-attempted probe reads as not probed, never as broken", async () => {
+    const probe = probeStub({ kind: "not-attempted", reason: "budget exhausted" });
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("was not probed (budget exhausted)");
+    expect(check.message).not.toMatch(/broken|failed/);
+  });
+
+  it("an enoent probe says the registered command cannot be launched", async () => {
+    const probe = probeStub({ kind: "enoent", allocatedMs: 5000 });
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("cannot be launched: node was not found (registered as node /opt/codex-claude-bridge/dist/index.js)");
+  });
+
+  it("a malformed shadowing codex-bridge entry never crashes the repair text", async () => {
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "ERR_DLOPEN_FAILED", allocatedMs: 5000 });
+    const check = await checkCodexBridge(
+      ctxFor(),
+      bridgeDeps(
+        { [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge-local": NPX_BRIDGE }, projects: { [PROJECT]: { mcpServers: { "codex-bridge": { args: 3 } } } } }) },
+        { probeMcp: probe },
+      ),
+    );
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("claude mcp remove codex-bridge -s local");
+  });
+});
+
+describe("T-509 codex-bridge check: no registered bridge, the bundle decides", () => {
+  const NONE = { [CLAUDE_JSON]: claudeJson({ mcpServers: {} }) };
+
+  it("bundle absent: skip 'no bridge resolves', probe untouched", async () => {
+    const probe = probeStub(PROBE_OK);
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(NONE, { bundledBridge: { kind: "absent" }, probeMcp: probe }));
+    expect(check.status).toBe("skip");
+    expect(check.detail.reason).toBe("no bridge resolves");
+    expect(check.message).toBe("No codex-claude-bridge is registered and the bundled copy did not install, so there is no Codex review backend to check.");
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("bundle unusable: advise with the reason and the reinstall command", async () => {
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(NONE, { bundledBridge: { kind: "unusable", reason: "entry file missing: /x" } }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("unusable (entry file missing: /x)");
+    expect(check.message).toContain("npm install -g @storybloq/storybloq@latest");
+  });
+
+  // The T-502 rule wins: a name that claims to be the bridge is never
+  // contradicted with setup advice, even when the bundle is installed.
+  it("bundle installed with a foreign user codex-bridge still skips 'cannot verify'", async () => {
+    const check = await run({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": { command: "python", args: ["/srv/x.py"] } } }) });
+    expect(check.status).toBe("skip");
+    expect(check.detail.reason).toBe("cannot verify codex-bridge");
+  });
+
+  it("bundle installed with an unrelated name registered still advises setup", async () => {
+    const check = await run({ [CLAUDE_JSON]: claudeJson({ mcpServers: { reviewer: { command: "python", args: ["/srv/x.py"] } } }) });
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("Run storybloq setup-skill.");
+  });
+
+  it("a foreign local codex-bridge shadowing a bundled user registration names the local entry", async () => {
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "better-sqlite3 missing", allocatedMs: 5000 });
+    const check = await checkCodexBridge(
+      ctxFor(),
+      bridgeDeps(
+        { [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge-local": NPX_BRIDGE }, projects: { [PROJECT]: { mcpServers: { "codex-bridge": { command: "python", args: ["/srv/x.py"] } } } } }) },
+        { probeMcp: probe },
+      ),
+    );
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("remove the local-scope `codex-bridge` entry first (claude mcp remove codex-bridge -s local), then run storybloq setup-skill");
+    // The foreign python entry was never launched: one probe, the bridge's argv.
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe.mock.calls[0]![0]!.argv).toEqual(["npx", "-y", "codex-claude-bridge@latest"]);
   });
 });

@@ -8,6 +8,7 @@
  */
 
 import { vi } from "vitest";
+import type { BundledBridge } from "../../../src/core/bridge-resolve.js";
 import { resolveSessionIntelConfig } from "../../../src/core/session-intel/config.js";
 import type { SkillTargetInfo } from "../../../src/core/skill-version-marker.js";
 import type {
@@ -17,6 +18,8 @@ import type {
   HealthMarkerRead,
   HealthRead,
   HealthRun,
+  McpLaunch,
+  McpProbe,
 } from "../../../src/core/health/types.js";
 import { HEALTH_CHECK_IDS } from "../../../src/core/health/types.js";
 
@@ -40,6 +43,9 @@ export interface StubOptions {
   versionCache?: Partial<HealthDeps["versionCache"]>;
   skillMarker?: Partial<HealthDeps["skillMarker"]>;
   globalConfig?: HealthDeps["globalConfig"];
+  bundledBridge?: BundledBridge;
+  ownerPackageDir?: HealthDeps["ownerPackageDir"];
+  probeMcp?: HealthDeps["probeMcp"];
 }
 
 export function stubDeps(opts: StubOptions = {}): HealthDeps {
@@ -68,6 +74,9 @@ export function stubDeps(opts: StubOptions = {}): HealthDeps {
       marker: opts.skillMarker?.marker ?? ((): HealthMarkerRead => ({ kind: "absent" })),
     },
     globalConfig: opts.globalConfig ?? (() => null),
+    bundledBridge: () => opts.bundledBridge ?? { kind: "absent" },
+    ownerPackageDir: opts.ownerPackageDir ?? (() => null),
+    probeMcp: opts.probeMcp ?? (async () => ({ kind: "not-attempted", reason: "stub" })),
   };
 }
 
@@ -98,6 +107,18 @@ export function skillTarget(over: Partial<SkillTargetInfo> = {}): SkillTargetInf
     ...over,
   };
 }
+
+/** A probe stub that records every launch it was handed and answers per call, last answer repeating. */
+export function probeStub(...answers: McpProbe[]) {
+  let i = 0;
+  return vi.fn(async (_launch: McpLaunch, _deadlineAt: number, _capMs: number): Promise<McpProbe> => {
+    const a = answers[Math.min(i, answers.length - 1)] ?? { kind: "not-attempted", reason: "stub" };
+    i += 1;
+    return a;
+  });
+}
+
+export const PROBE_OK: McpProbe = { kind: "ok", serverName: "codex-claude-bridge", serverVersion: "1.8.0", protocolVersion: "2024-11-05", allocatedMs: 5000 };
 
 /** A spawn stub that records how it was called. */
 export function runStub(result: HealthRun) {
