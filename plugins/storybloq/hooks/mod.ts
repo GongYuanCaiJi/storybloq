@@ -14,11 +14,13 @@
  * names are string literals at every on() call, as the client's source scan
  * requires; the pinned list they are checked against is client-api.ts.
  *
- * Scaffold state: the roster and sidebar files land in their own commits
- * (T-507, T-508). Until each lands, this module imports nothing from it.
+ * The sidebar landed at 72f98679 (T-508); the roster lands with T-507 and
+ * wires in at the marked line.
  */
 
-type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>;
+import { registerSidebar } from "./sidebar.js";
+
+export type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>;
 type Hook = ($: any, e: any, next: (e: any) => unknown) => unknown;
 export type On = (event: string, hook: Hook) => unknown;
 
@@ -28,5 +30,5 @@ export function register(on: On, options: Options): void {
   const sidebar = options["sidebar"] === true;
   if (!roster && !sidebar) return;
   // T-507 wires here: if (roster) registerRoster(on, options);
-  // T-508 wires here: if (sidebar) registerSidebar(on, options);
+  if (sidebar) registerSidebar(on, options);
 }
