@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   LEDGER_FILE,
+  LEDGER_GLOBAL_CAP,
   LEDGER_MAX_INPUT_BYTES,
   LEDGER_SUBDIR,
   ingestBoundaries,
@@ -17,8 +18,13 @@ import {
   boundaryLedgerRoot,
   resetLedgerRoutingCache,
 } from "../../src/core/session-intel/ledger-root.js";
-import { discoverWorktreeRoots } from "../../src/core/session-intel/presence-bridge.js";
-import { bareStoryInit, makeWorktreePair, symlinkSync } from "./session-intel-fixtures.js";
+import {
+  WORKTREE_DISCOVERY_FAILURE_TTL_MS,
+  discoverWorktreeRoots,
+  worktreeDiscoveryStats,
+} from "../../src/core/session-intel/presence-bridge.js";
+import { acquireLock, releaseLock } from "../../src/presence/io.js";
+import { bareStoryInit, makeWorktreePair, makeWorktreeTriple, symlinkSync } from "./session-intel-fixtures.js";
 
 const T0 = Date.parse("2026-09-09T12:00:00Z");
 const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
@@ -258,6 +264,193 @@ describe("ISS-1211: one repo, one boundary series", () => {
       expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
       expect(existsSync(ledgerPath(wt.worktree))).toBe(true);
       expect(existsSync(join(elsewhere, LEDGER_SUBDIR, LEDGER_FILE))).toBe(false);
+    } finally {
+      wt.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ISS-1211 gate round 1
+// ---------------------------------------------------------------------------
+
+describe("ISS-1211 gate: routing cost, degradation and safety", () => {
+  beforeEach(() => { resetLedgerRoutingCache(); worktreeDiscoveryStats.spawns = 0; });
+  afterEach(() => { resetLedgerRoutingCache(); });
+
+  it("resolves a root's routing with ONE git spawn, shares it across reads and writes, and re-spawns only per root or after a reset", () => {
+    const wt = makeWorktreePair("si-ledger-memo-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      boundaryLedgerReadRoots(wt.worktree);
+      readLedger(wt.worktree);
+      ingestBoundaries(wt.worktree, [entry("a", 1)], 20);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      // A DIFFERENT root is resolved independently: the memo is keyed by root,
+      // never shared between projects.
+      expect(boundaryLedgerRoot(wt.main)).toBe(wt.main);
+      expect(worktreeDiscoveryStats.spawns).toBe(2);
+      resetLedgerRoutingCache();
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      expect(worktreeDiscoveryStats.spawns).toBe(3);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("a FAILED discovery is retried only after the failure TTL: one hook process pays for git once, a long-lived one recovers in seconds", () => {
+    const bare = mkdtempSync(join(tmpdir(), "si-ledger-norepo-ttl-"));
+    try {
+      mkdirSync(join(bare, ".story"), { recursive: true });
+      let t = 1_000_000;
+      const clock = () => t;
+      // Degraded outcomes are never memoized, so every call below reaches
+      // discovery; only the failure TTL keeps git from being spawned again.
+      expect(boundaryLedgerRoot(bare, { clock })).toBe(bare);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      t += 1_000;
+      expect(boundaryLedgerRoot(bare, { clock })).toBe(bare);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      t += WORKTREE_DISCOVERY_FAILURE_TTL_MS;
+      expect(boundaryLedgerRoot(bare, { clock })).toBe(bare);
+      expect(worktreeDiscoveryStats.spawns).toBe(2);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
+  });
+
+  it("a main checkout that gains .story afterwards is picked up on the next call, without a second git spawn", () => {
+    const wt = makeWorktreePair("si-ledger-late-story-");
+    try {
+      bareStoryInit(wt.worktree);
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.worktree);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      bareStoryInit(wt.main);
+      // No reset: a routing that did not resolve was never cached.
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+      expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
+      expect(existsSync(ledgerPath(wt.main))).toBe(true);
+      expect(existsSync(ledgerPath(wt.worktree))).toBe(false);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("an already-spent caller budget resolves nothing and spawns nothing, and does not poison the next call", () => {
+    const wt = makeWorktreePair("si-ledger-deadline-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      strand(wt.main, [entry("shared", 1)]);
+      const t = 5_000_000;
+      const spent = { deadline: t, clock: () => t };
+      expect(boundaryLedgerRoot(wt.worktree, spent)).toBe(wt.worktree);
+      expect(readLedger(wt.worktree, spent)).toEqual([]);
+      expect(worktreeDiscoveryStats.spawns).toBe(0);
+      // With budget, the very next call resolves properly.
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      expect(readLedger(wt.worktree).map((e) => e.sessionId)).toEqual(["shared"]);
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("three checkouts: the read set is main, then the caller's own checkout, then every sibling in git's order", () => {
+    const three = makeWorktreeTriple("si-ledger-triple-");
+    try {
+      // Pins the fixture's own assumption about git's ordering, so a change in
+      // git would fail here rather than silently weaken the expectations below.
+      expect(discoverWorktreeRoots(three.main)).toEqual([three.main, three.linked[0], three.linked[1]]);
+      expect(boundaryLedgerReadRoots(three.linked[1])).toEqual([three.main, three.linked[1], three.linked[0]]);
+      expect(boundaryLedgerReadRoots(three.linked[0])).toEqual([three.main, three.linked[0], three.linked[1]]);
+      expect(boundaryLedgerReadRoots(three.main)).toEqual([three.main, three.linked[0], three.linked[1]]);
+      strand(three.main, [entry("from-main", 1)]);
+      strand(three.linked[0], [entry("from-wt-one", 2)]);
+      strand(three.linked[1], [entry("from-wt-two", 3)]);
+      resetLedgerRoutingCache();
+      expect(readLedger(three.linked[1]).map((e) => e.sessionId)).toEqual(["from-main", "from-wt-one", "from-wt-two"]);
+      resetLedgerRoutingCache();
+      expect(readLedger(three.main).map((e) => e.sessionId)).toEqual(["from-main", "from-wt-one", "from-wt-two"]);
+    } finally {
+      three.cleanup();
+    }
+  });
+
+  it("a routed main replaced by a symlink after discovery is refused at the write, and the boundary lands locally", () => {
+    const wt = makeWorktreePair("si-ledger-swap-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      const aside = join(wt.base, "main-moved-aside");
+      renameSync(wt.main, aside);
+      symlinkSync(aside, wt.main);
+      expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
+      expect(existsSync(ledgerPath(wt.worktree))).toBe(true);
+      expect(existsSync(ledgerPath(aside))).toBe(false);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("a routed root whose telemetry directory cannot be created falls back to the caller's own checkout", () => {
+    const wt = makeWorktreePair("si-ledger-unwritable-");
+    const mainStory = join(wt.main, ".story");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(boundaryLedgerRoot(wt.worktree)).toBe(wt.main);
+      // `.story/` is still a real, non-symlinked directory, so the routing
+      // itself stays valid; nothing can be created inside it.
+      chmodSync(mainStory, 0o500);
+      expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
+      expect(existsSync(ledgerPath(wt.worktree))).toBe(true);
+    } finally {
+      try { chmodSync(mainStory, 0o700); } catch { /* already gone */ }
+      wt.cleanup();
+    }
+  });
+
+  it("a ledger lock held by another writer is reported as lock-busy, never silently dropped", () => {
+    const wt = makeWorktreePair("si-ledger-lock-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      expect(ingestBoundaries(wt.worktree, [entry("a", 1)], 20)).toBe("written");
+      const lockPath = join(wt.main, ".story", "telemetry", LEDGER_SUBDIR, "boundaries.lock");
+      expect(acquireLock(lockPath, 300)).toBe(true);
+      try {
+        expect(ingestBoundaries(wt.worktree, [entry("a", 2)], 20)).toBe("lock-busy");
+      } finally {
+        releaseLock(lockPath);
+      }
+      expect(ingestBoundaries(wt.worktree, [entry("a", 2)], 20)).toBe("written");
+      expect(readLedger(wt.main)).toHaveLength(2);
+    } finally {
+      wt.cleanup();
+    }
+  });
+
+  it("the merge is a pure union: a checkout already at the global cap keeps every entry it had", () => {
+    const wt = makeWorktreePair("si-ledger-cap-");
+    try {
+      bareStoryInit(wt.main);
+      bareStoryInit(wt.worktree);
+      strand(wt.main, Array.from({ length: LEDGER_GLOBAL_CAP }, (_, i) => entry("main-s", i)));
+      strand(wt.worktree, Array.from({ length: 5 }, (_, i) => entry("wt-s", 1_000 + i)));
+      const read = readLedger(wt.main);
+      // A flat LEDGER_GLOBAL_CAP over the union would round-robin the two
+      // sessions and evict five of main's own on-disk entries.
+      expect(read).toHaveLength(LEDGER_GLOBAL_CAP + 5);
+      expect(read.filter((e) => e.sessionId === "main-s")).toHaveLength(LEDGER_GLOBAL_CAP);
+      expect(read.filter((e) => e.sessionId === "wt-s")).toHaveLength(5);
+      resetLedgerRoutingCache();
+      expect(readLedger(wt.worktree)).toHaveLength(LEDGER_GLOBAL_CAP + 5);
     } finally {
       wt.cleanup();
     }

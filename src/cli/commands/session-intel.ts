@@ -100,6 +100,10 @@ export function formatSessionIntelMd(r: SessionIntelResult, root: string | null 
   if (r.callerModelMismatch) lines.push(`Caller model mismatch: caller says ${r.callerModelMismatch.caller}, transcript says ${r.callerModelMismatch.transcript ?? "unknown"}`);
   lines.push(`Provenance: era ${r.provenance.era ?? "none"}, capture ${r.provenance.capture ? `${r.provenance.capture.captureKind} (autoCompactWindow ${r.provenance.capture.autoCompactWindowAtStart ?? "absent"})` : "none"}`);
   lines.push(`Presence: ${r.presence}${r.presenceReason ? ` (${r.presenceReason})` : ""}`);
+  // ISS-1211: a boundary that was scanned but not recorded is otherwise
+  // invisible here, because the presence record can persist while the ledger
+  // write is lock-busy or fails. Reported only when something went wrong.
+  if (r.ledgerIngest === "lock-busy" || r.ledgerIngest === "failed") lines.push(`Boundary ledger: ${r.ledgerIngest}`);
   // ISS-1185: the record can live under a different root than the one
   // sampled (a git worktree). Diagnostic only -- reported when it differs.
   if (recordRoot !== null && recordRoot !== root) lines.push(`Record found under a different root: ${recordRoot} (sampled root: ${root ?? "none"})`);

@@ -27,7 +27,7 @@ import {
   telemetrySubdirIfPresent,
 } from "../../presence/io.js";
 import type { CaptureKind } from "../../presence/session-intel-fields.js";
-import { LEDGER_SUBDIR, boundaryLedgerReadRoots, boundaryLedgerRoot } from "./ledger-root.js";
+import { LEDGER_SUBDIR, boundaryLedgerReadRoots, boundaryLedgerWriteTarget, ledgerWriteTargetStillValid } from "./ledger-root.js";
 import type { WorktreeWalkOptions } from "./presence-bridge.js";
 import type { CompactionTrigger } from "./types.js";
 
@@ -99,21 +99,27 @@ function readLedgerAt(root: string): LedgerEntry[] {
  * in a worktree are still counted from the main checkout and vice versa. A
  * plain checkout reads exactly one file, byte-for-byte as before.
  *
- * The merge is `trimLedger`'s own dedupe rule, so the same boundary recorded
- * in two checkouts collapses to one entry and can gain a classification but
- * never lose one. `LEDGER_GLOBAL_CAP` as the per-session window means the
- * merge itself discards nothing a single file kept; the resolver applies
- * `boundarySampleCount` to what it selects.
+ * The merge is `trimLedger`'s own dedupe rule applied ONCE over the union, so
+ * the same boundary recorded in two checkouts collapses to one entry and can
+ * gain a classification but never lose one.
+ *
+ * CAP RULE: every retention cap belongs to the WRITE. Each file on disk is
+ * already trimmed to `perSession` and `LEDGER_GLOBAL_CAP`, so both caps here
+ * scale with the number of files merged and the merge can never discard an
+ * entry a single checkout kept. Folding N files under a flat 200 would have
+ * round-robined the union and shrunk a session's 20 boundaries to a handful
+ * whenever another checkout held a large ledger. The resolver still applies
+ * `boundarySampleCount` to whatever it selects out of this.
  */
 export function readLedger(root: string, opts: WorktreeWalkOptions = {}): LedgerEntry[] {
   const roots = boundaryLedgerReadRoots(root, opts);
-  let merged = readLedgerAt(roots[0]!);
-  for (let i = 1; i < roots.length; i++) {
-    const other = readLedgerAt(roots[i]!);
-    if (other.length === 0) continue;
-    merged = trimLedger(merged, other, LEDGER_GLOBAL_CAP, LEDGER_GLOBAL_CAP).entries;
-  }
-  return merged;
+  const shared = readLedgerAt(roots[0]!);
+  if (roots.length === 1) return shared;
+  const rest: LedgerEntry[] = [];
+  for (let i = 1; i < roots.length; i++) rest.push(...readLedgerAt(roots[i]!));
+  if (rest.length === 0) return shared;
+  const cap = LEDGER_GLOBAL_CAP * roots.length;
+  return trimLedger(shared, rest, cap, cap).entries;
 }
 
 const ts = (e: LedgerEntry) => Date.parse(e.timestamp);
@@ -187,10 +193,18 @@ export type IngestOutcome = "written" | "unchanged" | "lock-busy" | "failed";
  * ISS-1211: the write lands in the REPO's ledger (the main worktree's), not
  * whatever checkout the hook's cwd resolved to, so one compaction is one entry
  * in one series no matter which worktree the session was standing in.
+ *
+ * Two fallbacks keep a boundary from being dropped outright, since the merged
+ * read finds it wherever it lands: a routed root whose identity no longer
+ * matches the one discovery validated, and a routed root whose telemetry
+ * directory cannot be created, both write to the caller's own checkout.
  */
-export function ingestBoundaries(root: string, incoming: readonly LedgerEntry[], perSession: number, globalCap = LEDGER_GLOBAL_CAP): IngestOutcome {
+export function ingestBoundaries(root: string, incoming: readonly LedgerEntry[], perSession: number, globalCap = LEDGER_GLOBAL_CAP, opts: WorktreeWalkOptions = {}): IngestOutcome {
   if (incoming.length === 0) return "unchanged";
-  const dir = ensureTelemetrySubdir(boundaryLedgerRoot(root), LEDGER_SUBDIR);
+  const target = boundaryLedgerWriteTarget(root, opts);
+  const routed = ledgerWriteTargetStillValid(root, target) ? target.root : root;
+  let dir = ensureTelemetrySubdir(routed, LEDGER_SUBDIR);
+  if (dir === null && routed !== root) dir = ensureTelemetrySubdir(root, LEDGER_SUBDIR);
   if (!dir) return "failed";
   const path = join(dir, LEDGER_FILE);
   const lockPath = join(dir, "boundaries.lock");

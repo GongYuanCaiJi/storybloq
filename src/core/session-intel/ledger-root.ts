@@ -12,119 +12,139 @@
  * and its worktrees, so a boundary is recorded once per repo while entries
  * already stranded in a worktree are still counted.
  *
- * Cost: at most ONE `git worktree list` per process, memoized per root and
- * shared by the read and the write path, because this sits on the prompt
- * hook's path and that whole path has roughly a 500 ms budget. Any git
- * failure, a checkout that is not a worktree, and a main checkout with no
- * `.story/` all resolve to the caller's own root, which is exactly the
- * pre-ISS-1211 behavior.
+ * Two rules keep it honest on the prompt hook's path, whose whole budget is
+ * roughly 500 ms:
+ *
+ *   - ONLY A RESOLVED ROUTING IS MEMOIZED. Git failing, timing out, or naming
+ *     a main checkout this module refuses leaves the caller on its own root
+ *     and caches NOTHING, so a repo that gains `.story/` (or a git that starts
+ *     working) is picked up on the next call rather than for the life of the
+ *     process. The spawn is still bounded, because `discoverWorktreeRoots`
+ *     memoizes the worktree list and remembers a failure for a short TTL.
+ *   - THE ROUTED ROOT IS REVALIDATED AT THE WRITE. Discovery proves a root
+ *     was safe when git named it, not that it still is.
  */
 
-import * as fs from "node:fs";
-import { join } from "node:path";
-import { directoryIdentity } from "../../presence/io.js";
-import { assertNoSymlinkOnPath } from "../skill-sync-check.js";
-import { discoverWorktreeRoots, type WorktreeWalkOptions } from "./presence-bridge.js";
+import {
+  discoverWorktreeRoots,
+  isSafeCandidateRoot,
+  resetWorktreeDiscoveryCache,
+  revalidateCandidateIdentity,
+  sameIdentity,
+  trustedRootIdentity,
+  type CandidateIdentity,
+  type SafeRootOptions,
+  type WorktreeWalkOptions,
+} from "./presence-bridge.js";
 
 /** `.story/telemetry/<this>`: the boundary ledger's directory. */
 export const LEDGER_SUBDIR = "session-intel";
 
 /** Same cap the presence walk uses; applied to `git worktree list` itself. */
-export const LEDGER_WORKTREE_LIMIT = 32;
+const LEDGER_WORKTREE_LIMIT = 32;
 
-export interface LedgerRouting {
+/**
+ * The ledger WRITES, so unlike the presence walk it refuses a checkout that
+ * has no `.story/` yet: a main checkout that is not a storybloq project is
+ * left alone rather than seeded.
+ */
+const LEDGER_ROOT: SafeRootOptions = { subdir: LEDGER_SUBDIR, requireStory: true };
+
+interface LedgerRouting {
   /** The checkout that owns the shared series. `root` itself for a plain checkout. */
   readonly mainRoot: string;
+  /** Identity of `mainRoot` at discovery, or null when it IS `root` (nothing to revalidate). */
+  readonly mainIdentity: CandidateIdentity | null;
   /** Every OTHER safe checkout of the same repo: `mainRoot` and `root` excluded. */
   readonly linkedRoots: readonly string[];
+}
+
+export interface LedgerWriteTarget {
+  readonly root: string;
+  /** Null when the target is the caller's own root: nothing to revalidate. */
+  readonly identity: CandidateIdentity | null;
 }
 
 const routingCache = new Map<string, LedgerRouting>();
 
 /**
- * Forgets what git reported. Tests call it between fixtures; a long-lived
- * server may call it when its project root changes underneath it.
+ * Forgets the routing AND the underlying worktree discovery. Tests call it
+ * between fixtures; nothing in production does, because a resolved routing is
+ * a property of the repository layout and a degraded one is never cached.
  */
 export function resetLedgerRoutingCache(): void {
   routingCache.clear();
+  resetWorktreeDiscoveryCache();
 }
 
-interface Identity {
-  readonly dev: number;
-  readonly ino: number;
-}
-
-/**
- * Identity of the caller's OWN root, following symlinks deliberately: `root`
- * is the caller's trusted argument, and `git worktree list` reports realpaths,
- * so a root reached through a symlinked ancestor would never string-match its
- * own entry. Same reasoning as `findPresenceRecordAcrossWorktrees`.
- */
-function ownIdentity(root: string): Identity | null {
-  try {
-    const st = fs.statSync(root);
-    return { dev: st.dev, ino: st.ino };
-  } catch {
-    return null;
-  }
+function localRouting(root: string): LedgerRouting {
+  return { mainRoot: root, mainIdentity: null, linkedRoots: [] };
 }
 
 /**
- * A candidate checkout is usable when it is itself a real directory (not a
- * symlink: a registered worktree path can be replaced after registration), it
- * ALREADY holds a real `.story/` directory (never created here, so a checkout
- * that is not a storybloq project is left alone), and no component down to the
- * ledger directory is a symlink. Same discipline as the presence walk's own
- * candidate check; the identity returned is the very `lstatSync` the symlink
- * check used, so capture and validation happen together.
+ * `resolved` is false for every degraded outcome (no git, not a repository,
+ * an expired deadline, or a main checkout that fails the safety rules), and
+ * only a `resolved` routing is allowed into the memo.
  */
-function safeLedgerRoot(candidate: string): Identity | null {
-  try {
-    const st = fs.lstatSync(candidate);
-    if (st.isSymbolicLink() || !st.isDirectory()) return null;
-    if (directoryIdentity(join(candidate, ".story")) === null) return null;
-    assertNoSymlinkOnPath(candidate, join(candidate, ".story", "telemetry", LEDGER_SUBDIR));
-    return { dev: st.dev, ino: st.ino };
-  } catch {
-    return null;
-  }
-}
-
-const same = (a: Identity | null, b: Identity | null) => a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
-
-function resolveRouting(root: string, opts: WorktreeWalkOptions): LedgerRouting {
-  const self = ownIdentity(root);
+function resolveRouting(root: string, opts: WorktreeWalkOptions): { routing: LedgerRouting; resolved: boolean } {
+  const self = trustedRootIdentity(root);
   // git-worktree(1): "The main worktree is listed first, followed by each of
-  // the linked worktrees." `[]` covers an absent git, a non-repository, and a
-  // timeout, and is the signal to stay entirely local.
+  // the linked worktrees." `[]` covers an absent git, a non-repository, a
+  // spent deadline, and a timeout, and is the signal to stay entirely local.
   const roots = discoverWorktreeRoots(root, { ...opts, limit: LEDGER_WORKTREE_LIMIT });
-  if (roots.length === 0) return { mainRoot: root, linkedRoots: [] };
-  const mainCandidate = safeLedgerRoot(roots[0]!);
-  const routeAway = mainCandidate !== null && !same(mainCandidate, self);
-  const mainRoot = routeAway ? roots[0]! : root;
-  const mainIdentity = routeAway ? mainCandidate : self;
+  if (roots.length === 0) return { routing: localRouting(root), resolved: false };
+  const main = isSafeCandidateRoot(roots[0]!, LEDGER_ROOT);
+  if (!main.ok) return { routing: localRouting(root), resolved: false };
+  // roots[0] is validated exactly once, here: the loop below starts at 1, so
+  // main is never re-stat'ed as a linked candidate and needs no exclusion of
+  // its own (git lists each worktree exactly once). Only self does, because
+  // when the caller IS a linked worktree it appears in this range.
   const linkedRoots: string[] = [];
-  for (const candidate of roots) {
-    const identity = safeLedgerRoot(candidate);
-    if (identity === null) continue;
-    if (same(identity, self) || same(identity, mainIdentity)) continue;
-    linkedRoots.push(candidate);
+  for (let i = 1; i < roots.length; i++) {
+    const candidate = isSafeCandidateRoot(roots[i]!, LEDGER_ROOT);
+    if (!candidate.ok) continue;
+    if (sameIdentity(candidate.identity, self)) continue;
+    linkedRoots.push(roots[i]!);
   }
-  return { mainRoot, linkedRoots };
+  // Self is excluded by dev/ino, never by string: the caller keeps its own
+  // spelling of its own checkout even when git names the same directory by
+  // its realpath.
+  const routing = sameIdentity(main.identity, self)
+    ? { mainRoot: root, mainIdentity: null, linkedRoots }
+    : { mainRoot: roots[0]!, mainIdentity: main.identity, linkedRoots };
+  return { routing, resolved: true };
 }
 
-/** The repo's ledger routing, resolved at most once per root per process. */
-export function ledgerRouting(root: string, opts: WorktreeWalkOptions = {}): LedgerRouting {
+function ledgerRouting(root: string, opts: WorktreeWalkOptions = {}): LedgerRouting {
   const cached = routingCache.get(root);
   if (cached) return cached;
-  const routing = resolveRouting(root, opts);
-  routingCache.set(root, routing);
+  const { routing, resolved } = resolveRouting(root, opts);
+  if (resolved) routingCache.set(root, routing);
   return routing;
 }
 
 /** The checkout a boundary is WRITTEN to: one repo, one series. */
 export function boundaryLedgerRoot(root: string, opts: WorktreeWalkOptions = {}): string {
   return ledgerRouting(root, opts).mainRoot;
+}
+
+/** The write target with the identity the write must revalidate it against. */
+export function boundaryLedgerWriteTarget(root: string, opts: WorktreeWalkOptions = {}): LedgerWriteTarget {
+  const routing = ledgerRouting(root, opts);
+  return { root: routing.mainRoot, identity: routing.mainIdentity };
+}
+
+/**
+ * Re-checks a routed target immediately before the write. A mismatch means the
+ * path git named has been replaced since discovery, so the routing is dropped
+ * (the next call re-resolves) and the caller writes to its own checkout, where
+ * the merged read still finds the entry.
+ */
+export function ledgerWriteTargetStillValid(callerRoot: string, target: LedgerWriteTarget): boolean {
+  if (target.identity === null) return true;
+  if (revalidateCandidateIdentity(target.root, target.identity, LEDGER_ROOT)) return true;
+  routingCache.delete(callerRoot);
+  return false;
 }
 
 /**

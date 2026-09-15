@@ -85,6 +85,31 @@ export interface WorktreeWalkOptions {
 const GIT_TIMEOUT_MS_DEFAULT = 1000;
 const WORKTREE_DISCOVERY_MAX_BUFFER = 1024 * 1024;
 const WORKTREE_DISCOVERY_DEFAULT_LIMIT = 32;
+/**
+ * Absolute parse cap. The memo below holds up to this many roots and `limit`
+ * slices what each caller sees, so one spawn serves callers asking for
+ * different limits.
+ */
+const WORKTREE_DISCOVERY_MAX_ROOTS = 64;
+/**
+ * ISS-1211 gate: a FAILED discovery is remembered this long. Nothing about a
+ * failure is cached permanently (a repo can be initialized, git can be
+ * installed), but one short-lived hook process must never pay for git twice,
+ * and a long-lived server retries within seconds.
+ */
+export const WORKTREE_DISCOVERY_FAILURE_TTL_MS = 10_000;
+
+/** Test seam: `git worktree list` spawns this process has actually made. */
+export const worktreeDiscoveryStats = { spawns: 0 };
+
+const discoveryCache = new Map<string, string[]>();
+const discoveryFailures = new Map<string, number>();
+
+/** Forgets both the successful and the failed discoveries. Tests only. */
+export function resetWorktreeDiscoveryCache(): void {
+  discoveryCache.clear();
+  discoveryFailures.clear();
+}
 
 /**
  * The main checkout plus every worktree `git worktree list --porcelain -z`
@@ -95,14 +120,32 @@ const WORKTREE_DISCOVERY_DEFAULT_LIMIT = 32;
  * with a SINGLE `clock()` call before deciding whether to invoke git at all,
  * so a deadline that expires between the check and the read can never turn
  * into a zero (unbounded) `execFileSync` timeout.
+ *
+ * ISS-1211 gate: the result is memoized per root for the life of the process.
+ * The worktree LIST is what is cached, never a verdict about any root's
+ * contents, so every caller still re-checks safety and identity at use. This
+ * is what lets the boundary-ledger routing and the presence walk share one
+ * spawn on a path (`handleSessionIntel`) that reaches both. A deadline that
+ * is already spent still returns `[]` before the memo is consulted: the
+ * contract is "no work now", and a caller that had no budget gets no answer
+ * rather than a cheaper one it did not ask for.
  */
 export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & { readonly limit?: number } = {}): string[] {
   const clock = opts.clock ?? Date.now;
-  const remaining = opts.deadline !== undefined ? opts.deadline - clock() : GIT_TIMEOUT_MS_DEFAULT;
+  const now = clock();
+  const remaining = opts.deadline !== undefined ? opts.deadline - now : GIT_TIMEOUT_MS_DEFAULT;
   if (remaining <= 0) return [];
   const limit = opts.limit ?? WORKTREE_DISCOVERY_DEFAULT_LIMIT;
   if (limit <= 0) return [];
+  const cached = discoveryCache.get(root);
+  if (cached !== undefined) return cached.slice(0, limit);
+  const failedAt = discoveryFailures.get(root);
+  // A negative elapsed means this caller's clock disagrees with the one that
+  // recorded the failure (a test seam, or an injected budget clock): re-resolve
+  // rather than honour a TTL measured against a different time base.
+  if (failedAt !== undefined && now - failedAt >= 0 && now - failedAt < WORKTREE_DISCOVERY_FAILURE_TTL_MS) return [];
   let out: string;
+  worktreeDiscoveryStats.spawns++;
   try {
     out = execFileSync("git", ["-C", root, "worktree", "list", "--porcelain", "-z"], {
       encoding: "utf-8",
@@ -115,15 +158,22 @@ export function discoverWorktreeRoots(root: string, opts: WorktreeWalkOptions & 
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
+    discoveryFailures.set(root, now);
     return [];
   }
   const roots: string[] = [];
   for (const field of out.split("\0")) {
     if (!field.startsWith("worktree ")) continue;
     roots.push(field.slice("worktree ".length));
-    if (roots.length >= limit) break;
+    if (roots.length >= WORKTREE_DISCOVERY_MAX_ROOTS) break;
   }
-  return roots;
+  if (roots.length === 0) {
+    discoveryFailures.set(root, now);
+    return [];
+  }
+  discoveryCache.set(root, roots);
+  discoveryFailures.delete(root);
+  return roots.slice(0, limit);
 }
 
 export interface CandidateIdentity {
@@ -131,25 +181,60 @@ export interface CandidateIdentity {
   readonly ino: number;
 }
 
+export interface SafeRootOptions {
+  /** The directory under `.story/telemetry/` the no-symlink chain is checked down to. */
+  readonly subdir: string;
+  /**
+   * Require `.story/` to already exist. The presence walk does not (it only
+   * ever reads, and an absent directory simply misses); the boundary ledger
+   * does, because it WRITES and must never seed `.story/` in a checkout that
+   * is not a storybloq project.
+   */
+  readonly requireStory?: boolean;
+}
+
+const PRESENCE_ROOT: SafeRootOptions = { subdir: "presence" };
+
 /**
  * A candidate root is safe to read from when it is itself a real directory
  * (not a symlink -- a registered worktree path can be replaced after
  * registration) AND no component from the candidate down through
- * `.story/telemetry/presence` is a symlink (reusing `assertNoSymlinkOnPath`,
+ * `.story/telemetry/<subdir>` is a symlink (reusing `assertNoSymlinkOnPath`,
  * the same no-follow chain check `scripts/sync-plugin-skill.ts` already
  * relies on). The identity captured here is the SAME `lstatSync` call used
  * for the symlink check, so capture and validation happen atomically.
  */
-function isSafeCandidateRoot(candidate: string): { ok: true; identity: CandidateIdentity } | { ok: false } {
+export function isSafeCandidateRoot(candidate: string, opts: SafeRootOptions = PRESENCE_ROOT): { ok: true; identity: CandidateIdentity } | { ok: false } {
   try {
     const st = fs.lstatSync(candidate);
     if (st.isSymbolicLink() || !st.isDirectory()) return { ok: false };
-    assertNoSymlinkOnPath(candidate, join(candidate, ".story", "telemetry", "presence"));
+    if (opts.requireStory === true && directoryIdentity(join(candidate, ".story")) === null) return { ok: false };
+    assertNoSymlinkOnPath(candidate, join(candidate, ".story", "telemetry", opts.subdir));
     return { ok: true, identity: { dev: st.dev, ino: st.ino } };
   } catch {
     return { ok: false };
   }
 }
+
+/**
+ * Identity of a root the CALLER owns, following symlinks deliberately: it is
+ * the caller's own trusted argument, not a walked candidate, so this is
+ * identity lookup and not the untrusted-candidate symlink walk
+ * `isSafeCandidateRoot` guards. `git worktree list` reports realpaths, so a
+ * root reached through a symlinked ancestor (macOS resolves its own tmpdir
+ * through `/private`) would never string-match its own entry.
+ */
+export function trustedRootIdentity(root: string): CandidateIdentity | null {
+  try {
+    const st = fs.statSync(root);
+    return { dev: st.dev, ino: st.ino };
+  } catch {
+    return null;
+  }
+}
+
+export const sameIdentity = (a: CandidateIdentity | null, b: CandidateIdentity | null): boolean =>
+  a !== null && b !== null && a.dev === b.dev && a.ino === b.ino;
 
 /**
  * Re-runs the exact same safety check and additionally requires the
@@ -159,9 +244,9 @@ function isSafeCandidateRoot(candidate: string): { ok: true; identity: Candidate
  * this narrows, but does not eliminate, the filesystem TOCTOU window between
  * discovery and use, which is this codebase's already-accepted posture.
  */
-export function revalidateCandidateIdentity(candidate: string, expected: CandidateIdentity): boolean {
-  const check = isSafeCandidateRoot(candidate);
-  return check.ok && check.identity.dev === expected.dev && check.identity.ino === expected.ino;
+export function revalidateCandidateIdentity(candidate: string, expected: CandidateIdentity, opts: SafeRootOptions = PRESENCE_ROOT): boolean {
+  const check = isSafeCandidateRoot(candidate, opts);
+  return check.ok && sameIdentity(check.identity, expected);
 }
 
 export interface WorktreePresenceMatch {
@@ -190,19 +275,13 @@ export interface WorktreePresenceMatch {
  */
 export function findPresenceRecordAcrossWorktrees(root: string, sessionId: string, opts: WorktreeWalkOptions = {}): WorktreePresenceMatch | null {
   const clock = opts.clock ?? Date.now;
-  let rootIdentity: CandidateIdentity | null = null;
-  try {
-    const st = fs.statSync(root);
-    rootIdentity = { dev: st.dev, ino: st.ino };
-  } catch {
-    rootIdentity = null;
-  }
+  const rootIdentity = trustedRootIdentity(root);
   const candidates = discoverWorktreeRoots(root, opts);
   for (const candidate of candidates) {
     if (opts.deadline !== undefined && clock() >= opts.deadline) return null;
     const safe = isSafeCandidateRoot(candidate);
     if (!safe.ok) continue;
-    if (rootIdentity && safe.identity.dev === rootIdentity.dev && safe.identity.ino === rootIdentity.ino) continue;
+    if (sameIdentity(safe.identity, rootIdentity)) continue;
     const record = readPresenceRecord(candidate, sessionId);
     if (record) return { root: candidate, record, identity: safe.identity };
   }

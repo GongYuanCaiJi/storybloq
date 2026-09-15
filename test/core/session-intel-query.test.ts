@@ -17,7 +17,7 @@ vi.mock("../../src/core/presence-enrichment.js", async (importOriginal) => {
   return { ...mod, applyPresenceEnrichment: wrapped };
 });
 import { sampleSession } from "../../src/core/session-intel/query.js";
-import { PENDING_SUBDIR, markCompactPending, readPresenceRecord, stampHandover } from "../../src/core/session-intel/presence-bridge.js";
+import { PENDING_SUBDIR, markCompactPending, readPresenceRecord, stampHandover, worktreeDiscoveryStats } from "../../src/core/session-intel/presence-bridge.js";
 import { presenceFileBase } from "../../src/presence/types.js";
 import { readLedger } from "../../src/core/session-intel/boundary-ledger.js";
 import { resetLedgerRoutingCache } from "../../src/core/session-intel/ledger-root.js";
@@ -449,6 +449,60 @@ describe("ISS-1211: the boundary series is the repo's, not the cwd's", () => {
       writeTranscript(f.projects, encoded(f.worktree), SID, [...growingSession(2, 100_000, 5_000), boundaryRecord({ ts: at(1), pre: 417_000 }), assistantRecord({ ts: at(2), read: 266_709 })]);
       sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: T0 + 5 * 60_000 });
       expect(readLedger(f.main)[0]).toMatchObject({ era, captureKind: "startup", autoCompactWindowAtStart: 450_000 });
+    });
+  });
+
+  /**
+   * The ACTIVE twin of the skipped test above: it asserts today's outcome so
+   * the gap cannot change silently. When the era store follows the ledger,
+   * this test flips to the skipped one's expectations and the skip is deleted.
+   */
+  it("GAP (active twin): an era captured in another checkout leaves the boundary unclassified", () => {
+    withWorktreeFixture((f) => {
+      const era = processEra.current()!.id;
+      expect(createEraIfAbsent(f.main, { era, pid: process.pid, startedAt: processEra.current()!.startedAt, captureKind: "startup", autoCompactWindowAtStart: 450_000, autoCompactWindowSource: "user", capturedAt: at(-30), endedAt: null, lastVerifiedAt: at(-30), unverifiableStreak: 0, sessionIds: [SID] })).toBe("created");
+      applyPresenceEnrichment(f.worktree, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...emptySessionIntel(), era, captureKind: "startup", autoCompactWindowAtStart: 450_000, capturedAt: at(-30) } }));
+      writeTranscript(f.projects, encoded(f.worktree), SID, [...growingSession(2, 100_000, 5_000), boundaryRecord({ ts: at(1), pre: 417_000 }), assistantRecord({ ts: at(2), read: 266_709 })]);
+      sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: T0 + 5 * 60_000 });
+      // The entry is still routed to the repo's ledger; only its provenance is lost.
+      expect(readLedger(f.main)[0]).toMatchObject({ sessionId: SID, preTokens: 417_000, era: null, captureKind: null, autoCompactWindowAtStart: null });
+    });
+  });
+
+  it("ISS-1211 gate: handleSessionIntel resolves the ledger routing and the presence walk with ONE git spawn", () => {
+    withWorktreeFixture((f) => {
+      // The record lives under the worktree, so the ISS-1185 walk runs too;
+      // the transcript must be reachable from main or the sampler returns
+      // before it ever reads the ledger and the routing is never exercised.
+      bindCaller(f.worktree);
+      writeTranscript(f.projects, encoded(f.main), SID, [assistantRecord({ ts: at(0), read: 100_000 })]);
+      resetLedgerRoutingCache();
+      worktreeDiscoveryStats.spawns = 0;
+      const cli = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects });
+      const parsed = JSON.parse(cli.output) as { data: { recordRoot: string | null; transcriptPath: string | null } };
+      expect(parsed.data.transcriptPath).not.toBeNull();
+      expect(parsed.data.recordRoot).toBe(f.worktree);
+      // One spawn for BOTH the ledger routing and the presence walk.
+      expect(worktreeDiscoveryStats.spawns).toBe(1);
+    });
+  });
+
+  it("ISS-1211 gate: a spent sampling budget keeps the boundary local and spends no git, and the ingest outcome is reported", () => {
+    withWorktreeFixture((f) => {
+      bindCaller(f.worktree);
+      writeTranscript(f.projects, encoded(f.worktree), SID, [...growingSession(2, 100_000, 5_000), boundaryRecord({ ts: at(1), pre: 417_000 }), assistantRecord({ ts: at(2), read: 266_709 })]);
+      resetLedgerRoutingCache();
+      worktreeDiscoveryStats.spawns = 0;
+      // Exactly AT the soft budget: the stage checkpoints (strictly greater)
+      // still pass, so the sample is taken and ingested, but the routing's
+      // deadline is spent and discovery must not run.
+      const started = T0 + 5 * 60_000;
+      const r = sampleSession({ root: f.worktree, cwd: f.worktree, sampledBy: "query", projectsDir: f.projects, now: started, budget: { startedAt: started, softMs: 1_000, clock: () => started + 1_000 } });
+      expect(r.presence).toBe("persisted");
+      expect(r.ledgerIngest).toBe("written");
+      expect(worktreeDiscoveryStats.spawns).toBe(0);
+      expect(existsSync(boundariesAt(f.worktree))).toBe(true);
+      expect(existsSync(boundariesAt(f.main))).toBe(false);
     });
   });
 

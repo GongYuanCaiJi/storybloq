@@ -39,6 +39,28 @@ export function makeWorktreePair(prefix: string): WorktreePair {
   return { base, main, worktree, cleanup: () => rmSync(base, { recursive: true, force: true }) };
 }
 
+export interface WorktreeTriple {
+  readonly base: string;
+  readonly main: string;
+  /** Linked worktrees in the order `git worktree list` reports them. */
+  readonly linked: readonly [string, string];
+  readonly cleanup: () => void;
+}
+
+/**
+ * The pair plus a second linked worktree, each with its own `.story`. Two
+ * linked worktrees is the smallest fixture that can tell "the caller's own
+ * checkout" apart from "every other checkout": with one, dropping the sibling
+ * list and dropping self from the read set look identical.
+ */
+export function makeWorktreeTriple(prefix: string): WorktreeTriple {
+  const pair = makeWorktreePair(prefix);
+  const second = join(pair.base, "wt-two");
+  git(pair.main, ["worktree", "add", "-q", "-b", "wt-branch-two", second]);
+  for (const root of [pair.main, pair.worktree, second]) bareStoryInit(root);
+  return { base: pair.base, main: pair.main, linked: [pair.worktree, second], cleanup: pair.cleanup };
+}
+
 /** Bare `.story` init (no full initProject): enough for readPresenceRecord/discovery tests. */
 export function bareStoryInit(root: string): void {
   mkdirSync(join(root, ".story"), { recursive: true });

@@ -18,11 +18,11 @@ import { currentStorybloqClient } from "../../autonomous/client-profile.js";
 import { isPresenceEnabled } from "../../presence/handler.js";
 import { readAutoCompactWindow } from "../claude-settings.js";
 import { readSessionIntelConfig, resolveSessionIntelConfig, type SessionIntelConfig } from "./config.js";
-import { ingestBoundaries, readLedger, type LedgerEntry } from "./boundary-ledger.js";
+import { LEDGER_GLOBAL_CAP, ingestBoundaries, readLedger, type IngestOutcome, type LedgerEntry } from "./boundary-ledger.js";
 import { resolveCeiling } from "./ceiling-resolver.js";
 import { readEra } from "./era-store.js";
 import { computeSample } from "./sampler.js";
-import { boundaryInsideEra, peekPending, persistSample, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, resolveTargetProvenance, type CallerBinding } from "./presence-bridge.js";
+import { boundaryInsideEra, peekPending, persistSample, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, resolveTargetProvenance, type CallerBinding, type WorktreeWalkOptions } from "./presence-bridge.js";
 import { processEra } from "./process-era.js";
 import { authorizeTranscriptPath, locateTranscript } from "./transcript-locate.js";
 import { scanFull, scanTail, type ScanRequest } from "./transcript-scan.js";
@@ -81,6 +81,13 @@ export interface SessionIntelResult {
   readonly callerModelMismatch: { readonly caller: string; readonly transcript: string | null } | null;
   readonly presence: PresenceOutcome;
   readonly presenceReason: string | null;
+  /**
+   * ISS-1211 gate: the boundary ledger write's own outcome, null when this
+   * call never attempted one. `presence` describes the presence record, which
+   * can be persisted while the ledger write is lock-busy or fails, so a
+   * dropped boundary used to be entirely silent.
+   */
+  readonly ledgerIngest: IngestOutcome | null;
   readonly provenance: TargetProvenance;
   readonly config: { readonly notes: readonly string[] };
 }
@@ -106,6 +113,7 @@ function unknownResult(base: Partial<SessionIntelResult>, reason: string): Sessi
     callerModelMismatch: null,
     presence: "skipped",
     presenceReason: reason,
+    ledgerIngest: null,
     provenance: { era: null, capture: null },
     config: { notes: [] },
     ...base,
@@ -226,7 +234,14 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
       unusableReason = "pending compaction events remain";
     }
   }
-  const ledger = opts.root ? readLedger(opts.root) : [];
+  // ISS-1211 gate: the routing's `git worktree list` runs under the CALLER's
+  // budget, not its own. A spent deadline makes discovery return nothing,
+  // which is the local routing and is never memoized, so the next call with
+  // budget left resolves properly.
+  const walk: WorktreeWalkOptions = opts.budget
+    ? { deadline: opts.budget.startedAt + opts.budget.softMs, clock: opts.budget.clock ?? Date.now }
+    : {};
+  const ledger = opts.root ? readLedger(opts.root, walk) : [];
   // The live setting is read ONLY when there is no capture object at all. A
   // capture that recorded no window (`captureKind: "absent"`) is a captured
   // null: re-reading the file here would report a window this process is not
@@ -258,6 +273,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
   // 5. Persist + ingest.
   let presence: PresenceOutcome = opts.root ? (presenceOn ? "skipped" : "presence-disabled") : "no-project";
   let presenceReason: string | null = bound ? null : bindingReason;
+  let ledgerIngest: IngestOutcome | null = null;
   if (bound && opts.root && usable && scan.observation.authoritative && overBudget()) {
     // Computed past the budget: reported, never persisted or ingested.
     usable = false;
@@ -290,7 +306,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
       unusableReason = `sample unvalidated: ${outcome.reason}`;
     }
     if (usable && scan.boundaries.length > 0 && binding!.era) {
-      ingestBoundaries(opts.root, stampBoundaries(opts.root, sessionId, binding!.era, scan, now), cfg.boundarySampleCount);
+      ledgerIngest = ingestBoundaries(opts.root, stampBoundaries(opts.root, sessionId, binding!.era, scan, now), cfg.boundarySampleCount, LEDGER_GLOBAL_CAP, walk);
     }
   } else if (bound && !usable) {
     presenceReason = unusableReason;
@@ -318,6 +334,7 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
     callerModelMismatch,
     presence,
     presenceReason,
+    ledgerIngest,
     provenance,
     config: { notes: cfg.notes },
   };
