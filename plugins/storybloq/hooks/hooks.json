@@ -1,0 +1,4 @@
+{
+  "description": "Storybloq Mods: the seat roster (T-507) and the ledger sidebar (T-508), one hooks module for both.",
+  "modules": ["../hooks/mod.ts"]
+}
