@@ -420,20 +420,20 @@ describe("T-509 codex-bridge check: the probe", () => {
     }
   });
 
-  it("a native-binding failure advises the rebuild inside the owning package dir, shell-quoted", async () => {
+  it("a native-binding failure advises the rebuild in the directory that owns better-sqlite3, shell-quoted", async () => {
     const stderr = "Error: Could not locate the bindings file. Tried:\n -> /x/better_sqlite3.node";
     const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr, allocatedMs: 5000 });
-    const owner = vi.fn(() => "/opt/my bridge/node_modules/codex-claude-bridge");
-    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe, ownerPackageDir: owner }));
+    const owner = vi.fn(() => "/opt/my bridge");
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe, nativeRebuildDir: owner }));
     expect(owner).toHaveBeenCalledWith("/opt/codex-claude-bridge/dist/index.js");
     expect(check.status).toBe("advise");
-    expect(check.message).toContain("Run: (cd '/opt/my bridge/node_modules/codex-claude-bridge' && npm rebuild better-sqlite3)");
+    expect(check.message).toContain("Run: (cd '/opt/my bridge' && npm rebuild better-sqlite3)");
   });
 
   it("the binary grammar asks the owner of the command itself", async () => {
     const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr: "NODE_MODULE_VERSION 115", allocatedMs: 5000 });
     const owner = vi.fn(() => "/opt/b");
-    await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": { command: "/usr/local/bin/codex-claude-bridge", args: [] } } }) }, { probeMcp: probe, ownerPackageDir: owner }));
+    await checkCodexBridge(ctxFor(), bridgeDeps({ [CLAUDE_JSON]: claudeJson({ mcpServers: { "codex-bridge": { command: "/usr/local/bin/codex-claude-bridge", args: [] } } }) }, { probeMcp: probe, nativeRebuildDir: owner }));
     expect(owner).toHaveBeenCalledWith("/usr/local/bin/codex-claude-bridge");
   });
 
@@ -444,6 +444,27 @@ describe("T-509 codex-bridge check: the probe", () => {
     expect(check.message).toContain("could not be established from this registration (user codex-bridge: npx -y codex-claude-bridge@latest)");
     expect(check.message).toContain("claude mcp remove codex-bridge -s user");
     expect(check.message).toContain("storybloq setup-skill");
+  });
+
+  it("an ok answer whose stderr reports the native module as unloadable is advise with the rebuild command (bridge 1.8.0 degrades instead of exiting)", async () => {
+    const stderr = "[codex-bridge] review storage unavailable; reviews will run without history: SQLite native addon could not load. Original error: Could not locate the bindings file. Tried:\n -> /opt/x/better_sqlite3.node\n";
+    const probe = probeStub({ ...PROBE_OK, stderr });
+    const owner = vi.fn(() => "/opt/codex-claude-bridge");
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe, nativeRebuildDir: owner }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("answers but cannot load its native module");
+    expect(check.message).toContain("Run: (cd /opt/codex-claude-bridge && npm rebuild better-sqlite3)");
+    expect(owner).toHaveBeenCalledWith("/opt/codex-claude-bridge/dist/index.js");
+    expect(JSON.parse(check.detail!["bridges"] as string)[0]).toMatchObject({ probe: "ok", degraded: "native-module" });
+  });
+
+  it("a failed exit quotes the first Error line of stderr, not a Node loader frame", async () => {
+    const stderr = "node:internal/modules/cjs/loader:1368\n  throw err;\n  ^\n\nError: Cannot find module '/opt/codex-claude-bridge/dist/index.js'\n    at Module._resolveFilename\n";
+    const probe = probeStub({ kind: "failed", reason: "exited before answering", code: 1, signal: null, stderr, allocatedMs: 5000 });
+    const check = await checkCodexBridge(ctxFor(), bridgeDeps(USER_BRIDGE, { probeMcp: probe }));
+    expect(check.status).toBe("advise");
+    expect(check.message).toContain("exit code 1: Error: Cannot find module '/opt/codex-claude-bridge/dist/index.js'");
+    expect(check.message).not.toContain("loader:1368");
   });
 
   it("a not-attempted probe reads as not probed, never as broken", async () => {

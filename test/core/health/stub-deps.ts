@@ -44,7 +44,7 @@ export interface StubOptions {
   skillMarker?: Partial<HealthDeps["skillMarker"]>;
   globalConfig?: HealthDeps["globalConfig"];
   bundledBridge?: BundledBridge;
-  ownerPackageDir?: HealthDeps["ownerPackageDir"];
+  nativeRebuildDir?: HealthDeps["nativeRebuildDir"];
   probeMcp?: HealthDeps["probeMcp"];
 }
 
@@ -75,7 +75,7 @@ export function stubDeps(opts: StubOptions = {}): HealthDeps {
     },
     globalConfig: opts.globalConfig ?? (() => null),
     bundledBridge: () => opts.bundledBridge ?? { kind: "absent" },
-    ownerPackageDir: opts.ownerPackageDir ?? (() => null),
+    nativeRebuildDir: opts.nativeRebuildDir ?? (() => null),
     probeMcp: opts.probeMcp ?? (async () => ({ kind: "not-attempted", reason: "stub" })),
   };
 }
@@ -118,7 +118,7 @@ export function probeStub(...answers: McpProbe[]) {
   });
 }
 
-export const PROBE_OK: McpProbe = { kind: "ok", serverName: "codex-claude-bridge", serverVersion: "1.8.0", protocolVersion: "2024-11-05", allocatedMs: 5000 };
+export const PROBE_OK: McpProbe = { kind: "ok", serverName: "codex-claude-bridge", serverVersion: "1.8.0", protocolVersion: "2024-11-05", allocatedMs: 5000, stderr: "" };
 
 /** A spawn stub that records how it was called. */
 export function runStub(result: HealthRun) {

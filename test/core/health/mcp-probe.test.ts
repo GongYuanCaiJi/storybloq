@@ -11,10 +11,10 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { spawnSync, type spawn as spawnFn } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BRIDGE_PROBE_MIN_MS, probeMcpServer } from "../../../src/core/health/deps.js";
+import { BRIDGE_PROBE_MIN_MS, STDERR_DRAIN_MS, probeMcpServer } from "../../../src/core/health/deps.js";
 import type { McpLaunch } from "../../../src/core/health/types.js";
 
 const fixture = (name: string): string => fileURLToPath(new URL(`./fixtures/${name}.mjs`, import.meta.url));
@@ -55,6 +55,20 @@ async function until(pred: () => boolean, ms = 3000): Promise<boolean> {
 }
 
 const far = () => Date.now() + 60_000;
+
+type FakeChild = EventEmitter & { pid?: number; exitCode: number | null; signalCode: string | null; stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: () => boolean };
+/** A pid-less in-process child for the spawn seam: three PassThrough streams, never exits. */
+function fakeChild(): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  child.pid = undefined;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => true;
+  return child;
+}
 
 /** Every launch's process tree must be gone once the adapter resolves; bounded polling absorbs reaping lag. */
 async function expectReaped(tok: string): Promise<void> {
@@ -190,14 +204,7 @@ describe("T-509 probeMcpServer", () => {
     // with EPIPE on the first write, exactly as a closed pipe does.
     let errored = 0;
     const fakeSpawn = (() => {
-      const child = new EventEmitter() as EventEmitter & { pid?: number; exitCode: number | null; signalCode: string | null; stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill: () => boolean };
-      child.pid = undefined;
-      child.exitCode = null;
-      child.signalCode = null;
-      child.stdin = new PassThrough();
-      child.stdout = new PassThrough();
-      child.stderr = new PassThrough();
-      child.kill = () => true;
+      const child = fakeChild();
       child.stdin.write = ((): boolean => {
         errored += 1;
         const err = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
@@ -234,6 +241,43 @@ describe("T-509 probeMcpServer", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("launches the server in a scratch directory that is removed afterwards, so nothing lands in the caller's cwd", async () => {
+    // The bridge writes reviews.db into process.cwd() at startup.
+    const { r, tok } = await probe("mcp-cwd-writer");
+    expect(r.kind).toBe("ok");
+    const serverCwd = (r as { serverName: string }).serverName;
+    expect(serverCwd).not.toBe(process.cwd());
+    expect(existsSync(join(process.cwd(), `probe-wrote-${tok}`))).toBe(false);
+    expect(await until(() => !existsSync(serverCwd))).toBe(true);
+  });
+
+  it("keeps reading stderr for a bounded moment after a good answer, so a warning written beside it reaches the ok result", async () => {
+    // Deterministic through the seam: the fake child answers on stdout first
+    // and only then reports the degraded native module on stderr.
+    const fakeSpawn = (() => {
+      const child = fakeChild();
+      setTimeout(() => {
+        child.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { protocolVersion: "2024-11-05", capabilities: {}, serverInfo: { name: "b", version: "1" } } }) + "\n");
+        setTimeout(() => child.stderr.write("[codex-bridge] review storage unavailable: Could not locate the bindings file\n"), Math.floor(STDERR_DRAIN_MS / 3));
+      }, 5);
+      return child;
+    }) as unknown as typeof spawnFn;
+    const r = await probeMcpServer({ argv: ["fake"], envOverrides: {} }, far(), 5_000, { env: process.env, spawn: fakeSpawn });
+    expect(r.kind).toBe("ok");
+    expect((r as { stderr: string }).stderr).toContain("Could not locate the bindings file");
+  });
+
+  it("does not launch anything when the scratch directory cannot be created", async () => {
+    const spawned: string[] = [];
+    const fakeSpawn = ((cmd: string) => {
+      spawned.push(cmd);
+      throw new Error("must not spawn");
+    }) as unknown as typeof spawnFn;
+    const r = await probeMcpServer({ argv: ["fake"], envOverrides: {} }, far(), 5_000, { env: process.env, spawn: fakeSpawn, mkScratch: () => { throw new Error("ENOSPC"); } });
+    expect(r).toMatchObject({ kind: "failed", reason: "scratch directory: ENOSPC" });
+    expect(spawned).toEqual([]);
   });
 
   it("merges envOverrides over the inherited environment", async () => {

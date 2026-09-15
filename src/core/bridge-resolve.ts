@@ -113,3 +113,28 @@ export function ownerPackageDir(executablePath: string): string | null {
     cur = parent;
   }
 }
+
+/**
+ * Where `npm rebuild better-sqlite3` must run for the bridge at this
+ * executable: the install root that OWNS the better-sqlite3 the bridge
+ * resolves. In the bundled layout that module is hoisted beside the bridge
+ * (`<storybloq>/node_modules/{codex-claude-bridge,better-sqlite3}`), so the
+ * bridge's own directory is the wrong answer: npm rebuild there finds no
+ * such dependency and reports success. Null when the executable is not the
+ * bridge's or better-sqlite3 does not resolve from it, so advice never names
+ * a guessed directory.
+ */
+export function nativeRebuildDir(executablePath: string): string | null {
+  const owner = ownerPackageDir(executablePath);
+  if (owner === null) return null;
+  let sqlitePkg: string;
+  try {
+    sqlitePkg = realpathSync(createRequire(join(owner, "package.json")).resolve("better-sqlite3/package.json"));
+  } catch {
+    return null;
+  }
+  // <root>/node_modules/better-sqlite3/package.json -> <root>
+  const pkgDir = dirname(sqlitePkg);
+  const modules = dirname(pkgDir);
+  return modules.endsWith("node_modules") ? dirname(modules) : null;
+}

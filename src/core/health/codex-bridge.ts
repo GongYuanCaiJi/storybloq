@@ -201,19 +201,20 @@ export async function checkCodexBridge(ctx: HealthContext, deps: HealthDeps): Pr
       scope: r.scope,
       probe: r.probe.kind,
       ...(r.probe.kind === "ok" ? { serverName: r.probe.serverName } : {}),
+      ...(degradedNativeModule(r.probe) ? { degraded: "native-module" } : {}),
       ...("allocatedMs" in r.probe ? { allocatedMs: r.probe.allocatedMs } : {}),
     }))),
   };
 
-  if (results.every((r) => r.probe.kind === "ok")) {
+  if (results.every((r) => r.probe.kind === "ok" && !degradedNativeModule(r.probe))) {
     const names = results.map((r) => `\`${r.name}\` (${r.scope} scope)`).join(" and ");
     return okCheck(ID, `Codex is installed and the codex-claude-bridge review backend answers as ${names}.`, detail);
   }
 
   const clauses = results
-    .filter((r) => r.probe.kind !== "ok")
+    .filter((r) => r.probe.kind !== "ok" || degradedNativeModule(r.probe))
     .map((r) => `\`${r.name}\` (${r.scope} scope) ${describeFailure(r, deps, winners)}`);
-  return adviseCheck(ID, `Codex is installed but the codex-claude-bridge review backend is registered and not answering: ${clauses.join(" ")}`, detail);
+  return adviseCheck(ID, `Codex is installed but the codex-claude-bridge review backend is registered but not healthy: ${clauses.join(" ")}`, detail);
 }
 
 /** The registration as an argv, verbatim, with its env map as overrides. */
@@ -278,6 +279,23 @@ function noBridgeRegistered(
   );
 }
 
+/**
+ * The bridge (1.8.0) answers initialize even when better-sqlite3 cannot load:
+ * it logs "review storage unavailable" to stderr and runs without history.
+ * That is not a healthy review backend, so an ok answer with that stderr is
+ * judged like a native-module failure.
+ */
+function degradedNativeModule(p: McpProbe): boolean {
+  return p.kind === "ok" && NATIVE_BINDING_RE.test(p.stderr);
+}
+
+/** The first line that reads as an error, else the first non-empty line. A Node
+ *  MODULE_NOT_FOUND stack opens with a loader frame, which tells the user nothing. */
+function firstErrorLine(stderr: string): string {
+  const lines = stderr.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  return lines.find((l) => /^(\w*Error\b|error:)/i.test(l)) ?? lines[0] ?? "";
+}
+
 /** The executable whose owning package a rebuild would run in, per launcher grammar; null for npx/bunx. */
 function executableOf(launch: McpLaunch): string | null {
   const [command, ...args] = launch.argv;
@@ -296,8 +314,15 @@ function describeFailure(
   const p = r.probe;
   const argv = r.launch.argv.map((a) => shellArg(a)).join(" ");
   switch (p.kind) {
-    case "ok":
-      return "answers.";
+    case "ok": {
+      if (!degradedNativeModule(p)) return "answers.";
+      const exe = executableOf(r.launch);
+      const dir = exe === null ? null : deps.nativeRebuildDir(exe);
+      const fix = dir !== null
+        ? `Run: (cd ${shellArg(dir)} && npm rebuild better-sqlite3)`
+        : `rebuild better-sqlite3 inside the copy that registration runs (${r.scope} ${r.name}: ${argv})`;
+      return `answers but cannot load its native module, so reviews run without history. ${fix}`;
+    }
     case "not-attempted":
       return `was not probed (${p.reason}).`;
     case "timeout":
@@ -307,7 +332,7 @@ function describeFailure(
     case "failed": {
       if (NATIVE_BINDING_RE.test(p.stderr)) {
         const exe = executableOf(r.launch);
-        const dir = exe === null ? null : deps.ownerPackageDir(exe);
+        const dir = exe === null ? null : deps.nativeRebuildDir(exe);
         if (dir !== null) {
           return `failed to load its native module. Run: (cd ${shellArg(dir)} && npm rebuild better-sqlite3)`;
         }
@@ -317,9 +342,9 @@ function describeFailure(
           : `claude mcp remove ${shellArg(r.name)} -s ${r.scope}, then storybloq setup-skill to register the bundled bridge`;
         return `failed to load its native module, and the bridge's package directory could not be established from this registration (${r.scope} ${r.name}: ${argv}); rebuild inside the copy that registration runs, or replace it: ${replace}.`;
       }
-      const line = p.stderr.split("\n").find((l) => l.trim().length > 0) ?? "";
+      const line = firstErrorLine(p.stderr);
       const exit = p.code !== null ? `exit code ${p.code}` : p.signal !== null ? `signal ${p.signal}` : p.reason;
-      return `${p.reason} (${exit}${line ? `: ${line.trim()}` : ""}); launch it by hand to see the error.`;
+      return `${p.reason} (${exit}${line ? `: ${line}` : ""}); launch it by hand to see the error.`;
     }
   }
 }

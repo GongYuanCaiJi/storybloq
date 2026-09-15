@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, realpathSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ownerPackageDir, resolveBundledBridge } from "../../src/core/bridge-resolve.js";
+import { nativeRebuildDir, ownerPackageDir, resolveBundledBridge } from "../../src/core/bridge-resolve.js";
 
 let dir: string | null = null;
 afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
@@ -99,5 +99,34 @@ describe("ownerPackageDir", () => {
     writeFileSync(join(nested, "package.json"), "{ broken");
     expect(ownerPackageDir(join(nested, "build", "x.node"))).toBeNull();
     expect(ownerPackageDir(f.entry.replace("codex-claude-bridge", "codex-claude-bridge-x"))).toBeNull();
+  });
+});
+
+describe("nativeRebuildDir", () => {
+  function sqlite(at: string): void {
+    mkdirSync(at, { recursive: true });
+    writeFileSync(join(at, "package.json"), JSON.stringify({ name: "better-sqlite3", version: "12.0.0" }));
+  }
+  it("is the install root that owns the better-sqlite3 the bridge resolves: the HOIST parent, not the bridge package", () => {
+    // Bundled layout: <app>/node_modules/{codex-claude-bridge,better-sqlite3}. npm rebuild must run in <app>.
+    const f = fakeInstall({ bin: { "codex-claude-bridge": "dist/index.js" } });
+    sqlite(join(dir!, "app", "node_modules", "better-sqlite3"));
+    expect(nativeRebuildDir(f.entry)).toBe(join(dir!, "app"));
+  });
+  it("is the bridge package when better-sqlite3 is nested inside it", () => {
+    const f = fakeInstall({ bin: { "codex-claude-bridge": "dist/index.js" } });
+    sqlite(join(f.pkgDir, "node_modules", "better-sqlite3"));
+    expect(nativeRebuildDir(f.entry)).toBe(f.pkgDir);
+  });
+  it("is null when the executable is not the bridge's, or better-sqlite3 does not resolve from it", () => {
+    const f = fakeInstall({ bin: { "codex-claude-bridge": "dist/index.js" } });
+    expect(nativeRebuildDir(f.entry)).toBeNull();
+    const other = join(dir!, "app", "node_modules", "other", "dist");
+    mkdirSync(other, { recursive: true });
+    writeFileSync(join(dir!, "app", "node_modules", "other", "package.json"), JSON.stringify({ name: "other" }));
+    writeFileSync(join(other, "index.js"), "");
+    sqlite(join(dir!, "app", "node_modules", "better-sqlite3"));
+    expect(nativeRebuildDir(join(other, "index.js"))).toBeNull();
+    expect(nativeRebuildDir(join(dir!, "missing.js"))).toBeNull();
   });
 });

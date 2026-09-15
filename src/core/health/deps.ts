@@ -11,9 +11,9 @@
 
 import fs from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { ownerPackageDir, resolveBundledBridge } from "../bridge-resolve.js";
+import { nativeRebuildDir, resolveBundledBridge } from "../bridge-resolve.js";
 import { readAutoCompactWindowDiagnostic } from "../claude-settings.js";
 import { readBoundedFileDetailed } from "../limit-config.js";
 import { isHealthCheckGloballyDisabled } from "../limit-ledger.js";
@@ -76,6 +76,8 @@ const LINE_LIMIT = 64 * 1024;
 const TOTAL_LIMIT = 256 * 1024;
 const STDERR_TAIL = 4 * 1024;
 const TERM_GRACE_MS = 200;
+/** After a good answer, how long stderr is still read before the ok settles: stdout and stderr are separate pipes with no cross-stream ordering, and the bridge reports a degraded native module on stderr. */
+export const STDERR_DRAIN_MS = 150;
 const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
 
 export interface ProbeMcpOptions {
@@ -85,6 +87,8 @@ export interface ProbeMcpOptions {
   readonly clientVersion?: string;
   /** Test seam: the spawn function (default `child_process.spawn`). */
   readonly spawn?: typeof spawn;
+  /** Test seam: creates the scratch cwd (default mkdtemp under os.tmpdir()). */
+  readonly mkScratch?: () => string;
 }
 
 const KILL_POLL_MS = 100;
@@ -108,6 +112,7 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
   const remaining = deadlineAt - now();
   if (remaining < BRIDGE_PROBE_MIN_MS) return Promise.resolve({ kind: "not-attempted", reason: "budget exhausted" });
   const allocatedMs = Math.max(BRIDGE_PROBE_MIN_MS, Math.min(capMs, remaining));
+  const startedAt = now();
   const [command, ...args] = launch.argv;
   if (command === undefined) return Promise.resolve({ kind: "failed", reason: "empty command", code: null, signal: null, stderr: "", allocatedMs });
 
@@ -120,15 +125,39 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
     let stderrTail = "";
     let timer: NodeJS.Timeout | null = null;
 
+    // The server runs in a scratch directory of its own: the bridge writes
+    // its review database into process.cwd() at startup, and a health check
+    // must leave nothing behind in the caller's project. Removed after the
+    // teardown, whatever the outcome. No scratch dir, no launch: the shared
+    // temp dir would collect a persistent database instead.
+    let scratch: string | null = null;
+    try {
+      scratch = (opts.mkScratch ?? (() => fs.mkdtempSync(join(tmpdir(), "storybloq-probe-"))))();
+    } catch (err: unknown) {
+      resolveProbe({ kind: "failed", reason: `scratch directory: ${err instanceof Error ? err.message : String(err)}`, code: null, signal: null, stderr: "", allocatedMs });
+      return;
+    }
+    const dropScratch = (): void => {
+      if (scratch === null) return;
+      try {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      } catch {
+        // best effort
+      }
+      scratch = null;
+    };
+
     let child: ReturnType<typeof spawn>;
     try {
       child = (opts.spawn ?? spawn)(command, args, {
         stdio: ["pipe", "pipe", "pipe"],
         env: { ...opts.env, ...launch.envOverrides },
+        cwd: scratch,
         detached: platform !== "win32",
         windowsHide: true,
       });
     } catch (err: unknown) {
+      dropScratch();
       resolveProbe(spawnFailure(err, allocatedMs));
       return;
     }
@@ -138,7 +167,10 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
       settled = true;
       if (timer) clearTimeout(timer);
       timer = null;
-      void teardown(child, exited !== null, platform).then(() => resolveProbe(result));
+      void teardown(child, exited !== null, platform).then(() => {
+        dropScratch();
+        resolveProbe(result);
+      });
     };
 
     child.once("error", (err: NodeJS.ErrnoException) => {
@@ -194,6 +226,14 @@ export function probeMcpServer(launch: McpLaunch, deadlineAt: number, capMs: num
           } catch {
             // best effort
           }
+          // Keep reading stderr for a bounded moment before the ok settles, so
+          // a warning the server wrote just before its answer is not lost to
+          // pipe ordering. An exit during the drain is still "answered then
+          // exited" through the exit listener.
+          if (timer) clearTimeout(timer);
+          const drain = Math.max(0, Math.min(STDERR_DRAIN_MS, startedAt + allocatedMs - now()));
+          timer = setTimeout(() => finish({ ...verdict, stderr: stderrTail }), drain);
+          return;
         }
         finish(verdict);
       }
@@ -251,7 +291,7 @@ function judgeLine(line: string, allocatedMs: number, stderr: string): McpProbe 
   const version = (info as Record<string, unknown>)["version"];
   if (typeof name !== "string") return failed("malformed initialize result (serverInfo.name)");
   if (typeof version !== "string") return failed("malformed initialize result (serverInfo.version)");
-  return { kind: "ok", serverName: name, serverVersion: version, protocolVersion: r["protocolVersion"], allocatedMs };
+  return { kind: "ok", serverName: name, serverVersion: version, protocolVersion: r["protocolVersion"], allocatedMs, stderr };
 }
 
 /**
@@ -409,7 +449,7 @@ export function defaultHealthDeps(opts: { ledgerRoot: string | null }): HealthDe
     // switch as a plain object.
     globalConfig: () => (isHealthCheckGloballyDisabled() ? { healthCheck: { enabled: false } } : null),
     bundledBridge: () => resolveBundledBridge(),
-    ownerPackageDir: (executablePath) => ownerPackageDir(executablePath),
+    nativeRebuildDir: (executablePath) => nativeRebuildDir(executablePath),
     // The inherited environment is this deps object's own `env`, merged under
     // the registration's overrides here so the check never reads process.env.
     probeMcp: (launch, deadlineAt, capMs) => probeMcpServer(launch, deadlineAt, capMs, { env: process.env }),

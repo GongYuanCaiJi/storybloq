@@ -157,7 +157,7 @@ export interface McpLaunch {
  * report as "not probed", never as "broken".
  */
 export type McpProbe =
-  | { readonly kind: "ok"; readonly serverName: string; readonly serverVersion: string; readonly protocolVersion: string; readonly allocatedMs: number }
+  | { readonly kind: "ok"; readonly serverName: string; readonly serverVersion: string; readonly protocolVersion: string; readonly allocatedMs: number; readonly stderr: string }
   | { readonly kind: "enoent"; readonly allocatedMs: number }
   | { readonly kind: "timeout"; readonly allocatedMs: number }
   | { readonly kind: "failed"; readonly reason: string; readonly code: number | null; readonly signal: string | null; readonly stderr: string; readonly allocatedMs: number }
@@ -207,8 +207,8 @@ export interface HealthDeps {
   readonly globalConfig: () => { healthCheck?: { enabled?: unknown } } | null;
   /** T-509: the optional bundled codex-claude-bridge, resolved without spawning. */
   readonly bundledBridge: () => BundledBridge;
-  /** T-509: the package directory that owns an executable, or null. */
-  readonly ownerPackageDir: (executablePath: string) => string | null;
+  /** T-509: where `npm rebuild better-sqlite3` must run for the bridge at this executable; null when unknown. */
+  readonly nativeRebuildDir: (executablePath: string) => string | null;
   /**
    * T-509: launch an MCP server and run the initialize handshake, bounded by
    * `capMs` and never past `deadlineAt`. The adapter owns the process tree:
