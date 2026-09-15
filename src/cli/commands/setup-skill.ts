@@ -985,6 +985,15 @@ export async function enableClaudeBusHooks(
     return hookRowKey(e.command)?.key === key;
   };
   const sessionGroups = hooks.SessionStart as unknown[];
+  // ISS-1222 (post-hoc Codex finding): the normalisation below keeps ONE
+  // owned row per event and matches rows by semantic key, so a stale
+  // launcher row beside the global one must be collapsed to the validated
+  // global command FIRST. With no validated launcher the collision is left
+  // exactly as it is and the normalisation is skipped, rather than promoting
+  // whichever row the scan met last.
+  const collisions = dedupeHookRows({ hooks: { SessionStart: sessionGroups } }, globalHookCommandFor());
+  if (collisions.unresolved.length > 0) return { changed: false, skipped: true };
+  if (collisions.changed) changed = true;
   let sessionEntry: HookEntry | null = null;
   let sessionMatches = 0;
   let canonicalSessionMatches = 0;

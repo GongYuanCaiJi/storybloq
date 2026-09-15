@@ -181,6 +181,35 @@ describe("registerHook by semantic command and coverage (ISS-1222)", () => {
     expect(await groupsOf("SessionStart")).toEqual([{ matcher: FULL, commands: [`${NVM} session resume-prompt`] }]);
   });
 
+  it("enableClaudeBusHooks keeps the validated global row and drops the stale npx row, whichever group order the file has (post-hoc Codex finding)", async () => {
+    await seed({
+      SessionStart: [
+        { matcher: CLAUDE_BUS_SESSION_START_MATCHER, hooks: [row(`${NVM} session resume-prompt`, { timeout: 7 })] },
+        { matcher: "resume", hooks: [row(`${NPX} session resume-prompt`)] },
+      ],
+      Stop: [{ matcher: "", hooks: [row(`${NVM} hook-status`)] }],
+    });
+    const r = await enableClaudeBusHooks(settingsPath, NVM);
+    expect(r).toEqual({ changed: true, skipped: false });
+    const s = JSON.parse(await readFile(settingsPath, "utf-8")) as { hooks: { SessionStart: Group[] } };
+    expect(s.hooks.SessionStart).toEqual([{ matcher: CLAUDE_BUS_SESSION_START_MATCHER, hooks: [{ type: "command", command: `${NVM} session resume-prompt`, timeout: 7 }] }]);
+  });
+
+  it("enableClaudeBusHooks with no validated global launcher leaves a same-key collision untouched and reports skipped", async () => {
+    globalLauncher.override = () => null;
+    await seed({
+      SessionStart: [
+        { matcher: CLAUDE_BUS_SESSION_START_MATCHER, hooks: [row(`${NVM} session resume-prompt`)] },
+        { matcher: "resume", hooks: [row(`${NPX} session resume-prompt`)] },
+      ],
+      Stop: [{ matcher: "", hooks: [row(`${NVM} hook-status`)] }],
+    });
+    const before = await readFile(settingsPath, "utf-8");
+    const r = await enableClaudeBusHooks(settingsPath, NVM);
+    expect(r).toEqual({ changed: false, skipped: true });
+    expect(await readFile(settingsPath, "utf-8")).toBe(before);
+  });
+
   it("enableClaudeBusHooks finds our rows by semantic key when only an alternate-path row exists", async () => {
     globalLauncher.override = () => null;
     await seed({

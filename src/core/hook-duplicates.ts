@@ -285,7 +285,10 @@ export function dedupeHookRows(settings: unknown, globalCommandFor: GlobalComman
         if (slot && r.entry === slot.entry) replaceInPlace.set(r.entry, keeperEntry);
         else toDrop.add(r.entry);
       }
-      if (!slot) placements.push({ matcher, entry: keeperEntry, anchorGroupIndex: source.groupIndex });
+      // A keeper with no slot goes where the collision FIRST appears in the
+      // file, not where the global row happened to sit, so the consolidated
+      // hook never moves past unrelated groups.
+      if (!slot) placements.push({ matcher, entry: keeperEntry, anchorGroupIndex: comp[0]!.groupIndex });
       reconciled.push({ hookType, key: comp[0]!.key.key, kept, dropped });
     }
     if (toDrop.size === 0 && replaceInPlace.size === 0) continue;
@@ -299,6 +302,11 @@ export function dedupeHookRows(settings: unknown, globalCommandFor: GlobalComman
         .filter((entry) => !toDrop.has(entry as HookEntry))
         .map((entry) => replaceInPlace.get(entry as HookEntry) ?? entry);
     }
+    // Anchors are indices into the array BEFORE any insertion: place in
+    // ascending anchor order and shift each by the insertions already made,
+    // so a second placement never lands against a moved group.
+    placements.sort((a, b) => a.anchorGroupIndex - b.anchorGroupIndex);
+    let inserted = 0;
     for (const p of placements) {
       const target = hookArray.find((group) =>
         typeof group === "object" && group !== null &&
@@ -307,8 +315,9 @@ export function dedupeHookRows(settings: unknown, globalCommandFor: GlobalComman
       if (target) {
         target.hooks!.push(p.entry);
       } else {
-        const at = Math.min(p.anchorGroupIndex, hookArray.length);
+        const at = Math.min(p.anchorGroupIndex + inserted, hookArray.length);
         hookArray.splice(at, 0, { matcher: p.matcher, hooks: [p.entry] });
+        inserted += 1;
       }
     }
     for (let i = hookArray.length - 1; i >= 0; i--) {

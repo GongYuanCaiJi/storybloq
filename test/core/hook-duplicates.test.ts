@@ -261,6 +261,39 @@ describe("dedupeHookRows", () => {
   });
 });
 
+describe("dedupeHookRows keeper placement (ISS-1222 post-hoc Codex finding)", () => {
+  it("a keeper with no slot lands at the FIRST collision row's group position, even when the global row sits later in the file", () => {
+    const s = { hooks: { SessionStart: [
+      { matcher: "startup|resume", hooks: [row(`${NPX} session resume-prompt`)] },
+      { matcher: "", hooks: [row("/other/tool start")] },
+      { matcher: "resume|clear", hooks: [row(`${NVM} session resume-prompt`)] },
+    ] } };
+    dedupeHookRows(s, globalFor(NVM));
+    expect(commands(s as never, "SessionStart")).toEqual([
+      { matcher: "startup|resume|clear", commands: [`${NVM} session resume-prompt`] },
+      { matcher: "", commands: ["/other/tool start"] },
+    ]);
+  });
+
+  it("two placements in one event, separated by retained unrelated groups, each land before their own anchor", () => {
+    const s = { hooks: { SessionStart: [
+      { matcher: "a|b", hooks: [row(`${NPX} session resume-prompt`)] },
+      { matcher: "", hooks: [row("/other/tool one")] },
+      { matcher: "b|c", hooks: [row(`${NVM} session resume-prompt`)] },
+      { matcher: "x|y", hooks: [row(`${NPX} session intel-start`)] },
+      { matcher: "", hooks: [row("/other/tool two")] },
+      { matcher: "y|z", hooks: [row(`${NVM} session intel-start`)] },
+    ] } };
+    dedupeHookRows(s, globalFor(NVM));
+    expect(commands(s as never, "SessionStart")).toEqual([
+      { matcher: "a|b|c", commands: [`${NVM} session resume-prompt`] },
+      { matcher: "", commands: ["/other/tool one"] },
+      { matcher: "x|y|z", commands: [`${NVM} session intel-start`] },
+      { matcher: "", commands: ["/other/tool two"] },
+    ]);
+  });
+});
+
 describe("reconcileDuplicateHookRows", () => {
   let dir: string | null = null;
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); dir = null; });
