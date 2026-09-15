@@ -50,6 +50,26 @@ export function modsDir(): string {
 export const MODS_DISPLAY_PATH = "~/.claude/skills/storybloq/";
 
 /**
+ * Sidecar beside the generated install.ts recording the binary path the copy
+ * answers (empty when it answers the bare name), so the version-marker check
+ * can tell on every invocation whether the binary has moved without parsing
+ * the generated module.
+ */
+export const MODS_BIN_FILE = ".storybloq-bin";
+
+/**
+ * The binary path the installed copy answers: null when it answers the bare
+ * name, undefined when no sidecar exists (a copy from before the sidecar, or
+ * no copy at all).
+ */
+export function readModsBin(dir: string = modsDir()): string | null | undefined {
+  const p = join(dir, "hooks", MODS_BIN_FILE);
+  if (!existsSync(p)) return undefined;
+  const text = readFileSync(p, "utf-8").trim();
+  return text.length > 0 ? text : null;
+}
+
+/**
  * Resolves the bundled plugin directory, in either layout:
  *   - Bundled (npm): dist/cli.js, plugin at <pkg>/plugins/storybloq
  *   - Source (dev):  src/core/mods-install.ts, plugin at <pkg>/plugins/storybloq
@@ -321,6 +341,8 @@ export async function installMods(options: InstallModsOptions): Promise<InstallM
     }
     await writeFile(join(stage, "hooks", "install.ts"), renderInstallModule(options.bin), "utf-8");
     written.push("hooks/install.ts");
+    await writeFile(join(stage, "hooks", MODS_BIN_FILE), `${options.bin ?? ""}\n`, "utf-8");
+    written.push(`hooks/${MODS_BIN_FILE}`);
 
     if (__installModsTestHooks.beforeSwap !== null) await __installModsTestHooks.beforeSwap();
     const { copyDirRecursive } = await import("../cli/commands/setup-skill.js");

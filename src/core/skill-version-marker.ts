@@ -196,6 +196,37 @@ async function refreshCodexConfigIfPresent(): Promise<void> {
  * a UX degradation, not a blocker. The user's original command still
  * runs.
  */
+/**
+ * T-507 pen hold 1, second half: the Mods copy follows the binary even when
+ * the storybloq version has not changed (an nvm switch at the same version
+ * leaves the marker current and the stale branch above never runs). Where a
+ * copy is installed, the path it records is compared with a fresh
+ * resolution on every invocation the marker check runs; the copy is
+ * rewritten once when they differ and left alone when they match. A copy
+ * from before the sidecar existed is rewritten once to gain it. Best-effort,
+ * logged, never blocking.
+ */
+async function refreshModsIfBinMoved(): Promise<void> {
+  try {
+    const { installMods, modsInstalled, readModsBin, MODS_DISPLAY_PATH } = await import("./mods-install.js");
+    if (!modsInstalled()) return;
+    const { resolveStorybloqBin } = await import("../cli/commands/setup-skill.js");
+    const bin = resolveStorybloqBin();
+    const recorded = readModsBin();
+    if (recorded !== undefined && recorded === bin) return;
+    await installMods({ bin });
+    process.stderr.write(
+      `storybloq: the storybloq binary moved; refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `storybloq: Mods refresh failed (non-fatal): ${msg}\n` +
+      `  Run 'storybloq setup --client claude' manually to retry.\n`,
+    );
+  }
+}
+
 export async function autoRefreshSkillIfStale(
   runningVersion: string,
   opts: { reconcileLimitHooks?: boolean } = {},
@@ -205,7 +236,10 @@ export async function autoRefreshSkillIfStale(
   // explicitly opted out of.
   const reconcileLimitHooks = opts.reconcileLimitHooks !== false;
   const staleTargets = skillTargets().filter((target) => isSkillStale(runningVersion, target.id));
-  if (staleTargets.length === 0) return false;
+  if (staleTargets.length === 0) {
+    await refreshModsIfBinMoved();
+    return false;
+  }
 
   try {
     const { copyDirRecursive, resolveSkillSourceDir, resolveStorybloqBin } =
@@ -364,6 +398,7 @@ export async function autoRefreshSkillIfStale(
       }
     }
 
+    await refreshModsIfBinMoved();
     return true;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -15,7 +15,7 @@
  * (the refresh copies the files but keeps the old install.ts) goes red
  * against the "moves with the binary" test below. Other mutants this file
  * kills: M-ALWAYS-INSTALL, M-KEEP-TESTS, M-KEEP-SKILLS, M-PARTIAL-GRAPH,
- * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO.
+ * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO, M-NO-PATH-TRACK, M-RECOPY-ALWAYS.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, writeFile, readFile, rm, chmod, readdir } from "node:fs/promises";
@@ -132,10 +132,12 @@ describe("installMods (T-507 D)", () => {
 
     const hooks = (await readdir(join(dir, "hooks"))).sort();
     const sourceHooks = (await readdir(join(PLUGIN_SRC, "hooks"))).filter((f) => !f.endsWith(".test.ts")).sort();
-    expect(hooks).toEqual(sourceHooks);
+    // The copy is the source's runtime files plus the generated install.ts and the binary sidecar.
+    expect(hooks).toEqual([".storybloq-bin", ...sourceHooks].sort());
     expect(hooks.some((f) => f.endsWith(".test.ts"))).toBe(false);
+    expect((await readFile(join(dir, "hooks", ".storybloq-bin"), "utf-8")).trim()).toBe(bin);
     for (const name of hooks) {
-      if (name === "install.ts") continue;
+      if (name === "install.ts" || name === ".storybloq-bin") continue;
       expect(await readFile(join(dir, "hooks", name), "utf-8")).toBe(await readFile(join(PLUGIN_SRC, "hooks", name), "utf-8"));
     }
     expect(await readFile(join(dir, "hooks", "install.ts"), "utf-8")).toContain(`return ${JSON.stringify(bin)};`);
@@ -581,6 +583,54 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     expect(await readFile(join(modsDir(), "hooks", "sidebar.ts"), "utf-8")).toBe(
       await readFile(join(PLUGIN_SRC, "hooks", "sidebar.ts"), "utf-8"),
     );
+  });
+
+  it("follows the binary at the SAME storybloq version: marker current, PATH switched, install.ts answers the new path (M-NO-PATH-TRACK)", async () => {
+    const { installMods, modsDir, readModsBin } = await import("../../src/core/mods-install.js");
+    const oldBin = await fakeBin(join(tempDir, "nvm", "v20", "bin"));
+    await installMods({ bin: oldBin });
+    expect(readModsBin()).toBe(oldBin);
+    // The skill is current: the stale branch must not be what moves the path.
+    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+
+    const newBin = await fakeBin(join(tempDir, "nvm", "v22", "bin"));
+    process.env.PATH = dirname(newBin);
+    const { autoRefreshSkillIfStale } = await import("../../src/core/skill-version-marker.js");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false); // nothing stale, and still:
+    const installTs = await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8");
+    expect(installTs).toContain(`return ${JSON.stringify(newBin)};`);
+    expect(installTs).not.toContain(oldBin);
+    expect(readModsBin()).toBe(newBin);
+  });
+
+  it("with the binary unchanged the copy is left alone: no file is rewritten (M-RECOPY-ALWAYS)", async () => {
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "nvm", "v20", "bin"));
+    await installMods({ bin });
+    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+    process.env.PATH = dirname(bin);
+    const { stat } = await import("node:fs/promises");
+    const before = new Map<string, number>();
+    for (const [rel] of await snapshotTree(modsDir())) before.set(rel, (await stat(join(modsDir(), rel))).mtimeMs);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const { autoRefreshSkillIfStale } = await import("../../src/core/skill-version-marker.js");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+    for (const [rel, mtime] of before) {
+      expect((await stat(join(modsDir(), rel))).mtimeMs, rel).toBe(mtime);
+    }
+  });
+
+  it("a copy from before the sidecar is rewritten once to gain it, then left alone", async () => {
+    const { installMods, modsDir, readModsBin, MODS_BIN_FILE } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "nvm", "v20", "bin"));
+    await installMods({ bin });
+    await rm(join(modsDir(), "hooks", MODS_BIN_FILE));
+    expect(readModsBin()).toBeUndefined();
+    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+    process.env.PATH = dirname(bin);
+    const { autoRefreshSkillIfStale } = await import("../../src/core/skill-version-marker.js");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+    expect(readModsBin()).toBe(bin);
   });
 
   it("installs no Mods copy where none was installed: the refresh is not a setup", async () => {
