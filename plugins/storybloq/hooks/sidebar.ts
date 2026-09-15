@@ -87,12 +87,42 @@ const COLUMN_BORDER = "round";
 const BORDER_COLUMNS = 2;
 
 /**
+ * The heading colours: waiting, working, finished. Open is deliberately
+ * uncoloured, being the resting state and the column a reader lands on most.
+ */
+const TONE_BLOCKED = "yellow";
+const TONE_INPROGRESS = "cyan";
+const TONE_DONE = "green";
+
+/**
+ * Cells kept clear to the right of the header row.
+ *
+ * The engine draws its own close mark in the last cell of the pane, and the
+ * context fill was right-aligned straight into it: live it read "context 7%×",
+ * with the mark looking like part of our string. `BoxProps` carries
+ * `marginRight`, so the header simply stops short of the edge.
+ */
+const HEADER_MARK_CLEARANCE = 3;
+
+/**
  * Narrower than this and four columns are shredded rather than laid out, so
  * the same four sections stack instead. Well below the 110 the client needs
  * to dock a pane at all, so this is the in-between case: a pane that exists
  * but is too narrow to be a board.
  */
 const BOARD_MIN_COLUMNS = 60;
+
+/**
+ * How a ledger write is recognised at `tool.call`. The MCP names arrive
+ * prefixed by their server, the CLI's own do not; the verb at the end is what
+ * separates a write from a read.
+ */
+const MCP_PREFIX = "mcp__storybloq__";
+const LEDGER_TOOL_PREFIX = "storybloq_";
+const LEDGER_WRITE_VERB = /_(create|update|set|unset|add|init|snapshot|reinforce|supersede)$/;
+/** Where a path can arrive on a built-in file tool's event. */
+const PATH_ARGUMENTS = ["file_path", "path", "notebook_path", "command"] as const;
+const STORY_DIR = ".story/";
 
 const TICKETS_DIR = ".story/tickets";
 const ISSUES_DIR = ".story/issues";
@@ -483,6 +513,31 @@ async function readContextFill($: any): Promise<number | null> {
   }
 }
 
+/**
+ * Did this tool call change the ledger?
+ *
+ * Two ways it can: one of the storybloq tools whose name ends in a writing
+ * verb (MCP names arrive as `mcp__storybloq__storybloq_ticket_update`, the
+ * CLI's own as `storybloq_ticket_update`), or a built-in file tool pointed at
+ * `.story/`. A read is none of those and must not cost a sweep, which is why
+ * the verb is tested and not just the prefix: `storybloq_status` writes
+ * nothing.
+ *
+ * Pure, and it reads only the few argument fields a path can arrive in, so a
+ * Write of a megabyte is not serialized to answer a yes or no question.
+ */
+function wroteLedger(e: any): boolean {
+  const tool: unknown = e?.tool;
+  if (typeof tool !== "string") return false;
+  const bare = tool.startsWith(MCP_PREFIX) ? tool.slice(MCP_PREFIX.length) : tool;
+  if (bare.startsWith(LEDGER_TOOL_PREFIX)) return LEDGER_WRITE_VERB.test(bare);
+  for (const key of PATH_ARGUMENTS) {
+    const value: unknown = e?.[key];
+    if (typeof value === "string" && value.includes(STORY_DIR)) return true;
+  }
+  return false;
+}
+
 /** Side by side, or one column after another on a narrow pane. */
 function isStacked(width: number): boolean {
   return width < BOARD_MIN_COLUMNS;
@@ -515,42 +570,69 @@ function boardColumn(
   elements: any,
   key: string,
   heading: string,
+  tone: string | null,
   cards: readonly SidebarBoardCard[],
   width: number,
 ): unknown {
   // The border takes a column on each side, so the text inside has that much
   // less. Getting this wrong wraps every row and the board falls apart.
   const textWidth = Math.max(1, width - BORDER_COLUMNS);
-  const rows: unknown[] = [
-    elements.Text({ bold: true, children: headingText(heading, cards.length, textWidth) }),
-  ];
+  const headingProps: Record<string, unknown> = {
+    bold: true,
+    children: headingText(heading, cards.length, textWidth),
+  };
+  // Blocked, in progress and done carry a colour; open is the resting state
+  // and keeps the terminal's own.
+  if (tone !== null) headingProps["color"] = tone;
+
+  const body: unknown[] = [];
   for (const card of cards.slice(0, COLUMN_CARD_CAP)) {
-    rows.push(elements.Text({ children: truncate(`${card.id} ${card.title}`, textWidth) }));
+    const line = truncate(`${card.id} ${card.title}`, textWidth);
+    const id = line.slice(0, Math.min(card.id.length, line.length));
+    const rest = line.slice(id.length);
+    // The id dim and the title plain: the eye runs down the titles and only
+    // stops at an id when it is looking for one.
+    body.push(
+      elements.Text({
+        children: [
+          elements.Text({ dimColor: true, children: id }),
+          elements.Text({ children: rest }),
+        ],
+      }),
+    );
   }
   if (cards.length > COLUMN_CARD_CAP) {
-    rows.push(elements.Text({ dimColor: true, children: COLUMN_TAIL }));
+    body.push(elements.Text({ dimColor: true, children: COLUMN_TAIL }));
   }
-  // A card, not a list: the heading with its count is the first row inside
-  // the border, which is what makes the four columns read as four things.
+
+  // Two boxes, not one: the heading is its own bordered box sitting on the
+  // body's, and the borders that meet between them are the divider.
   return elements.Box({
     key,
     flexDirection: "column",
-    borderStyle: COLUMN_BORDER,
     width,
     overflow: "hidden",
-    children: rows,
+    children: [
+      elements.Box({
+        key: `${key}-heading`,
+        flexDirection: "column",
+        borderStyle: COLUMN_BORDER,
+        width,
+        overflow: "hidden",
+        children: [elements.Text(headingProps)],
+      }),
+      elements.Box({
+        key: `${key}-body`,
+        flexDirection: "column",
+        borderStyle: COLUMN_BORDER,
+        width,
+        overflow: "hidden",
+        children: body,
+      }),
+    ],
   });
 }
 
-/**
- * The four columns, side by side where there is room and stacked where there
- * is not. The keys stay the same either way, so what a column contains does
- * not depend on how it was laid out.
- *
- * No gap either way, because each column now carries its own border: stacked
- * a gap row would cost a card, and side by side the borders touching is what
- * makes the four read as one board.
- */
 function boardNode(elements: any, board: any, width: number, stacked: boolean): unknown {
   // Stacked, one bordered card per row at the full width; side by side, the
   // width split four ways with the borders touching, which is what makes them
@@ -563,10 +645,10 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean): 
     flexDirection: stacked ? "column" : "row",
     gap: 0,
     children: [
-      boardColumn(elements, "board-blocked", "Blocked", board.blocked, columnWidth),
-      boardColumn(elements, "board-open", "Open", board.open, columnWidth),
-      boardColumn(elements, "board-inprogress", "In progress", board.inProgress, columnWidth),
-      boardColumn(elements, "board-done", "Done", board.done, columnWidth),
+      boardColumn(elements, "board-blocked", "Blocked", TONE_BLOCKED, board.blocked, columnWidth),
+      boardColumn(elements, "board-open", "Open", null, board.open, columnWidth),
+      boardColumn(elements, "board-inprogress", "In progress", TONE_INPROGRESS, board.inProgress, columnWidth),
+      boardColumn(elements, "board-done", "Done", TONE_DONE, board.done, columnWidth),
     ],
   });
 }
@@ -587,9 +669,10 @@ function headerNode(elements: any, context: number | null): unknown {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    marginRight: HEADER_MARK_CLEARANCE,
     children: [
       elements.Text({ bold: true, children: "Storybloq" }),
-      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}% ` }),
+      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
     ],
   });
 }
@@ -618,6 +701,7 @@ export function registerSidebar(on: On, _options: Options): void {
         rows.push(Text({ children: truncate(summaryLine(false), width) }));
       } else {
         rows.push(boardNode(elements, projection.board, width, isStacked(width)));
+        rows.push(Text({ key: "issues-gap", children: " " }));
         const bySeverity = projection.issuesBySeverity;
         rows.push(
           Text({
@@ -691,9 +775,22 @@ export function registerSidebar(on: On, _options: Options): void {
     return next(e);
   });
 
-  // Deliberately nothing. A tool call is far too frequent to re-read a ledger
-  // on, and `turn.complete` already covers the writes a turn made.
-  on("tool.call", ($: any, e: any, next: (e: any) => unknown) => next(e));
+  // A ledger write inside a turn has to show up inside that turn: the owner
+  // moved a ticket to in progress, waited five seconds and moved it back, and
+  // the board sat on the old column the whole time because nothing asked for
+  // a rescan until the turn ended. So this runs the call first and then, only
+  // for a call that can have written `.story/`, requests a scan; the scan is
+  // mtime-keyed, so the cost of one that changed nothing is a stat sweep.
+  //
+  // Filtered here rather than by an `on()` matcher on the tool name: a
+  // matcher prints as `tool.call{tool=/.../}` in the client's scan, and the
+  // contract test compares that list against the bare event names pinned in
+  // client-api.ts, which is not this Mod's file to change.
+  on("tool.call", async ($: any, e: any, next: (e: any) => unknown) => {
+    const result = await next(e);
+    if (uiAvailable && sidebarEnabled && wroteLedger(e)) requestScan($);
+    return result;
+  });
 
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);

@@ -321,13 +321,23 @@ function nodeByKey(node: unknown, key: string): any {
   return nodeByKey(props["children"], key);
 }
 
+/**
+ * One string per drawn line under a node: a Text is one line, a Box is its
+ * children's lines in order. Nested Text (an id and a title in one row) stays
+ * one line, which is how the client lays it out.
+ */
+function textRows(node: unknown): string[] {
+  if (node === null || node === undefined) return [];
+  if (Array.isArray(node)) return node.flatMap(textRows);
+  if (typeof node !== "object") return [];
+  const element = (node as { element?: string }).element;
+  if (element !== "Box") return [textOf(node)];
+  return textRows((node as { props?: Record<string, unknown> }).props?.["children"]);
+}
+
 /** One row per drawn line of a column, heading first. */
 function rowsOf(tree: unknown, key: string): string[] {
-  const column = nodeByKey(tree, key);
-  if (!column) return [];
-  const children = column.props?.children;
-  const list: unknown[] = Array.isArray(children) ? children : children === undefined ? [] : [children];
-  return list.map((child) => textOf(child));
+  return textRows(nodeByKey(tree, key));
 }
 
 /** One row per line the pane draws, top to bottom. */
@@ -361,14 +371,21 @@ function abovePromptEvent(columns: number): unknown {
   };
 }
 
-/** Every string in a drawn tree, flattened, so an assertion can look for one. */
-function textOf(node: unknown): string {
+/**
+ * Every string in a drawn tree, flattened, so an assertion can look for one.
+ *
+ * A Text's own children run together with no separator, the way the client
+ * lays inline Text out; a Box's children are separated, since they are
+ * different rows or columns.
+ */
+function textOf(node: unknown, separator = " "): string {
   if (node === null || node === undefined) return "";
   if (typeof node === "string") return node;
-  if (Array.isArray(node)) return node.map(textOf).join(" ");
+  if (Array.isArray(node)) return node.map((child) => textOf(child, separator)).join(separator);
   if (typeof node === "object") {
+    const element = (node as { element?: string }).element;
     const props = (node as { props?: Record<string, unknown> }).props ?? {};
-    return textOf(props["children"]);
+    return textOf(props["children"], element === "Text" ? "" : separator);
   }
   return "";
 }
@@ -877,66 +894,160 @@ test("breaks the header off the board with one blank row that actually draws", a
   await started(h);
   const rows = paneRows(await h.render(paneEvent()));
 
-  // Four rows: the header, the break, the board, the issues line. The break
-  // has to be a row the client will DRAW, which an empty string is not: it
-  // collapses to no height, which is why the owner saw the wordmark sitting
-  // straight on top of "Blocked". So this counts rows and pins the content,
-  // and M-NO-HEADER-BREAK (an empty string, or no row at all) fails here.
-  expect(rows.length).toBe(4);
+  // Five rows: the header, the break, the board, a second break, the issues
+  // line. A break has to be a row the client will DRAW, which an empty string
+  // is not: it collapses to no height, which is why the owner saw the
+  // wordmark sitting straight on top of "Blocked". So this counts rows and
+  // pins the content, and M-NO-HEADER-BREAK (an empty string, or no row at
+  // all) fails here.
+  expect(rows.length).toBe(5);
   expect(rows[0]).toContain("Storybloq");
   expect(rows[1]).toBe(" ");
   expect(rows[1]!.length).toBeGreaterThan(0);
   expect(rows[2]).toContain("Blocked");
   expect(rows[2]).toContain("Done");
-  expect(rows[3]).toContain("issues:");
+  expect(rows[3]).toBe(" ");
+  expect(rows[4]).toContain("issues:");
 });
 
-test("draws each column as a bordered card, sized to fit the border", async () => {
+test("boxes every column heading over its body, both sized to fit the border", async () => {
   const h = harness(newFixture());
   await started(h);
-  const tree = await h.render(paneEvent(160));
+  const keys = ["board-blocked", "board-open", "board-inprogress", "board-done"];
 
-  // M-NO-BORDER drops the border and the four columns read as one run-on
-  // list again.
-  for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
-    const column = nodeByKey(tree, key);
-    expect(typeof column.props.borderStyle).toBe("string");
-    // The border costs a column each side, so the text has to be that much
-    // narrower or every row wraps and the board comes apart.
-    const columnWidth: number = column.props.width;
-    for (const row of rowsOf(tree, key)) {
-      expect(row.length).toBeLessThanOrEqual(columnWidth - 2);
+  // Below the stacking threshold each card takes the pane's whole width;
+  // above it the four share it. The bound is the event's own bodyColumns, not
+  // a number fitted to one terminal.
+  for (const columns of [50, 110, 144, 158, 160]) {
+    const event = paneEvent(columns);
+    const bodyColumns = columns - 4;
+    const stacked = bodyColumns < 60;
+    const expectedWidth = stacked ? bodyColumns : Math.max(12, Math.floor(bodyColumns / 4));
+    const tree = await h.render(event);
+
+    for (const key of keys) {
+      const column = nodeByKey(tree, key);
+      const headingBox = nodeByKey(tree, `${key}-heading`);
+      const bodyBox = nodeByKey(tree, `${key}-body`);
+
+      // M-HEADER-UNBOXED leaves the heading as a bare row of the body box.
+      expect(typeof headingBox.props.borderStyle).toBe("string");
+      // M-NO-BORDER drops the body's border and the columns run together.
+      expect(typeof bodyBox.props.borderStyle).toBe("string");
+      expect(headingBox.props.borderStyle).toBe(bodyBox.props.borderStyle);
+      expect(headingBox.props.width).toBe(expectedWidth);
+      expect(bodyBox.props.width).toBe(expectedWidth);
+      expect(column.props.width).toBe(expectedWidth);
+
+      // The border costs a column each side, so every line has to be that
+      // much narrower or the row wraps and the board comes apart.
+      for (const row of rowsOf(tree, key)) {
+        expect(row.length).toBeLessThanOrEqual(expectedWidth - 2);
+      }
     }
+
+    const total = keys.reduce((sum, key) => sum + (nodeByKey(tree, key).props.width as number), 0);
+    expect(total).toBe(stacked ? expectedWidth * 4 : 4 * Math.floor(bodyColumns / 4));
+    if (!stacked) expect(total).toBeLessThanOrEqual(bodyColumns);
   }
-  // Four columns across the pane's width, borders touching.
-  const widths = ["board-blocked", "board-open", "board-inprogress", "board-done"].map(
-    (key) => nodeByKey(tree, key).props.width as number,
-  );
-  expect(widths.reduce((sum, w) => sum + w, 0)).toBeLessThanOrEqual(156);
 });
 
-test("gives the percent sign room to survive the pane's close mark", async () => {
+test("keeps the header clear of the cell the engine draws its close mark in", async () => {
   const h = harness(newFixture());
   await started(h);
-  const right = textOf(nodeByKey(await h.render(paneEvent()), "header"));
+  const tree = await h.render(paneEvent());
+  const header = nodeByKey(tree, "header");
 
-  // Live this read "context 7×": the last cell of the pane's first body row
-  // is the engine's own close mark, and whatever the percent sign was doing
-  // there, it was not on screen. The trailing space keeps the sign one cell
-  // clear of the edge, and it also means the string no longer ENDS in "%",
-  // which covers the other candidate cause.
-  expect(right).toContain("context 20% ");
-  expect(right.endsWith("%")).toBe(false);
+  // This pins the CLEARANCE CONTRACT, not what a terminal shows: the header
+  // row stops short of the pane's last cells, where the engine draws its own
+  // close mark. Live it read "context 7%×" with the mark hard against our
+  // string, and only the owner's eye can confirm the fix landed; what a test
+  // can hold is that the margin is still asked for. M-MARK-COLLISION drops it.
+  expect(header.props.marginRight).toBeGreaterThanOrEqual(3);
+  expect(textOf(header)).toContain("context 20%");
 });
 
-test("shows the context fill on a session that had already run a turn", async () => {
+test("moves a ticket on the board during the turn that moved it", async () => {
   const h = harness(newFixture());
-  // No turn.complete: the Mod is loading into a session that has been going a
-  // while, which is what a reload is. The context figures belong to the
-  // window, not to the turn, so they are readable the moment it loads, and
-  // waiting for the next turn to end leaves the header blank until then.
   await started(h);
-  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 20%");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+
+  // The owner moved a ticket to in progress mid turn, waited, and moved it
+  // back; the board never budged, because nothing asked for a scan until the
+  // turn ended. M-STALE-BOARD leaves tool.call a passthrough and this fails.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await h.fire("tool.call", { tool: "mcp__storybloq__storybloq_ticket_update", tool_use_id: "call-1" });
+  await h.tick();
+
+  const tree = await h.render(paneEvent());
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 2");
+  expect(headingOf(tree, "board-open")).toBe("Open 4");
+  expect(columnText(tree, "board-inprogress")).toContain("T-010");
+  expect(columnText(tree, "board-open")).not.toContain("T-010");
+});
+
+test("takes the same ledger write from the CLI's own tool name", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "complete", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await h.fire("tool.call", { tool: "storybloq_ticket_update", tool_use_id: "call-2" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-done")).toBe("Done 3");
+});
+
+test("rescans after an edit aimed at a ledger file, and not after any other", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // The ticket moves on disk first; what the two calls below differ in is
+  // whether the board is allowed to notice. Counting reads would prove
+  // nothing here, since a scan of an unchanged ledger reads no file at all.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  await h.fire("tool.call", { tool: "Edit", tool_use_id: "c3", file_path: "/repo/src/index.ts" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+
+  await h.fire("tool.call", { tool: "Edit", tool_use_id: "c4", file_path: "/repo/.story/tickets/T-010.json" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("does not sweep the ledger for a tool that only read it", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // A read is by far the common case, and a sweep per read would be the cost
+  // the chunked scan exists to avoid. The prefix is not enough on its own:
+  // the verb at the end of the name is what says a write happened. The ledger
+  // has already moved here, so a board that moves with it is the proof that
+  // the read triggered a scan.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  for (const tool of ["mcp__storybloq__storybloq_status", "storybloq_ticket_list", "Read", "Grep"]) {
+    await h.fire("tool.call", { tool, tool_use_id: `read-${tool}` });
+    await h.tick();
+    expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+
+  // And the write that follows them does move it, so the board was only ever
+  // one call away from the truth.
+  await h.fire("tool.call", { tool: "storybloq_ticket_update", tool_use_id: "write-1" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("hands the tool result back exactly once", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const event = { tool: "mcp__storybloq__storybloq_ticket_update", tool_use_id: "call-5" };
+  // The harness's next() answers with the event it was handed, so this is
+  // both "next was called" and "its value is what the hook returns".
+  expect(await h.fire("tool.call", event)).toBe(event);
 });
 
 test("draws the board even when the usage call is refused", async () => {
