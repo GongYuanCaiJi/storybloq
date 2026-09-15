@@ -2391,6 +2391,14 @@ function formatTrajectoryMd(trajectory: readonly TrajectoryEntry[]): string {
   if (trajectory.length === 0) return "";
   const lines = ["## Trajectory"];
   for (const entry of trajectory) {
+    // ISS-1219: occurrenceCount counts only continuation/blocked/owner-gated/
+    // carried mentions while latest takes any mention, so a shipped-only id
+    // has count 0 beside a named latest. Say that plainly instead of the
+    // single-sentence form, which read as a contradiction.
+    if (entry.occurrenceCount === 0) {
+      lines.push(`- ${entry.id}: no open mention; last named as ${entry.latestDisposition} in ${entry.latest}`);
+      continue;
+    }
     lines.push(
       `- ${entry.id}: seen in ${entry.occurrenceCount} handover(s), latest ${entry.latest} (${entry.latestDisposition})`,
     );

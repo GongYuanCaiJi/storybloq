@@ -27,6 +27,7 @@ import {
 import { makeTicket, makeIssue, makeNote, makeLesson, makeState, makeRoadmap, makePhase } from "./test-factories.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "../../src/core/queries.js";
 import type { RecommendResult } from "../../src/core/recommend.js";
+import type { TrajectoryEntry } from "../../src/core/markdown-sections.js";
 import type { ValidationResult, ValidationFinding } from "../../src/core/validation.js";
 import type { Ruling } from "../../src/models/ruling.js";
 
@@ -1671,5 +1672,64 @@ describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did 
     expect(none.data).toEqual({ filename: FILE });
     const landed = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", true)) as { data: Record<string, unknown> };
     expect(landed.data).toEqual({ filename: FILE, tokenPressureStamped: true });
+  });
+});
+
+describe("ISS-1219: trajectory zero-count rendering", () => {
+  // occurrenceCount counts only continuation/blocked/owner-gated/carried
+  // mentions (buildTrajectory); latest takes any mention. A shipped-only id
+  // therefore has count 0 beside a named latest, and the single-sentence
+  // form read as a contradiction in the field (ISS-1210, 2026-09-14).
+  const zeroShipped = {
+    id: "ISS-1210",
+    occurrenceCount: 0,
+    firstSeenInWindow: "h1.md",
+    latest: "h1.md",
+    latestDisposition: "shipped" as const,
+  };
+  const twoContinuation = {
+    id: "ISS-950",
+    occurrenceCount: 2,
+    firstSeenInWindow: "h2.md",
+    latest: "h1.md",
+    latestDisposition: "continuation" as const,
+  };
+  // Synthetic: the count rule never produces a zero-count entry with a
+  // non-shipped disposition today; this fixture pins that the renderer
+  // reads the disposition from data rather than hardcoding "shipped".
+  const zeroContinuation = {
+    id: "T-999",
+    occurrenceCount: 0,
+    firstSeenInWindow: "h1.md",
+    latest: "h1.md",
+    latestDisposition: "continuation" as const,
+  };
+  const brief = (trajectory: TrajectoryEntry[]) => ({
+    handovers: [{ filename: "h1.md", form: "structured" as const, records: [], index: null }],
+    trajectory,
+    skippedHandovers: 0,
+    missingHandovers: 0,
+  });
+
+  it("renders a zero-count entry as a no-open-mention line, never as 'seen in 0'", () => {
+    const md = outputFormatter.formatHandoverBrief(brief([zeroShipped, twoContinuation]), "md");
+    expect(md).toContain("- ISS-1210: no open mention; last named as shipped in h1.md");
+    expect(md).not.toMatch(/seen in 0 handover\(s\), latest/);
+    expect(md).toContain("- ISS-950: seen in 2 handover(s), latest h1.md (continuation)");
+  });
+
+  it("takes the disposition from the entry, not a literal 'shipped'", () => {
+    const md = outputFormatter.formatHandoverBrief(brief([zeroContinuation]), "md");
+    expect(md).toContain("- T-999: no open mention; last named as continuation in h1.md");
+  });
+
+  it("leaves the json trajectory shape unchanged", () => {
+    const json = JSON.parse(outputFormatter.formatHandoverBrief(brief([zeroShipped, twoContinuation]), "json")) as {
+      data: { trajectory: { id: string; occurrenceCount: number }[] };
+    };
+    expect(json.data.trajectory.map((t) => [t.id, t.occurrenceCount])).toEqual([
+      ["ISS-1210", 0],
+      ["ISS-950", 2],
+    ]);
   });
 });
