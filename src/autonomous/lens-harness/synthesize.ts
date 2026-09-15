@@ -40,7 +40,11 @@ import {
 } from "@storybloq/lenses";
 import { parseDiffScope, classifyOrigin } from "./diff-scope.js";
 import { writeToCache } from "./cache.js";
-import { readCoverageMemory, updateCoverageMemory } from "./coverage-memory.js";
+import {
+  acquireReviewCoverageLock,
+  readCoverageMemory,
+  updateCoverageMemory,
+} from "./coverage-memory.js";
 import { SECRETS_GATE_FINDING_ID } from "./secrets-gate.js";
 import {
   appendAnchoringTelemetry,
@@ -87,6 +91,16 @@ export interface SynthesizeOutput {
   readonly preExistingFindings: readonly MergedFinding[];
   readonly preExistingCount: number;
   readonly telemetryWriteFailed: boolean;
+  /**
+   * ISS-950: what this round could NOT decide, and why.
+   *
+   * Empty on an ordinary round. Non-empty means a coverage decision was made
+   * conservatively because the inputs for the real one were unavailable, and
+   * the agent needs to know that: a round that is harder to pass for an unseen
+   * reason reads as the cap misfiring, and the documented response to that is
+   * the relabel this item exists to stop.
+   */
+  readonly coverageNotes: readonly string[];
 }
 
 /**
@@ -277,7 +291,45 @@ export function skipBasisForLens(args: {
     : "self-reported";
 }
 
+/**
+ * What a caller tells the agent when it could not take this review's lock.
+ *
+ * It says what was given up and what was done instead, because a round that is
+ * strictly harder to pass for a reason nobody can see reads as the cap
+ * misfiring, and the documented response to that is the relabel this item
+ * exists to stop.
+ */
+const COVERAGE_LOCK_UNAVAILABLE_NOTE =
+  "Coverage memory was not consulted: another synthesize call for this reviewId held the " +
+  "review lock. Every lens skip is recorded as self-reported (so a skip still caps) and no " +
+  "cross-call relabel was judged this round. Re-run the round once the other call finishes " +
+  "to get the full coverage decision.";
+
+/**
+ * ISS-950: ONE review's synthesize is one critical section.
+ *
+ * The lock is taken before the coverage memory is read and released after the
+ * round is persisted, because downgrade-only has to hold for the verdict this
+ * call RETURNS and not merely for what it later writes. `acquireReviewCoverageLock`
+ * carries the sequence that made the narrower guarantee insufficient.
+ *
+ * A sessionless call has no memory to race over and takes no lock. A call that
+ * cannot take the lock does NOT proceed as if it had one: it runs degraded,
+ * which is the whole point of separating `unavailable` from `not-needed`.
+ */
 export function handleSynthesize(input: SynthesizeInput): SynthesizeOutput {
+  const lock = acquireReviewCoverageLock(input.sessionDir, input.metadata.reviewId);
+  try {
+    return synthesizeUnderReviewLock(input, lock.kind === "unavailable");
+  } finally {
+    if (lock.kind === "held") lock.release();
+  }
+}
+
+function synthesizeUnderReviewLock(
+  input: SynthesizeInput,
+  coverageLockUnavailable: boolean,
+): SynthesizeOutput {
   const stage: Stage = input.stage ?? "CODE_REVIEW";
   const reviewId = input.metadata.reviewId;
   const meta = readHarnessMeta(input.sessionDir, reviewId);
@@ -490,16 +542,29 @@ export function handleSynthesize(input: SynthesizeInput): SynthesizeOutput {
   const fileUnion = anchorArtifact
     ? changeFileUnion(declaredFiles, anchorArtifact)
     : [];
-  const priorCoverage = readCoverageMemory(input.sessionDir, reviewId);
+  // NOT READ AT ALL when the lock could not be taken. Reading it here is the
+  // unsynchronized read the lock exists to prevent, and acting on a snapshot
+  // another call may already have invalidated is how a verdict escapes its cap.
+  const priorCoverage = coverageLockUnavailable
+    ? {}
+    : readCoverageMemory(input.sessionDir, reviewId);
+  const coverageNotes: string[] = coverageLockUnavailable
+    ? [COVERAGE_LOCK_UNAVAILABLE_NOTE]
+    : [];
 
   const skipBasis = (lens: string): LensCoverageBasis =>
-    skipBasisForLens({
-      lensId: lens,
-      declaredFiles,
-      artifact: anchorArtifact,
-      priorBasis: priorCoverage[lens]?.basis,
-      unionSize: fileUnion.length,
-    });
+    // Degraded, every skip is `self-reported`: the harness cannot rule out a
+    // restriction it was unable to read, so it assumes the strictest one. The
+    // skip still caps, which is the safe direction.
+    coverageLockUnavailable
+      ? "self-reported"
+      : skipBasisForLens({
+          lensId: lens,
+          declaredFiles,
+          artifact: anchorArtifact,
+          priorBasis: priorCoverage[lens]?.basis,
+          unionSize: fileUnion.length,
+        });
 
   /**
    * Whether an `ok` is this lens renaming the skip it already submitted.
@@ -797,5 +862,6 @@ export function handleSynthesize(input: SynthesizeInput): SynthesizeOutput {
     preExistingFindings,
     preExistingCount: preExistingFindings.length,
     telemetryWriteFailed,
+    coverageNotes,
   };
 }

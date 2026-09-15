@@ -25,7 +25,7 @@
 
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import lockfile from "proper-lockfile";
 import type { LensCoverageBasis, LensCoverageEntry } from "@storybloq/lenses";
 import { telemetryDirPath } from "../liveness.js";
@@ -54,6 +54,19 @@ const LOCK_OPTIONS = { stale: 10_000 };
  */
 const LOCK_RETRIES = 4;
 const LOCK_RETRY_MS = 10;
+
+/**
+ * The PER-REVIEW lock's budget, which is deliberately far larger than the
+ * shared file's.
+ *
+ * This one is held across a whole synthesize (the read, the pipeline, the
+ * persist), so a contending call is waiting for real work rather than for a
+ * small JSON write, and giving up early would degrade rounds that only needed
+ * to queue. 1.2s covers an ordinary synthesize; past it the caller degrades,
+ * which is safe by construction (see `acquireReviewCoverageLock`).
+ */
+const REVIEW_LOCK_RETRIES = 30;
+const REVIEW_LOCK_RETRY_MS = 40;
 
 /** A synchronous wait. `updateCoverageMemory` is called from a sync tool path. */
 function sleepSync(ms: number): void {
@@ -143,6 +156,97 @@ export function coverageMemoryPath(sessionDir: string): string {
   return join(telemetryDirPath(sessionDir), MEMORY_FILE);
 }
 
+/**
+ * The lock path for ONE review.
+ *
+ * A `reviewId` is caller-supplied text and must never reach the filesystem as a
+ * path: `../../x` would put a lock outside the session, and on a
+ * case-insensitive filesystem two ids could collide silently. Everything
+ * outside a conservative character set is replaced, the result is truncated,
+ * and a digest of the ORIGINAL id is appended, so sanitizing can never merge
+ * two distinct reviews onto one lock while the readable part still says which
+ * review it belongs to.
+ */
+function reviewLockPath(sessionDir: string, reviewId: string): string {
+  const safe = reviewId.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 48);
+  const digest = createHash("sha256").update(reviewId).digest("hex").slice(0, 12);
+  return join(telemetryDirPath(sessionDir), `lens-coverage-${safe}-${digest}.lock`);
+}
+
+/**
+ * The outcome of asking for a review's lock.
+ *
+ * Three values, not a nullable one, because "there was nothing to lock" and
+ * "someone else has it" call for opposite behaviour and a single `null` cannot
+ * tell them apart. A sessionless synthesize has no memory to race over and
+ * proceeds exactly as before; a contended one must NOT.
+ */
+export type ReviewCoverageLock =
+  | { readonly kind: "held"; readonly release: () => void }
+  | { readonly kind: "not-needed" }
+  | { readonly kind: "unavailable" };
+
+/**
+ * Hold one review's coverage decisions against every other call for that review.
+ *
+ * WHY THE PERSIST LOCK IS NOT ENOUGH. `updateCoverageMemory` merges under the
+ * shared file's lock, so the PERSISTED memory always carries the strictest
+ * basis any call established. That is the wrong guarantee on its own, because a
+ * verdict is returned before it is persisted. Two calls for one review can both
+ * read unrestricted memory; A persists `self-reported`; B, still holding the
+ * snapshot it read before A wrote, RETURNS `not-applicable`. B's own merge then
+ * keeps A's restriction on disk and the ledger looks consistent, while the
+ * round B answered has already cleared a cap it owed. The same window loses a
+ * relabel: B cannot see the skip A recorded, so a flip to `ok` with zero
+ * findings passes unflagged. Downgrade-only has to hold for what a call
+ * RETURNS, which means the read, the pipeline and the persist are one critical
+ * section.
+ *
+ * KEYED ON THE REVIEW, not on the session or the file. Two unrelated reviews in
+ * one session share no decision and must not queue behind each other; the
+ * shared-file lock inside `updateCoverageMemory` still serializes the write
+ * itself, which is the only thing they do share.
+ *
+ * UNAVAILABLE IS NOT A LICENCE TO PROCEED. A caller that cannot take this lock
+ * must not read the memory and act on it -- that is precisely the unsynchronized
+ * read this exists to prevent. It degrades instead: every skip is treated as
+ * `self-reported` and no relabel is judged, which is a weaker verdict and never
+ * an escaped one. See `handleSynthesize`.
+ */
+export function acquireReviewCoverageLock(
+  sessionDir: string | undefined,
+  reviewId: string,
+): ReviewCoverageLock {
+  if (!sessionDir) return { kind: "not-needed" };
+  const tDir = telemetryDirPath(sessionDir);
+  const target = reviewLockPath(sessionDir, reviewId);
+  for (let attempt = 0; attempt <= REVIEW_LOCK_RETRIES; attempt += 1) {
+    try {
+      mkdirSync(tDir, { recursive: true });
+      const release = lockfile.lockSync(target, {
+        ...LOCK_OPTIONS,
+        // The target is a name, not a file we keep: `realpath` would demand it
+        // exist, and creating a sentinel only to resolve it buys nothing.
+        realpath: false,
+      });
+      return {
+        kind: "held",
+        release: () => {
+          try {
+            release();
+          } catch {
+            /* ignore unlock errors */
+          }
+        },
+      };
+    } catch {
+      if (attempt === REVIEW_LOCK_RETRIES) return { kind: "unavailable" };
+      sleepSync(REVIEW_LOCK_RETRY_MS);
+    }
+  }
+  return { kind: "unavailable" };
+}
+
 function readMemoryFile(sessionDir: string): MemoryFile {
   try {
     const parsed: unknown = JSON.parse(
@@ -160,23 +264,18 @@ function readMemoryFile(sessionDir: string): MemoryFile {
  * sessionless synthesize, and for an unreadable file -- all three are the same
  * statement: nothing is known, so nothing is held against this round.
  *
- * DELIBERATELY UNLOCKED, and read before the verdict is computed, which leaves
- * one residual worth naming. Two synthesize calls for the same review can both
- * read before either writes, so the second one to finish may compute its own
- * round without seeing the restriction the first established, and that round's
- * verdict can carry a `not-applicable` the peer had already ruled out.
+ * TAKES NO LOCK OF ITS OWN, and does not need one: the CALLER holds this
+ * review's lock across the read, the pipeline and the persist. That is what
+ * closes the window an earlier revision left open, where two calls both read
+ * unrestricted memory and the second RETURNED a `not-applicable` the first had
+ * already ruled out (see `acquireReviewCoverageLock` for the full sequence).
  *
- * What the residual is NOT is a corrupted record. `updateCoverageMemory` merges
- * under the lock, re-reading inside it and applying the sticky rule, so the
- * PERSISTED memory always carries the strictest basis any call established and
- * every later call is held to it. The window is one round wide and closes by
- * itself.
- *
- * Locking here instead would not close it either: the read happens before the
- * pipeline runs, so any lock taken for it would have to be held across the
- * whole merge to mean anything, which serializes every concurrent review in a
- * session behind one file. The cost is not worth a window that costs at most
- * one round's strictness and never a wrong record.
+ * The critical section has to span all three steps, because a verdict is
+ * returned before it is persisted: a lock around this read alone would be
+ * released before the answer it informs is computed, and would guarantee
+ * nothing about that answer. `handleSynthesize` is the one caller and takes the
+ * lock before calling this; a caller that could not take it must not read the
+ * memory and act on it at all.
  */
 export function readCoverageMemory(
   sessionDir: string | undefined,
