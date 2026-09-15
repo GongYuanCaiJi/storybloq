@@ -934,3 +934,49 @@ describe("T-476 section 10: setting citesRulings via create/update", () => {
     ).rejects.toThrow(CliValidationError);
   });
 });
+
+describe("handleIssueCreate validation texts and precedence are unchanged by ISS-1221", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    for (const d of tmpDirs) await rm(d, { recursive: true, force: true });
+    tmpDirs.length = 0;
+  });
+  async function project(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "issue-create-texts-"));
+    tmpDirs.push(dir);
+    await initProject(dir, { name: "test" });
+    return dir;
+  }
+  const base = { title: "Bug", impact: "x", components: [], relatedTickets: [], location: [] };
+
+  it("pins the three invalid_input texts literally", async () => {
+    const dir = await project();
+    await expect(handleIssueCreate({ ...base, severity: "urgent" }, "json", dir))
+      .rejects.toThrow('Unknown issue severity "urgent": must be one of critical, high, medium, low');
+    await expect(handleIssueCreate({ ...base, severity: "high", dedupeKey: "k".repeat(513) }, "json", dir))
+      .rejects.toThrow(/512/);
+    await expect(handleIssueCreate({ ...base, severity: "high", phase: "p9" }, "json", dir))
+      .rejects.toThrow('Phase "p9" not found in roadmap');
+  });
+
+  it("a bad citesRuling still wins over a bad dedupe key (severity, citesRuling, dedupeKey order)", async () => {
+    const dir = await project();
+    const citesOnly = await handleIssueCreate({ ...base, severity: "high", citesRuling: ["nope"] }, "json", dir).catch((e: Error) => e.message);
+    expect(citesOnly).toMatch(/Invalid ruling ID/);
+    const compound = await handleIssueCreate({ ...base, severity: "high", citesRuling: ["nope"], dedupeKey: "k".repeat(513) }, "json", dir).catch((e: Error) => e.message);
+    expect(compound).toBe(citesOnly);
+  });
+
+  it("a repeated dedupe key returns the existing issue before the phase is validated", async () => {
+    const dir = await project();
+    const first = JSON.parse((await handleIssueCreate({ ...base, severity: "high", dedupeKey: "dk-order" }, "json", dir)).output).data;
+    const again = JSON.parse((await handleIssueCreate({ ...base, severity: "high", dedupeKey: "dk-order", phase: "p9" }, "json", dir)).output).data;
+    expect(again.id).toBe(first.id);
+  });
+
+  it("an empty-string phase is still refused by write validation, not by the roadmap check", async () => {
+    const dir = await project();
+    await expect(handleIssueCreate({ ...base, severity: "high", phase: "" }, "json", dir))
+      .rejects.toThrow('references unknown phase ""');
+  });
+});

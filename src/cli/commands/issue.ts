@@ -1,4 +1,11 @@
 import { displayIdOf } from "../../core/resolver.js";
+import {
+  type IssueCreateInput,
+  validateIssueCreateSeverity,
+  validateIssueCreateDedupeKey,
+  validateIssueCreatePhase,
+} from "../../core/issue-create-input.js";
+import { inferIssuePhase } from "../../autonomous/issue-create-preparation.js";
 import { validateProject } from "../../core/validation.js";
 import { resolveAndNormalizeTicketRef, resolveAndNormalizeIssueRef, RefResolutionError } from "../../core/ref-normalization.js";
 import { ProjectState } from "../../core/project-state.js";
@@ -29,7 +36,6 @@ import {
   type IssueSeverity,
 } from "../../models/types.js";
 import {
-  IssueDedupeKeySchema,
   type Issue,
   type IssueSourceRefInput,
 } from "../../models/issue.js";
@@ -49,6 +55,8 @@ import {
   setMetadata,
   unsetMetadata,
 } from "./metadata.js";
+
+export type { IssueCreateInput };
 
 // Re-export for register.ts
 export { ISSUE_STATUSES, ISSUE_SEVERITIES };
@@ -209,43 +217,6 @@ function validateAndResolveRelatedTickets(ids: string[], state: ProjectState): s
   return resolved;
 }
 
-/**
- * ISS-1203: an issue filed with no phase is invisible on the Mac app's
- * phase-grouped board. When the caller omits `phase`, default it from the
- * first related ticket's phase, or the active session's current ticket when
- * there is no related ticket. This is only ever a DEFAULT VALUE -- nothing
- * about the inference is recorded on the issue, so it is indistinguishable
- * from a phase the caller typed in directly.
- *
- * Pitfall: a child ticket's own `phase` can be null while its umbrella
- * carries the real one (leaf tickets are the ones roadmap phase listings
- * group by, but a child's own field is not guaranteed to be populated).
- * Resolve through `resolvedParent` in that case rather than leaving the
- * issue phase-less. An umbrella-related ticket has no parent to resolve
- * through, so this is a no-op for it.
- */
-async function inferIssuePhase(
-  state: ProjectState,
-  resolvedRelatedTicketIds: readonly string[],
-  root: string,
-): Promise<string | null> {
-  let ticketId = resolvedRelatedTicketIds[0];
-  if (!ticketId) {
-    try {
-      const { findActiveSessionFull } = await import("../../autonomous/session.js");
-      ticketId = findActiveSessionFull(root)?.state.ticket?.id;
-    } catch {
-      // An unreadable session store is not proof a session is running --
-      // leave the issue phase-less rather than guess.
-    }
-  }
-  if (!ticketId) return null;
-  const ticket = state.activeTickets.find((t) => t.id === ticketId);
-  if (!ticket) return null;
-  if (ticket.phase != null) return ticket.phase;
-  return state.resolvedParent(ticket)?.phase ?? null;
-}
-
 /** Build a multiset of error findings keyed by code|entity|message, with message lookup. */
 function buildErrorMultiset(findings: readonly { level: string; code: string; entity: string | null; message: string }[]): { counts: Map<string, number>; messages: Map<string, string> } {
   const counts = new Map<string, number>();
@@ -303,42 +274,22 @@ function validatePostWriteIssueState(
 }
 
 export async function handleIssueCreate(
-  args: {
-    title: string;
-    severity: string;
-    impact: string;
-    components: string[];
-    relatedTickets: string[];
-    location: string[];
-    sourceRefs?: IssueSourceRefInput[];
-    dedupeKey?: string;
-    createdBy?: string;
-    phase?: string;
-    citesRuling?: string[];
-  },
+  args: IssueCreateInput,
   format: string,
   root: string,
 ): Promise<CommandResult> {
-  if (!ISSUE_SEVERITIES.includes(args.severity as IssueSeverity)) {
-    throw new CliValidationError(
-      "invalid_input",
-      `Unknown issue severity "${args.severity}": must be one of ${ISSUE_SEVERITIES.join(", ")}`,
-    );
-  }
+  // ISS-1221: the three input checks below are shared with the recovery-record
+  // preparer (core/issue-create-input.ts) and stay in this order: severity,
+  // the citation check, the dedupe key; the phase once the ledger is locked.
+  const severityRefusal = validateIssueCreateSeverity(args);
+  if (severityRefusal) throw new CliValidationError("invalid_input", severityRefusal.message);
   const citesRulingsResolution = resolveCitesRulingsInput(args.citesRuling, undefined);
   if (!citesRulingsResolution.ok) {
     throw new CliValidationError("invalid_input", citesRulingsResolution.message);
   }
 
-  const dedupeResult = args.dedupeKey === undefined
-    ? null
-    : IssueDedupeKeySchema.safeParse(args.dedupeKey);
-  if (dedupeResult && !dedupeResult.success) {
-    throw new CliValidationError(
-      "invalid_input",
-      dedupeResult.error.issues.map((issue) => issue.message).join("; "),
-    );
-  }
+  const dedupeRefusal = validateIssueCreateDedupeKey(args);
+  if (dedupeRefusal) throw new CliValidationError("invalid_input", dedupeRefusal.message);
 
   let createdIssue: Issue | undefined;
   let deduplicated = false;
@@ -366,13 +317,14 @@ export async function handleIssueCreate(
       throw err;
     }
 
-    if (args.phase && !state.roadmap.phases.some((p) => p.id === args.phase)) {
-      throw new CliValidationError("invalid_input", `Phase "${args.phase}" not found in roadmap`);
-    }
+    const phaseRefusal = validateIssueCreatePhase(state, args.phase);
+    if (phaseRefusal) throw new CliValidationError("invalid_input", phaseRefusal.message);
     const resolvedRelated = args.relatedTickets.length > 0
       ? validateAndResolveRelatedTickets(args.relatedTickets, state)
       : [];
-    const effectivePhase = args.phase ?? (await inferIssuePhase(state, resolvedRelated, root));
+    // ISS-1203 default, ISS-1221 contract: undefined means infer; an explicit
+    // null was resolved by a preparer and is written as is. See inferIssuePhase.
+    const effectivePhase = args.phase !== undefined ? args.phase : await inferIssuePhase(state, resolvedRelated, root);
 
     createdInState = state;
     const isTeam = state.config.team?.enabled === true;
