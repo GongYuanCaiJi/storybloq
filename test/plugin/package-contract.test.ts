@@ -45,7 +45,7 @@ describe("the Mods runtime ships with the package (T-507 D)", () => {
 
   it("every runtime file the copy needs exists in the repository", () => {
     const hooks = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugins", "storybloq", "hooks");
-    for (const name of ["hooks.json", "mod.ts", "client-api.ts", "install.ts", "roster.ts", "sidebar.ts", "sidebar-projection.ts"]) {
+    for (const name of ["hooks.json", "mod.ts", "client-api.ts", "install.ts", "sidebar.ts", "sidebar-projection.ts"]) {
       expect(existsSync(join(hooks, name)), name).toBe(true);
     }
   });

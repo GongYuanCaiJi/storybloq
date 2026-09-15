@@ -5,7 +5,8 @@
  * Claude Code session, one of its subagents, or (merged at read time, never
  * written here) a Codex task known only through its Bus endpoint. Records are
  * written by the storybloq CLI (`storybloq roster start|heartbeat|end`), which
- * the Claude Code function-hooks Mod (`plugins/storybloq/hooks/roster.ts`)
+ * a Claude Code function-hooks Mod (removed by owner ruling on 2026-09-15;
+ * the core stays for the CLI, the MCP reader and the status views)
  * runs; nothing writes this JSON by hand.
  *
  * Identity. The presence ownerIdentity anchors a seat: `client:clientTaskId`,
@@ -28,7 +29,7 @@
  * Concurrency. Every read-modify-write and every reaper deletion runs under
  * the per-record lock the presence hooks already use (`<file>.lock`,
  * mkdir-based, 150 ms budget). Atomic rename alone prevents torn files, not
- * lost updates: the Mod's heartbeat, its poll, a `turn.complete` and a manual
+ * lost updates: a writer's heartbeat, its poll, a `turn.complete` and a manual
  * CLI call can all target one record inside a second. On contention a write
  * reports `skipped-contention`; it never claims a write it did not make.
  *
@@ -224,7 +225,7 @@ const CONTROL_CHARS = /[\x00-\x1f]/;
 /**
  * Validates a `start`'s identity and content by BYTES (the caps bound the
  * serialized record). Throws naming the field; the CLI turns that into an
- * `invalid_input` and the Mod into one log line.
+ * `invalid_input` and a caller into one log line.
  */
 export function validateStart(event: Extract<RosterSeatEvent, { kind: "start" }>): void {
   if (!isClient(event.client)) throw new Error("client must be claude or codex");

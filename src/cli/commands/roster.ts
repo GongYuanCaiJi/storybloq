@@ -2,10 +2,11 @@
  * T-507 commit B: `storybloq roster start|heartbeat|end|list [--all]` and the
  * read-only `storybloq_roster_get`.
  *
- * The write commands are what the Claude Code Mod runs through
- * `$.process.run` (`plugins/storybloq/hooks/roster.ts`), so their contract is
+ * The write commands are shaped for a caller that runs them through a
+ * function-hooks `$.process.run` (the roster Mod was removed by owner ruling
+ * on 2026-09-15; the core and this CLI stay), so their contract is
  * machine-first: one JSON envelope on stdout whatever happens, `no_project`
- * when the cwd is not inside a ledger (the Mod caches that per cwd and stops
+ * when the cwd is not inside a ledger (such a caller caches that per cwd and stops
  * calling), `invalid_input` for a bad body, and `core/roster.ts`'s own
  * refusal reasons passed through verbatim as `refused_transition`,
  * `skipped_contention`, `write_failed`. A write never loads project state:
@@ -111,7 +112,7 @@ const REASON_CODES: Record<Exclude<UpsertResult, { ok: true }>["reason"], string
 
 /**
  * One write, one envelope. `root === null` is the no-project case and is
- * answered before anything is validated, so a Mod running outside a ledger
+ * answered before anything is validated, so a caller running outside a ledger
  * learns that first and cheaply.
  */
 export function handleRosterWrite(
@@ -152,7 +153,7 @@ export function handleRosterWrite(
   }
   const result = upsertSeat(root, event, nowIso);
   if (!result.ok) {
-    // The core's reason is the machine-readable code; a Mod branches on it
+    // The core's reason is the machine-readable code; a caller branches on it
     // (`refused_transition` after a restart is expected, `write_failed` is not).
     return {
       output: JSON.stringify({ version: 1, error: { code: REASON_CODES[result.reason], message: result.message } }, null, 2),

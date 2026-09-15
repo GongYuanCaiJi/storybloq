@@ -13,17 +13,25 @@
  * WHERE. ~/.claude/skills/storybloq/, beside the /story skill at
  * ~/.claude/skills/story/. The client loads it with
  * `claude --plugin-dir ~/.claude/skills/storybloq` under
- * CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; both Mods stay off until their
+ * CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1; the Mod stays off until its
  * userConfig option is set.
  *
- * HOW. The whole tree is staged beside the destination and swapped in with
- * the same atomic swap the skill copy uses (`copyDirRecursive`), so a
- * failure while staging leaves the previous copy untouched and no partial
- * copy is ever loadable.
+ * HOW. The whole tree is staged beside the destination (a unique mkdtemp
+ * directory) and swapped in with the same atomic swap the skill copy uses
+ * (`copyDirRecursive`), so a failure while staging leaves the previous copy
+ * untouched and no partial copy is ever loadable. The source must carry the
+ * whole runtime module graph before anything is staged: a package missing
+ * one imported module would otherwise replace a working copy with one the
+ * client cannot load. Installs are serialized per destination by a
+ * `<dest>.lock` file taken with O_EXCL and owned by a token (a second
+ * install in the same process waits on it like any other), so two setups
+ * or a setup and a refresh never share the swap's fixed `.tmp` and `.bak`
+ * paths.
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -99,7 +107,198 @@ export interface InstallModsResult {
   readonly written: readonly string[];
 }
 
-const REQUIRED_HOOK_FILES = ["hooks.json", "mod.ts"];
+/**
+ * The runtime module graph the copy must carry whole: mod.ts imports
+ * sidebar.ts, sidebar.ts imports sidebar-projection.ts, and client-api.ts is
+ * the pin they are checked against. install.ts is generated.
+ */
+export const REQUIRED_HOOK_FILES = ["hooks.json", "mod.ts", "client-api.ts", "sidebar.ts", "sidebar-projection.ts"] as const;
+
+/** How long a second installer waits for the first's lock before giving up. */
+export const MODS_LOCK_WAIT_MS = 10_000;
+/** A lock whose holder cannot be checked for liveness and is older than this is taken over. */
+export const MODS_LOCK_STALE_MS = 60_000;
+
+/**
+ * Test seams. `beforeSwap` is awaited after the tree is staged and before it
+ * is swapped in; `onLockHeld` is called each time a contender finds the lock
+ * held by a live holder and is about to wait; `pidAlive` replaces the
+ * liveness probe.
+ */
+export const __installModsTestHooks: {
+  beforeSwap: (() => Promise<void>) | null;
+  onLockHeld: (() => void) | null;
+  pidAlive: ((pid: number) => boolean) | null;
+} = { beforeSwap: null, onLockHeld: null, pidAlive: null };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pidAlive(pid: number): boolean {
+  if (__installModsTestHooks.pidAlive !== null) return __installModsTestHooks.pidAlive(pid);
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+interface LockBody {
+  readonly pid: number;
+  readonly token: string;
+  readonly mtimeMs: number;
+}
+
+/**
+ * Reads `<pid> <token>` from a lock. Null only when the lock is gone
+ * (ENOENT); a malformed body reads as pid -1 with an empty token; every
+ * other failure is the caller's to see, not a reason to spin.
+ */
+async function readLock(lockPath: string): Promise<LockBody | null> {
+  try {
+    const [body, info] = await Promise.all([readFile(lockPath, "utf-8"), stat(lockPath)]);
+    const m = /^(\d+) ([0-9a-f-]{36})\s*$/.exec(body);
+    if (!m) return { pid: -1, token: "", mtimeMs: info.mtimeMs };
+    return { pid: Number(m[1]), token: m[2]!, mtimeMs: info.mtimeMs };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+function sameLock(a: LockBody, b: LockBody): boolean {
+  return a.pid === b.pid && a.token === b.token && a.mtimeMs === b.mtimeMs;
+}
+
+/** A lock whose pid is dead on this machine; one whose holder cannot be judged, by age. */
+function lockDead(held: LockBody): boolean {
+  return held.pid > 0 ? !pidAlive(held.pid) : Date.now() - held.mtimeMs > MODS_LOCK_STALE_MS;
+}
+
+/** Creates `path` with O_EXCL carrying `<pid> <token>`; false when it exists. */
+async function createLock(path: string, token: string): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(path, "wx");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
+  try {
+    await handle.writeFile(`${process.pid} ${token}\n`, "utf-8");
+    await handle.close();
+  } catch (err) {
+    try { await handle.close(); } catch { /* already closed */ }
+    await rm(path, { force: true });
+    throw err;
+  }
+  return true;
+}
+
+/** Removes `path` while it still carries `token`; a successor's lock is left alone. */
+async function releaseLock(path: string, token: string): Promise<void> {
+  const held = await readLock(path);
+  if (held !== null && held.token === token) await rm(path, { force: true });
+}
+
+/**
+ * Removes the lock at `path` only if it is still `expected`. The file is moved
+ * to a unique name first and read there, so the decision is made on the file
+ * this contender actually holds: when it turns out to be a successor's lock
+ * (taken between the judgement and the move), it is linked back under its
+ * own name, same inode, so the successor's release still finds its token.
+ */
+async function removeIfStill(path: string, expected: LockBody, token: string): Promise<void> {
+  const aside = `${path}.reclaim-${token}`;
+  try {
+    await rename(path, aside);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    throw err;
+  }
+  let moved: LockBody | null;
+  try {
+    moved = await readLock(aside);
+  } catch (readErr) {
+    // Unknown file, unreadable: put it back where its holder expects it
+    // rather than leave it stranded under a private name, then fail.
+    try {
+      await link(aside, path);
+      await rm(aside, { force: true });
+    } catch (restoreErr) {
+      throw new Error(
+        `could not read the moved lock ${aside} (${String(readErr)}) nor restore it to ${path} (${String(restoreErr)})`,
+      );
+    }
+    throw readErr;
+  }
+  if (moved === null || sameLock(moved, expected)) {
+    await rm(aside, { force: true });
+    return;
+  }
+  // A successor's lock was displaced: back under its own name, same inode.
+  try {
+    await link(aside, path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  await rm(aside, { force: true });
+}
+
+/**
+ * Reclaims a dead `<dir>.lock` under `<dir>.lock.reclaim`, a second O_EXCL
+ * lock that serializes reclaims: the main lock is re-read while the reclaim
+ * lock is held and removed only if it is still the lock that was judged
+ * dead, so a contender can never remove a fresh lock a rival took after
+ * reclaiming ahead of it. The reclaim lock is held for a few file operations;
+ * one left by a crashed reclaimer is removed through `removeIfStill`.
+ */
+async function reclaimDeadLock(lockPath: string, judgedDead: LockBody, token: string): Promise<void> {
+  const reclaimPath = `${lockPath}.reclaim`;
+  if (!(await createLock(reclaimPath, token))) {
+    const holder = await readLock(reclaimPath);
+    if (holder !== null && lockDead(holder)) await removeIfStill(reclaimPath, holder, token);
+    else await sleep(50);
+    return; // the caller loops and looks at the main lock again
+  }
+  try {
+    const now = await readLock(lockPath);
+    if (now !== null && sameLock(now, judgedDead)) await rm(lockPath, { force: true });
+  } finally {
+    await releaseLock(reclaimPath, token);
+  }
+}
+
+/**
+ * Takes `<dir>.lock` with O_EXCL. The lock carries `<pid> <token>`; release
+ * removes it only while it still carries this holder's token, so a holder can
+ * never remove a successor's lock. A lock whose pid is dead on this machine is
+ * reclaimed at once; one whose holder cannot be judged (a malformed body) is
+ * reclaimed by age; a live holder is waited for up to MODS_LOCK_WAIT_MS.
+ */
+async function acquireLock(dir: string): Promise<() => Promise<void>> {
+  const lockPath = `${dir}.lock`;
+  const token = randomUUID();
+  const deadline = Date.now() + MODS_LOCK_WAIT_MS;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error(`another storybloq install holds ${lockPath}; try again in a moment`);
+    }
+    if (await createLock(lockPath, token)) {
+      return () => releaseLock(lockPath, token);
+    }
+    const held = await readLock(lockPath);
+    if (held === null) continue; // released between the open and the read
+    if (lockDead(held)) {
+      await reclaimDeadLock(lockPath, held, token);
+      continue;
+    }
+    if (__installModsTestHooks.onLockHeld !== null) __installModsTestHooks.onLockHeld();
+    await sleep(50);
+  }
+}
 
 /**
  * Installs (or replaces) the Mods copy. Stages the whole tree beside the
@@ -127,10 +326,12 @@ export async function installMods(options: InstallModsOptions): Promise<InstallM
     .filter((name) => name !== "install.ts")
     .sort();
 
-  const stage = `${dir}.stage-${process.pid}`;
-  await rm(stage, { recursive: true, force: true });
+  await mkdir(dirname(dir), { recursive: true });
+  const release = await acquireLock(dir);
+  let stage: string | null = null;
   const written: string[] = [];
   try {
+    stage = await mkdtemp(`${dir}.stage-`);
     await mkdir(join(stage, ".claude-plugin"), { recursive: true });
     await mkdir(join(stage, "hooks"), { recursive: true });
     await writeFile(join(stage, ".claude-plugin", "plugin.json"), JSON.stringify(manifest, null, 2) + "\n", "utf-8");
@@ -142,10 +343,15 @@ export async function installMods(options: InstallModsOptions): Promise<InstallM
     await writeFile(join(stage, "hooks", "install.ts"), renderInstallModule(options.bin), "utf-8");
     written.push("hooks/install.ts");
 
+    if (__installModsTestHooks.beforeSwap !== null) await __installModsTestHooks.beforeSwap();
     const { copyDirRecursive } = await import("../cli/commands/setup-skill.js");
     await copyDirRecursive(stage, dir);
   } finally {
-    await rm(stage, { recursive: true, force: true });
+    try {
+      if (stage !== null) await rm(stage, { recursive: true, force: true });
+    } finally {
+      await release();
+    }
   }
   return { dir, bin: options.bin, written };
 }

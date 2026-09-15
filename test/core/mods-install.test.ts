@@ -13,11 +13,13 @@
  * Pen hold 1 (T-507): when the global binary moves (an nvm switch), the
  * version-marker auto-refresh must re-resolve that path. M-NO-RERESOLVE
  * (the refresh copies the files but keeps the old install.ts) goes red
- * against the "moves with the binary" test below.
+ * against the "moves with the binary" test below. Other mutants this file
+ * kills: M-ALWAYS-INSTALL, M-KEEP-TESTS, M-KEEP-SKILLS, M-PARTIAL-GRAPH,
+ * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, writeFile, readFile, rm, chmod, readdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +35,36 @@ async function fakeBin(dir: string): Promise<string> {
   await writeFile(bin, "#!/bin/sh\n", "utf-8");
   await chmod(bin, 0o755);
   return bin;
+}
+
+/** Polls `cond` every 10 ms; fails after `timeoutMs` so a broken lock cannot hang the suite. */
+async function waitFor(cond: () => boolean, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("waitFor: condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** True when this process can read `path` (as root it can, whatever the mode). */
+async function readable(path: string): Promise<boolean> {
+  try {
+    await readFile(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Every regular file under `root`, as relative path to bytes. */
+async function snapshotTree(root: string, prefix = ""): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const entry of await readdir(join(root, prefix), { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) for (const [k, v] of await snapshotTree(root, rel)) out.set(k, v);
+    else out.set(rel, await readFile(join(root, rel), "utf-8"));
+  }
+  return out;
 }
 
 describe("renderInstallModule (T-507 D)", () => {
@@ -51,10 +83,17 @@ describe("renderInstallModule (T-507 D)", () => {
     expect(text).toMatch(/not (be )?resolved|no global/i);
   });
 
-  it("escapes a path that carries a quote or a backslash so the module still parses", async () => {
+  it("escapes a path that carries a quote or a backslash so the module still parses and answers it", async () => {
     const { renderInstallModule } = await import("../../src/core/mods-install.js");
-    const text = renderInstallModule('C:\\Users\\o"k\\storybloq.cmd');
-    expect(text).toContain(JSON.stringify('C:\\Users\\o"k\\storybloq.cmd'));
+    const path = 'C:\\Users\\o"k\\storybloq.cmd';
+    const text = renderInstallModule(path);
+    expect(text).toContain(JSON.stringify(path));
+    const ts = await import("typescript");
+    const out = ts.transpileModule(text, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } });
+    expect(out.diagnostics ?? []).toEqual([]);
+    const exports: Record<string, unknown> = {};
+    new Function("exports", out.outputText)(exports);
+    expect((exports["resolveStorybloqBin"] as () => string)()).toBe(path);
   });
 });
 
@@ -135,6 +174,270 @@ describe("installMods (T-507 D)", () => {
     expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
   });
 
+  it("two installs at once against the same destination both land, and leave one copy and no sibling", async () => {
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const a = await fakeBin(join(tempDir, "a"));
+    const b = await fakeBin(join(tempDir, "b"));
+    const [first, second] = await Promise.all([installMods({ bin: a }), installMods({ bin: b })]);
+    expect(first.dir).toBe(modsDir());
+    expect(second.dir).toBe(modsDir());
+    const installTs = await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8");
+    // Whichever took the lock last wins, whole: the copy is one call's, never a mix.
+    expect([`return ${JSON.stringify(a)};`, `return ${JSON.stringify(b)};`].some((line) => installTs.includes(line))).toBe(true);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+    expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
+  });
+
+  it("a lock left by a dead process is reclaimed at once (M-NO-DEAD-RECLAIM)", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    // The liveness probe is injected: a real just-exited pid could be reused
+    // by the OS between the write and the probe.
+    const dead = 4_000_001;
+    __installModsTestHooks.pidAlive = (pid) => pid !== dead;
+    await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
+    const started = Date.now();
+    try {
+      await installMods({ bin });
+    } finally {
+      __installModsTestHooks.pidAlive = null;
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("reclaiming never removes a fresh lock a rival took after reclaiming first", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    const dead = 4_000_002;
+    const rival = `${process.pid} ${randomUUID()}\n`; // alive: this process
+    let swapped = false;
+    let heldSeen = 0;
+    // The first liveness probe answers "dead" and, as if a rival had reclaimed
+    // and retaken the lock in the meantime, replaces the lock file before the
+    // contender gets to remove anything. The rival must survive.
+    __installModsTestHooks.pidAlive = (pid) => {
+      if (pid !== dead) return true;
+      if (!swapped) {
+        swapped = true;
+        writeFileSync(lockPath, rival, "utf-8");
+      }
+      return false;
+    };
+    __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    let pending: Promise<unknown> | null = null;
+    try {
+      await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
+      pending = installMods({ bin });
+      await waitFor(() => heldSeen > 0);
+      expect(await readFile(lockPath, "utf-8")).toBe(rival);
+      expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+      await rm(lockPath, { force: true }); // the rival releases
+      await pending;
+    } finally {
+      __installModsTestHooks.pidAlive = null;
+      __installModsTestHooks.onLockHeld = null;
+    }
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("a lock read that fails for a reason other than ENOENT is an error, not a ten-second wait", async (ctx) => {
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    await writeFile(lockPath, `${process.pid} ${randomUUID()}\n`, "utf-8");
+    await chmod(lockPath, 0o000);
+    if (await readable(lockPath)) {
+      await rm(lockPath, { force: true });
+      ctx.skip(); // root, or a platform where mode 000 does not deny a read: the failure cannot be produced here
+    }
+    const started = Date.now();
+    try {
+      await expect(installMods({ bin })).rejects.toThrow(/EACCES/);
+    } finally {
+      await chmod(lockPath, 0o644);
+      await rm(lockPath, { force: true });
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+  });
+
+  it("a lock whose holder cannot be judged is taken over by age only (M-NO-STALE-TAKEOVER)", async () => {
+    const { installMods, modsDir, MODS_LOCK_STALE_MS } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    await writeFile(lockPath, "garbage\n", "utf-8");
+    const { utimes } = await import("node:fs/promises");
+    const old = (Date.now() - MODS_LOCK_STALE_MS - 1000) / 1000;
+    await utimes(lockPath, old, old);
+    await installMods({ bin });
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("a lock held by a live process is waited for, and the install proceeds once it is released", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    await writeFile(lockPath, `${process.pid} ${randomUUID()}\n`, "utf-8"); // this process: alive, not ours
+    let settled = false;
+    let heldSeen = 0;
+    __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    try {
+      const pending = installMods({ bin }).then(() => { settled = true; });
+      await waitFor(() => heldSeen >= 3); // reached the held lock and kept waiting
+      expect(settled).toBe(false);
+      expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+      await rm(lockPath, { force: true });
+      await pending;
+    } finally {
+      __installModsTestHooks.onLockHeld = null;
+    }
+    expect(settled).toBe(true);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("a second install in this process waits for the first, even while the first holds the lock past the swap", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const a = await fakeBin(join(tempDir, "a"));
+    const b = await fakeBin(join(tempDir, "b"));
+    let releaseFirst: (() => void) | null = null;
+    let enteredFirst: () => void = () => {};
+    const firstPaused = new Promise<void>((resolve) => { enteredFirst = resolve; });
+    const order: string[] = [];
+    let heldSeen = 0;
+    __installModsTestHooks.beforeSwap = () => {
+      enteredFirst();
+      return new Promise<void>((resolve) => { releaseFirst = resolve; });
+    };
+    __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    try {
+      const first = installMods({ bin: a }).then(() => order.push("first"));
+      await firstPaused; // the first is staged and holding the lock
+      __installModsTestHooks.beforeSwap = null; // only the first install pauses
+      const second = installMods({ bin: b }).then(() => order.push("second"));
+      await waitFor(() => heldSeen >= 3); // the second reached the held lock and is waiting on it
+      expect(order).toEqual([]); // it neither overtook nor reclaimed the first's live lock
+      expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+      releaseFirst!();
+      await Promise.all([first, second]);
+    } finally {
+      __installModsTestHooks.beforeSwap = null;
+      __installModsTestHooks.onLockHeld = null;
+    }
+    expect(order).toEqual(["first", "second"]);
+    expect(await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8")).toContain(`return ${JSON.stringify(b)};`);
+    expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
+  });
+
+  it("the lock is released even when the staging directory cannot be removed", async (ctx) => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    const parent = dirname(modsDir());
+    await mkdir(parent, { recursive: true });
+    const lockedDirs: string[] = [];
+    // Once staged, a read-only directory with a file inside is planted in the
+    // stage: removing the stage then fails (the file cannot be unlinked), and
+    // the lock must still be released.
+    __installModsTestHooks.beforeSwap = async () => {
+      for (const entry of await readdir(parent)) {
+        if (!entry.startsWith("storybloq.stage-")) continue;
+        const locked = join(parent, entry, "hooks", "locked");
+        await mkdir(locked);
+        await writeFile(join(locked, "pin"), "", "utf-8");
+        await chmod(locked, 0o500);
+        lockedDirs.push(locked);
+      }
+    };
+    let rejection: unknown = null;
+    try {
+      rejection = await installMods({ bin }).then(() => null, (err: unknown) => err);
+    } finally {
+      __installModsTestHooks.beforeSwap = null;
+      for (const locked of lockedDirs) await chmod(locked, 0o755);
+    }
+    expect(lockedDirs).toHaveLength(1);
+    if (rejection === null) {
+      // root, or a platform where a read-only directory does not block an
+      // unlink: the cleanup failure cannot be produced here.
+      ctx.skip();
+    }
+    expect(String(rejection)).toMatch(/EACCES|EPERM/);
+    expect(existsSync(`${modsDir()}.lock`)).toBe(false);
+    const started = Date.now();
+    await installMods({ bin }); // takes the lock at once
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+    for (const entry of await readdir(parent)) {
+      if (entry.startsWith("storybloq.stage-")) await rm(join(parent, entry), { recursive: true, force: true });
+    }
+  });
+
+  it("a holder's release never removes a lock a successor has since taken (M-RELEASE-ANY)", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    const lockPath = `${modsDir()}.lock`;
+    const successor = `${process.pid} ${randomUUID()}\n`;
+    __installModsTestHooks.beforeSwap = async () => {
+      // As if the lock had been reclaimed and retaken while this install ran.
+      await writeFile(lockPath, successor, "utf-8");
+    };
+    try {
+      await installMods({ bin });
+    } finally {
+      __installModsTestHooks.beforeSwap = null;
+    }
+    expect(await readFile(lockPath, "utf-8")).toBe(successor);
+    await rm(lockPath, { force: true });
+  });
+
+  it("a source missing one module of the runtime graph is refused, and the previous copy stays (sidebar-projection.ts)", async () => {
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await installMods({ bin });
+    const before = await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8");
+    const partial = join(tempDir, "partial-plugin");
+    await mkdir(join(partial, ".claude-plugin"), { recursive: true });
+    await mkdir(join(partial, "hooks"), { recursive: true });
+    await writeFile(join(partial, ".claude-plugin", "plugin.json"), await readFile(join(PLUGIN_SRC, ".claude-plugin", "plugin.json")));
+    for (const name of ["hooks.json", "mod.ts", "client-api.ts", "sidebar.ts"]) {
+      await writeFile(join(partial, "hooks", name), await readFile(join(PLUGIN_SRC, "hooks", name)));
+    }
+    await expect(installMods({ bin: "/elsewhere/storybloq", sourceDir: partial })).rejects.toThrow(/sidebar-projection\.ts is missing/);
+    expect(await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8")).toBe(before);
+    expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
+  });
+
+  it("a failure after staging began (an unreadable runtime file) leaves the previous copy byte-identical and no stage behind", async () => {
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await installMods({ bin });
+    const before = await snapshotTree(modsDir());
+    expect(before.has(".claude-plugin/plugin.json")).toBe(true);
+    expect(before.has("hooks/install.ts")).toBe(true);
+    const bad = join(tempDir, "bad-plugin");
+    await mkdir(join(bad, ".claude-plugin"), { recursive: true });
+    await mkdir(join(bad, "hooks"), { recursive: true });
+    await writeFile(join(bad, ".claude-plugin", "plugin.json"), await readFile(join(PLUGIN_SRC, ".claude-plugin", "plugin.json")));
+    for (const name of ["hooks.json", "mod.ts", "client-api.ts", "sidebar-projection.ts"]) {
+      await writeFile(join(bad, "hooks", name), await readFile(join(PLUGIN_SRC, "hooks", name)));
+    }
+    // sidebar.ts exists (validation passes) but is a directory: the read fails mid-stage.
+    await mkdir(join(bad, "hooks", "sidebar.ts"));
+    await expect(installMods({ bin: "/elsewhere/storybloq", sourceDir: bad })).rejects.toThrow();
+    expect(await snapshotTree(modsDir())).toEqual(before);
+    expect(await readdir(join(tempDir, ".claude", "skills"))).toEqual(["storybloq"]);
+  });
+
   it("a source whose hooks are incomplete is refused before anything is swapped in", async () => {
     const { installMods, modsDir } = await import("../../src/core/mods-install.js");
     const bin = await fakeBin(join(tempDir, "bin"));
@@ -164,11 +467,24 @@ describe("installMods (T-507 D)", () => {
     const scanOf = (dir: string) =>
       execFileSync("claude", ["plugin", "validate", dir], { encoding: "utf8", env })
         .split("\n")
-        .filter((row) => row.includes("mod.ts hooks:") || row.includes("mod.ts calls:") || row.includes("env reads:"))
+        .filter((row) => row.includes("mod.ts hooks:") || row.includes("mod.ts calls:"))
         .map((row) => row.trim());
     const installed = execFileSync("claude", ["plugin", "validate", modsDir()], { encoding: "utf8", env });
     expect(installed).toContain("Validation passed");
-    expect(scanOf(modsDir())).toEqual(scanOf(PLUGIN_SRC));
+    const copyScan = scanOf(modsDir());
+    const repoScan = scanOf(PLUGIN_SRC);
+    // Two lines (the sidebar reads no environment, so the scan prints no env
+    // line), each once and each with a payload: an empty scan on both sides
+    // would otherwise compare equal.
+    expect(copyScan).toHaveLength(2);
+    for (const label of ["mod.ts hooks:", "mod.ts calls:"]) {
+      const rows = copyScan.filter((row) => row.includes(label));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.split(label)[1]!.trim().length).toBeGreaterThan(0);
+    }
+    expect(copyScan.find((row) => row.includes("mod.ts hooks:"))).toContain("ui.render");
+    expect(copyScan.find((row) => row.includes("mod.ts calls:"))).toContain("$.fs.read (via drainChunk, readHeader)");
+    expect(copyScan).toEqual(repoScan);
   });
 });
 
@@ -216,8 +532,8 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     expect(installTs).toContain(`return ${JSON.stringify(newBin)};`);
     expect(installTs).not.toContain(oldBin);
     // The runtime files came along too, not only install.ts.
-    expect(await readFile(join(modsDir(), "hooks", "roster.ts"), "utf-8")).toBe(
-      await readFile(join(PLUGIN_SRC, "hooks", "roster.ts"), "utf-8"),
+    expect(await readFile(join(modsDir(), "hooks", "sidebar.ts"), "utf-8")).toBe(
+      await readFile(join(PLUGIN_SRC, "hooks", "sidebar.ts"), "utf-8"),
     );
   });
 
@@ -237,5 +553,73 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     expect(await autoRefreshSkillIfStale("1.1.6")).toBe(true);
     expect(await readFile(join(modsDir(), "hooks", "install.ts"), "utf-8")).toContain('return "storybloq";');
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+});
+
+describe("setup-skill wires the Mods copy (T-507 D)", () => {
+  let tempDir: string;
+  let originalHome: string | undefined;
+  let originalPath: string | undefined;
+  let out: string[];
+  let err: string[];
+  let stdoutSpy: { mockRestore: () => void } | null = null;
+  let stderrSpy: { mockRestore: () => void } | null = null;
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `storybloq-mods-setup-${randomUUID()}`);
+    await mkdir(join(tempDir, ".claude"), { recursive: true });
+    originalHome = process.env.HOME;
+    originalPath = process.env.PATH;
+    process.env.HOME = tempDir;
+    // Shims: a storybloq the resolver finds, and a claude whose `mcp add` succeeds, so the
+    // handler runs its whole path inside this HOME (settings.json, .claude.json, skills/).
+    const shims = join(tempDir, "shims");
+    await fakeBin(shims);
+    await writeFile(join(shims, "claude"), "#!/bin/sh\nexit 0\n", "utf-8");
+    await chmod(join(shims, "claude"), 0o755);
+    process.env.PATH = shims;
+    out = [];
+    err = [];
+    const { vi } = await import("vitest");
+    stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: unknown) => { out.push(String(chunk)); return true; }) as never);
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => { err.push(String(chunk)); return true; }) as never);
+  });
+
+  afterEach(async () => {
+    stdoutSpy?.mockRestore();
+    stderrSpy?.mockRestore();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    await rm(tempDir, { recursive: true, force: true });
+    const { vi } = await import("vitest");
+    vi.doUnmock("../../src/core/mods-install.js");
+    vi.resetModules();
+  });
+
+  it("handleSetup --client claude installs the copy with the binary it resolved, and says so", async () => {
+    const { handleSetup } = await import("../../src/cli/commands/setup-skill.js");
+    await handleSetup({ client: "claude" });
+    const installTs = await readFile(join(tempDir, ".claude", "skills", "storybloq", "hooks", "install.ts"), "utf-8");
+    expect(installTs).toContain(`return ${JSON.stringify(join(tempDir, "shims", "storybloq"))};`);
+    expect(existsSync(join(tempDir, ".claude", "skills", "storybloq", "hooks", "mod.ts"))).toBe(true);
+    expect(out.join("")).toContain("Installed Mods (function hooks, off by default) at ~/.claude/skills/storybloq/");
+    expect(err.join("")).not.toContain("Mods copy failed");
+  });
+
+  it("a failing Mods copy is a warning, and the rest of the Claude setup still completes", async () => {
+    const { vi } = await import("vitest");
+    vi.doMock("../../src/core/mods-install.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../src/core/mods-install.js")>();
+      return { ...actual, installMods: async () => { throw new Error("disk full (simulated)"); } };
+    });
+    const { handleSetup } = await import("../../src/cli/commands/setup-skill.js");
+    await expect(handleSetup({ client: "claude" })).resolves.toBeUndefined();
+    expect(err.join("")).toContain("Warning: Mods copy failed (non-fatal): disk full (simulated)");
+    expect(existsSync(join(tempDir, ".claude", "skills", "storybloq"))).toBe(false);
+    // The /story skill still landed (the marker is best-effort and, in the
+    // source layout, has no package.json beside dist/ to read a version from).
+    expect(existsSync(join(tempDir, ".claude", "skills", "story", "SKILL.md"))).toBe(true);
   });
 });

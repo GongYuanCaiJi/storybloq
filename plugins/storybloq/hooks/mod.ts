@@ -5,7 +5,6 @@
  * plugin, so every storybloq Mod registers through here. Each Mod lives in
  * its own file and is gated by its own `userConfig` option, off by default:
  *
- *   - roster.ts   T-507, the seat roster (option `roster`)
  *   - sidebar.ts  T-508, the ledger sidebar (option `sidebar`)
  *
  * The client loads this module only under CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1
@@ -14,10 +13,10 @@
  * names are string literals at every on() call, as the client's source scan
  * requires; the pinned list they are checked against is client-api.ts.
  *
- * The sidebar landed at 72f98679 (T-508) and the roster with T-507.
+ * The sidebar landed at 72f98679 (T-508). The roster Mod (T-507) was removed
+ * by owner ruling on 2026-09-15: one dashboard Mod; the roster core stays.
  */
 
-import { registerRoster } from "./roster.js";
 import { registerSidebar } from "./sidebar.js";
 
 export type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>;
@@ -26,9 +25,6 @@ export type On = (event: string, hook: Hook) => unknown;
 
 /** `register(on, options)`: the entry the client calls once per activation. */
 export function register(on: On, options: Options): void {
-  const roster = options["roster"] === true;
   const sidebar = options["sidebar"] === true;
-  if (!roster && !sidebar) return;
-  if (roster) registerRoster(on, options);
   if (sidebar) registerSidebar(on, options);
 }

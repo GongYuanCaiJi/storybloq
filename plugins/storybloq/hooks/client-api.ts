@@ -14,7 +14,7 @@
  * on() is not a string literal; $ is always spelled $.noun.event(...)"), so
  * the Mods spell these names as literals and this file is the pin they are
  * checked against: `claude plugin validate plugins/storybloq` prints what
- * each module hooks and calls, and the roster test compares that list with
+ * each module hooks and calls, and the sidebar test compares that list with
  * EVENTS and CALLS here. When a client update renames one, both change.
  */
 
@@ -41,16 +41,6 @@ export type EventKey = keyof typeof EVENTS;
  * the Mods intend to make; a call missing here is a call to justify.
  */
 export const CALLS = {
-  roster: [
-    "$.session.id",
-    "$.session.cwd",
-    "$.agent.list",
-    "$.clock.now",
-    "$.clock.every",
-    "$.env.get",
-    "$.process.run",
-    "$.ui.log",
-  ],
   sidebar: [
     "$.clock.every",
     "$.fs.exists",

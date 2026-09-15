@@ -5698,7 +5698,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
 
 /**
  * `storybloq roster start|heartbeat|end|list`. The three writes are the Claude
- * Code Mod's path (`plugins/storybloq/hooks/roster.ts` runs them through
+ * Code function-hooks path (a Mod would run them through
  * `$.process.run` with `--stdin --format json`); they never load project
  * state and always answer with one JSON envelope on stdout, `no_project`
  * included. `list` is the human and MCP read, Bus merged, terminal seats
@@ -5773,7 +5773,7 @@ export function registerRosterCommand(yargs: Argv): Argv {
           };
           const { discoverProjectRoot } = await import("../core/project-root-discovery.js");
           // `null` (no ledger above the cwd) is the only no_project answer. A
-          // throw is an unreadable .story/ and is said as io_error, so a Mod
+          // throw is an unreadable .story/ and is said as io_error, so a caller
           // never caches "no project here" over a permissions failure.
           let root: string | null;
           try {
