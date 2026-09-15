@@ -388,7 +388,6 @@ test("draws the pane with the ledger's numbers", async () => {
   expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
   expect(text).toContain("1 critical");
   expect(text).toContain("T-001");
-  expect(text).toContain("2026-01-02-latest.md");
 });
 
 test("opens the pane once, on an interactive session with a surface", async () => {
@@ -820,19 +819,20 @@ test("says nothing about context on a window that has had no response yet", asyn
   expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).not.toContain("context");
 });
 
-test("names the two newest handovers, one per line, newest first", async () => {
+test("keeps the handover names off the board", async () => {
   const h = harness(newFixture());
   h.fixture.files[".story/handovers/2026-01-03-newest.md"] = "# Newest";
-  h.fixture.files[".story/handovers/2026-01-01-oldest.md"] = "# Oldest";
   h.fixture.mtimes[".story/handovers/2026-01-03-newest.md"] = 1000;
-  h.fixture.mtimes[".story/handovers/2026-01-01-oldest.md"] = 1000;
   await started(h);
 
+  // The owner took them off: cleaner as a board. The projection still names
+  // them (its own test pins the order), but the pane draws none of it, and
+  // M-HANDOVERS-BACK puts the rows back.
   const text = textOf(await h.render(paneEvent()));
-  expect(text).toContain("2026-01-03-newest.md");
-  expect(text).toContain("2026-01-02-latest.md");
-  expect(text).not.toContain("2026-01-01-oldest.md");
-  expect(text.indexOf("2026-01-03-newest.md")).toBeLessThan(text.indexOf("2026-01-02-latest.md"));
+  expect(text).not.toContain(".md");
+  expect(text).not.toContain("handovers:");
+  // The issues line under the board stays.
+  expect(text).toContain("issues: 1 critical");
 });
 
 test("caps a column at eight and ends it with dots", async () => {
@@ -860,7 +860,7 @@ test("leaves a column that fits without a tail", async () => {
   expect(rows).not.toContain("...");
 });
 
-test("sets the issues line flush left, like the handovers under it", async () => {
+test("sets the issues line flush left under the board", async () => {
   const h = harness(newFixture());
   await started(h);
   const rows = paneRows(await h.render(paneEvent()));
@@ -869,19 +869,64 @@ test("sets the issues line flush left, like the handovers under it", async () =>
   // It was indented two spaces, which read as a hanging line under a board
   // that is itself flush left.
   expect(issues).toBe("issues: 1 critical, 0 high, 0 medium, 0 low");
-  expect(rows.some((row) => row.startsWith("handovers: "))).toBe(true);
+  expect(rows[rows.length - 1]).toBe(issues);
 });
 
-test("breaks the header off the board with one empty row", async () => {
+test("breaks the header off the board with one blank row that actually draws", async () => {
   const h = harness(newFixture());
   await started(h);
   const rows = paneRows(await h.render(paneEvent()));
 
+  // Four rows: the header, the break, the board, the issues line. The break
+  // has to be a row the client will DRAW, which an empty string is not: it
+  // collapses to no height, which is why the owner saw the wordmark sitting
+  // straight on top of "Blocked". So this counts rows and pins the content,
+  // and M-NO-HEADER-BREAK (an empty string, or no row at all) fails here.
+  expect(rows.length).toBe(4);
   expect(rows[0]).toContain("Storybloq");
-  expect(rows[1]).toBe("");
-  // And the board comes straight after the break, not another blank.
+  expect(rows[1]).toBe(" ");
+  expect(rows[1]!.length).toBeGreaterThan(0);
   expect(rows[2]).toContain("Blocked");
   expect(rows[2]).toContain("Done");
+  expect(rows[3]).toContain("issues:");
+});
+
+test("draws each column as a bordered card, sized to fit the border", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent(160));
+
+  // M-NO-BORDER drops the border and the four columns read as one run-on
+  // list again.
+  for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
+    const column = nodeByKey(tree, key);
+    expect(typeof column.props.borderStyle).toBe("string");
+    // The border costs a column each side, so the text has to be that much
+    // narrower or every row wraps and the board comes apart.
+    const columnWidth: number = column.props.width;
+    for (const row of rowsOf(tree, key)) {
+      expect(row.length).toBeLessThanOrEqual(columnWidth - 2);
+    }
+  }
+  // Four columns across the pane's width, borders touching.
+  const widths = ["board-blocked", "board-open", "board-inprogress", "board-done"].map(
+    (key) => nodeByKey(tree, key).props.width as number,
+  );
+  expect(widths.reduce((sum, w) => sum + w, 0)).toBeLessThanOrEqual(156);
+});
+
+test("gives the percent sign room to survive the pane's close mark", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const right = textOf(nodeByKey(await h.render(paneEvent()), "header"));
+
+  // Live this read "context 7×": the last cell of the pane's first body row
+  // is the engine's own close mark, and whatever the percent sign was doing
+  // there, it was not on screen. The trailing space keeps the sign one cell
+  // clear of the edge, and it also means the string no longer ENDS in "%",
+  // which covers the other candidate cause.
+  expect(right).toContain("context 20% ");
+  expect(right.endsWith("%")).toBe(false);
 });
 
 test("shows the context fill on a session that had already run a turn", async () => {

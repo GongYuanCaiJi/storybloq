@@ -82,6 +82,10 @@ const COLUMN_CARD_CAP = 8;
 const COLUMN_TAIL = "...";
 const BOARD_COLUMNS = 4;
 
+/** Each column is a bordered card, and the border costs a column each side. */
+const COLUMN_BORDER = "round";
+const BORDER_COLUMNS = 2;
+
 /**
  * Narrower than this and four columns are shredded rather than laid out, so
  * the same four sections stack instead. Well below the 110 the client needs
@@ -514,16 +518,28 @@ function boardColumn(
   cards: readonly SidebarBoardCard[],
   width: number,
 ): unknown {
+  // The border takes a column on each side, so the text inside has that much
+  // less. Getting this wrong wraps every row and the board falls apart.
+  const textWidth = Math.max(1, width - BORDER_COLUMNS);
   const rows: unknown[] = [
-    elements.Text({ bold: true, children: headingText(heading, cards.length, width) }),
+    elements.Text({ bold: true, children: headingText(heading, cards.length, textWidth) }),
   ];
   for (const card of cards.slice(0, COLUMN_CARD_CAP)) {
-    rows.push(elements.Text({ children: truncate(`${card.id} ${card.title}`, width) }));
+    rows.push(elements.Text({ children: truncate(`${card.id} ${card.title}`, textWidth) }));
   }
   if (cards.length > COLUMN_CARD_CAP) {
     rows.push(elements.Text({ dimColor: true, children: COLUMN_TAIL }));
   }
-  return elements.Box({ key, flexDirection: "column", width, overflow: "hidden", children: rows });
+  // A card, not a list: the heading with its count is the first row inside
+  // the border, which is what makes the four columns read as four things.
+  return elements.Box({
+    key,
+    flexDirection: "column",
+    borderStyle: COLUMN_BORDER,
+    width,
+    overflow: "hidden",
+    children: rows,
+  });
 }
 
 /**
@@ -531,18 +547,21 @@ function boardColumn(
  * is not. The keys stay the same either way, so what a column contains does
  * not depend on how it was laid out.
  *
- * Stacked the columns run down the pane, so they take no gap row between
- * them: a blank row there costs a card and the bold headings already separate
- * them. Side by side the gap is the column of space between them.
+ * No gap either way, because each column now carries its own border: stacked
+ * a gap row would cost a card, and side by side the borders touching is what
+ * makes the four read as one board.
  */
 function boardNode(elements: any, board: any, width: number, stacked: boolean): unknown {
-  const columnWidth = stacked ? width : Math.max(12, Math.floor((width - 3) / BOARD_COLUMNS));
+  // Stacked, one bordered card per row at the full width; side by side, the
+  // width split four ways with the borders touching, which is what makes them
+  // read as one board rather than four strays.
+  const columnWidth = stacked ? width : Math.max(12, Math.floor(width / BOARD_COLUMNS));
   // Left to right in the order the work moves: what is stuck, what can be
   // picked up, what is being done, what is finished.
   return elements.Box({
     key: "board",
     flexDirection: stacked ? "column" : "row",
-    gap: stacked ? 0 : 1,
+    gap: 0,
     children: [
       boardColumn(elements, "board-blocked", "Blocked", board.blocked, columnWidth),
       boardColumn(elements, "board-open", "Open", board.open, columnWidth),
@@ -570,7 +589,7 @@ function headerNode(elements: any, context: number | null): unknown {
     alignItems: "center",
     children: [
       elements.Text({ bold: true, children: "Storybloq" }),
-      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
+      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}% ` }),
     ],
   });
 }
@@ -586,11 +605,13 @@ export function registerSidebar(on: On, _options: Options): void {
       const elements = $.ui.resolve(e);
       const { Box, Text } = elements;
       const width: number = typeof e.props?.bodyColumns === "number" ? e.props.bodyColumns : 40;
-      // The header, then one empty row: the break the owner asked for, so the
-      // wordmark does not read as part of the first column heading.
+      // The header, then one blank row: the break the owner asked for, so the
+      // wordmark does not read as part of the first column heading. A single
+      // space and not an empty string, because an empty Text collapses to no
+      // row at all in this client and the break simply did not draw.
       const rows: unknown[] = [
         headerNode(elements, contextPercent),
-        Text({ key: "header-gap", children: "" }),
+        Text({ key: "header-gap", children: " " }),
       ];
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
@@ -604,11 +625,6 @@ export function registerSidebar(on: On, _options: Options): void {
             children: `issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`,
           }),
         );
-        for (const [index, name] of projection.latestHandovers.entries()) {
-          rows.push(
-            Text({ dimColor: true, children: truncate(`${index === 0 ? "handovers: " : "           "}${name}`, width) }),
-          );
-        }
         if (sessionActive) rows.push(Text({ dimColor: true, children: "an autonomous session is active" }));
       }
       return Box({ flexDirection: "column", children: rows });
