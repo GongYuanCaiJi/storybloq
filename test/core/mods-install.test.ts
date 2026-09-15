@@ -15,7 +15,7 @@
  * (the refresh copies the files but keeps the old install.ts) goes red
  * against the "moves with the binary" test below. Other mutants this file
  * kills: M-ALWAYS-INSTALL, M-KEEP-TESTS, M-KEEP-SKILLS, M-PARTIAL-GRAPH,
- * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY.
+ * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, writeFile, readFile, rm, chmod, readdir } from "node:fs/promises";
@@ -245,6 +245,52 @@ describe("installMods (T-507 D)", () => {
       __installModsTestHooks.onLockHeld = null;
     }
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("a reclaim lock left by a dead reclaimer is cleared and the install proceeds", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    const dead = 4_000_003;
+    __installModsTestHooks.pidAlive = (pid) => pid !== dead;
+    await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
+    await writeFile(`${lockPath}.reclaim`, `${dead} ${randomUUID()}\n`, "utf-8");
+    const started = Date.now();
+    try {
+      await installMods({ bin });
+    } finally {
+      __installModsTestHooks.pidAlive = null;
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
+  });
+
+  it("a stale reclaim lock whose holder cannot be judged fails closed, naming the path (M-RECLAIM-AUTO)", async () => {
+    const { installMods, modsDir, MODS_LOCK_STALE_MS, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    const reclaimPath = `${lockPath}.reclaim`;
+    const dead = 4_000_004;
+    __installModsTestHooks.pidAlive = (pid) => pid !== dead;
+    await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
+    await writeFile(reclaimPath, "garbage\n", "utf-8");
+    const { utimes } = await import("node:fs/promises");
+    const old = (Date.now() - MODS_LOCK_STALE_MS - 1000) / 1000;
+    await utimes(reclaimPath, old, old);
+    const started = Date.now();
+    try {
+      await expect(installMods({ bin })).rejects.toThrow(reclaimPath);
+    } finally {
+      __installModsTestHooks.pidAlive = null;
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(existsSync(reclaimPath)).toBe(true); // never auto-removed
+    expect(existsSync(lockPath)).toBe(true);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
   });
 
   it("a lock read that fails for a reason other than ENOENT is an error, not a ten-second wait", async (ctx) => {

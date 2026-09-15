@@ -26,11 +26,15 @@
  * `<dest>.lock` file taken with O_EXCL and owned by a token (a second
  * install in the same process waits on it like any other), so two setups
  * or a setup and a refresh never share the swap's fixed `.tmp` and `.bak`
- * paths.
+ * paths. The swap itself is two renames (`dest` to `.bak`, `.tmp` to
+ * `dest`), so a crash between them leaves the plugin path absent until the
+ * next install runs recovery; that window is the same one the /story skill
+ * copy has today, and the client loads a plugin only at session start or
+ * on /reload-plugins.
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { link, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -204,64 +208,39 @@ async function releaseLock(path: string, token: string): Promise<void> {
 }
 
 /**
- * Removes the lock at `path` only if it is still `expected`. The file is moved
- * to a unique name first and read there, so the decision is made on the file
- * this contender actually holds: when it turns out to be a successor's lock
- * (taken between the judgement and the move), it is linked back under its
- * own name, same inode, so the successor's release still finds its token.
- */
-async function removeIfStill(path: string, expected: LockBody, token: string): Promise<void> {
-  const aside = `${path}.reclaim-${token}`;
-  try {
-    await rename(path, aside);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
-    throw err;
-  }
-  let moved: LockBody | null;
-  try {
-    moved = await readLock(aside);
-  } catch (readErr) {
-    // Unknown file, unreadable: put it back where its holder expects it
-    // rather than leave it stranded under a private name, then fail.
-    try {
-      await link(aside, path);
-      await rm(aside, { force: true });
-    } catch (restoreErr) {
-      throw new Error(
-        `could not read the moved lock ${aside} (${String(readErr)}) nor restore it to ${path} (${String(restoreErr)})`,
-      );
-    }
-    throw readErr;
-  }
-  if (moved === null || sameLock(moved, expected)) {
-    await rm(aside, { force: true });
-    return;
-  }
-  // A successor's lock was displaced: back under its own name, same inode.
-  try {
-    await link(aside, path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-  }
-  await rm(aside, { force: true });
-}
-
-/**
  * Reclaims a dead `<dir>.lock` under `<dir>.lock.reclaim`, a second O_EXCL
  * lock that serializes reclaims: the main lock is re-read while the reclaim
  * lock is held and removed only if it is still the lock that was judged
  * dead, so a contender can never remove a fresh lock a rival took after
- * reclaiming ahead of it. The reclaim lock is held for a few file operations;
- * one left by a crashed reclaimer is removed through `removeIfStill`.
+ * reclaiming ahead of it. The reclaim lock is held for a few file
+ * operations. One left by a crashed reclaimer (its pid dead) is removed
+ * with a plain unlink after a re-read; the window between that re-read and
+ * the unlink is accepted, since closing it would need a rename that makes
+ * the canonical path free while a live lock is displaced, which is worse.
+ * A reclaim lock whose holder cannot be judged is never removed here:
+ * recovery fails closed with the path, for the user to delete by hand.
  */
 async function reclaimDeadLock(lockPath: string, judgedDead: LockBody, token: string): Promise<void> {
   const reclaimPath = `${lockPath}.reclaim`;
   if (!(await createLock(reclaimPath, token))) {
     const holder = await readLock(reclaimPath);
-    if (holder !== null && lockDead(holder)) await removeIfStill(reclaimPath, holder, token);
-    else await sleep(50);
-    return; // the caller loops and looks at the main lock again
+    if (holder === null) return; // released between the open and the read
+    if (holder.pid > 0) {
+      if (!pidAlive(holder.pid)) {
+        const again = await readLock(reclaimPath);
+        if (again !== null && sameLock(again, holder)) await rm(reclaimPath, { force: true });
+      } else {
+        await sleep(50);
+      }
+      return; // the caller loops and looks at the main lock again
+    }
+    if (Date.now() - holder.mtimeMs > MODS_LOCK_STALE_MS) {
+      throw new Error(
+        `a stale storybloq install lock is left at ${reclaimPath} and its holder cannot be identified; delete that file and run the install again`,
+      );
+    }
+    await sleep(50);
+    return;
   }
   try {
     const now = await readLock(lockPath);
