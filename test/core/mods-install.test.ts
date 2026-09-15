@@ -15,7 +15,7 @@
  * (the refresh copies the files but keeps the old install.ts) goes red
  * against the "moves with the binary" test below. Other mutants this file
  * kills: M-ALWAYS-INSTALL, M-KEEP-TESTS, M-KEEP-SKILLS, M-PARTIAL-GRAPH,
- * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO, M-NO-PATH-TRACK, M-RECOPY-ALWAYS.
+ * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO, M-RECLAIM-DEAD-AUTO, M-NO-PATH-TRACK, M-RECOPY-ALWAYS.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdir, writeFile, readFile, rm, chmod, readdir } from "node:fs/promises";
@@ -261,24 +261,61 @@ describe("installMods (T-507 D)", () => {
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
   });
 
-  it("a reclaim lock left by a dead reclaimer is cleared and the install proceeds", async () => {
+  it("a reclaim lock with a dead pid is never removed: the install waits, then fails closed naming the path (M-RECLAIM-DEAD-AUTO)", async () => {
     const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
     const bin = await fakeBin(join(tempDir, "bin"));
     await mkdir(dirname(modsDir()), { recursive: true });
     const lockPath = `${modsDir()}.lock`;
+    const reclaimPath = `${lockPath}.reclaim`;
     const dead = 4_000_003;
     __installModsTestHooks.pidAlive = (pid) => pid !== dead;
+    __installModsTestHooks.lockWaitMs = 500;
+    let heldSeen = 0;
+    __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
     await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
-    await writeFile(`${lockPath}.reclaim`, `${dead} ${randomUUID()}\n`, "utf-8");
+    await writeFile(reclaimPath, `${dead} ${randomUUID()}\n`, "utf-8");
     const started = Date.now();
     try {
-      await installMods({ bin });
+      await expect(installMods({ bin })).rejects.toThrow(reclaimPath);
     } finally {
       __installModsTestHooks.pidAlive = null;
+      __installModsTestHooks.lockWaitMs = null;
+      __installModsTestHooks.onLockHeld = null;
     }
-    expect(Date.now() - started).toBeLessThan(5000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(450); // it waited for the deadline
+    expect(heldSeen).toBeGreaterThan(0); // and kept looking at the reclaim lock while waiting
+    expect(existsSync(reclaimPath)).toBe(true); // never auto-removed
+    expect(existsSync(lockPath)).toBe(true);
+    expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+  });
+
+  it("a reclaim lock released while the install waits lets the reclaim of the main lock proceed", async () => {
+    const { installMods, modsDir, __installModsTestHooks } = await import("../../src/core/mods-install.js");
+    const bin = await fakeBin(join(tempDir, "bin"));
+    await mkdir(dirname(modsDir()), { recursive: true });
+    const lockPath = `${modsDir()}.lock`;
+    const reclaimPath = `${lockPath}.reclaim`;
+    const dead = 4_000_005;
+    __installModsTestHooks.pidAlive = (pid) => pid !== dead;
+    let heldSeen = 0;
+    __installModsTestHooks.onLockHeld = () => { heldSeen += 1; };
+    await writeFile(lockPath, `${dead} ${randomUUID()}\n`, "utf-8");
+    await writeFile(reclaimPath, `${process.pid} ${randomUUID()}\n`, "utf-8"); // a live reclaimer, not ours
+    let pending: Promise<unknown> | null = null;
+    try {
+      pending = settle(installMods({ bin }));
+      await waitFor(() => heldSeen >= 3);
+      expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(false);
+      await rm(reclaimPath, { force: true }); // the live reclaimer finishes
+      await pending;
+    } finally {
+      __installModsTestHooks.pidAlive = null;
+      __installModsTestHooks.onLockHeld = null;
+      await rm(reclaimPath, { force: true });
+      if (pending !== null) await pending;
+    }
     expect(existsSync(lockPath)).toBe(false);
-    expect(existsSync(`${lockPath}.reclaim`)).toBe(false);
+    expect(existsSync(reclaimPath)).toBe(false);
     expect(existsSync(join(modsDir(), "hooks", "mod.ts"))).toBe(true);
   });
 
@@ -295,11 +332,13 @@ describe("installMods (T-507 D)", () => {
     const { utimes } = await import("node:fs/promises");
     const old = (Date.now() - MODS_LOCK_STALE_MS - 1000) / 1000;
     await utimes(reclaimPath, old, old);
+    __installModsTestHooks.lockWaitMs = 500;
     const started = Date.now();
     try {
       await expect(installMods({ bin })).rejects.toThrow(reclaimPath);
     } finally {
       __installModsTestHooks.pidAlive = null;
+      __installModsTestHooks.lockWaitMs = null;
     }
     expect(Date.now() - started).toBeLessThan(5000);
     expect(existsSync(reclaimPath)).toBe(true); // never auto-removed

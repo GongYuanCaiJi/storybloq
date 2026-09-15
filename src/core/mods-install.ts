@@ -147,13 +147,15 @@ export const MODS_LOCK_STALE_MS = 60_000;
  * Test seams. `beforeSwap` is awaited after the tree is staged and before it
  * is swapped in; `onLockHeld` is called each time a contender finds the lock
  * held by a live holder and is about to wait; `pidAlive` replaces the
- * liveness probe.
+ * liveness probe; `lockWaitMs` shortens the lock wait.
  */
 export const __installModsTestHooks: {
   beforeSwap: (() => Promise<void>) | null;
   onLockHeld: (() => void) | null;
   pidAlive: ((pid: number) => boolean) | null;
-} = { beforeSwap: null, onLockHeld: null, pidAlive: null };
+  /** Shortens the lock wait so a fail-closed path can be tested in seconds. */
+  lockWaitMs: number | null;
+} = { beforeSwap: null, onLockHeld: null, pidAlive: null, lockWaitMs: null };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -232,35 +234,20 @@ async function releaseLock(path: string, token: string): Promise<void> {
  * lock that serializes reclaims: the main lock is re-read while the reclaim
  * lock is held and removed only if it is still the lock that was judged
  * dead, so a contender can never remove a fresh lock a rival took after
- * reclaiming ahead of it. The reclaim lock is held for a few file
- * operations. One left by a crashed reclaimer (its pid dead) is removed
- * with a plain unlink after a re-read; the window between that re-read and
- * the unlink is accepted, since closing it would need a rename that makes
- * the canonical path free while a live lock is displaced, which is worse.
- * A reclaim lock whose holder cannot be judged is never removed here:
- * recovery fails closed with the path, for the user to delete by hand.
+ * reclaiming ahead of it. A reclaim lock that is not ours is NEVER removed
+ * here, whatever its body says: a live reclaimer releases it within a few
+ * file operations, so the caller waits for it up to the deadline and then
+ * fails closed naming the path. Automatic removal of an abandoned reclaim
+ * lock would let two reclaimers into this section (both read it, one
+ * removes and retakes it, the other's pending removal deletes the fresh
+ * one), and a delayed removal could then take a fresh installer's main lock.
  */
 async function reclaimDeadLock(lockPath: string, judgedDead: LockBody, token: string): Promise<void> {
   const reclaimPath = `${lockPath}.reclaim`;
   if (!(await createLock(reclaimPath, token))) {
-    const holder = await readLock(reclaimPath);
-    if (holder === null) return; // released between the open and the read
-    if (holder.pid > 0) {
-      if (!pidAlive(holder.pid)) {
-        const again = await readLock(reclaimPath);
-        if (again !== null && sameLock(again, holder)) await rm(reclaimPath, { force: true });
-      } else {
-        await sleep(50);
-      }
-      return; // the caller loops and looks at the main lock again
-    }
-    if (Date.now() - holder.mtimeMs > MODS_LOCK_STALE_MS) {
-      throw new Error(
-        `a stale storybloq install lock is left at ${reclaimPath} and its holder cannot be identified; delete that file and run the install again`,
-      );
-    }
+    if (__installModsTestHooks.onLockHeld !== null) __installModsTestHooks.onLockHeld();
     await sleep(50);
-    return;
+    return; // the caller loops and looks at both locks again
   }
   try {
     const now = await readLock(lockPath);
@@ -280,9 +267,15 @@ async function reclaimDeadLock(lockPath: string, judgedDead: LockBody, token: st
 async function acquireLock(dir: string): Promise<() => Promise<void>> {
   const lockPath = `${dir}.lock`;
   const token = randomUUID();
-  const deadline = Date.now() + MODS_LOCK_WAIT_MS;
+  const deadline = Date.now() + (__installModsTestHooks.lockWaitMs ?? MODS_LOCK_WAIT_MS);
   for (;;) {
     if (Date.now() >= deadline) {
+      const reclaimPath = `${lockPath}.reclaim`;
+      if (existsSync(reclaimPath)) {
+        throw new Error(
+          `a storybloq install lock is left at ${reclaimPath} and was not released; delete that file and run the install again`,
+        );
+      }
       throw new Error(`another storybloq install holds ${lockPath}; try again in a moment`);
     }
     if (await createLock(lockPath, token)) {
