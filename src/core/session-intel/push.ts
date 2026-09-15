@@ -481,21 +481,42 @@ export type HandoverStampResult =
        */
       readonly pressureState: TokenPressureState | null;
     }
-  | { readonly status: "skipped"; readonly reason: string };
+  | {
+      readonly status: "skipped";
+      readonly reason: string;
+      /**
+       * ISS-1214: WHY the skip happened, decided at the return site that
+       * knows. Classifying downstream would mean re-deriving cause from
+       * message text, which is how a reply ends up asserting a cause it
+       * cannot establish. "config" is a precondition that never applied.
+       */
+      readonly kind: "config" | "binding" | "outcome" | "error";
+    };
 
 /**
- * ISS-1214: the not-applicable preconditions. A stamp that never applied is
- * not a failure a reader can act on -- every plain `storybloq handover
- * create` in a terminal skips on "client is not Claude" -- so these stay
- * silent and the reply is byte-identical to what it has always been.
+ * ISS-1214: the shape a reply needs to say what happened, with the cause
+ * already decided. `reason` is display text; `kind` is what may be concluded
+ * from it.
  */
-const STAMP_NOT_APPLICABLE = new Set([
-  "sessionIntel disabled",
-  "presence disabled",
+export type StampFailureKind = "binding" | "outcome" | "refused" | "error";
+
+/**
+ * Binding reasons an ordinary terminal always produces and cannot act on: a
+ * CLI run is not a Claude session, so saying the stamp "did not land" there
+ * reports the absence of a feature as a failure.
+ */
+const CLI_SILENT_BINDING_REASONS = new Set([
   "client is not Claude",
   "no caller session id",
   "no project",
 ]);
+
+/**
+ * On MCP the client IS Claude and a session id is expected, so a missing one
+ * is a real defect to report -- the field report's silent failure. Only a
+ * genuinely absent project stays quiet, since no stamp could ever apply.
+ */
+const MCP_SILENT_BINDING_REASONS = new Set(["no project"]);
 
 /** Human-readable forms of the enrichment outcomes a stamp can end on. */
 const STAMP_OUTCOME_REASONS: Readonly<Record<string, string>> = {
@@ -508,17 +529,24 @@ const STAMP_OUTCOME_REASONS: Readonly<Record<string, string>> = {
 
 /**
  * ISS-1214: why the stamp did not land, or null when it landed or when it
- * never applied. The shape knowledge lives here, beside the result type, so
- * the CLI surface does not have to reason about outcome statuses.
+ * never applied. Classification lives here, beside the shapes, so no display
+ * surface has to infer cause from reason text.
  */
-export function describeStampFailure(result: HandoverStampResult): string | null {
+export function describeStampFailure(
+  result: HandoverStampResult,
+  surface: "mcp" | "cli" = "cli",
+): { readonly reason: string; readonly kind: StampFailureKind } | null {
   if (result.status === "skipped") {
-    return STAMP_NOT_APPLICABLE.has(result.reason) ? null : `skipped: ${result.reason}`;
+    if (result.kind === "config") return null;
+    const silent = surface === "mcp" ? MCP_SILENT_BINDING_REASONS : CLI_SILENT_BINDING_REASONS;
+    if (result.kind === "binding" && silent.has(result.reason)) return null;
+    const prefix = result.kind === "error" ? "error" : "skipped";
+    return { reason: `${prefix}: ${result.reason}`, kind: result.kind };
   }
   const outcome = result.outcome;
   if (outcome.status === "written") return null;
-  if (outcome.status === "refused") return `refused: ${outcome.reason}`;
-  return STAMP_OUTCOME_REASONS[outcome.status] ?? outcome.status;
+  if (outcome.status === "refused") return { reason: `refused: ${outcome.reason}`, kind: "refused" };
+  return { reason: STAMP_OUTCOME_REASONS[outcome.status] ?? outcome.status, kind: "outcome" };
 }
 
 /**
@@ -538,15 +566,15 @@ export function describeStampFailure(result: HandoverStampResult): string | null
 export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: string | null; cwd?: string; now?: number; projectsDir?: string } = {}): HandoverStampResult {
   try {
     const cfg = readSessionIntelConfig(root);
-    if (!cfg.enabled) return { status: "skipped", reason: "sessionIntel disabled" };
-    if (!isPresenceEnabled(root)) return { status: "skipped", reason: "presence disabled" };
+    if (!cfg.enabled) return { status: "skipped", reason: "sessionIntel disabled", kind: "config" };
+    if (!isPresenceEnabled(root)) return { status: "skipped", reason: "presence disabled", kind: "config" };
     const binding = resolveCallerBinding(root, opts.explicitTaskId, undefined, {});
-    if (!binding.bound || !binding.sessionId || !binding.era) return { status: "skipped", reason: binding.reason };
+    if (!binding.bound || !binding.sessionId || !binding.era) return { status: "skipped", reason: binding.reason, kind: "binding" };
     const now = opts.now ?? Date.now();
     const sessionId = binding.sessionId;
     const resolvedRoot = binding.recordRoot ?? root;
     if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
-      return { status: "skipped", reason: "candidate root changed since discovery" };
+      return { status: "skipped", reason: "candidate root changed since discovery", kind: "outcome" };
     }
     const record = readPresenceRecord(resolvedRoot, sessionId);
     const located = locateTranscript({ sessionId, cwd: opts.cwd ?? resolvedRoot, hint: record?.sessionIntel?.transcriptPath ?? null, allowGlob: false, projectsDir: opts.projectsDir });
@@ -556,11 +584,11 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     // large transcript file, widening the window since the check before
     // them. Never rely on that earlier check alone to guard this write.
     if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
-      return { status: "skipped", reason: "candidate root changed since discovery" };
+      return { status: "skipped", reason: "candidate root changed since discovery", kind: "outcome" };
     }
     reconcileUnderLock({ root: resolvedRoot, sessionId, cfg, tailBoundaries: tail?.boundaries ?? [], transcriptPath: located?.path ?? null, source: "other", now }, LIFECYCLE_LOCK_BUDGET_MS);
     if (binding.recordRootIdentity && !revalidateCandidateIdentity(resolvedRoot, binding.recordRootIdentity)) {
-      return { status: "skipped", reason: "candidate root changed since discovery" };
+      return { status: "skipped", reason: "candidate root changed since discovery", kind: "outcome" };
     }
     // tokensAtHandover is taken from the record INSIDE the stamp's lock (the
     // null fallback in stampHandover reads lastSample there), so the token
@@ -571,6 +599,6 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now, { out: observed, cfg });
     return { status: "stamped", sessionId, outcome, root: resolvedRoot, pressureState: observed.state };
   } catch (err) {
-    return { status: "skipped", reason: err instanceof Error ? err.message : String(err) };
+    return { status: "skipped", reason: err instanceof Error ? err.message : String(err), kind: "error" };
   }
 }

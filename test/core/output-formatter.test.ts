@@ -1626,26 +1626,46 @@ describe("T-476 binding ruling: every attribution-displaying ruling formatter ou
  */
 describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did not land", () => {
   const FILE = "2026-09-14-01-session.md";
+  const HINT = "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
+  const NEUTRAL = "The caller could not be bound to a live presence record; if this repeats, restart the client.";
+  const busy = { reason: "lock busy", kind: "outcome" } as const;
+  const unbound = { reason: "skipped: no presence record for the caller", kind: "binding" } as const;
 
-  it("md: the bare reply is unchanged when there is no reason, and a reason adds one block under it", () => {
+  it("md: the bare reply is unchanged when there is no failure, and a failure adds one block under it", () => {
     expect(outputFormatter.formatHandoverCreateResult(FILE, "md")).toBe(`Created handover: ${FILE}`);
     expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, null)).toBe(`Created handover: ${FILE}`);
-    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "lock busy")).toBe(
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, busy)).toBe(
       `Created handover: ${FILE}\n\nHandover stamp did not land (lock busy): context pressure is not held; the next imperative is expected.`,
     );
   });
 
-  it("md: an unbound-caller or stale-server reason carries the one action hint; a lock-busy reason does not", () => {
-    const unbound = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "skipped: no presence record for the caller");
-    expect(unbound).toContain("Handover stamp did not land (skipped: no presence record for the caller): context pressure is not held; the next imperative is expected.");
-    expect(unbound).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
-    const refusedEra = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "refused: record era differs from the caller's live era");
-    expect(refusedEra).toContain("Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.");
-    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, "lock busy")).not.toContain("Restart the client");
+  it("md: the causal restart hint requires POSITIVE staleness; an unbound caller on a fresh server gets the neutral sentence", () => {
+    const fresh = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, unbound, false);
+    expect(fresh).toContain("Handover stamp did not land (skipped: no presence record for the caller): context pressure is not held; the next imperative is expected.");
+    expect(fresh).toContain(NEUTRAL);
+    expect(fresh).not.toContain(HINT);
+
+    const stale = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, unbound, true);
+    expect(stale).toContain(HINT);
+    expect(stale).not.toContain(NEUTRAL);
+
+    // Default is false: a caller that cannot establish staleness never asserts it.
+    expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, unbound)).toContain(NEUTRAL);
+  });
+
+  it("md: outcome, refused and error kinds get neither sentence, stale or not", () => {
+    for (const kind of ["outcome", "refused", "error"] as const) {
+      for (const stale of [false, true]) {
+        const out = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, { reason: `r-${kind}`, kind }, stale);
+        expect(out, `${kind}/${String(stale)}`).toBe(
+          `Created handover: ${FILE}\n\nHandover stamp did not land (r-${kind}): context pressure is not held; the next imperative is expected.`,
+        );
+      }
+    }
   });
 
   it("json: tokenPressureStampReason carries the reason, and the key is absent when there is none", () => {
-    const withReason = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", false, null, null, false, "lock busy")) as { data: Record<string, unknown> };
+    const withReason = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", false, null, null, false, busy)) as { data: Record<string, unknown> };
     expect(withReason.data).toEqual({ filename: FILE, tokenPressureStampReason: "lock busy" });
     const none = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", false, null, null, false, null)) as { data: Record<string, unknown> };
     expect(none.data).toEqual({ filename: FILE });

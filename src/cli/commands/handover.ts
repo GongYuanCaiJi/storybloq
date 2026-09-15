@@ -21,6 +21,7 @@ import {
   formatHandoverCreateResult,
   formatError,
   ExitCode,
+  type HandoverStampFailure,
 } from "../../core/output-formatter.js";
 import {
   withProjectLock,
@@ -295,7 +296,18 @@ export async function handleHandoverCreate(
   format: OutputFormat,
   root: string,
   /** T-499: the caller's identity for the handover stamp; `stamp: false` skips it (tests, batch tooling). */
-  intel: { readonly clientTaskId?: string | null; readonly stamp?: boolean; readonly now?: number; readonly projectsDir?: string } = {},
+  intel: {
+    readonly clientTaskId?: string | null;
+    readonly stamp?: boolean;
+    readonly now?: number;
+    readonly projectsDir?: string;
+    /**
+     * ISS-1214: which surface is asking. It decides which skips are worth
+     * reporting (a terminal is never a Claude session; an MCP caller always
+     * should be) and whether a server-staleness claim can be made at all.
+     */
+    readonly surface?: "mcp" | "cli";
+  } = {},
 ): Promise<CommandResult> {
   if (!content.trim()) {
     throw new CliValidationError("invalid_input", "Handover content is empty");
@@ -401,7 +413,8 @@ export async function handleHandoverCreate(
   // ISS-1214: why an attempted stamp did not land, so the reply cannot read
   // as success while the record keeps `handoverWrittenAt: null` and the
   // prompt hook re-fires the imperative with no visible cause.
-  let stampReason: string | null = null;
+  let stampFailure: HandoverStampFailure | null = null;
+  let serverStale = false;
   if (intel.stamp !== false) {
     try {
       const { describeStampFailure, stampHandoverForCaller } = await import("../../core/session-intel/push.js");
@@ -413,12 +426,24 @@ export async function handleHandoverCreate(
         stampedRoot = r.root;
         compactNeeded = r.pressureState === "compact-needed";
       } else {
-        stampReason = describeStampFailure(r);
+        stampFailure = describeStampFailure(r, intel.surface ?? "cli");
       }
     } catch (err) {
       // Reached only if the import or the stamp itself throws. Silent before
       // ISS-1214, which is the exact shape that hid the field-report failure.
-      stampReason = `error: ${err instanceof Error ? err.message : String(err)}`;
+      stampFailure = { reason: `error: ${err instanceof Error ? err.message : String(err)}`, kind: "error" };
+    }
+    // Only the MCP surface can answer this: the staleness question is about a
+    // long-lived server process against the build on disk, and a CLI process
+    // was just spawned from that build. Asked only when there is a failure to
+    // explain, so the ordinary path does not pay for it.
+    if (stampFailure !== null && intel.surface === "mcp") {
+      try {
+        const { describeBinaryStaleness } = await import("../../autonomous/binary-staleness.js");
+        serverStale = describeBinaryStaleness() !== null;
+      } catch {
+        serverStale = false;
+      }
     }
   }
 
@@ -427,5 +452,5 @@ export async function handleHandoverCreate(
   // a suppression that did not happen. ISS-1185: stampedRoot is reported
   // only when it diverges from the MCP root (formatHandoverCreateResult
   // gates on that itself).
-  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded, stampReason) };
+  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded, stampFailure, serverStale) };
 }

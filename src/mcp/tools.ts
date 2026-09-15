@@ -333,8 +333,12 @@ export async function runMcpWriteTool(
     const result = await handler(writeRoot, "md");
 
     if (result.errorCode && INFRASTRUCTURE_ERROR_CODES.includes(result.errorCode)) {
+      // ISS-1214: an infrastructure failure is one of the shapes a stale
+      // server produces, so this exit needs the note at least as much as the
+      // success one below. `withStalenessNote` is byte-identical when
+      // staleness is not established.
       return {
-        content: [{ type: "text", text: formatMcpError(result.errorCode, result.output) }],
+        content: [{ type: "text", text: withStalenessNote(formatMcpError(result.errorCode, result.output)) }],
         isError: true,
       };
     }
@@ -362,14 +366,17 @@ export async function runMcpWriteTool(
     if (staleNote) text = `${text}\n\n${staleNote}`;
     return { content: [{ type: "text", text }] };
   } catch (err: unknown) {
+    // ISS-1214: same reasoning as the errorCode exit above -- a thrown write
+    // failure is exactly what a stale server produces, so all three throw
+    // shapes carry the note when one is established.
     if (err instanceof ProjectLoaderError) {
-      return { content: [{ type: "text", text: formatMcpError(err.code, err.message) }], isError: true };
+      return { content: [{ type: "text", text: withStalenessNote(formatMcpError(err.code, err.message)) }], isError: true };
     }
     if (err instanceof CliValidationError) {
-      return { content: [{ type: "text", text: formatMcpError(err.code, err.message) }], isError: true };
+      return { content: [{ type: "text", text: withStalenessNote(formatMcpError(err.code, err.message)) }], isError: true };
     }
     const message = err instanceof Error ? err.message : String(err);
-    return { content: [{ type: "text", text: formatMcpError("io_error", message) }], isError: true };
+    return { content: [{ type: "text", text: withStalenessNote(formatMcpError("io_error", message)) }], isError: true };
   }
 }
 
@@ -893,7 +900,10 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       });
     }
     return runMcpWriteTool(pinnedRoot, (root) =>
-      handleHandoverCreate(args.content, args.slug ?? "session", "md", root),
+      // ISS-1214: naming the surface is what lets the reply report an unbound
+      // MCP caller (never silent here) and assert a stale server only when
+      // one was actually established.
+      handleHandoverCreate(args.content, args.slug ?? "session", "md", root, { surface: "mcp" }),
     );
   });
 

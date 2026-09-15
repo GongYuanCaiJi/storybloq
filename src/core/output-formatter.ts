@@ -2449,16 +2449,23 @@ export const HANDOVER_STAMP_RESTART_HINT =
   "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
 
 /**
- * The reasons the hint above actually addresses. Everything else (a busy
- * lock, a failed write, an ended session) is not fixed by a restart, so it
- * gets the reason alone rather than an action that would not help.
+ * The same situation without the cause. A binding failure has many possible
+ * causes and a stale server is only one of them, so the hint above is printed
+ * ONLY where staleness was positively established; everywhere else the reader
+ * gets what is known plus a remedy that costs nothing if the guess is wrong.
  */
-const HANDOVER_STAMP_RESTART_REASONS = new Set([
-  "no presence record for the caller",
-  "process era unknown",
-  "record era differs from the live process era",
-  "record era differs from the caller's live era",
-]);
+export const HANDOVER_STAMP_UNBOUND_LINE =
+  "The caller could not be bound to a live presence record; if this repeats, restart the client.";
+
+/**
+ * ISS-1214: why an attempted stamp did not land. `reason` is display text;
+ * `kind` is what may be concluded from it, decided by the stamp path that
+ * knows -- this formatter never re-derives cause from message text.
+ */
+export interface HandoverStampFailure {
+  readonly reason: string;
+  readonly kind: "binding" | "outcome" | "refused" | "error";
+}
 
 /**
  * ISS-1214: the line a reply carries when a stamp was attempted and did not
@@ -2466,11 +2473,19 @@ const HANDOVER_STAMP_RESTART_REASONS = new Set([
  * <file>" on every failure path, so an agent read the reply as success while
  * `handoverWrittenAt` stayed null and the prompt hook re-fired the imperative
  * with no visible cause.
+ *
+ * `serverStale` must come from a POSITIVE staleness check (the caller's own
+ * `describeBinaryStaleness`), never from the shape of the reason: the hint is
+ * a causal claim, and a false one sends a reader to restart a client that was
+ * never the problem.
  */
-export function formatHandoverStampFailure(reason: string): string {
-  const tail = reason.includes(": ") ? reason.slice(reason.indexOf(": ") + 2) : reason;
-  const hint = HANDOVER_STAMP_RESTART_REASONS.has(tail) || tail.startsWith("process era ") ? ` ${HANDOVER_STAMP_RESTART_HINT}` : "";
-  return `Handover stamp did not land (${reason}): context pressure is not held; the next imperative is expected.${hint}`;
+export function formatHandoverStampFailure(failure: HandoverStampFailure, serverStale = false): string {
+  const base = `Handover stamp did not land (${failure.reason}): context pressure is not held; the next imperative is expected.`;
+  // Only a binding failure is about the caller's link to a record at all; an
+  // outcome, a refusal and a thrown error each have their own causes, and a
+  // restart addresses none of them.
+  if (failure.kind !== "binding") return base;
+  return `${base} ${serverStale ? HANDOVER_STAMP_RESTART_HINT : HANDOVER_STAMP_UNBOUND_LINE}`;
 }
 
 /**
@@ -2488,22 +2503,28 @@ export function formatHandoverCreateResult(
   compactNeeded = false,
   /**
    * ISS-1214: why an attempted stamp did not land. Null when it landed, when
-   * none was attempted, and when the skip was a not-applicable precondition
-   * (session intel off, a non-Claude client) that a reader cannot act on.
+   * none was attempted, and when the skip was a precondition this surface
+   * cannot act on (session intel off, a non-Claude client on the CLI).
    */
-  stampReason: string | null = null,
+  stampFailure: HandoverStampFailure | null = null,
+  /**
+   * ISS-1214: whether the running server was POSITIVELY established as older
+   * than the on-disk build. Only the MCP surface can answer this; a caller
+   * that cannot must leave it false rather than infer it.
+   */
+  serverStale = false,
 ): string {
   const diverged = stamped && stampedRoot !== null && mcpRoot !== null && stampedRoot !== mcpRoot;
-  const reason = stamped ? null : stampReason;
+  const failure = stamped ? null : stampFailure;
   if (format === "json") {
     const data: Record<string, unknown> = stamped ? { filename, tokenPressureStamped: true } : { filename };
     if (diverged) data.tokenPressureStampedRoot = stampedRoot;
-    if (reason !== null) data.tokenPressureStampReason = reason;
+    if (failure !== null) data.tokenPressureStampReason = failure.reason;
     return JSON.stringify(successEnvelope(data), null, 2);
   }
   if (!stamped) {
     const base = `Created handover: ${filename}`;
-    return reason === null ? base : `${base}\n\n${formatHandoverStampFailure(reason)}`;
+    return failure === null ? base : `${base}\n\n${formatHandoverStampFailure(failure, serverStale)}`;
   }
   const note = diverged ? ` (stamped under a different root: ${stampedRoot})` : "";
   const line = compactNeeded ? HANDOVER_STAMPED_COMPACT_NEEDED_LINE : HANDOVER_STAMPED_CONTINUE_LINE;
