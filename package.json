@@ -59,6 +59,9 @@
     "yargs": "^17",
     "zod": "^3"
   },
+  "optionalDependencies": {
+    "codex-claude-bridge": "1.8.0"
+  },
   "devDependencies": {
     "@types/node": "^20",
     "@types/proper-lockfile": "^4.1.4",
