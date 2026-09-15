@@ -374,13 +374,29 @@ describe("tool description contract (T-460)", () => {
     // {version, data} instead of string-sniffing Markdown error text;
     // measured at 63,795, still under the existing 64,000 ceiling, no raise
     // needed.
-    // This ceiling leaves ~370 bytes of headroom and fails once an edit gives
+    // ISS-950 then added one optional `capReasons` array to the
+    // autonomous_guide report object, so a reviewer can echo
+    // reviewVerdict.capReasons and the stage can tell a coverage-only cap from
+    // a findings cap; measured at 63,997, which is +197 over 63,800 and left
+    // THREE bytes of headroom without raising this budget. That was the
+    // mistake: the growth was honest (field surface plus one describe line),
+    // the silence about it was not, and the next legitimate edit inherited a
+    // ceiling it could not clear. T-509 part 4 was that edit, adding 45 bytes
+    // to storybloq_health's description so it says the Codex bridge is
+    // launched and answered rather than merely registered; measured at 64,042
+    // and red. Both growths were trimmed before this raise, per the ratchet's
+    // own order of operations: `capReasons` can be cut to about 60 characters,
+    // which lands the payload at 63,991, and nine bytes of headroom is the
+    // same trap as three. So the budget is raised from 64,000 to 64,500 as a
+    // deliberate act, restoring ~458 bytes of real headroom and keeping both
+    // descriptions readable.
+    // This ceiling leaves ~458 bytes of headroom and fails once an edit gives
     // back more than that. Raising it is a deliberate act that belongs in a
     // commit message, which is the point. Deliberately NO lower bound: the cues
     // above are what protect against over-trimming, and a floor would fail an
     // honest future trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(64_000);
+    expect(bytes).toBeLessThan(64_500);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
