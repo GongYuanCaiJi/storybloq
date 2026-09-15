@@ -69,7 +69,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **limit-status** (--cancel?, --requeue?, --recent?, --format?) - Show pending usage-limit auto-resumes (global across projects); cancel or requeue records
 - **session intel-start** (--client?) - Capture the auto-compact setting for the current process era (SessionStart hook)
 - **session intel-prompt** (--client?) - Sample context pressure and emit additionalContext at imperative pressure (UserPromptSubmit hook)
-- **session intel** (--session-id?, --transcript?, --caller-model?, --full?, --client-task-id?, --format?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/
+- **session intel** (--session-id?, --transcript?, --caller-model?, --full?, --client-task-id?, --format?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/. --transcript must be ~/.claude/projects/<project>/<sessionId>.jsonl (a regular file, not a symlink); a refusal names the rule that failed
 - **setup** (--client?, --skip-hooks?, --skip-skill?) - Install Storybloq skill, MCP, and hooks for Claude, Codex, or both
 - **setup-skill** (--skip-hooks?) - Compatibility alias for `storybloq setup --client claude`
 - **reconcile** (--dry-run?, --ci?, --rebalance-ranks?, --format?) - Detect and fix duplicate displayIds across all entity types

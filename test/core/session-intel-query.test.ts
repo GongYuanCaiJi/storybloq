@@ -154,6 +154,38 @@ describe("sampleSession", () => {
     });
   });
 
+  it("ISS-1224: an explicit transcript refused by the access contract names the rule that failed, never the path outside the root", () => {
+    withFixture((f) => {
+      // Rule 1: a readable file OUTSIDE ~/.claude/projects/<dir>/. The path
+      // must not be echoed: it is exactly the value the contract refused.
+      const outside = join(f.base, `${SID}.jsonl`);
+      writeFileSync(outside, assistantRecord({ ts: at(0), read: 10 }) + "\n");
+      const r1 = sampleSession({ root: null, cwd: f.base, sampledBy: "query", transcriptPath: outside, sessionId: SID, projectsDir: f.projects });
+      expect(r1.usable).toBe(false);
+      expect(r1.transcriptPath).toBeNull();
+      expect(r1.unusableReason).toBe("transcript refused: it is not exactly one directory below the Claude projects directory (~/.claude/projects/<project>/<sessionId>.jsonl)");
+      expect(r1.unusableReason).not.toContain(f.base);
+
+      // Rule 2: inside the root, but the basename is not the session id.
+      const inside = writeTranscript(f.projects, encoded(f.base), "other-session", [assistantRecord({ ts: at(0), read: 10 })]);
+      const r2 = sampleSession({ root: null, cwd: f.base, sampledBy: "query", transcriptPath: inside, sessionId: SID, projectsDir: f.projects });
+      expect(r2.usable).toBe(false);
+      expect(r2.unusableReason).toBe(`transcript refused: its basename is not ${SID}.jsonl`);
+
+      // Rule 3: no session id given and none derivable from the basename.
+      const unnamed = join(f.base, "notes.txt");
+      writeFileSync(unnamed, "{}\n");
+      const r3 = sampleSession({ root: null, cwd: f.base, sampledBy: "query", transcriptPath: unnamed, projectsDir: f.projects });
+      expect(r3.usable).toBe(false);
+      expect(r3.unusableReason).toBe("transcript refused: no session id given; pass --session-id or name the file <sessionId>.jsonl");
+      expect(r3.unusableReason).not.toContain(f.base);
+
+      // The located (no explicit path) failure keeps its original wording.
+      const nf = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects });
+      expect(nf.unusableReason).toBe("transcript not found or not authorized");
+    });
+  });
+
   it("unbound caller (no record) still answers read-only from the live setting, reported as unbound", () => {
     withFixture((f) => {
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(0), read: 10 })]);

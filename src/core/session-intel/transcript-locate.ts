@@ -78,6 +78,42 @@ export function authorizeTranscriptPath(
   return real;
 }
 
+/**
+ * ISS-1224: why `authorizeTranscriptPath` refused a candidate, as a sentence
+ * naming the rule that failed, or null when the candidate is authorized. The
+ * rules are checked in the same order as the authorizer, so the first
+ * failure named is the one it stopped on. The candidate path is never
+ * echoed: an explicit path outside the allowed root is exactly the value
+ * the contract refused to read, and the caller already knows what it passed.
+ */
+export const REFUSAL_NO_SESSION_ID = "transcript refused: no session id given; pass --session-id or name the file <sessionId>.jsonl";
+export const REFUSAL_NOT_A_FILE = "transcript refused: the path is not an existing regular file (a symlink, directory or absent path is never read)";
+export const REFUSAL_OUTSIDE_PROJECTS = "transcript refused: it is not exactly one directory below the Claude projects directory (~/.claude/projects/<project>/<sessionId>.jsonl)";
+export const refusalBasename = (expectedSessionId: string): string => `transcript refused: its basename is not ${expectedSessionId}.jsonl`;
+
+export function explainTranscriptRefusal(
+  candidate: string | null | undefined,
+  expectedSessionId: string,
+  projectsDir: string = defaultProjectsDir(),
+): string | null {
+  if (typeof candidate !== "string" || candidate.length === 0 || candidate.includes("\0")) return REFUSAL_NOT_A_FILE;
+  if (!isAuthorizableSessionId(expectedSessionId)) return REFUSAL_NO_SESSION_ID;
+  if (basename(candidate) !== `${expectedSessionId}.jsonl`) return refusalBasename(expectedSessionId);
+  let real: string;
+  let projectsReal: string;
+  try {
+    const st = fs.lstatSync(candidate);
+    if (st.isSymbolicLink() || !st.isFile()) return REFUSAL_NOT_A_FILE;
+    real = fs.realpathSync(candidate);
+    projectsReal = fs.realpathSync(projectsDir);
+  } catch {
+    return REFUSAL_NOT_A_FILE;
+  }
+  if (basename(real) !== `${expectedSessionId}.jsonl`) return refusalBasename(expectedSessionId);
+  if (resolve(dirname(dirname(real))) !== resolve(projectsReal)) return REFUSAL_OUTSIDE_PROJECTS;
+  return null;
+}
+
 export function locateTranscript(req: LocateRequest): LocatedTranscript | null {
   if (!isAuthorizableSessionId(req.sessionId)) return null;
   const projectsDir = req.projectsDir ?? defaultProjectsDir();

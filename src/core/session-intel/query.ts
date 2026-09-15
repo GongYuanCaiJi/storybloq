@@ -24,7 +24,7 @@ import { readEra } from "./era-store.js";
 import { computeSample } from "./sampler.js";
 import { boundaryInsideEra, peekPending, persistSample, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, resolveTargetProvenance, type CallerBinding, type WorktreeWalkOptions } from "./presence-bridge.js";
 import { processEra } from "./process-era.js";
-import { authorizeTranscriptPath, locateTranscript } from "./transcript-locate.js";
+import { authorizeTranscriptPath, explainTranscriptRefusal, locateTranscript, REFUSAL_NO_SESSION_ID } from "./transcript-locate.js";
 import { scanFull, scanTail, type ScanRequest } from "./transcript-scan.js";
 import type { ScanResult, ScannedSessionFacts, SampledBy, TargetProvenance, TokenPressureSample, UsageAdvisoryInput } from "./types.js";
 import { TRY_LOCK_BUDGET_MS } from "../presence-enrichment.js";
@@ -155,7 +155,9 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
     const m = /([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\.jsonl$/.exec(opts.transcriptPath);
     sessionId = m ? m[1]! : null;
   }
-  if (!sessionId) return unknownResult({}, binding?.reason ?? "no target session id");
+  // ISS-1224: an explicit transcript with no session id (given or derivable
+  // from its basename) names that rule instead of a generic target failure.
+  if (!sessionId) return unknownResult({}, binding?.reason ?? (opts.transcriptPath ? REFUSAL_NO_SESSION_ID : "no target session id"));
   const presenceOn = opts.root ? isPresenceEnabled(opts.root) : false;
   const bound = !explicit && binding !== null && binding.bound && presenceOn && cfg.enabled;
   const bindingReason = explicit ? "explicit target" : !presenceOn ? "presence disabled" : !cfg.enabled ? "sessionIntel disabled" : binding!.reason;
@@ -174,7 +176,13 @@ export function sampleSession(opts: SampleSessionOptions): SessionIntelResult {
   }
   const provenance = resolveTargetProvenance(opts.root, sessionId);
   if (!transcriptPath) {
-    return unknownResult({ sessionId, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "transcript not found or not authorized");
+    // ISS-1224: an explicit --transcript names the access-contract rule it
+    // failed (never echoing the path); a located lookup keeps the generic
+    // reason, since no candidate was the caller's own claim.
+    const reason = opts.transcriptPath
+      ? explainTranscriptRefusal(opts.transcriptPath, sessionId, opts.projectsDir) ?? "transcript not found or not authorized"
+      : "transcript not found or not authorized";
+    return unknownResult({ sessionId, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, reason);
   }
   if (overBudget()) {
     return unknownResult({ sessionId, transcriptPath, binding: bound ? "bound" : "read-only", bindingReason, provenance, config: { notes: cfg.notes } }, "soft budget exceeded after locate");

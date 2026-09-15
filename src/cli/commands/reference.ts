@@ -380,7 +380,7 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "session intel",
-    description: "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/",
+    description: "Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/. --transcript must be ~/.claude/projects/<project>/<sessionId>.jsonl (a regular file, not a symlink); a refusal names the rule that failed",
     usage: "storybloq session intel [--session-id <id>] [--transcript <path>] [--caller-model <model>] [--full] [--client-task-id <id>] [--format json|md]",
     flags: ["--session-id", "--transcript", "--caller-model", "--full", "--client-task-id", "--format"],
   },

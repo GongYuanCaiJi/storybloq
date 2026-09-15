@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { authorizeTranscriptPath, encodeProjectDir, isAuthorizableSessionId, locateTranscript } from "../../src/core/session-intel/transcript-locate.js";
+import { authorizeTranscriptPath, encodeProjectDir, explainTranscriptRefusal, isAuthorizableSessionId, locateTranscript } from "../../src/core/session-intel/transcript-locate.js";
 import { SID, writeTranscript } from "./session-intel-fixtures.js";
 
 function withProjects(fn: (base: string, projects: string) => void): void {
@@ -100,6 +100,36 @@ describe("locateTranscript", () => {
     withProjects((base, projects) => {
       expect(locateTranscript({ sessionId: "../x", cwd: null, hint: null, allowGlob: true, projectsDir: projects })).toBeNull();
       expect(locateTranscript({ sessionId: SID, cwd: null, hint: null, allowGlob: true, projectsDir: join(base, "nope") })).toBeNull();
+    });
+  });
+});
+
+describe("explainTranscriptRefusal (ISS-1224)", () => {
+  it("names the failed rule per candidate, with no reason for an authorized path and no path echoed", () => {
+    withProjects((base, projects) => {
+      const ok = writeTranscript(projects, "-Users-x-proj", SID, ["{}"]);
+      expect(explainTranscriptRefusal(ok, SID, projects)).toBeNull();
+      const outside = join(base, `${SID}.jsonl`);
+      writeFileSync(outside, "{}\n");
+      const r1 = explainTranscriptRefusal(outside, SID, projects)!;
+      expect(r1).toMatch(/^transcript refused: it is not exactly one directory below the Claude projects directory/);
+      expect(r1).not.toContain(base);
+      const other = writeTranscript(projects, "-Users-x-proj", "other-session", ["{}"]);
+      expect(explainTranscriptRefusal(other, SID, projects)).toBe(`transcript refused: its basename is not ${SID}.jsonl`);
+      expect(explainTranscriptRefusal(other, "", projects)).toBe("transcript refused: no session id given; pass --session-id or name the file <sessionId>.jsonl");
+      // Same order as the authorizer: an unusable candidate is named before a missing session id.
+      expect(explainTranscriptRefusal("", "", projects)).toBe("transcript refused: the path is not an existing regular file (a symlink, directory or absent path is never read)");
+      expect(explainTranscriptRefusal(join(projects, "-Users-x-proj", "missing", `${SID}.jsonl`), SID, projects)).toBe("transcript refused: the path is not an existing regular file (a symlink, directory or absent path is never read)");
+      const link = join(projects, "-Users-x-proj", "link.jsonl");
+      symlinkSync(ok, link);
+      expect(explainTranscriptRefusal(link, SID, projects)).toBe(`transcript refused: its basename is not ${SID}.jsonl`);
+      const namedLink = join(projects, "-Users-y-proj", `${SID}.jsonl`);
+      mkdirSync(join(projects, "-Users-y-proj"), { recursive: true });
+      symlinkSync(ok, namedLink);
+      expect(explainTranscriptRefusal(namedLink, SID, projects)).toBe("transcript refused: the path is not an existing regular file (a symlink, directory or absent path is never read)");
+      expect(authorizeTranscriptPath(namedLink, SID, projects)).toBeNull();
+      // Every refusal explained here is one authorizeTranscriptPath also refuses.
+      for (const c of [outside, other, link]) expect(authorizeTranscriptPath(c, SID, projects)).toBeNull();
     });
   });
 });
