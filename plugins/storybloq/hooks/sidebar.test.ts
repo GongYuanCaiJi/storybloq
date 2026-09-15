@@ -789,7 +789,7 @@ test("keeps a four digit count whole as well", async () => {
   expect(heading.endsWith(" 1000")).toBe(true);
 });
 
-test("heads the pane with the wordmark alone, context to the right", async () => {
+test("heads the pane with the wordmark alone", async () => {
   const h = harness(newFixture());
   await started(h);
   await h.fire("turn.complete", {});
@@ -797,11 +797,13 @@ test("heads the pane with the wordmark alone, context to the right", async () =>
   const header = textOf(nodeByKey(tree, "header"));
 
   expect(header).toContain("Storybloq");
-  expect(header).toContain("context 20%");
   // The owner took the rasterized mark out; the wordmark is the brand. The
-  // phase went with it once the board stopped being one phase's.
+  // phase went with it once the board stopped being one phase's, and the
+  // context fill went to the foot of the pane. M-CONTEXT-TOP draws it here
+  // again.
   expect(nodeByKey(tree, "logo")).toBe(null);
   expect(header).not.toContain("Phase");
+  expect(header).not.toContain("context");
 });
 
 test("works out the context fill from the fields the usage actually carries", async () => {
@@ -813,7 +815,7 @@ test("works out the context fill from the fields the usage actually carries", as
   // that read back and this goes red.
   h.usage = { context: { window: 200_000, tokens: 50_000 }, rateLimits: [] };
   await h.fire("turn.complete", {});
-  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 25%");
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 25%");
 });
 
 test("prefers the percent the engine states over its own arithmetic", async () => {
@@ -823,7 +825,7 @@ test("prefers the percent the engine states over its own arithmetic", async () =
   // so where it exists it wins.
   h.usage = { context: { window: 200_000, tokens: 50_000, percent: 73 }, rateLimits: [] };
   await h.fire("turn.complete", {});
-  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).toContain("context 73%");
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 73%");
 });
 
 test("says nothing about context on a window that has had no response yet", async () => {
@@ -833,7 +835,7 @@ test("says nothing about context on a window that has had no response yet", asyn
   // up zero would read as an empty window rather than an unknown one.
   h.usage = { context: { window: 200_000 }, rateLimits: [] };
   await h.fire("turn.complete", {});
-  expect(textOf(nodeByKey(await h.render(paneEvent()), "header"))).not.toContain("context");
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).not.toContain("context");
 });
 
 test("keeps the handover names off the board", async () => {
@@ -880,13 +882,14 @@ test("leaves a column that fits without a tail", async () => {
 test("sets the issues line flush left under the board", async () => {
   const h = harness(newFixture());
   await started(h);
-  const rows = paneRows(await h.render(paneEvent()));
-  const issues = rows.find((row) => row.trimStart().startsWith("issues:")) ?? "";
+  const tree = await h.render(paneEvent());
 
   // It was indented two spaces, which read as a hanging line under a board
-  // that is itself flush left.
-  expect(issues).toBe("issues: 1 critical, 0 high, 0 medium, 0 low");
-  expect(rows[rows.length - 1]).toBe(issues);
+  // that is itself flush left. It shares its row with the context fill, which
+  // is right-aligned on the same line at the foot of the pane.
+  expect(textOf(nodeByKey(tree, "issues"))).toBe("issues: 1 critical, 0 high, 0 medium, 0 low");
+  expect(paneRows(tree).length).toBe(5);
+  expect(paneRows(tree)[4]).toContain("issues:");
 });
 
 test("breaks the header off the board with one blank row that actually draws", async () => {
@@ -952,19 +955,20 @@ test("boxes every column heading over its body, both sized to fit the border", a
   }
 });
 
-test("keeps the header clear of the cell the engine draws its close mark in", async () => {
+test("keeps the row that carries the fill clear of the pane's last cell", async () => {
   const h = harness(newFixture());
   await started(h);
   const tree = await h.render(paneEvent());
-  const header = nodeByKey(tree, "header");
+  const footer = nodeByKey(tree, "footer");
 
-  // This pins the CLEARANCE CONTRACT, not what a terminal shows: the header
-  // row stops short of the pane's last cells, where the engine draws its own
-  // close mark. Live it read "context 7%×" with the mark hard against our
-  // string, and only the owner's eye can confirm the fix landed; what a test
-  // can hold is that the margin is still asked for. M-MARK-COLLISION drops it.
-  expect(header.props.marginRight).toBeGreaterThanOrEqual(3);
-  expect(textOf(header)).toContain("context 20%");
+  // This pins the CLEARANCE CONTRACT, not what a terminal shows: the row
+  // carrying the fill stops short of the pane's last cells, where the engine
+  // draws its own close mark. Live it read "context 7%×" with the mark hard
+  // against our string, and only the owner's eye can confirm the fix landed;
+  // what a test can hold is that the margin is still asked for.
+  // M-MARK-COLLISION drops it.
+  expect(footer.props.marginRight).toBeGreaterThanOrEqual(3);
+  expect(textOf(footer)).toContain("context 20%");
 });
 
 test("moves a ticket on the board during the turn that moved it", async () => {
@@ -1041,6 +1045,70 @@ test("does not sweep the ledger for a tool that only read it", async () => {
   expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
 });
 
+test("never sweeps for a tool that only looked at the ledger", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // The ledger has already moved. Every call below names .story/ and none of
+  // them changed it, so a board that moves is a sweep that should not have
+  // happened: M-READ-SWEEP leaves the path branch open to any tool and
+  // M-BASH-ALL lets any Bash command that mentions the directory through.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  const lookers: Record<string, unknown>[] = [
+    { tool: "Read", file_path: "/repo/.story/tickets/T-001.json" },
+    { tool: "Glob", path: "/repo/.story", pattern: "**/*.json" },
+    { tool: "Grep", path: "/repo/.story/tickets", pattern: "inprogress" },
+    { tool: "LS", path: "/repo/.story" },
+    { tool: "Bash", command: "cat .story/config.json" },
+    { tool: "Bash", command: "ls .story/tickets | head" },
+    { tool: "Bash", command: "grep -r inprogress .story/tickets" },
+    { tool: "Bash", command: "git status .story/" },
+    // The CLI reading, not writing: the prefix is not enough on its own here
+    // either.
+    { tool: "Bash", command: "storybloq status --compact" },
+    { tool: "Bash", command: "storybloq ticket list --phase p1" },
+  ];
+  for (const [index, looker] of lookers.entries()) {
+    await h.fire("tool.call", { ...looker, tool_use_id: `look-${index}` });
+    await h.tick();
+    expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+});
+
+test("sweeps for a Bash command that can have written the ledger", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // A command is opaque, so both halves have to hold: it names the ledger and
+  // it can write. This one does both.
+  await h.fire("tool.call", { tool: "Bash", command: "storybloq ticket update T-001 --status complete", tool_use_id: "b1" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+});
+
+test("sweeps for a redirect into the ledger, and for a Write at one of its paths", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  await h.fire("tool.call", { tool: "Bash", command: "echo '{}' > .story/tickets/T-099.json", tool_use_id: "b2" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+
+  const second = harness(newFixture());
+  await started(second);
+  second.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "complete", order: 10, title: "Open ten" });
+  second.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await second.fire("tool.call", { tool: "Write", file_path: "/repo/.story/tickets/T-010.json", tool_use_id: "w1" });
+  await second.tick();
+  expect(headingOf(await second.render(paneEvent()), "board-done")).toBe("Done 3");
+});
+
 test("hands the tool result back exactly once", async () => {
   const h = harness(newFixture());
   await started(h);
@@ -1067,8 +1135,8 @@ test("draws the board even when the usage call is refused", async () => {
   // The scan ran to the end and the board has the ledger's numbers.
   expect(headingOf(tree, "board-inprogress")).toBe("In progress 1");
   expect(headingOf(tree, "board-open")).toBe("Open 5");
-  // And the header's right side is simply empty.
-  expect(textOf(nodeByKey(tree, "header"))).not.toContain("context");
+  // And the right of the footer row is simply empty.
+  expect(textOf(nodeByKey(tree, "footer"))).not.toContain("context");
 
   // The refusal does not stop a later refresh either.
   h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "complete", title: "Working on it" });

@@ -95,14 +95,15 @@ const TONE_INPROGRESS = "cyan";
 const TONE_DONE = "green";
 
 /**
- * Cells kept clear to the right of the header row.
+ * Cells kept clear to the right of the pane's own rows.
  *
- * The engine draws its own close mark in the last cell of the pane, and the
+ * The engine draws its close mark in the last cell of the pane, and the
  * context fill was right-aligned straight into it: live it read "context 7%×",
  * with the mark looking like part of our string. `BoxProps` carries
- * `marginRight`, so the header simply stops short of the edge.
+ * `marginRight`, so the row simply stops short of the edge. The fill now sits
+ * at the foot rather than the head, and keeps the clearance there.
  */
-const HEADER_MARK_CLEARANCE = 3;
+const PANE_EDGE_CLEARANCE = 3;
 
 /**
  * Narrower than this and four columns are shredded rather than laid out, so
@@ -120,8 +121,24 @@ const BOARD_MIN_COLUMNS = 60;
 const MCP_PREFIX = "mcp__storybloq__";
 const LEDGER_TOOL_PREFIX = "storybloq_";
 const LEDGER_WRITE_VERB = /_(create|update|set|unset|add|init|snapshot|reinforce|supersede)$/;
+/**
+ * The built-in tools that can write a file, from this build's own tool table
+ * (`BuiltinToolInputs` in claude-code.d.ts carries Edit, Write and
+ * NotebookEdit; MultiEdit is named here for builds that have it, and costs
+ * nothing where it does not exist).
+ */
+const MUTATING_FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+const BASH_TOOL = "Bash";
+/**
+ * The storybloq CLI writing the ledger: a write whatever path it names, since
+ * the CLI resolves `.story/` itself and the command line need not mention it.
+ */
+const BASH_LEDGER_COMMAND =
+  /\bstorybloq\b[^;|&]*\b(create|update|set|unset|add|init|snapshot|reinforce|supersede)\b/;
+/** A shell mutation, which only counts where the command also names .story/. */
+const BASH_MUTATION = />>?|\bmv\s|\bcp\s|\brm\s|\btee\s|\bsed\s+-i/;
 /** Where a path can arrive on a built-in file tool's event. */
-const PATH_ARGUMENTS = ["file_path", "path", "notebook_path", "command"] as const;
+const PATH_ARGUMENTS = ["file_path", "path", "notebook_path"] as const;
 const STORY_DIR = ".story/";
 
 const TICKETS_DIR = ".story/tickets";
@@ -516,14 +533,33 @@ async function readContextFill($: any): Promise<number | null> {
 /**
  * Did this tool call change the ledger?
  *
- * Two ways it can: one of the storybloq tools whose name ends in a writing
- * verb (MCP names arrive as `mcp__storybloq__storybloq_ticket_update`, the
- * CLI's own as `storybloq_ticket_update`), or a built-in file tool pointed at
- * `.story/`. A read is none of those and must not cost a sweep, which is why
- * the verb is tested and not just the prefix: `storybloq_status` writes
- * nothing.
+ * The question has to be answered from the tool NAME first, because a ledger
+ * read is the common case and a sweep per read is the cost the chunked scan
+ * exists to avoid. Reading a ticket, globbing `.story`, or catting a config
+ * file all mention the directory and none of them change a thing.
  *
- * Pure, and it reads only the few argument fields a path can arrive in, so a
+ *   tool                                              scan
+ *   storybloq_* / mcp__storybloq__* ending in a       yes
+ *     writing verb (ticket_update, meta_set, ...)
+ *   any other storybloq tool (status, list, get)      no
+ *   Write, Edit, MultiEdit, NotebookEdit at a         yes
+ *     path under .story/
+ *   the same four anywhere else                       no
+ *   Bash running the storybloq CLI with a writing     yes
+ *     verb (it resolves .story/ itself, so the
+ *      command line need not name the directory)
+ *   Bash whose command names .story/ AND mutates      yes
+ *     it (a redirect, mv, cp, rm, tee, sed -i)
+ *   Bash otherwise (cat, ls, grep, git status,        no
+ *     storybloq status, storybloq ticket list)
+ *   Read, Glob, Grep, LS, anything else               no
+ *
+ * Bash is conservative by construction: a command is opaque, so the two
+ * halves (it touches the ledger, and it can write) both have to hold. A
+ * missed write costs one turn of staleness, since turn.complete still scans;
+ * a false positive costs a stat sweep of the whole ledger, which is worse.
+ *
+ * Pure, and it reads only the few fields a path or a command arrives in, so a
  * Write of a megabyte is not serialized to answer a yes or no question.
  */
 function wroteLedger(e: any): boolean {
@@ -531,6 +567,13 @@ function wroteLedger(e: any): boolean {
   if (typeof tool !== "string") return false;
   const bare = tool.startsWith(MCP_PREFIX) ? tool.slice(MCP_PREFIX.length) : tool;
   if (bare.startsWith(LEDGER_TOOL_PREFIX)) return LEDGER_WRITE_VERB.test(bare);
+  if (tool === BASH_TOOL) {
+    const command: unknown = e?.["command"];
+    if (typeof command !== "string") return false;
+    if (BASH_LEDGER_COMMAND.test(command)) return true;
+    return command.includes(STORY_DIR) && BASH_MUTATION.test(command);
+  }
+  if (!MUTATING_FILE_TOOLS.has(tool)) return false;
   for (const key of PATH_ARGUMENTS) {
     const value: unknown = e?.[key];
     if (typeof value === "string" && value.includes(STORY_DIR)) return true;
@@ -654,25 +697,41 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean): 
 }
 
 /**
- * The header row: the wordmark on the left, the context fill pushed to the
- * right of the same row.
+ * The header row: the wordmark, and nothing else.
  *
- * No mark and no phase. The owner had the rasterized S here and took it out,
- * so the wordmark is the brand and the row costs one terminal row instead of
- * three; the phase went with it once the board became the whole project's
- * rather than one phase's, where naming a phase would have been a lie about
- * what is under it.
+ * No mark, no phase, and no longer the context fill. The owner had the
+ * rasterized S here and took it out, the phase went when the board stopped
+ * being one phase's, and the fill moved to the foot of the pane, so what is
+ * left is the brand and one row of height.
  */
-function headerNode(elements: any, context: number | null): unknown {
+function headerNode(elements: any): unknown {
   return elements.Box({
     key: "header",
     flexDirection: "row",
+    alignItems: "center",
+    children: [elements.Text({ bold: true, children: "Storybloq" })],
+  });
+}
+
+/**
+ * The foot of the pane: the issues breakdown flush left, the context fill
+ * right-aligned on the same row.
+ *
+ * The fill reads at the bottom right, where a status line would put it, and
+ * the row stops short of the pane's edge: the engine's close mark is a
+ * top-right thing, but nothing is gained by drawing into the last cell
+ * anywhere. With no reading to show, the right side is simply empty.
+ */
+function footerNode(elements: any, issues: string, context: number | null): unknown {
+  return elements.Box({
+    key: "footer",
+    flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginRight: HEADER_MARK_CLEARANCE,
+    marginRight: PANE_EDGE_CLEARANCE,
     children: [
-      elements.Text({ bold: true, children: "Storybloq" }),
-      elements.Text({ dimColor: true, children: context === null ? "" : `context ${context}%` }),
+      elements.Text({ key: "issues", dimColor: true, children: issues }),
+      elements.Text({ key: "context", dimColor: true, children: context === null ? "" : `context ${context}%` }),
     ],
   });
 }
@@ -693,7 +752,7 @@ export function registerSidebar(on: On, _options: Options): void {
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
       const rows: unknown[] = [
-        headerNode(elements, contextPercent),
+        headerNode(elements),
         Text({ key: "header-gap", children: " " }),
       ];
       if (projection === null) {
@@ -703,12 +762,8 @@ export function registerSidebar(on: On, _options: Options): void {
         rows.push(boardNode(elements, projection.board, width, isStacked(width)));
         rows.push(Text({ key: "issues-gap", children: " " }));
         const bySeverity = projection.issuesBySeverity;
-        rows.push(
-          Text({
-            dimColor: true,
-            children: `issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`,
-          }),
-        );
+        const issues = `issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`;
+        rows.push(footerNode(elements, truncate(issues, width), contextPercent));
         if (sessionActive) rows.push(Text({ dimColor: true, children: "an autonomous session is active" }));
       }
       return Box({ flexDirection: "column", children: rows });
