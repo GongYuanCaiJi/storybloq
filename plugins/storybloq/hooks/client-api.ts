@@ -19,7 +19,7 @@
  */
 
 /** The client version the names below were read from. */
-export const CLIENT_API_VERSION = "2.1.272";
+export const CLIENT_API_VERSION = "2.1.273";
 
 /** Events a Mod registers with `on("<name>", hook)`; the literal must match. */
 export const EVENTS = {
