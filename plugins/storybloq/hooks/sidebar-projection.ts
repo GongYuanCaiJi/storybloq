@@ -379,7 +379,20 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     title: t.title,
     blocked: t.status !== "complete" && isBlocked(t),
   });
-  const byOrderAscending = (a: SidebarTicket, b: SidebarTicket): number => a.order - b.order;
+  // Ticket order, then the id as the tie-break, so the columns are stable
+  // between renders and between sessions. Order alone is not enough: the
+  // ledger hands out the same order number freely (every ticket filed without
+  // one shares a default), and Array.prototype.sort is only stable with
+  // respect to INPUT order, which here is directory read order. Done sorts
+  // the other way, newest first, and breaks its ties the other way too.
+  // Ticket order, then the id as the tie-break, so the columns are stable
+  // between renders and between sessions. Order alone is not enough: the
+  // ledger hands out the same order number freely (every ticket filed without
+  // one shares a default), and Array.prototype.sort is only stable with
+  // respect to INPUT order, which here is directory read order. Done sorts
+  // the other way, newest first, and breaks its ties the other way too.
+  const byOrderAscending = (a: SidebarTicket, b: SidebarTicket): number =>
+    (a.order - b.order) || (a.displayId ?? a.id).localeCompare(b.displayId ?? b.id);
   const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
   const board: SidebarBoard = {
     blocked: boardLeaves.filter(waiting).sort(byOrderAscending).map(card),

@@ -335,9 +335,14 @@ function textRows(node: unknown): string[] {
   return textRows((node as { props?: Record<string, unknown> }).props?.["children"]);
 }
 
-/** One row per drawn line of a column, heading first. */
+/** One row per drawn line of a column, heading first, rule included. */
 function rowsOf(tree: unknown, key: string): string[] {
   return textRows(nodeByKey(tree, key));
+}
+
+/** The card rows of a column: everything below the heading and its rule. */
+function cardsOf(tree: unknown, key: string): string[] {
+  return rowsOf(tree, key).slice(2);
 }
 
 /** One row per line the pane draws, top to bottom. */
@@ -371,6 +376,34 @@ function abovePromptEvent(columns: number): unknown {
   };
 }
 
+/** Terminal cells a string takes, for the width assertions. */
+function cells(text: string): number {
+  let width = 0;
+  let joined = false;
+  for (const character of text) {
+    const point = character.codePointAt(0) ?? 0;
+    if (point === 0x200d) {
+      joined = true;
+      continue;
+    }
+    if (point === 0xfe0f) continue;
+    if (joined) {
+      joined = false;
+      continue;
+    }
+    const wide =
+      (point >= 0x1100 && point <= 0x115f)
+      || (point >= 0x2e80 && point <= 0xa4cf)
+      || (point >= 0xac00 && point <= 0xd7a3)
+      || (point >= 0xf900 && point <= 0xfaff)
+      || (point >= 0xff00 && point <= 0xff60)
+      || (point >= 0x1f300 && point <= 0x1f9ff)
+      || (point >= 0x20000 && point <= 0x3fffd);
+    width += wide ? 2 : 1;
+  }
+  return width;
+}
+
 /**
  * Every string in a drawn tree, flattened, so an assertion can look for one.
  *
@@ -385,7 +418,8 @@ function textOf(node: unknown, separator = " "): string {
   if (typeof node === "object") {
     const element = (node as { element?: string }).element;
     const props = (node as { props?: Record<string, unknown> }).props ?? {};
-    return textOf(props["children"], element === "Text" ? "" : separator);
+    const inline = element === "Text" || props["flexDirection"] === "row";
+    return textOf(props["children"], inline ? "" : separator);
   }
   return "";
 }
@@ -857,26 +891,50 @@ test("keeps the handover names off the board", async () => {
 test("caps a column at eight and ends it with dots", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Seventeen open tickets: eight rows and a dotted tail, on any pane height.
-  // M-CAP-IGNORED draws all seventeen and writes no tail, which is the column
-  // that ran off the bottom of the owner's pane.
-  const tree = await h.render(paneEvent());
-  const rows = rowsOf(tree, "board-open");
+  // Seventeen open tickets: eight rows and a dotted tail, in a pane with the
+  // rows to spare. M-CAP-IGNORED draws all seventeen and writes no tail,
+  // which is the column that ran off the bottom of the owner's pane, and
+  // M-ROW-OVERFLOW ignores the budget that keeps the tail on screen.
+  const tree = await h.render(paneEvent(160, 30));
+  const cards = cardsOf(tree, "board-open");
 
-  // One heading, eight cards, one tail.
-  expect(rows.length).toBe(10);
-  expect(rows[9]).toBe("...");
-  expect(rows.slice(1, 9).every((row) => row.startsWith("T-"))).toBe(true);
-  expect(columnText(tree, "board-open")).toContain("Open 17");
+  expect(cards.length).toBe(9);
+  expect(cards[8]).toBe("...");
+  expect(cards.slice(0, 8).every((row) => row.startsWith("T-"))).toBe(true);
+  expect(headingOf(tree, "board-open")).toBe("Open 17");
 });
 
-test("leaves a column that fits without a tail", async () => {
+test("leaves a column that fits without a tail, and levels the four bodies", async () => {
   const h = harness(newFixture());
   await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+
   // Five open tickets, so nothing is left out and there is nothing to say.
-  const rows = rowsOf(await h.render(paneEvent()), "board-open");
-  expect(rows.length).toBe(6);
-  expect(rows).not.toContain("...");
+  expect(cardsOf(tree, "board-open")).toEqual([
+    "T-002 A ticket",
+    "T-010 Open ten",
+    "T-012 Open twelve",
+    "T-013 Open thirteen",
+    "T-014 Open fourteen",
+  ]);
+  // And every body draws the same number of rows, the shorter ones padded,
+  // so the four cards end level. M-RAGGED-BODIES lets them end where they
+  // like.
+  const heights = ["board-blocked", "board-open", "board-inprogress", "board-done"].map(
+    (key) => cardsOf(tree, key).length,
+  );
+  expect(heights).toEqual([5, 5, 5, 5]);
+});
+
+test("says so in a column with nothing in it", async () => {
+  const h = harness(newFixture());
+  // Nothing is blocked once the blocker is finished.
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "complete", title: "Working on it" });
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+
+  expect(headingOf(tree, "board-blocked")).toBe("Blocked 0");
+  expect(cardsOf(tree, "board-blocked")[0]).toBe("none");
 });
 
 test("sets the issues line flush left under the board", async () => {
@@ -913,62 +971,242 @@ test("breaks the header off the board with one blank row that actually draws", a
   expect(rows[4]).toContain("issues:");
 });
 
-test("boxes every column heading over its body, both sized to fit the border", async () => {
+test("draws one bordered card per column, its heading ruled off from the body", async () => {
   const h = harness(newFixture());
   await started(h);
   const keys = ["board-blocked", "board-open", "board-inprogress", "board-done"];
 
   // Below the stacking threshold each card takes the pane's whole width;
-  // above it the four share it. The bound is the event's own bodyColumns, not
-  // a number fitted to one terminal.
+  // above it the four share it, less the three gaps. The bound is the event's
+  // own bodyColumns, not a number fitted to one terminal.
   for (const columns of [50, 110, 144, 158, 160]) {
-    const event = paneEvent(columns);
     const bodyColumns = columns - 4;
     const stacked = bodyColumns < 60;
-    const expectedWidth = stacked ? bodyColumns : Math.max(12, Math.floor(bodyColumns / 4));
-    const tree = await h.render(event);
+    const tree = await h.render(paneEvent(columns, 30));
+    const board = nodeByKey(tree, "board");
+    const widths = keys.map((key) => nodeByKey(tree, key).props.width as number);
 
     for (const key of keys) {
       const column = nodeByKey(tree, key);
-      const headingBox = nodeByKey(tree, `${key}-heading`);
-      const bodyBox = nodeByKey(tree, `${key}-body`);
-
-      // M-HEADER-UNBOXED leaves the heading as a bare row of the body box.
-      expect(typeof headingBox.props.borderStyle).toBe("string");
-      // M-NO-BORDER drops the body's border and the columns run together.
-      expect(typeof bodyBox.props.borderStyle).toBe("string");
-      expect(headingBox.props.borderStyle).toBe(bodyBox.props.borderStyle);
-      expect(headingBox.props.width).toBe(expectedWidth);
-      expect(bodyBox.props.width).toBe(expectedWidth);
-      expect(column.props.width).toBe(expectedWidth);
-
+      const width = column.props.width as number;
+      // One box, not two: M-TWO-BOXES puts the heading back in a bordered box
+      // of its own, which drew a double line between heading and body.
+      expect(typeof column.props.borderStyle).toBe("string");
+      expect(nodeByKey(tree, `${key}-heading`).element).toBe("Text");
+      // The rule under the heading spans the inner width exactly, so it meets
+      // both side borders.
+      expect(rowsOf(tree, key)[1]!.length).toBe(width - 2);
+      expect(rowsOf(tree, key)[1]).toMatch(/^\u2500+$/);
       // The border costs a column each side, so every line has to be that
       // much narrower or the row wraps and the board comes apart.
-      for (const row of rowsOf(tree, key)) {
-        expect(row.length).toBeLessThanOrEqual(expectedWidth - 2);
-      }
+      for (const row of rowsOf(tree, key)) expect(row.length).toBeLessThanOrEqual(width - 2);
     }
 
-    const total = keys.reduce((sum, key) => sum + (nodeByKey(tree, key).props.width as number), 0);
-    expect(total).toBe(stacked ? expectedWidth * 4 : 4 * Math.floor(bodyColumns / 4));
-    if (!stacked) expect(total).toBeLessThanOrEqual(bodyColumns);
+    // M-NO-GAP closes the column gap the owner asked for.
+    expect(board.props.gap).toBe(stacked ? 0 : 1);
+    if (stacked) {
+      expect(widths).toEqual([bodyColumns, bodyColumns, bodyColumns, bodyColumns]);
+    } else {
+      // The four widths and the three gaps fill the pane exactly.
+      expect(widths.reduce((sum, w) => sum + w, 0) + 3).toBe(bodyColumns);
+    }
   }
 });
 
-test("keeps the row that carries the fill clear of the pane's last cell", async () => {
+test("weights the board toward the work in hand on a wide pane", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // Narrow enough and the four columns are even.
+  const even = await h.render(paneEvent(110, 30));
+  expect(nodeByKey(even, "board-inprogress").props.width).toBe(nodeByKey(even, "board-done").props.width);
+
+  // From 158 columns up, about a twentieth of the pane moves from Done to In
+  // progress: M-EQUAL-WIDTHS-WIDE leaves them even and this fails.
+  for (const columns of [162, 200]) {
+    const tree = await h.render(paneEvent(columns, 30));
+    const inProgress = nodeByKey(tree, "board-inprogress").props.width as number;
+    const done = nodeByKey(tree, "board-done").props.width as number;
+    const blocked = nodeByKey(tree, "board-blocked").props.width as number;
+    expect(inProgress).toBeGreaterThan(done);
+    expect(inProgress - blocked).toBe(blocked - done);
+    // And the pane is still filled exactly.
+    const total = ["board-blocked", "board-open", "board-inprogress", "board-done"]
+      .map((key) => nodeByKey(tree, key).props.width as number)
+      .reduce((sum, w) => sum + w, 0);
+    expect(total + 3).toBe(columns - 4);
+  }
+});
+
+test("emphasises the column being worked, and lets the finished one recede", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+  const heading = (key: string) => nodeByKey(tree, `${key}-heading`).props;
+
+  // In progress is the only bold coloured heading; Done recedes.
+  // M-DONE-LOUD gives Done the same weight and this fails.
+  expect(heading("board-inprogress").color).toBe("cyan");
+  expect(heading("board-inprogress").bold).toBe(true);
+  expect(heading("board-blocked").color).toBe("yellow");
+  expect(heading("board-blocked").bold).toBeUndefined();
+  expect(heading("board-open").color).toBeUndefined();
+  expect(heading("board-open").bold).toBeUndefined();
+  expect(heading("board-done").dimColor).toBe(true);
+  expect(heading("board-done").color).toBeUndefined();
+  expect(heading("board-done").bold).toBeUndefined();
+});
+
+/**
+ * The rows a drawn tree occupies, the way the client lays it out: a Text is
+ * one row, a column Box its children plus its gaps, a row Box the tallest of
+ * them, and a border adds one row above and one below.
+ */
+function paneHeight(node: unknown): number {
+  if (node === null || node === undefined) return 0;
+  if (Array.isArray(node)) return node.reduce((sum: number, child) => sum + paneHeight(child), 0);
+  if (typeof node !== "object") return 0;
+  const element = (node as { element?: string }).element;
+  const props = (node as { props?: Record<string, unknown> }).props ?? {};
+  if (element !== "Box") return 1;
+  const children = props["children"];
+  const list: unknown[] = Array.isArray(children) ? children : children === undefined ? [] : [children];
+  const border = typeof props["borderStyle"] === "string" ? 2 : 0;
+  const gap = typeof props["gap"] === "number" ? (props["gap"] as number) : 0;
+  if (props["flexDirection"] === "row") {
+    return border + list.reduce((tallest: number, child) => Math.max(tallest, paneHeight(child)), 0);
+  }
+  return border + list.reduce((sum: number, child) => sum + paneHeight(child), 0) + gap * Math.max(0, list.length - 1);
+}
+
+test("draws no more rows than the pane gave it", async () => {
+  const h = harness(manyOpen(12));
+  await started(h);
+
+  // The pane clips at bodyRows without saying so, which is how the owner lost
+  // a tail and two footer lines. M-ROW-OVERFLOW spends the whole budget on
+  // cards and this fails at every size.
+  for (const bodyRows of [12, 18, 25]) {
+    for (const columns of [50, 160]) {
+      const tree = await h.render(paneEvent(columns, bodyRows));
+      expect(paneHeight(tree)).toBeLessThanOrEqual(bodyRows);
+      // And the board is still a board: every column still carries its count.
+      for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
+        expect(headingOf(tree, key)).toMatch(/ \d+$/);
+      }
+    }
+  }
+});
+
+test("drops the blank rows before it drops a card", async () => {
+  const h = harness(manyOpen(12));
+  await started(h);
+
+  // Twelve rows side by side: the gaps are affordable. Nine is not, so the
+  // blank rows go first and the cards stay.
+  const roomy = paneRows(await h.render(paneEvent(160, 12)));
+  expect(roomy[1]).toBe(" ");
+
+  const tight = await h.render(paneEvent(160, 9));
+  expect(paneRows(tight).some((row) => row === " ")).toBe(false);
+  expect(cardsOf(tight, "board-open").length).toBeGreaterThan(0);
+  expect(paneHeight(tight)).toBeLessThanOrEqual(9);
+});
+
+test("falls back to four counted rows when no frame will fit", async () => {
+  const h = harness(manyOpen(12));
+  await started(h);
+
+  // Stacked, four framed cards need their frames before a single card is
+  // drawn. Under that the board is the four counts and nothing else, which is
+  // still the board.
+  const tree = await h.render(paneEvent(50, 12));
+  expect(paneHeight(tree)).toBeLessThanOrEqual(12);
+  expect(headingOf(tree, "board-open")).toBe("Open 17");
+  expect(nodeByKey(tree, "board-open").element).toBe("Text");
+});
+
+test("measures a title in terminal cells, not in characters", async () => {
+  const h = harness(newFixture());
+  // A CJK title, an emoji title and an ASCII one, all far too long. A wide
+  // character takes two cells, so counting characters overruns the column by
+  // one cell per character and the row wraps: M-WIDE-CHAR counts characters.
+  h.fixture.files[".story/tickets/T-030.json"] = ticketText({ id: "T-030", status: "open", order: 30, title: "点点点点点点点点点点点点点点点点点点点点点点点点点点" });
+  h.fixture.files[".story/tickets/T-031.json"] = ticketText({ id: "T-031", status: "open", order: 31, title: "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥" });
+  h.fixture.files[".story/tickets/T-032.json"] = ticketText({ id: "T-032", status: "open", order: 32, title: "a".repeat(120) });
+  h.fixture.mtimes[".story/tickets/T-030.json"] = 1000;
+  h.fixture.mtimes[".story/tickets/T-031.json"] = 1000;
+  h.fixture.mtimes[".story/tickets/T-032.json"] = 1000;
+  await started(h);
+
+  for (const columns of [110, 158, 258]) {
+    const tree = await h.render(paneEvent(columns, 30));
+    const width = nodeByKey(tree, "board-open").props.width as number;
+    for (const row of cardsOf(tree, "board-open")) {
+      expect(cells(row)).toBeLessThanOrEqual(width - 2);
+    }
+    // The id survives whole and only the title is cut, with one ellipsis
+    // where there was any cutting to do.
+    const cjk = cardsOf(tree, "board-open").find((row) => row.startsWith("T-030")) ?? "";
+    expect(cjk.startsWith("T-030 ")).toBe(true);
+    expect(cjk.split("…").length).toBeLessThanOrEqual(2);
+    if (columns < 258) expect(cjk.endsWith("…")).toBe(true);
+  }
+});
+
+test("colours the severities that exist and dims the ones that do not", async () => {
+  const h = harness(newFixture());
+  h.fixture.files[".story/issues/ISS-002.json"] = issueText({ id: "ISS-002", severity: "high" });
+  h.fixture.mtimes[".story/issues/ISS-002.json"] = 1000;
+  await started(h);
+  const tree = await h.render(paneEvent(160, 30));
+  const parts = (nodeByKey(tree, "issues").props.children as any[]).filter(
+    (child) => typeof child?.props?.children === "string" && /\d/.test(child.props.children),
+  );
+
+  // critical 1, high 1, medium 0, low 0. M-DIM-CRITICAL dims a bucket that
+  // has something in it, or colours one that does not.
+  expect(parts[0].props.children).toBe("1 critical");
+  expect(parts[0].props.color).toBe("red");
+  expect(parts[1].props.children).toBe("1 high");
+  expect(parts[1].props.color).toBe("yellow");
+  expect(parts[2].props.children).toBe("0 medium");
+  expect(parts[2].props.dimColor).toBe(true);
+  expect(parts[2].props.color).toBeUndefined();
+  expect(parts[3].props.dimColor).toBe(true);
+  // The context fill stays neutral.
+  expect(nodeByKey(tree, "context").props.color).toBeUndefined();
+});
+
+test("shortens the severity labels when the row is too narrow for them", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // Wide enough for the long labels.
+  expect(textOf(nodeByKey(await h.render(paneEvent(160, 30)), "issues"))).toContain("1 critical");
+  // Not wide enough: the context fill keeps its width and the issues line
+  // gives up its words rather than its numbers.
+  const narrow = await h.render(paneEvent(48, 30));
+  const text = textOf(nodeByKey(narrow, "issues"));
+  expect(text).toContain("1 crit");
+  expect(text).not.toContain("critical");
+  expect(textOf(nodeByKey(narrow, "context"))).toBe("context 20%");
+});
+
+test("keeps the header clear of the cell the engine draws its close mark in", async () => {
   const h = harness(newFixture());
   await started(h);
   const tree = await h.render(paneEvent());
-  const footer = nodeByKey(tree, "footer");
 
-  // This pins the CLEARANCE CONTRACT, not what a terminal shows: the row
-  // carrying the fill stops short of the pane's last cells, where the engine
-  // draws its own close mark. Live it read "context 7%×" with the mark hard
-  // against our string, and only the owner's eye can confirm the fix landed;
-  // what a test can hold is that the margin is still asked for.
-  // M-MARK-COLLISION drops it.
-  expect(footer.props.marginRight).toBeGreaterThanOrEqual(3);
-  expect(textOf(footer)).toContain("context 20%");
+  // This pins the CLEARANCE CONTRACT, not what a terminal shows: the header
+  // row stops short of the pane's last cells, where the engine draws its own
+  // close mark. Live it read "context 7%×" with the mark hard against our
+  // string, and only the owner's eye can confirm the fix landed; what a test
+  // can hold is that the margin is still asked for. M-MARK-COLLISION drops
+  // it. The foot of the pane needs none: the mark is a top-right thing.
+  expect(nodeByKey(tree, "header").props.marginRight).toBeGreaterThanOrEqual(3);
+  expect(nodeByKey(tree, "footer").props.marginRight).toBeUndefined();
+  expect(textOf(nodeByKey(tree, "footer"))).toContain("context 20%");
 });
 
 test("moves a ticket on the board during the turn that moved it", async () => {

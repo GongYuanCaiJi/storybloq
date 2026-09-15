@@ -81,18 +81,64 @@ const SCAN_TICK_MS = 25;
 const COLUMN_CARD_CAP = 8;
 const COLUMN_TAIL = "...";
 const BOARD_COLUMNS = 4;
+/** What a column with nothing in it says, rather than drawing a blank frame. */
+const EMPTY_COLUMN = "none";
+
+/**
+ * The rows the pane spends on everything that is not a card: the header, the
+ * two blank rows around the board and the footer, and per column the heading
+ * box (text plus its two border rows) and the body box's two border rows.
+ */
+const CHROME_ROWS = 4;
+const GAP_ROWS = 2;
+/** Card rows per column below which the blank rows are not worth their cost. */
+const GAPS_MIN_BODY = 3;
+/** The card's two border rows, its heading row and the rule under it. */
+const COLUMN_FRAME_ROWS = 4;
 
 /** Each column is a bordered card, and the border costs a column each side. */
 const COLUMN_BORDER = "round";
 const BORDER_COLUMNS = 2;
+/** The rule under a heading, and the gaps between the four columns. */
+const HEADING_RULE = "\u2500";
+const COLUMN_GAP = 1;
+const GAP_TOTAL = 3;
+/**
+ * From this width, In progress is widened and Done narrowed by about a
+ * twentieth of the pane: at that size there is room to weight the board
+ * toward the column being worked rather than the one already finished.
+ */
+const WIDE_COLUMNS = 158;
+const WIDE_SHIFT = 0.05;
+const MIN_COLUMN_WIDTH = 12;
 
 /**
- * The heading colours: waiting, working, finished. Open is deliberately
- * uncoloured, being the resting state and the column a reader lands on most.
+ * The severity buckets in the order the footer names them, with the colour a
+ * nonzero one carries and the short label it falls back to.
  */
-const TONE_BLOCKED = "yellow";
-const TONE_INPROGRESS = "cyan";
-const TONE_DONE = "green";
+const SEVERITY_ORDER = [
+  { key: "critical", long: "critical", short: "crit", tone: "red" },
+  { key: "high", long: "high", short: "high", tone: "yellow" },
+  { key: "medium", long: "medium", short: "med", tone: null },
+  { key: "low", long: "low", short: "low", tone: null },
+] as const;
+
+/**
+ * How each column's heading is drawn.
+ *
+ * One column is emphasised and it is the one that says what is happening
+ * now: In progress, bold and cyan. Blocked keeps a colour because it is a
+ * warning, but not the weight; Open is plain, being the resting state and the
+ * column a reader lands on most; Done recedes, since finished work is
+ * reference rather than news. The count rides in the heading text and is
+ * never coloured apart from it.
+ */
+const COLUMN_STYLES = {
+  blocked: { color: "yellow" },
+  open: {},
+  inProgress: { color: "cyan", bold: true },
+  done: { dimColor: true },
+} as const;
 
 /**
  * Cells kept clear to the right of the pane's own rows.
@@ -140,6 +186,11 @@ const BASH_MUTATION = />>?|\bmv\s|\bcp\s|\brm\s|\btee\s|\bsed\s+-i/;
 /** Where a path can arrive on a built-in file tool's event. */
 const PATH_ARGUMENTS = ["file_path", "path", "notebook_path"] as const;
 const STORY_DIR = ".story/";
+
+/** The cell-width approximation's special code points, and the cut mark. */
+const ZERO_WIDTH_JOINER = 0x200d;
+const VARIATION_SELECTOR = 0xfe0f;
+const ELLIPSIS = "\u2026";
 
 const TICKETS_DIR = ".story/tickets";
 const ISSUES_DIR = ".story/issues";
@@ -230,8 +281,95 @@ function reproject(): void {
   projection = projectSidebar({ project, phases, tickets, issues, handoverFilenames });
 }
 
-function truncate(text: string, width: number): string {
-  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+/**
+ * How many terminal cells a string takes, which is not its length.
+ *
+ * A CJK ideograph or an emoji occupies two cells, a combining mark none, and
+ * a zero-width joiner welds what follows onto what came before. Measuring
+ * `.length` instead overruns a column by a cell per wide character, and the
+ * row wraps, and the board comes apart; measuring code points alone is wrong
+ * the other way. This is the usual approximation (the East Asian Wide and
+ * Fullwidth blocks plus the emoji planes), not a full Unicode width table,
+ * which is more than a sidebar can carry.
+ */
+function cellWidth(text: string): number {
+  let width = 0;
+  let joined = false;
+  for (const character of text) {
+    const point = character.codePointAt(0) ?? 0;
+    if (point === ZERO_WIDTH_JOINER) {
+      joined = true;
+      continue;
+    }
+    if (isCombining(point) || point === VARIATION_SELECTOR) continue;
+    if (joined) {
+      joined = false;
+      continue;
+    }
+    width += isWide(point) ? 2 : 1;
+  }
+  return width;
+}
+
+function isCombining(point: number): boolean {
+  return (
+    (point >= 0x0300 && point <= 0x036f)
+    || (point >= 0x0483 && point <= 0x0489)
+    || (point >= 0x0591 && point <= 0x05bd)
+    || (point >= 0x0610 && point <= 0x061a)
+    || (point >= 0x064b && point <= 0x065f)
+    || (point >= 0x1ab0 && point <= 0x1aff)
+    || (point >= 0x1dc0 && point <= 0x1dff)
+    || (point >= 0x20d0 && point <= 0x20ff)
+    || (point >= 0xfe20 && point <= 0xfe2f)
+  );
+}
+
+function isWide(point: number): boolean {
+  return (
+    (point >= 0x1100 && point <= 0x115f)
+    || (point >= 0x2e80 && point <= 0x303e)
+    || (point >= 0x3041 && point <= 0x33ff)
+    || (point >= 0x3400 && point <= 0x4dbf)
+    || (point >= 0x4e00 && point <= 0x9fff)
+    || (point >= 0xa000 && point <= 0xa4cf)
+    || (point >= 0xac00 && point <= 0xd7a3)
+    || (point >= 0xf900 && point <= 0xfaff)
+    || (point >= 0xfe10 && point <= 0xfe19)
+    || (point >= 0xfe30 && point <= 0xfe6f)
+    || (point >= 0xff00 && point <= 0xff60)
+    || (point >= 0xffe0 && point <= 0xffe6)
+    || (point >= 0x1f300 && point <= 0x1f64f)
+    || (point >= 0x1f680 && point <= 0x1f6ff)
+    || (point >= 0x1f900 && point <= 0x1f9ff)
+    || (point >= 0x20000 && point <= 0x3fffd)
+  );
+}
+
+/**
+ * Cuts a string to fit `cells` terminal cells, ending in one ellipsis where
+ * anything was cut.
+ *
+ * Code point by code point, so a surrogate pair is never halved and a
+ * combining mark rides along with the character it marks. The ellipsis is
+ * U+2026, one cell wide.
+ */
+function truncate(text: string, cells: number): string {
+  if (cells <= 0) return "";
+  if (cellWidth(text) <= cells) return text;
+  const room = cells - 1;
+  let width = 0;
+  let out = "";
+  for (const character of text) {
+    const point = character.codePointAt(0) ?? 0;
+    const step = isCombining(point) || point === VARIATION_SELECTOR || point === ZERO_WIDTH_JOINER
+      ? 0
+      : isWide(point) ? 2 : 1;
+    if (width + step > room) break;
+    width += step;
+    out += character;
+  }
+  return `${out}${ELLIPSIS}`;
 }
 
 /** The one line the narrow fallback draws, and the pane's own summary row. */
@@ -587,10 +725,51 @@ function isStacked(width: number): boolean {
 }
 
 /**
+ * How many card rows each column may draw, and whether the pane can afford
+ * the blank rows around the board at all.
+ *
+ * The pane clips at `props.scroll.bodyRows`, silently, so the budget is
+ * counted out before anything is drawn:
+ *
+ *   header 1, header gap 1, footer gap 1, footer 1   = 4 chrome rows
+ *   the card's border, above and below              = 2
+ *   its heading row and the rule under it           = 2
+ *
+ * Side by side the four columns are parallel, so one column's four frame rows
+ * are the board's; stacked they run one after another, so the frames cost
+ * four times that and the rows left over are shared between them. The blank
+ * rows go before the cards do, because a board with one card in it still says
+ * something and a gap says nothing. When even four framed headings will not
+ * fit, the board falls back to one plain counted row per column, which is the
+ * smallest thing that is still the board.
+ *
+ * What comes back is the rows one BODY may draw, tail included; the board
+ * decides how many of those are cards once it knows whether anything was left
+ * out.
+ */
+function rowBudget(e: any, stacked: boolean): { body: number; gaps: boolean; compact: boolean } {
+  const bodyRows: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
+  if (bodyRows <= 0) return { body: COLUMN_CARD_CAP + 1, gaps: true, compact: false };
+  const frames = stacked ? COLUMN_FRAME_ROWS * BOARD_COLUMNS : COLUMN_FRAME_ROWS;
+  const share = stacked ? BOARD_COLUMNS : 1;
+  // With the blank rows first, but only while they are affordable: below
+  // GAPS_MIN_BODY rows of cards per column the gaps are costing more than
+  // they are worth, and a board with cards in it beats a tidy empty one.
+  for (const [gaps, floor] of [[true, GAPS_MIN_BODY], [false, 1]] as const) {
+    const chrome = CHROME_ROWS - (gaps ? 0 : GAP_ROWS);
+    const room = bodyRows - chrome - frames;
+    if (room >= share * floor) {
+      return { body: Math.min(COLUMN_CARD_CAP + 1, Math.floor(room / share)), gaps, compact: false };
+    }
+  }
+  return { body: 0, gaps: false, compact: true };
+}
+
+/**
  * A heading that keeps its count when the column is too narrow for both.
  *
  * The count is the point of the heading, so the label is what gets cut:
- * "In progress 100" at fourteen columns is "In progr… 100", never
+ * "In progress 100" at fourteen cells is "In progr… 100", never
  * "In progress 1…", which would quietly report a different number.
  */
 function headingText(label: string, count: number, width: number): string {
@@ -598,13 +777,63 @@ function headingText(label: string, count: number, width: number): string {
   return `${truncate(label, Math.max(1, width - tail.length))}${tail}`;
 }
 
+/** One card row: the id whole and dim, the title cut to what is left. */
+function cardRow(elements: any, card: SidebarBoardCard, width: number): unknown {
+  const room = width - cellWidth(card.id) - 1;
+  const title = room > 0 ? truncate(card.title, room) : "";
+  return elements.Text({
+    wrap: "truncate",
+    children: [
+      // The id whole, never cut: a half id is worse than no id. The title
+      // takes what is left, and the eye runs down the titles.
+      elements.Text({ dimColor: true, children: truncate(card.id, width) }),
+      elements.Text({ children: title === "" ? "" : ` ${title}` }),
+    ],
+  });
+}
+
 /**
- * One column: a heading carrying the full count, at most COLUMN_CARD_CAP
- * cards, and a tail line when there are more.
+ * The rows of one column's body, every body the same height.
+ *
+ * The four bodies draw the same number of rows, so the cards end level
+ * instead of leaving a ragged edge: a column with fewer cards is padded with
+ * blanks, and a column with nothing in it says so in a dim word rather than
+ * showing an empty frame. The tail row is part of that common height, held
+ * back by the budget, so a capped column can say it was capped without
+ * standing a row taller than the rest.
+ */
+function bodyRowsOf(
+  elements: any,
+  cards: readonly SidebarBoardCard[],
+  width: number,
+  shown: number,
+  height: number,
+): unknown[] {
+  const rows: unknown[] = [];
+  if (cards.length === 0) {
+    rows.push(elements.Text({ dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
+  } else {
+    for (const card of cards.slice(0, shown)) rows.push(cardRow(elements, card, width));
+    if (cards.length > shown) rows.push(elements.Text({ dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
+  }
+  while (rows.length < height) rows.push(elements.Text({ children: " " }));
+  return rows;
+}
+
+/**
+ * One column: a bordered card with its heading at the top, a rule under the
+ * heading, and the card rows beneath.
+ *
+ * One box and not two. The heading is enclosed by the card's own top and side
+ * borders and the rule below it, which is the divider; two stacked bordered
+ * boxes drew a double line between heading and body. The rule is a Text of
+ * box-drawing dashes spanning the inner width, so it meets both side borders;
+ * it cannot render the ├ and ┤ junctions, since a child of the box cannot
+ * reach into the border cells the renderer owns.
  *
  * The count in the heading is the WHOLE column, not the rows drawn, so a
- * capped column still tells the truth about the phase; the tail says the
- * column goes on. Titles are truncated to the column's width, not the pane's.
+ * capped column still tells the truth about the project; the tail says the
+ * column goes on. Titles are cut to the column's width, not the pane's.
  *
  * Takes the resolved element table rather than `$`: these are plain
  * constructors, and the client's scan is strict about where `$` may travel.
@@ -613,85 +842,102 @@ function boardColumn(
   elements: any,
   key: string,
   heading: string,
-  tone: string | null,
+  style: Readonly<Record<string, unknown>>,
   cards: readonly SidebarBoardCard[],
   width: number,
+  shown: number,
+  height: number,
 ): unknown {
   // The border takes a column on each side, so the text inside has that much
   // less. Getting this wrong wraps every row and the board falls apart.
   const textWidth = Math.max(1, width - BORDER_COLUMNS);
-  const headingProps: Record<string, unknown> = {
-    bold: true,
-    children: headingText(heading, cards.length, textWidth),
-  };
-  // Blocked, in progress and done carry a colour; open is the resting state
-  // and keeps the terminal's own.
-  if (tone !== null) headingProps["color"] = tone;
-
-  const body: unknown[] = [];
-  for (const card of cards.slice(0, COLUMN_CARD_CAP)) {
-    const line = truncate(`${card.id} ${card.title}`, textWidth);
-    const id = line.slice(0, Math.min(card.id.length, line.length));
-    const rest = line.slice(id.length);
-    // The id dim and the title plain: the eye runs down the titles and only
-    // stops at an id when it is looking for one.
-    body.push(
-      elements.Text({
-        children: [
-          elements.Text({ dimColor: true, children: id }),
-          elements.Text({ children: rest }),
-        ],
-      }),
-    );
-  }
-  if (cards.length > COLUMN_CARD_CAP) {
-    body.push(elements.Text({ dimColor: true, children: COLUMN_TAIL }));
-  }
-
-  // Two boxes, not one: the heading is its own bordered box sitting on the
-  // body's, and the borders that meet between them are the divider.
   return elements.Box({
     key,
     flexDirection: "column",
+    borderStyle: COLUMN_BORDER,
     width,
     overflow: "hidden",
     children: [
-      elements.Box({
+      elements.Text({
         key: `${key}-heading`,
-        flexDirection: "column",
-        borderStyle: COLUMN_BORDER,
-        width,
-        overflow: "hidden",
-        children: [elements.Text(headingProps)],
+        ...style,
+        wrap: "truncate",
+        children: headingText(heading, cards.length, textWidth),
       }),
-      elements.Box({
-        key: `${key}-body`,
-        flexDirection: "column",
-        borderStyle: COLUMN_BORDER,
-        width,
-        overflow: "hidden",
-        children: body,
-      }),
+      elements.Text({ key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
+      ...bodyRowsOf(elements, cards, textWidth, shown, height),
     ],
   });
 }
 
-function boardNode(elements: any, board: any, width: number, stacked: boolean): unknown {
-  // Stacked, one bordered card per row at the full width; side by side, the
-  // width split four ways with the borders touching, which is what makes them
-  // read as one board rather than four strays.
-  const columnWidth = stacked ? width : Math.max(12, Math.floor(width / BOARD_COLUMNS));
+/** The board reduced to four counted rows, when no frame will fit. */
+function compactBoard(elements: any, board: any, width: number): unknown {
+  const line = (
+    key: string,
+    label: string,
+    style: Readonly<Record<string, unknown>>,
+    cards: readonly SidebarBoardCard[],
+  ): unknown =>
+    elements.Text({ key, ...style, wrap: "truncate", children: headingText(label, cards.length, width) });
+  return elements.Box({
+    key: "board",
+    flexDirection: "column",
+    children: [
+      line("board-blocked", "Blocked", COLUMN_STYLES.blocked, board.blocked),
+      line("board-open", "Open", COLUMN_STYLES.open, board.open),
+      line("board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress),
+      line("board-done", "Done", COLUMN_STYLES.done, board.done),
+    ],
+  });
+}
+
+/**
+ * The four column widths.
+ *
+ * Stacked, every card takes the pane. Side by side, the width less the three
+ * gaps splits four ways, the leftover cells going to Open; from WIDE_COLUMNS
+ * up, a twentieth of the pane moves from Done to In progress, so the board
+ * leans toward the work in hand. The four widths and the gaps always sum to
+ * the pane's width, whatever the arithmetic above did.
+ */
+function columnWidths(width: number, stacked: boolean): number[] {
+  if (stacked) return [width, width, width, width];
+  const base = Math.max(MIN_COLUMN_WIDTH, Math.floor((width - GAP_TOTAL) / BOARD_COLUMNS));
+  const widths = [base, base, base, base];
+  widths[1] = (widths[1] ?? base) + Math.max(0, width - GAP_TOTAL - base * BOARD_COLUMNS);
+  if (width >= WIDE_COLUMNS) {
+    const shift = Math.min(Math.round(width * WIDE_SHIFT), (widths[3] ?? base) - MIN_COLUMN_WIDTH);
+    if (shift > 0) {
+      widths[2] = (widths[2] ?? base) + shift;
+      widths[3] = (widths[3] ?? base) - shift;
+    }
+  }
+  return widths;
+}
+
+function boardNode(elements: any, board: any, width: number, stacked: boolean, body: number): unknown {
+  const widths = columnWidths(width, stacked);
+  // Every body the same height, and that height inside the budget: as many
+  // rows as the fullest column can show, one of them given up to the tail
+  // when anything was left out, so a capped column says so without standing a
+  // row taller than the rest.
+  const columns = [board.blocked, board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
+  const longest = Math.max(...columns.map((column) => column.length));
+  let shown = Math.min(body, longest);
+  if (columns.some((column) => column.length > shown)) shown = Math.max(0, Math.min(shown, body - 1));
+  const omitted = columns.some((column) => column.length > shown);
+  const height = Math.max(1, Math.min(body, shown + (omitted ? 1 : 0)));
   // Left to right in the order the work moves: what is stuck, what can be
   // picked up, what is being done, what is finished.
   return elements.Box({
     key: "board",
     flexDirection: stacked ? "column" : "row",
-    gap: 0,
+    gap: stacked ? 0 : COLUMN_GAP,
     children: [
-      boardColumn(elements, "board-blocked", "Blocked", TONE_BLOCKED, board.blocked, columnWidth),
-      boardColumn(elements, "board-open", "Open", null, board.open, columnWidth),
-      boardColumn(elements, "board-inprogress", "In progress", TONE_INPROGRESS, board.inProgress, columnWidth),
-      boardColumn(elements, "board-done", "Done", TONE_DONE, board.done, columnWidth),
+      boardColumn(elements, "board-blocked", "Blocked", COLUMN_STYLES.blocked, board.blocked, widths[0]!, shown, height),
+      boardColumn(elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[1]!, shown, height),
+      boardColumn(elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[2]!, shown, height),
+      boardColumn(elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[3]!, shown, height),
     ],
   });
 }
@@ -709,6 +955,7 @@ function headerNode(elements: any): unknown {
     key: "header",
     flexDirection: "row",
     alignItems: "center",
+    marginRight: PANE_EDGE_CLEARANCE,
     children: [elements.Text({ bold: true, children: "Storybloq" })],
   });
 }
@@ -717,21 +964,59 @@ function headerNode(elements: any): unknown {
  * The foot of the pane: the issues breakdown flush left, the context fill
  * right-aligned on the same row.
  *
- * The fill reads at the bottom right, where a status line would put it, and
- * the row stops short of the pane's edge: the engine's close mark is a
- * top-right thing, but nothing is gained by drawing into the last cell
- * anywhere. With no reading to show, the right side is simply empty.
+ * The four buckets are always all there, so the shape of the line does not
+ * move about; what changes is the weight. A zero bucket is dim and a nonzero
+ * one is not, critical reads red and high yellow when they have anything in
+ * them, and the separators are dim throughout, so the eye lands on the
+ * severities that exist. The context fill is neutral and gets its width
+ * first, the issues line taking what is left and going to the short labels
+ * when the long ones will not fit.
+ *
+ * No right margin here: the engine's close mark is a top-right thing, and the
+ * header is what keeps clear of it.
  */
-function footerNode(elements: any, issues: string, context: number | null): unknown {
+function footerNode(
+  elements: any,
+  bySeverity: Readonly<Record<string, number>>,
+  context: number | null,
+  width: number,
+): unknown {
+  const contextText = context === null ? "" : `context ${context}%`;
+  const room = Math.max(1, width - cellWidth(contextText) - 1);
+  const counts = SEVERITY_ORDER.map((severity) => bySeverity[severity.key] ?? 0);
+  const long = `issues: ${SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.long}`).join(", ")}`;
+  const short = SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.short}`).join(" ");
+  const abbreviated = cellWidth(long) > room;
+
+  const parts: unknown[] = [];
+  if (!abbreviated) parts.push(elements.Text({ children: "issues: " }));
+  SEVERITY_ORDER.forEach((severity, index) => {
+    const count = counts[index] ?? 0;
+    const props: Record<string, unknown> = {
+      children: `${count} ${abbreviated ? severity.short : severity.long}`,
+    };
+    if (count === 0) props["dimColor"] = true;
+    else if (severity.tone !== null) props["color"] = severity.tone;
+    if (index > 0) {
+      parts.push(elements.Text({ dimColor: true, children: abbreviated ? " " : ", " }));
+    }
+    parts.push(elements.Text(props));
+  });
+
   return elements.Box({
     key: "footer",
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginRight: PANE_EDGE_CLEARANCE,
     children: [
-      elements.Text({ key: "issues", dimColor: true, children: issues }),
-      elements.Text({ key: "context", dimColor: true, children: context === null ? "" : `context ${context}%` }),
+      elements.Box({
+        key: "issues",
+        flexDirection: "row",
+        width: Math.min(room, cellWidth(abbreviated ? short : long)),
+        overflow: "hidden",
+        children: parts,
+      }),
+      elements.Text({ key: "context", wrap: "truncate", children: contextText }),
     ],
   });
 }
@@ -751,20 +1036,24 @@ export function registerSidebar(on: On, _options: Options): void {
       // wordmark does not read as part of the first column heading. A single
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
-      const rows: unknown[] = [
-        headerNode(elements),
-        Text({ key: "header-gap", children: " " }),
-      ];
+      const stacked = isStacked(width);
+      const budget = rowBudget(e, stacked);
+      const rows: unknown[] = [headerNode(elements)];
+      if (budget.gaps) rows.push(Text({ key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
         rows.push(Text({ children: truncate(summaryLine(false), width) }));
       } else {
-        rows.push(boardNode(elements, projection.board, width, isStacked(width)));
-        rows.push(Text({ key: "issues-gap", children: " " }));
-        const bySeverity = projection.issuesBySeverity;
-        const issues = `issues: ${bySeverity["critical"] ?? 0} critical, ${bySeverity["high"] ?? 0} high, ${bySeverity["medium"] ?? 0} medium, ${bySeverity["low"] ?? 0} low`;
-        rows.push(footerNode(elements, truncate(issues, width), contextPercent));
-        if (sessionActive) rows.push(Text({ dimColor: true, children: "an autonomous session is active" }));
+        rows.push(
+          budget.compact
+            ? compactBoard(elements, projection.board, width)
+            : boardNode(elements, projection.board, width, stacked, budget.body),
+        );
+        if (budget.gaps) rows.push(Text({ key: "issues-gap", children: " " }));
+        rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
+        if (sessionActive) {
+          rows.push(Text({ dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+        }
       }
       return Box({ flexDirection: "column", children: rows });
     }
