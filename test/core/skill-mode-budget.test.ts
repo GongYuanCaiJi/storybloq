@@ -54,7 +54,11 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // headroom. Same reasoning as the T-501 raise, and SKILL.md paid for its
   // own two-line health addition by trimming two duplicated routing
   // parentheticals rather than raising the 56,000 priming ceiling.
-  "settings.md": 17000,
+  // Raised to 18,000 by ISS-1222, which documents the sixth health check
+  // (`hook-duplicates`: what it reads, how a row is identified, what
+  // setup-skill keeps): 17,468 measured, rounded up to the next 1,000. Off
+  // the priming path, same reasoning as the T-501 and T-502 raises.
+  "settings.md": 18000,
   "session-guard.md": 41000,
   "setup-flow.md": 47000, // ISS-1146: already over a design target, ceiling only pins regrowth
   // ISS-950 raises this from 27,000 to 28,000 (27,458 measured at landing).
