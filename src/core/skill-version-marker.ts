@@ -270,6 +270,29 @@ export async function autoRefreshSkillIfStale(
     // nothing to re-register against, and any failure logs but does
     // not block the refresh.
     const bin = refreshedClaude ? resolveStorybloqBin() : null;
+
+    // T-507 commit D: the Mods copy follows the CLI. Re-resolving the global
+    // binary here is what moves the generated hooks/install.ts when the
+    // binary moves (an nvm switch). Only where a copy is installed: the
+    // refresh is not a setup. Best-effort, logged, never blocking.
+    if (refreshedClaude) {
+      try {
+        const { installMods, modsInstalled, MODS_DISPLAY_PATH } = await import("./mods-install.js");
+        if (modsInstalled()) {
+          await installMods({ bin });
+          process.stderr.write(
+            `storybloq: refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
+          );
+        }
+      } catch (modsErr: unknown) {
+        const modsMsg = modsErr instanceof Error ? modsErr.message : String(modsErr);
+        process.stderr.write(
+          `storybloq: Mods refresh failed (non-fatal): ${modsMsg}\n` +
+          `  Run 'storybloq setup --client claude' manually to retry.\n`,
+        );
+      }
+    }
+
     if (bin !== null) {
       try {
         const { countLegacyHooks, sweepLegacyHooks } = await import("./hook-migration.js");

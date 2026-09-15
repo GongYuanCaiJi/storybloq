@@ -38,6 +38,10 @@
   "files": [
     "dist",
     "src/skill",
+    "plugins/storybloq/.claude-plugin/plugin.json",
+    "plugins/storybloq/hooks/hooks.json",
+    "plugins/storybloq/hooks/*.ts",
+    "!plugins/storybloq/hooks/*.test.ts",
     "README.md",
     "NOTICE"
   ],

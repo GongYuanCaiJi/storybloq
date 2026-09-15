@@ -1517,6 +1517,21 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
     process.stderr.write("  This may indicate a corrupt installation. Try: npm install -g @storybloq/storybloq@latest\n");
   }
 
+  // T-507 commit D: the Mods copy (Claude Code function hooks), off by
+  // default, with hooks/install.ts generated to answer the absolute path of
+  // the global binary. Non-fatal: the skill and hooks above do not depend
+  // on it, and the version-marker refresh retries it on the next upgrade.
+  try {
+    const { installMods, MODS_DISPLAY_PATH } = await import("../../core/mods-install.js");
+    const modsBin = resolveStorybloqBin();
+    const mods = await installMods({ bin: modsBin });
+    log(`Installed Mods (function hooks, off by default) at ${MODS_DISPLAY_PATH}`);
+    log(`  ${mods.written.length} files written; storybloq resolved to ${modsBin ?? "the bare name (not found on PATH)"}`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`Warning: Mods copy failed (non-fatal): ${msg}\n`);
+  }
+
   // Attempt MCP registration -- requires both `storybloq` and `claude` in PATH.
   let mcpRegistered = false;
   let cliInPath = false;
