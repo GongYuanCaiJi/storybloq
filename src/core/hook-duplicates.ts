@@ -102,12 +102,27 @@ export interface DedupeReport {
   readonly dropped: readonly HookRowRef[];
 }
 
+export interface PrunedGroup {
+  readonly hookType: string;
+  readonly matcher: string;
+}
+
 export interface DedupeOutcome {
   readonly changed: boolean;
   readonly reconciled: readonly DedupeReport[];
   /** Collisions left in place because no validated global launcher was available. */
   readonly unresolved: readonly HookCollision[];
+  /** ISS-1226: empty matcher groups removed under events Storybloq owns, whoever emptied them. */
+  readonly pruned: readonly PrunedGroup[];
 }
+
+/**
+ * ISS-1226: the events setup-skill registers hooks under. An empty matcher
+ * group under one of these is debris from an earlier writer (a migration
+ * that removed the group's last row) and is pruned; empty groups under any
+ * other event belong to someone else and are never touched.
+ */
+export const STORYBLOQ_HOOK_EVENTS: ReadonlySet<string> = new Set(["PreCompact", "SessionStart", "Stop", "StopFailure", "UserPromptSubmit"]);
 
 /** The validated global launcher's command for a subcommand, or null when none was established. */
 export type GlobalCommandFor = (rest: string) => string | null;
@@ -216,16 +231,31 @@ function unionMatcher(comp: readonly Row[]): string | null {
  * destination, the validated global launcher's command, and the hook options
  * (timeout, async, anything else) of the row that already carried that
  * command, else of the first row. Mutates `settings` in place. Groups
- * emptied by a drop are removed. With no global command for a subcommand the
- * collision is reported under `unresolved` and left exactly as it was.
+ * emptied by a drop are removed, and so is any group already empty under an
+ * event Storybloq owns (ISS-1226). With no global command for a subcommand
+ * the collision is reported under `unresolved` and left exactly as it was.
  */
 export function dedupeHookRows(settings: unknown, globalCommandFor: GlobalCommandFor): DedupeOutcome {
   const hooks = hooksOf(settings);
-  if (hooks === null) return { changed: false, reconciled: [], unresolved: [] };
+  if (hooks === null) return { changed: false, reconciled: [], unresolved: [], pruned: [] };
   const reconciled: DedupeReport[] = [];
   const unresolved: HookCollision[] = [];
+  const pruned: PrunedGroup[] = [];
   for (const [hookType, hookArray] of Object.entries(hooks)) {
     if (!Array.isArray(hookArray)) continue;
+    if (STORYBLOQ_HOOK_EVENTS.has(hookType)) {
+      const prunedHere: PrunedGroup[] = [];
+      for (let i = hookArray.length - 1; i >= 0; i--) {
+        const group = hookArray[i];
+        if (typeof group !== "object" || group === null) continue;
+        const g = group as MatcherGroup;
+        if (Array.isArray(g.hooks) && g.hooks.length === 0) {
+          hookArray.splice(i, 1);
+          prunedHere.unshift({ hookType, matcher: typeof g.matcher === "string" ? g.matcher : "" });
+        }
+      }
+      pruned.push(...prunedHere);
+    }
     const comps = components(ownedRows(hookArray));
     if (comps.length === 0) continue;
     const toDrop = new Set<HookEntry>();
@@ -288,16 +318,16 @@ export function dedupeHookRows(settings: unknown, globalCommandFor: GlobalComman
       if (Array.isArray(g.hooks) && g.hooks.length === 0) hookArray.splice(i, 1);
     }
   }
-  return { changed: reconciled.length > 0, reconciled, unresolved };
+  return { changed: reconciled.length > 0 || pruned.length > 0, reconciled, unresolved, pruned };
 }
 
 /**
  * Reads a settings file with the same guards as hook removal (a missing,
  * unreadable or malformed file is left alone), dedupes, and writes atomically
- * only when a collision was resolved.
+ * only when a collision was resolved or an empty owned group was pruned.
  */
 export async function reconcileDuplicateHookRows(settingsPath: string, globalCommandFor: GlobalCommandFor): Promise<DedupeOutcome> {
-  const nothing: DedupeOutcome = { changed: false, reconciled: [], unresolved: [] };
+  const nothing: DedupeOutcome = { changed: false, reconciled: [], unresolved: [], pruned: [] };
   if (!existsSync(settingsPath)) return nothing;
   let settings: unknown;
   try {
@@ -311,7 +341,7 @@ export async function reconcileDuplicateHookRows(settingsPath: string, globalCom
   try {
     await atomicWriteFollowingSymlink(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   } catch {
-    return { changed: false, reconciled: [], unresolved: out.unresolved };
+    return { changed: false, reconciled: [], unresolved: out.unresolved, pruned: [] };
   }
   return out;
 }

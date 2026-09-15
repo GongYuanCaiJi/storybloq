@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import {
   enableClaudeBusHooks,
+  migrateLegacyHookVariants,
   globalLauncher,
   registerLimitSessionStartHook,
   registerLimitStopFailureHook,
@@ -22,6 +23,7 @@ import {
   formatHookCommand,
   CLAUDE_BUS_SESSION_START_MATCHER,
 } from "../../../src/cli/commands/setup-skill.js";
+import { reconcileDuplicateHookRows } from "../../../src/core/hook-duplicates.js";
 
 const NVM = "/fake/nvm/bin/storybloq";
 const NPX = "/fake/.npm/_npx/573f/node_modules/.bin/storybloq";
@@ -160,6 +162,23 @@ describe("registerHook by semantic command and coverage (ISS-1222)", () => {
     expect(await registerStopHook(settingsPath, NVM)).toBe("registered");
     const s = JSON.parse(await readFile(settingsPath, "utf-8")) as { hooks: { Stop: Group[] } };
     expect(s.hooks.Stop[0]!.hooks).toEqual([{ type: "command", command: `${NVM} hook-status`, async: true, timeout: 99 }]);
+  });
+
+  it("ISS-1226: the live shape run through the migration and then the reconcile leaves no empty group", async () => {
+    await seed({ SessionStart: [
+      { matcher: FULL, hooks: [row(`${NVM} session resume-prompt`), row(`${NVM} session intel-start`, { timeout: 5 })] },
+      { matcher: "resume", hooks: [row(`${NPX} session resume-prompt`)] },
+    ] });
+    expect(await migrateLegacyHookVariants("SessionStart", "session resume-prompt", `${NVM} session resume-prompt`, settingsPath)).toBe(1);
+    expect(await groupsOf("SessionStart")).toEqual([{ matcher: FULL, commands: [`${NVM} session resume-prompt`, `${NVM} session intel-start`] }]);
+    // A shell left by any earlier writer is cleaned by the reconcile on the next setup-skill.
+    await seed({ SessionStart: [
+      { matcher: FULL, hooks: [row(`${NVM} session resume-prompt`)] },
+      { matcher: "resume", hooks: [] },
+    ] });
+    const out = await reconcileDuplicateHookRows(settingsPath, (rest) => formatHookCommand(NVM, rest));
+    expect(out.pruned).toEqual([{ hookType: "SessionStart", matcher: "resume" }]);
+    expect(await groupsOf("SessionStart")).toEqual([{ matcher: FULL, commands: [`${NVM} session resume-prompt`] }]);
   });
 
   it("enableClaudeBusHooks finds our rows by semantic key when only an alternate-path row exists", async () => {

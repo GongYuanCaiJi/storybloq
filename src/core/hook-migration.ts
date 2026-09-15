@@ -286,6 +286,7 @@ export async function migrateLegacyHookVariants(
 
   const hookArray = hooks[hookType] as unknown[];
   let removedCount = 0;
+  const emptied = new Set<MatcherGroup>();
 
   for (const group of hookArray) {
     if (typeof group !== "object" || group === null) continue;
@@ -305,6 +306,15 @@ export async function migrateLegacyHookVariants(
       return false;
     });
     removedCount += before - g.hooks.length;
+    if (before > 0 && g.hooks.length === 0) emptied.add(g);
+  }
+  // ISS-1226: a group this migration emptied is removed with its last row,
+  // never left behind as an empty shell for a later registration to fill.
+  for (let i = hookArray.length - 1; i >= 0; i--) {
+    const group = hookArray[i];
+    if (typeof group !== "object" || group === null) continue;
+    const g = group as MatcherGroup;
+    if (emptied.has(g)) hookArray.splice(i, 1);
   }
 
   if (removedCount === 0) return 0;

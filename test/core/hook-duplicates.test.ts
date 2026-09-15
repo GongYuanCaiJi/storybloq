@@ -167,7 +167,7 @@ describe("dedupeHookRows", () => {
     expect(commands(s, "UserPromptSubmit")[0]!.commands).toEqual([`${NVM} session intel-prompt`]);
     expect(s.model).toBe("opus");
     expect(findHookCollisions(s)).toEqual([]);
-    expect(dedupeHookRows(s, globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [] });
+    expect(dedupeHookRows(s, globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [], pruned: [] });
   });
 
   it("two identical global rows collapse to one and the removed twin is reported dropped", () => {
@@ -302,8 +302,47 @@ describe("reconcileDuplicateHookRows", () => {
     expect(findHookCollisions(after)).toEqual([]);
     // Second run: nothing to do, file untouched.
     const text = readFileSync(settingsPath, "utf-8");
-    expect(await reconcileDuplicateHookRows(settingsPath, globalFor(nvmBin))).toEqual({ changed: false, reconciled: [], unresolved: [] });
+    expect(await reconcileDuplicateHookRows(settingsPath, globalFor(nvmBin))).toEqual({ changed: false, reconciled: [], unresolved: [], pruned: [] });
     expect(readFileSync(settingsPath, "utf-8")).toBe(text);
+  });
+
+  it("ISS-1226: an empty group under an event Storybloq owns is pruned even with no collision; other events are left alone", async () => {
+    dir = mkdtempSync(join(tmpdir(), "iss1226-"));
+    const settingsPath = join(dir, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { matcher: FULL, hooks: [row(`${NVM} session resume-prompt`)] },
+          { matcher: "resume", hooks: [] },
+        ],
+        StopFailure: [{ matcher: "rate_limit", hooks: [] }],
+        Notification: [{ matcher: "", hooks: [] }],
+      },
+    }, null, 2));
+    const out = await reconcileDuplicateHookRows(settingsPath, globalFor(NVM));
+    expect(out).toEqual({ changed: true, reconciled: [], unresolved: [], pruned: [
+      { hookType: "SessionStart", matcher: "resume" },
+      { hookType: "StopFailure", matcher: "rate_limit" },
+    ] });
+    const after = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks: Record<string, Array<{ matcher: string; hooks: unknown[] }>> };
+    expect(after.hooks.SessionStart.map((g) => g.matcher)).toEqual([FULL]);
+    expect(after.hooks.StopFailure).toEqual([]);
+    expect(after.hooks.Notification).toEqual([{ matcher: "", hooks: [] }]);
+    // Second run: nothing left to prune, no write.
+    const text = readFileSync(settingsPath, "utf-8");
+    expect((await reconcileDuplicateHookRows(settingsPath, globalFor(NVM))).changed).toBe(false);
+    expect(readFileSync(settingsPath, "utf-8")).toBe(text);
+  });
+
+  it("ISS-1226: with no global launcher the prune still runs, since it drops no row", async () => {
+    dir = mkdtempSync(join(tmpdir(), "iss1226-"));
+    const settingsPath = join(dir, "settings.json");
+    writeFileSync(settingsPath, JSON.stringify({ hooks: { Stop: [{ matcher: "", hooks: [row(`${NVM} hook-status`)] }, { matcher: "", hooks: [] }] } }));
+    const out = await reconcileDuplicateHookRows(settingsPath, globalFor(null));
+    expect(out.changed).toBe(true);
+    expect(out.pruned).toEqual([{ hookType: "Stop", matcher: "" }]);
+    const after = JSON.parse(readFileSync(settingsPath, "utf-8")) as { hooks: { Stop: unknown[] } };
+    expect(after.hooks.Stop).toHaveLength(1);
   });
 
   it("does not write when the global launcher is unresolved, and survives a missing or malformed file", async () => {
@@ -315,9 +354,9 @@ describe("reconcileDuplicateHookRows", () => {
     expect(out.changed).toBe(false);
     expect(out.unresolved).toHaveLength(2);
     expect(readFileSync(settingsPath, "utf-8")).toBe(text);
-    expect(await reconcileDuplicateHookRows(join(dir, "missing.json"), globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [] });
+    expect(await reconcileDuplicateHookRows(join(dir, "missing.json"), globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [], pruned: [] });
     writeFileSync(settingsPath, "{not json");
-    expect(await reconcileDuplicateHookRows(settingsPath, globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [] });
+    expect(await reconcileDuplicateHookRows(settingsPath, globalFor(NVM))).toEqual({ changed: false, reconciled: [], unresolved: [], pruned: [] });
     expect(readFileSync(settingsPath, "utf-8")).toBe("{not json");
   });
 });

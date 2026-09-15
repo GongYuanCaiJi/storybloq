@@ -1417,8 +1417,11 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
     for (const u of duplicates.unresolved) {
       log(`  Duplicate ${u.hookType} hook rows left in place, the global storybloq launcher could not be established: ${u.rows.map((row) => row.command).join(", ")}`);
     }
+    for (const p of duplicates.pruned) {
+      log(`  Removed empty ${p.hookType} hook group (matcher "${p.matcher}")`);
+    }
     if (duplicates.changed) {
-      log("  Rewrote ~/.claude/settings.json to drop the duplicate rows; the file is re-serialised as two-space JSON, so any hand formatting is normalised");
+      log("  Rewrote ~/.claude/settings.json to drop the duplicate rows or empty groups; the file is re-serialised as two-space JSON, so any hand formatting is normalised");
     }
 
     const precompactResult = await registerPreCompactHook(undefined, resolvedBin);

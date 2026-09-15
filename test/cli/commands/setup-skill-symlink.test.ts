@@ -94,7 +94,8 @@ describe("setup-skill symlink preservation (issue #12)", () => {
     expect(removed).toBe(1);
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     const written = JSON.parse(await readFile(real, "utf-8")) as { hooks: { PreCompact: { hooks: unknown[] }[] } };
-    expect(written.hooks.PreCompact[0]!.hooks).toHaveLength(0);
+    // ISS-1226: the group the migration emptied is removed with its row.
+    expect(written.hooks.PreCompact).toHaveLength(0);
     expect(await noTmpArtifacts(dir)).toBe(true);
   });
 

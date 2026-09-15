@@ -1790,6 +1790,24 @@ describe("migrateLegacyHookVariants", () => {
     expect(await remainingCommands("PreCompact")).toEqual([]);
   });
 
+  it("ISS-1226: a group emptied by the migration disappears instead of surviving as an empty shell", async () => {
+    await writeFile(settingsPath, JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { matcher: "startup|resume|clear|compact", hooks: [{ type: "command", command: "/new/v22/bin/storybloq session resume-prompt" }] },
+          { matcher: "resume", hooks: [{ type: "command", command: "/Users/o/.npm/_npx/573f/node_modules/.bin/storybloq session resume-prompt" }] },
+          { matcher: "", hooks: [] },
+        ],
+      },
+    }, null, 2), "utf-8");
+    const { migrateLegacyHookVariants } = await import("../../../src/cli/commands/setup-skill.js");
+    const count = await migrateLegacyHookVariants("SessionStart", "session resume-prompt", "/new/v22/bin/storybloq session resume-prompt", settingsPath);
+    expect(count).toBe(1);
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8")) as { hooks: { SessionStart: Array<{ matcher: string; hooks: unknown[] }> } };
+    // The emptied "resume" group is gone; a group that was already empty before the migration is not this function's to touch.
+    expect(settings.hooks.SessionStart.map((g) => [g.matcher, g.hooks.length])).toEqual([["startup|resume|clear|compact", 1], ["", 0]]);
+  });
+
   it("removes stale absolute path that no longer matches", async () => {
     await seed("PreCompact", ["/old/v20/bin/storybloq session compact-prepare"]);
     const { migrateLegacyHookVariants } = await import("../../../src/cli/commands/setup-skill.js");
