@@ -20,7 +20,10 @@
  *     and caches NOTHING, so a repo that gains `.story/` (or a git that starts
  *     working) is picked up on the next call rather than for the life of the
  *     process. The spawn is still bounded, because `discoverWorktreeRoots`
- *     memoizes the worktree list under a short TTL in both directions.
+ *     memoizes the worktree list under a short TTL in both directions. A
+ *     RESOLVED routing outlives that TTL: it is kept for the life of the
+ *     process, so a long-lived server learns about a worktree added later
+ *     only on the write side (every hook resolves fresh) or after a restart.
  *   - THE ROUTED ROOT IS REVALIDATED AT THE WRITE. Discovery proves a root
  *     was safe when git named it, not that it still is.
  *
