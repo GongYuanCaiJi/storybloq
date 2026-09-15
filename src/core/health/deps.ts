@@ -3,7 +3,7 @@
  *
  * This is the ONLY module in `core/health` that touches the real home
  * directory, environment, clock, platform or a subprocess. Everything else is
- * a pure function of its inputs, which is what makes the five checks
+ * a pure function of its inputs, which is what makes the six checks
  * testable without a network, a spawn or a writable HOME -- and what makes
  * THIS module the one that has to be tested against a real (isolated) HOME,
  * because nothing else exercises the syscalls.

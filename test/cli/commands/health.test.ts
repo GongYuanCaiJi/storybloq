@@ -83,7 +83,7 @@ const parsed = (output: string) => JSON.parse(output) as {
 };
 
 describe("storybloq health (CLI)", () => {
-  it("lists the five checks in json and exits 0", async () => {
+  it("lists the six checks in json and exits 0", async () => {
     const root = await tempDir("health-cli-");
     await initProject(root, { name: "p", type: "npm" });
     const result = await handleHealth({ ledgerRoot: root, projectDir: root }, "json", { deps: await pinnedDeps() });
@@ -96,6 +96,7 @@ describe("storybloq health (CLI)", () => {
       "codex-bridge",
       "skill-version",
       "cross-session-inbound",
+      "hook-duplicates",
     ]);
     expect(body.projectDir).toBe(root);
   });
@@ -106,7 +107,7 @@ describe("storybloq health (CLI)", () => {
     const result = await handleHealth({ ledgerRoot: root, projectDir: root }, "md", { deps: await pinnedDeps() });
     expect(result.output).toContain("# Health check");
     expect(result.output).toContain(`settings inspected for ${root}`);
-    for (const id of ["usage-window", "cli-version", "codex-bridge", "skill-version", "cross-session-inbound"]) {
+    for (const id of ["usage-window", "cli-version", "codex-bridge", "skill-version", "cross-session-inbound", "hook-duplicates"]) {
       expect(result.output).toMatch(new RegExp(`\\[(ok|advise|skip|error)\\] ${id}:`));
     }
   });
@@ -115,7 +116,7 @@ describe("storybloq health (CLI)", () => {
     const dir = await tempDir("health-cli-bare-");
     const result = await handleHealth({ ledgerRoot: null, projectDir: dir }, "json", { deps: await pinnedDeps() });
     expect(result.exitCode ?? 0).toBe(0);
-    expect(parsed(result.output).checks).toHaveLength(5);
+    expect(parsed(result.output).checks).toHaveLength(6);
   });
 
   it("reads the project layers of the INVOCATION directory, not the ledger root", async () => {

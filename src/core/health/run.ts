@@ -18,6 +18,7 @@
 import { checkCliVersion } from "./cli-version.js";
 import { checkCodexBridge } from "./codex-bridge.js";
 import { checkCrossSessionInbound } from "./cross-session-inbound.js";
+import { checkHookDuplicates } from "./hook-duplicates.js";
 import { checkSkillVersion } from "./skill-version.js";
 import { checkUsageWindow } from "./usage-window.js";
 import {
@@ -112,6 +113,8 @@ function runOne(
       return checkSkillVersion(ctx, deps);
     case "cross-session-inbound":
       return checkCrossSessionInbound(ctx, deps);
+    case "hook-duplicates":
+      return checkHookDuplicates(ctx, deps);
   }
 }
 

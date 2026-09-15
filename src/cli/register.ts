@@ -4728,7 +4728,7 @@ export function registerHealthCommand(yargs: Argv): Argv {
           empty: "drop",
           trim: "always",
           requireValue: "Pass at least one check id, or omit --only to run them all.",
-          describe: "Run only these checks (usage-window, cli-version, codex-bridge, skill-version, cross-session-inbound)",
+          describe: "Run only these checks (usage-window, cli-version, codex-bridge, skill-version, cross-session-inbound, hook-duplicates)",
         },
       ),
     async (argv) => {

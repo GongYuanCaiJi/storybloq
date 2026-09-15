@@ -63,7 +63,7 @@ const callHealth = async (registry: Registry, args: Record<string, unknown> = {}
 };
 
 describe("storybloq_health registration", () => {
-  it("is in the full set and answers with the five checks", async () => {
+  it("is in the full set and answers with the six checks", async () => {
     const root = await tempDir("health-tool-");
     await initProject(root, { name: "p", type: "npm" });
     const launchDir = await tempDir("health-launch-");
@@ -77,6 +77,7 @@ describe("storybloq_health registration", () => {
       "codex-bridge",
       "skill-version",
       "cross-session-inbound",
+      "hook-duplicates",
     ]);
     expect(result.projectDir).toBe(launchDir);
   });
@@ -86,7 +87,7 @@ describe("storybloq_health registration", () => {
     const { registry, server } = makeRegistry();
     registerDegradedTools(server, undefined, { launchDir });
     const result = await callHealth(registry);
-    expect(result.checks).toHaveLength(5);
+    expect(result.checks).toHaveLength(6);
     expect(result.projectDir).toBe(launchDir);
   });
 
@@ -121,7 +122,7 @@ describe("storybloq_health registration", () => {
     expect(registry.registrations.filter((n) => n === "storybloq_health")).toHaveLength(2);
 
     const result = await callHealth(registry);
-    expect(result.checks).toHaveLength(5);
+    expect(result.checks).toHaveLength(6);
     // The ledger root is now set; the inspected directory is UNCHANGED, and is
     // not the directory init happened in.
     expect(result.projectDir).toBe(launchDir);

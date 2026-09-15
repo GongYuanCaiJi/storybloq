@@ -242,7 +242,7 @@ Two roots matter. Config comes from the `.story/` root (may be absent). Settings
 
 A layer Storybloq cannot READ is never reported as absent. Where the unreadable layer could change the verdict, the check returns `skip` with `unreadable: <path>` instead, so a permission error can never be dressed up as advice. `cross-session-inbound` is the strictest case: all four of its layers must be determinate.
 
-The five checks, with the advice each one pins:
+The six checks, with the advice each one pins:
 
 | Check | When it advises | What it tells you to do |
 |-------|-----------------|-------------------------|
@@ -251,8 +251,11 @@ The five checks, with the advice each one pins:
 | `codex-bridge` | Codex is installed but the review backend is not registered for Claude Code | "Register it with `claude mcp add codex-bridge -s user -- npx -y codex-claude-bridge@latest`." |
 | `skill-version` | An installed `/story` skill is older than the running CLI | "Run `storybloq setup --client <claude\|codex\|all>` to refresh it." |
 | `cross-session-inbound` | Claude Code's `crossSessionInbound` is unset, or resolves to `hold` or `refuse` | Set it to `accept` in `~/.claude/settings.json`; remove it from, or set it to `accept` in, any repository file that tightens it; if managed settings set it, ask your admin |
+| `hook-duplicates` | `~/.claude/settings.json` registers the same storybloq hook more than once for one event and source (two launcher paths, or two overlapping matcher groups) | "Run `storybloq setup-skill` to keep the global binary's row and drop the rest." |
 
 `cross-session-inbound` is a Claude Code setting, so it is skipped under Codex. It merges four layers (managed, user, project, project-local); every layer must be readable or the check skips. When unset, a session running without permission prompts holds messages from your other sessions for manual review, which stalls pen/worker messaging. A session started with a `--settings` flag can replace the user value but not a managed one, and repository files only ever tighten.
+
+`hook-duplicates` reads only `~/.claude/settings.json` (project, local and managed layers are not inspected) and identifies a row by its semantic command, the storybloq binary basename plus subcommand, never by the full path. Two rows collide when their matcher groups can fire for the same source; the deliberate `compact` plus `resume` pair does not. The check reports and picks no keeper: `storybloq setup-skill` keeps the row of the global launcher (the one `npm root -g` and `which storybloq` agree on) and prints each row it removed. It is skipped under Codex.
 
 `codex-bridge` resolves the registration by name across local, project, and user scope, highest precedence first, and only trusts a winner when no higher scope was unreadable. A server whose name looks like the bridge but whose launch command Storybloq does not recognise produces a `skip`, not a false `ok`.
 

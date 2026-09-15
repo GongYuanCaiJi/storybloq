@@ -412,7 +412,7 @@ describe("tool description contract (T-460)", () => {
     // T-502 adds storybloq_health (77 -> 78), registered in the full AND the
     // degraded set for the same reason: a user with no `.story/` yet is
     // exactly the one running a stale CLI with no review bridge. No _list
-    // tool; the five check ids are a closed enum in the schema.
+    // tool; the six check ids are a closed enum in the schema.
     expect(result.tools.length).toBe(78);
   });
 });

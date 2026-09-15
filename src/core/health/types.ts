@@ -7,7 +7,7 @@
  * that holds pen/worker messages instead of delivering them.
  *
  * Three rules hold for every check and are the reason this module exists as
- * its own layer rather than as five ad-hoc probes:
+ * its own layer rather than as six ad-hoc probes:
  *
  *  1. TWO ROOTS. `ledgerRoot` is the `.story/` root (null in degraded mode)
  *     and supplies CONFIG only. `projectDir` is the INVOCATION directory and
@@ -47,6 +47,7 @@ export const HEALTH_CHECK_IDS = [
   "codex-bridge",
   "skill-version",
   "cross-session-inbound",
+  "hook-duplicates",
 ] as const;
 
 export type HealthCheckId = (typeof HEALTH_CHECK_IDS)[number];
@@ -102,6 +103,7 @@ export const HEALTH_CONFIG_KEY: Readonly<Record<HealthCheckId, string>> = {
   "codex-bridge": "codexBridge",
   "skill-version": "skillVersion",
   "cross-session-inbound": "crossSessionInbound",
+  "hook-duplicates": "hookDuplicates",
 };
 
 export interface HealthCheckConfig {

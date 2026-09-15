@@ -6,7 +6,7 @@ import { allChecksOn, ctxFor, stubDeps } from "./stub-deps.js";
 const ids = (result: { checks: readonly { id: string }[] }) => result.checks.map((c) => c.id);
 
 describe("T-502 runHealth", () => {
-  it("runs the five checks in the fixed order", async () => {
+  it("runs the six checks in the fixed order", async () => {
     const result = await runHealth(ctxFor(), stubDeps());
     expect(ids(result)).toEqual([...HEALTH_CHECK_IDS]);
     expect(result.cliVersion).toBe("1.14.0");
@@ -45,10 +45,10 @@ describe("T-502 runHealth", () => {
     expect(ids(result)).toEqual([...HEALTH_CHECK_IDS]);
   });
 
-  it("a disabled project config produces five skips that stay in the list", async () => {
+  it("a disabled project config produces six skips that stay in the list", async () => {
     const config = { ...allChecksOn(), enabled: false };
     const result = await runHealth(ctxFor({ config }), stubDeps());
-    expect(result.checks).toHaveLength(5);
+    expect(result.checks).toHaveLength(6);
     for (const check of result.checks) {
       expect(check.status).toBe("skip");
       expect(check.detail.reason).toBe(PROJECT_DISABLED_REASON);
@@ -66,7 +66,7 @@ describe("T-502 runHealth", () => {
     expect(result.checks.find((c) => c.id === "cli-version")!.detail.reason).not.toBe(PROJECT_DISABLED_REASON);
   });
 
-  it("the global kill switch produces five skips with the global reason", async () => {
+  it("the global kill switch produces six skips with the global reason", async () => {
     const deps = stubDeps({ globalConfig: () => ({ healthCheck: { enabled: false } }) });
     const result = await runHealth(ctxFor(), deps);
     for (const check of result.checks) {
@@ -103,13 +103,14 @@ describe("T-502 runHealth", () => {
     });
     const result = await runHealth(ctxFor({ deadline: 5_000 }), deps);
     const skipped = result.checks.filter((c) => c.detail.reason === BUDGET_REASON);
-    expect(skipped.map((c) => c.id)).toEqual(["skill-version", "cross-session-inbound"]);
+    expect(skipped.map((c) => c.id)).toEqual(["skill-version", "cross-session-inbound", "hook-duplicates"]);
     expect(skipped[0]!.message).toBe("Skipped: the 5 second health budget was exhausted before this check ran.");
     expect(result.budgetExhausted).toBe(true);
   });
 
   it("reports budgetExhausted with no skips when only the last check overran", async () => {
-    // The clock is advanced by the FIFTH check's first settings read, so every
+    // The clock is advanced by the LAST check's settings read (hook-duplicates;
+    // cross-session-inbound, the other reader, is switched off here), so every
     // check started inside the budget and only the run as a whole overran.
     let clock = 1_000;
     const deps = stubDeps({
@@ -119,7 +120,8 @@ describe("T-502 runHealth", () => {
         return { kind: "absent" };
       },
     });
-    const result = await runHealth(ctxFor({ deadline: 5_000 }), deps);
+    const config = allChecksOn();
+    const result = await runHealth(ctxFor({ deadline: 5_000, config: { ...config, checks: { ...config.checks, "cross-session-inbound": false } } }), deps);
     expect(result.checks.some((c) => c.detail.reason === BUDGET_REASON)).toBe(false);
     expect(result.budgetExhausted).toBe(true);
     expect(result.durationMs).toBe(98_999);

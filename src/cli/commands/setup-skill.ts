@@ -1,11 +1,20 @@
 import { mkdir, writeFile, readFile, readdir, copyFile, rm, rename, lstat } from "node:fs/promises";
-import { existsSync, accessSync, readdirSync, constants as fsConstants } from "node:fs";
-import { join, dirname, delimiter as pathDelimiter } from "node:path";
+import { existsSync, accessSync, readdirSync, realpathSync, constants as fsConstants } from "node:fs";
+import { join, dirname, delimiter as pathDelimiter, win32 as winPath, posix as posixPath } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { atomicWriteFollowingSymlink, resolveSymlinkTarget } from "../../core/symlink-write.js";
+import {
+  coverageCovers,
+  coverageOverlaps,
+  dedupeHookRows,
+  hookRowKey,
+  matcherCoverage,
+  reconcileDuplicateHookRows,
+  type GlobalCommandFor,
+} from "../../core/hook-duplicates.js";
 
 import {
   PRECOMPACT_SUBCOMMAND,
@@ -275,6 +284,82 @@ function isExecutableFile(path: string): boolean {
   }
 }
 
+/**
+ * ISS-1222: the global storybloq launcher, established two ways that must
+ * agree. `npm root -g` names the global package root, so the launcher npm
+ * exposes is `<prefix>/bin/storybloq` (`<prefix>/storybloq.cmd` on Windows);
+ * the PATH walk is what `which storybloq` answers. The launcher is accepted
+ * only when both resolve to the same real file. Under npx the PATH walk finds
+ * the cache copy, the two disagree, and the answer is null: a process that
+ * cannot prove which launcher is global never rewrites a hook row.
+ */
+export interface GlobalLauncherProbe {
+  readonly run: (cmd: string, args: readonly string[], timeoutMs: number) => string | null;
+  readonly pathWalk: () => string | null;
+  readonly realpath: (path: string) => string | null;
+  readonly isExecutable: (path: string) => boolean;
+  readonly platform: string;
+}
+
+export const GLOBAL_LAUNCHER_PROBE_TIMEOUT_MS = 3000;
+
+function runNpmRootG(cmd: string, args: readonly string[], timeoutMs: number): string | null {
+  try {
+    return execFileSync(cmd, [...args], { stdio: "pipe", timeout: timeoutMs, encoding: "utf-8", shell: process.platform === "win32" });
+  } catch {
+    return null;
+  }
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveGlobalStorybloqBin(probe: Partial<GlobalLauncherProbe> = {}): string | null {
+  const platform = probe.platform ?? process.platform;
+  const run = probe.run ?? runNpmRootG;
+  const pathWalk = probe.pathWalk ?? resolveStorybloqBin;
+  const realpath = probe.realpath ?? realpathOrNull;
+  const isExecutable = probe.isExecutable ?? isExecutableFile;
+  const out = run(platform === "win32" ? "npm.cmd" : "npm", ["root", "-g"], GLOBAL_LAUNCHER_PROBE_TIMEOUT_MS);
+  if (out === null) return null;
+  const root = out.trim().split(/\r?\n/).pop()?.trim() ?? "";
+  if (root.length === 0) return null;
+  const launcher = platform === "win32"
+    ? winPath.join(winPath.dirname(root), "storybloq.cmd")
+    : posixPath.join(posixPath.dirname(posixPath.dirname(root)), "bin", "storybloq");
+  if (!isExecutable(launcher)) return null;
+  const walked = pathWalk();
+  if (walked === null) return null;
+  const a = realpath(launcher);
+  const b = realpath(walked);
+  if (a === null || b === null) return null;
+  // Windows realpaths keep whatever drive-letter case each caller used.
+  const same = platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  if (!same) return null;
+  return launcher;
+}
+
+/**
+ * Test seam and per-process memo for the validated global launcher. The
+ * probe spawns npm, so it runs at most once per process and only when a
+ * caller actually meets a collision.
+ */
+export const globalLauncher: { override: GlobalCommandFor | null; memo: { value: string | null } | null } = { override: null, memo: null };
+
+export function globalHookCommandFor(): GlobalCommandFor {
+  return (rest) => {
+    if (globalLauncher.override) return globalLauncher.override(rest);
+    if (globalLauncher.memo === null) globalLauncher.memo = { value: resolveGlobalStorybloqBin() };
+    const bin = globalLauncher.memo.value;
+    return bin === null ? null : formatHookCommand(bin, rest);
+  };
+}
+
 function candidatePaths(): string[] {
   const home = homedir();
   const list: string[] = [];
@@ -358,6 +443,8 @@ async function registerHook(
      * (session resume-prompt under "compact" and "resume").
      */
     scopeIdempotencyToMatcher?: boolean;
+    /** ISS-1222 test seam: the validated global launcher's command for a subcommand. */
+    globalCommandFor?: GlobalCommandFor;
   },
 ): Promise<"registered" | "exists" | "skipped"> {
   const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
@@ -414,7 +501,14 @@ async function registerHook(
 
   // Idempotency: scan for existing command (defensive -- skip malformed entries)
   const hookCommand = hookEntry.command;
-  if (hookCommand) {
+  const key = hookCommand ? hookRowKey(hookCommand) : null;
+  // ISS-1222: an owned command is identified by its semantic key (basename
+  // plus subcommand) and by whether an existing row's matcher COVERS the
+  // target's sources, never by the exact path. Rows of other tools (a null
+  // key) keep the exact-string rule.
+  let rewriteInPlace: HookEntry | null = null;
+  let overlapsTarget = false;
+  if (hookCommand && key === null) {
     for (const group of hookArray) {
       if (typeof group !== "object" || group === null) continue;
       const g = group as MatcherGroup;
@@ -424,22 +518,64 @@ async function registerHook(
         if (isHookWithCommand(entry, hookCommand)) return "exists";
       }
     }
-  }
-
-  // Find existing matcher group with valid hooks array, or create one
-  let appended = false;
-  for (const group of hookArray) {
-    if (typeof group !== "object" || group === null) continue;
-    const g = group as MatcherGroup;
-    if ((g.matcher ?? "") === targetMatcher && Array.isArray(g.hooks)) {
-      g.hooks.push(hookEntry);
-      appended = true;
-      break;
+  } else if (hookCommand && key !== null) {
+    const target = matcherCoverage(targetMatcher);
+    const candidate = hookCommand.trim();
+    for (const group of hookArray) {
+      if (typeof group !== "object" || group === null) continue;
+      const g = group as MatcherGroup;
+      if (!Array.isArray(g.hooks)) continue;
+      if (opts?.scopeIdempotencyToMatcher && (g.matcher ?? "") !== targetMatcher) continue;
+      const cov = matcherCoverage(typeof g.matcher === "string" ? g.matcher : "");
+      for (const entry of g.hooks) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const e = entry as HookEntry;
+        if (e.type !== "command" || typeof e.command !== "string") continue;
+        const k = hookRowKey(e.command);
+        if (k === null || k.key !== key.key) continue;
+        // A legacy basename (claudestory) is a row for the migration sweep to
+        // replace, not an installation of this hook: it never blocks the
+        // canonical row, or a user would be left with no hook at all.
+        if (k.binBasename !== key.binBasename) continue;
+        if (coverageCovers(cov, target)) {
+          if (e.command.trim() === candidate) return "exists";
+          if (rewriteInPlace === null) rewriteInPlace = e;
+        } else if (coverageOverlaps(cov, target)) {
+          overlapsTarget = true;
+        }
+      }
+    }
+    if (rewriteInPlace !== null || overlapsTarget) {
+      // Only the validated global launcher may replace or collapse rows; any
+      // other binary (an npx copy, an old install) adds nothing beside them.
+      const globalFor = opts?.globalCommandFor ?? globalHookCommandFor();
+      if (globalFor(key.rest)?.trim() !== candidate) return "exists";
+      if (rewriteInPlace !== null) rewriteInPlace.command = hookCommand;
     }
   }
 
-  if (!appended) {
-    hookArray.push({ matcher: targetMatcher, hooks: [hookEntry] });
+  if (rewriteInPlace === null) {
+    // Find existing matcher group with valid hooks array, or create one
+    let appended = false;
+    for (const group of hookArray) {
+      if (typeof group !== "object" || group === null) continue;
+      const g = group as MatcherGroup;
+      if ((g.matcher ?? "") === targetMatcher && Array.isArray(g.hooks)) {
+        g.hooks.push(hookEntry);
+        appended = true;
+        break;
+      }
+    }
+
+    if (!appended) {
+      hookArray.push({ matcher: targetMatcher, hooks: [hookEntry] });
+    }
+  }
+  if (key !== null && (rewriteInPlace !== null || overlapsTarget)) {
+    // ISS-1222: the write above may have left same-key rows beside the global
+    // one (two stale variants, a partial-overlap group); collapse this event
+    // to exactly one row per collision before the file is written.
+    dedupeHookRows({ hooks: { [hookType]: hookArray } }, opts?.globalCommandFor ?? globalHookCommandFor());
   }
 
   // Atomic write that follows a symlinked settings.json (issue #12)
@@ -575,35 +711,10 @@ export async function registerLimitStopFailureHook(
 ): Promise<"registered" | "exists" | "skipped"> {
   const bin = binPath ?? resolveStorybloqBin() ?? "storybloq";
   const command = formatHookCommand(bin, LIMITSTOP_SUBCOMMAND);
-  const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
-
-  // Coverage-aware idempotency: an existing group whose matcher COVERS
-  // rate_limit (e.g. "" or "rate_limit|server_error") already fires our
-  // command -- adding the exact-matcher group would double-fire it. An
-  // unrelated matcher (server_error only) does NOT cover it, and must not
-  // suppress installing the rate_limit group this feature needs.
-  if (existsSync(path)) {
-    try {
-      const settings = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
-      const hooks = settings?.hooks as Record<string, unknown> | undefined;
-      const hookArray = hooks && Array.isArray(hooks.StopFailure) ? (hooks.StopFailure as unknown[]) : [];
-      for (const group of hookArray) {
-        if (typeof group !== "object" || group === null) continue;
-        const g = group as MatcherGroup;
-        if (!Array.isArray(g.hooks)) continue;
-        if (!matcherCoversSource(g.matcher, STOPFAILURE_MATCHER)) continue;
-        for (const entry of g.hooks) {
-          if (isHookWithCommand(entry, command)) return "exists";
-        }
-      }
-    } catch {
-      // Unreadable settings: fall through; registerHook applies its own guards.
-    }
-  }
-
-  return registerHook("StopFailure", { type: "command", command }, settingsPath, STOPFAILURE_MATCHER, {
-    scopeIdempotencyToMatcher: true,
-  });
+  // ISS-1222: registerHook itself answers "exists" when a row with the same
+  // semantic command sits in any group whose matcher covers rate_limit, so the
+  // exact-matcher group is never added beside a covering one.
+  return registerHook("StopFailure", { type: "command", command }, settingsPath, STOPFAILURE_MATCHER);
 }
 
 /**
@@ -618,34 +729,10 @@ export async function registerLimitSessionStartHook(
 ): Promise<"registered" | "exists" | "skipped"> {
   const bin = binPath ?? resolveStorybloqBin() ?? "storybloq";
   const command = formatHookCommand(bin, SESSIONSTART_SUBCOMMAND);
-  const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
-
-  if (existsSync(path)) {
-    try {
-      const settings = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
-      const hooks = settings?.hooks as Record<string, unknown> | undefined;
-      const hookArray = hooks && Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as unknown[]) : [];
-      for (const group of hookArray) {
-        if (typeof group !== "object" || group === null) continue;
-        const g = group as MatcherGroup;
-        if (!Array.isArray(g.hooks)) continue;
-        if (!matcherCoversSource(g.matcher, "resume")) continue;
-        for (const entry of g.hooks) {
-          if (isHookWithCommand(entry, command)) return "exists";
-        }
-      }
-    } catch {
-      // Unreadable settings: fall through; registerHook applies its own guards.
-    }
-  }
-
-  return registerHook(
-    "SessionStart",
-    { type: "command", command },
-    settingsPath,
-    LIMIT_SESSIONSTART_MATCHER,
-    { scopeIdempotencyToMatcher: true },
-  );
+  // ISS-1222: registerHook answers "exists" when a row with the same semantic
+  // command sits in any group covering the resume source (the Bus-broadened
+  // "startup|resume|clear|compact" group included), so no second group is added.
+  return registerHook("SessionStart", { type: "command", command }, settingsPath, LIMIT_SESSIONSTART_MATCHER);
 }
 
 /**
@@ -886,6 +973,17 @@ export async function enableClaudeBusHooks(
   }
 
   let changed = false;
+  // ISS-1222: locate our rows by semantic command, not exact path, so a row
+  // registered through another launcher path is still the one normalised.
+  const sessionKey = hookRowKey(sessionCommand)?.key ?? null;
+  const stopKey = hookRowKey(stopCommand)?.key ?? null;
+  const isOwnedRow = (entry: unknown, exact: string, key: string | null): boolean => {
+    if (isHookWithCommand(entry, exact)) return true;
+    if (key === null || typeof entry !== "object" || entry === null) return false;
+    const e = entry as HookEntry;
+    if (e.type !== "command" || typeof e.command !== "string") return false;
+    return hookRowKey(e.command)?.key === key;
+  };
   const sessionGroups = hooks.SessionStart as unknown[];
   let sessionEntry: HookEntry | null = null;
   let sessionMatches = 0;
@@ -897,7 +995,7 @@ export async function enableClaudeBusHooks(
     if (!Array.isArray(matcherGroup.hooks)) continue;
     const retained: unknown[] = [];
     for (const entry of matcherGroup.hooks) {
-      if (isHookWithCommand(entry, sessionCommand)) {
+      if (isOwnedRow(entry, sessionCommand, sessionKey)) {
         sessionMatches += 1;
         if ((matcherGroup.matcher ?? "") === CLAUDE_BUS_SESSION_START_MATCHER) {
           canonicalSessionMatches += 1;
@@ -931,7 +1029,7 @@ export async function enableClaudeBusHooks(
     const matcherGroup = group as MatcherGroup;
     if (!Array.isArray(matcherGroup.hooks)) continue;
     for (const entry of matcherGroup.hooks) {
-      if (!isHookWithCommand(entry, stopCommand)) continue;
+      if (!isOwnedRow(entry, stopCommand, stopKey)) continue;
       const hook = entry as HookEntry;
       if ("async" in hook) {
         delete hook.async;
@@ -1307,6 +1405,21 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
     if (migratedStart > 0) log(`  Migrated ${migratedStart} stale SessionStart hook entr${migratedStart === 1 ? "y" : "ies"}`);
     const migratedStop = await migrateLegacyHookVariants("Stop", STOP_SUBCOMMAND, stopCmd);
     if (migratedStop > 0) log(`  Migrated ${migratedStop} stale Stop hook entr${migratedStop === 1 ? "y" : "ies"}`);
+    // ISS-1222: the same hook through two launcher paths (an npx cache copy
+    // beside the global install) runs twice. Collapse each collision to the
+    // validated global launcher's row and say exactly what was removed.
+    const duplicates = await reconcileDuplicateHookRows(join(homedir(), ".claude", "settings.json"), globalHookCommandFor());
+    for (const r of duplicates.reconciled) {
+      for (const d of r.dropped) {
+        log(`  Removed duplicate ${r.hookType} hook row: ${d.command} (matcher "${d.matcher}"); kept ${r.kept.command} (matcher "${r.kept.matcher}")`);
+      }
+    }
+    for (const u of duplicates.unresolved) {
+      log(`  Duplicate ${u.hookType} hook rows left in place, the global storybloq launcher could not be established: ${u.rows.map((row) => row.command).join(", ")}`);
+    }
+    if (duplicates.changed) {
+      log("  Rewrote ~/.claude/settings.json to drop the duplicate rows; the file is re-serialised as two-space JSON, so any hand formatting is normalised");
+    }
 
     const precompactResult = await registerPreCompactHook(undefined, resolvedBin);
     switch (precompactResult) {
