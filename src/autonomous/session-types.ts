@@ -419,6 +419,14 @@ export interface ReviewRecord {
   readonly codexSessionId?: string;
   /** T-461: the effort level this round ran at. Absent on pre-dial records. */
   readonly effort?: string;
+  /**
+   * ISS-950: the caps the lens pipeline fired on this round, verbatim.
+   *
+   * Absent means no claim was made (a backend that produces no caps, or a
+   * record written before this field), which is a different statement from a
+   * known-empty list. Only ever written when the report supplied one.
+   */
+  readonly capReasons?: readonly string[];
   readonly timestamp: string;
 
   // ── T-488 Run A: the same spine the artifact carries ────────────────────
@@ -1093,6 +1101,9 @@ export const SessionStateSchema = z.object({
       codexSessionId: forgiveNull(z.string()),
       // T-461: see the plan array above for why this is a bare string.
       effort: forgiveNull(z.string()).catch(undefined),
+      // ISS-950: pure audit, so a damaged value costs the disclosure and never
+      // the session -- the same rule `effort` above follows.
+      capReasons: z.array(z.string()).optional().catch(undefined),
       timestamp: z.string(),
     })).default([]),
   }).default({ plan: [], code: [] }),
@@ -2835,6 +2846,15 @@ export interface GuideReportInput {
   readonly notes?: string;
   readonly reviewer?: string;  // ISS-102: actual reviewer backend used (overrides computed nextReviewer)
   readonly reviewId?: string;  // ISS-720: lens reviewId from prepare/synthesize; joins to verification telemetry to record the path actually taken
+  /**
+   * ISS-950: `ReviewVerdict.capReasons`, echoed from the lens judge.
+   *
+   * The routing decision needs it and nothing else carries it: a coverage cap
+   * and a findings cap both arrive as `revise`, and only these strings separate
+   * them. Optional and never inferred -- a backend that does not produce caps
+   * omits it, and an absent value is read as "no claim", never as "no caps".
+   */
+  readonly capReasons?: readonly string[];
 
   // ── T-488 Run A: what actually ran, when the caller can say ─────────────
   // Every one of these is OPTIONAL and none is ever guessed. A dispatcher that

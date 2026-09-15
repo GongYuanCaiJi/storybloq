@@ -1977,6 +1977,9 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         reviewerSessionId: z.string().optional().describe("Codex session ID"),
         reviewer: z.string().optional().describe("Actual reviewer backend used, e.g. 'agent' when codex was unavailable"),
         reviewId: z.string().optional().describe("From review_lenses_prepare/synthesize; pass on lens-backed review_round reports (ISS-720)."),
+        capReasons: z.array(z.string()).optional().describe(
+          "ISS-950: reviewVerdict.capReasons verbatim. A coverage-only revise routes to a lens re-run, not IMPLEMENT.",
+        ),
         // T-488 provenance. Optional, never inferred: with none supplied the
         // round records source "unknown", evidence "none", which is truthful.
         //
