@@ -71,6 +71,8 @@ interface Harness {
   readonly counters: { timers: number; storeSets: number };
   /** Arms one rejection, the way a hook beneath may refuse a call. */
   failNextInvalidate: boolean;
+  /** Refuses every timer registration while set, the same way. */
+  failTimer: boolean;
   reads: number;
   fire(event: string, e: unknown): Promise<unknown>;
   tick(times?: number): Promise<void>;
@@ -89,7 +91,7 @@ function harness(fixture: Fixture): Harness {
   const invalidated: string[] = [];
   const logged: string[] = [];
   const stored: Record<string, unknown> = {};
-  const state = { reads: 0, failNextInvalidate: false };
+  const state = { reads: 0, failNextInvalidate: false, failTimer: false };
   const counters = { timers: 0, storeSets: 0 };
 
   const elements = {
@@ -152,6 +154,7 @@ function harness(fixture: Fixture): Harness {
     },
     clock: {
       every: (_ms: number, fn: () => void) => {
+        if (state.failTimer) throw new Error("a hook refused clock.every");
         counters.timers += 1;
         timers.push(fn);
         return { cancel: () => {} };
@@ -178,6 +181,12 @@ function harness(fixture: Fixture): Harness {
     },
     set failNextInvalidate(value: boolean) {
       state.failNextInvalidate = value;
+    },
+    get failTimer() {
+      return state.failTimer;
+    },
+    set failTimer(value: boolean) {
+      state.failTimer = value;
     },
     get reads() {
       return state.reads;
@@ -488,4 +497,48 @@ test("drops a ticket that left the ledger", async () => {
   await h.tick();
 
   expect(textOf(await h.render(paneEvent()))).toContain("0 in progress");
+});
+
+test("runs the refresh that was asked for during a scan that then failed", async () => {
+  const h = harness(newFixture());
+  // The scan is initialized with its queue built, and nothing has drained.
+  await h.fire("session.start", START);
+
+  h.fixture.files[".story/tickets/T-003.json"] = ticketText({
+    id: "T-003",
+    status: "inprogress",
+    title: "Arrived mid scan",
+  });
+  h.fixture.mtimes[".story/tickets/T-003.json"] = 1500;
+  await h.fire("turn.complete", {});
+
+  // The scan now fails at the very end, after its files are read: the pending
+  // request is the only record that a refresh is owed.
+  h.failNextInvalidate = true;
+  await h.tick();
+
+  // M-PENDING-LOST: a failure path that clears the in-flight flags but leaves
+  // the pending flag set strands the request. Later ticks return at once
+  // because no scan is active, so the write waits for a turn that may never
+  // come.
+  expect(textOf(await h.render(paneEvent()))).toContain("Arrived mid scan");
+});
+
+test("recovers when the scan timer could not be registered at first", async () => {
+  const h = harness(newFixture());
+  h.failTimer = true;
+  await h.fire("session.start", START);
+  await h.tick();
+
+  // Nothing could drain, so nothing should have been started either.
+  expect(textOf(await h.render(abovePromptEvent(80)))).not.toContain("1 in progress");
+
+  h.failTimer = false;
+  await h.fire("turn.complete", {});
+  await h.tick();
+
+  // M-TIMER-FLAG-EARLY: marking the timer started before the registration
+  // returns means no later attempt is ever made, so a scan is begun with
+  // nothing to drain it and the pane never leaves its loading line.
+  expect(textOf(await h.render(paneEvent()))).toContain("1 in progress");
 });

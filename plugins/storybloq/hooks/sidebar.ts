@@ -271,13 +271,39 @@ function noteFailure($: any, what: string): void {
  */
 function startTimer($: any): void {
   if (timerStarted) return;
-  timerStarted = true;
-  $.clock.every(SCAN_TICK_MS, () => {
-    drainChunk($).catch(() => {
-      scanActive = false;
-      ticking = false;
+  try {
+    $.clock.every(SCAN_TICK_MS, () => {
+      drainChunk($).catch(() => {
+        finalizeScan($, "failed");
+      });
     });
-  });
+  } catch {
+    // A hook beneath may refuse the registration. Marking it started before
+    // it returned would mean no later attempt is ever made, and a scan begun
+    // with no timer builds a queue that nothing drains.
+    noteFailure($, "the scan timer could not be started");
+    return;
+  }
+  timerStarted = true;
+}
+
+/**
+ * The one exit from a scan, whichever way it ended.
+ *
+ * Releasing the in-flight flags and consuming the pending refresh belong
+ * together: a failure path that released the flags but left the pending flag
+ * set would strand the request, because every later tick returns at once with
+ * no scan active and nothing else reads that flag. Consumed exactly once, so
+ * a failed scan nobody asked to repeat is not retried on its own.
+ */
+function finalizeScan($: any, outcome: "done" | "failed"): void {
+  scanActive = false;
+  scanInitializing = false;
+  ticking = false;
+  if (outcome === "failed") noteFailure($, "a ledger scan did not finish");
+  if (!pendingRefresh) return;
+  pendingRefresh = false;
+  requestScan($);
 }
 
 /**
@@ -293,12 +319,14 @@ function requestScan($: any): void {
     pendingRefresh = true;
     return;
   }
+  // The timer may still be missing because an earlier registration was
+  // refused. Without it a queue would be built that nothing drains, so try
+  // again here and start no scan while it is absent.
+  startTimer($);
+  if (!timerStarted) return;
   beginScan($).catch(() => {
-    // The scan is detached, so nothing else would hear this. Leaving the
-    // in-flight flags set is what would wedge every later scan.
-    scanInitializing = false;
-    scanActive = false;
-    noteFailure($, "a ledger scan could not be started");
+    // The scan is detached, so nothing else would hear this.
+    finalizeScan($, "failed");
   });
 }
 
@@ -351,6 +379,7 @@ async function drainChunk($: any): Promise<void> {
   // as long as the session lasts.
   if (ticking || !scanActive) return;
   ticking = true;
+  let outcome: "done" | "failed" | null = null;
   try {
     let read = 0;
     while (queue.length > 0 && read < SCAN_CHUNK) {
@@ -368,24 +397,22 @@ async function drainChunk($: any): Promise<void> {
       }
     }
     if (queue.length === 0) {
-      scanActive = false;
       warm = true;
       reproject();
       await saveCache($);
       $.ui.invalidate("ui.render");
-      if (pendingRefresh) {
-        pendingRefresh = false;
-        requestScan($);
-      }
+      outcome = "done";
     }
   } catch {
-    // Same reasoning as the detached start: whatever failed, the scan is over,
-    // and leaving it marked in flight would stop every later one.
-    scanActive = false;
-    noteFailure($, "a ledger scan failed part way");
-  } finally {
-    ticking = false;
+    // Whatever failed, this scan is over. Which of the two it was changes
+    // only the log line: both leave through the same door.
+    outcome = "failed";
   }
+  if (outcome === null) {
+    ticking = false;
+    return;
+  }
+  finalizeScan($, outcome);
 }
 
 export function registerSidebar(on: On, _options: Options): void {
