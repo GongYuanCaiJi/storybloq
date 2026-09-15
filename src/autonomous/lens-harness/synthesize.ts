@@ -230,6 +230,53 @@ function citedRulingsMetaFinding(undelivered: Record<string, readonly string[]>)
   };
 }
 
+/**
+ * The basis for a skip, as this harness computes it.
+ *
+ * EXPORTED, and the reason is testability rather than reuse.
+ * `runMergerPipeline` recomputes a supplied `not-applicable` from the anchoring
+ * artifact and demotes what it cannot confirm, so whichever way this function
+ * reads the file set, the SERVER's answer is what reaches the verdict. That is
+ * defense in depth and exactly the right contract, but it also means no test
+ * driving `handleSynthesize` can tell a correct union reading from a broken
+ * one. This seam is where that rule is actually pinned.
+ *
+ * THE UNION IS NOT THE DECLARATION. `coreLensApplicability` ranges over the
+ * caller-declared files UNION every path the diff touches, because a caller
+ * that declares `["NOTES.md"]` while the diff deletes `src/auth.ts` would
+ * otherwise buy four excused core lenses over unreviewed auth code.
+ *
+ * DOWNGRADE ONLY. An earlier call in this review that recorded a
+ * `self-reported` skip pins this lens there: a later call cannot raise it to
+ * `not-applicable` by presenting a narrower diff. The server cannot enforce
+ * this, because the earlier call is not in the session it can see.
+ *
+ * An empty artifact or an empty union can never excuse a lens. "The tables
+ * found nothing" and "there was nothing to look at" are different statements,
+ * and only the first is coverage.
+ */
+export function skipBasisForLens(args: {
+  readonly lensId: string;
+  readonly declaredFiles: readonly string[];
+  readonly artifact: string | undefined;
+  readonly priorBasis?: LensCoverageBasis;
+  /**
+   * Size of `changeFileUnion(declaredFiles, artifact)` when the caller already
+   * computed it. Recomputed here when absent, so the function is correct on its
+   * own and the caller does not pay for the union twice.
+   */
+  readonly unionSize?: number;
+}): LensCoverageBasis {
+  if (args.priorBasis === "self-reported") return "self-reported";
+  if (!args.artifact) return "self-reported";
+  const unionSize = args.unionSize
+    ?? changeFileUnion(args.declaredFiles, args.artifact).length;
+  if (unionSize === 0) return "self-reported";
+  return coreLensApplicability(args.lensId, args.declaredFiles, args.artifact) === "not-applicable"
+    ? "not-applicable"
+    : "self-reported";
+}
+
 export function handleSynthesize(input: SynthesizeInput): SynthesizeOutput {
   const stage: Stage = input.stage ?? "CODE_REVIEW";
   const reviewId = input.metadata.reviewId;
@@ -445,22 +492,14 @@ export function handleSynthesize(input: SynthesizeInput): SynthesizeOutput {
     : [];
   const priorCoverage = readCoverageMemory(input.sessionDir, reviewId);
 
-  /**
-   * The basis for a skip, as this harness computes it.
-   *
-   * DOWNGRADE ONLY. An earlier call in this review that recorded a
-   * `self-reported` skip pins this lens there: a later call cannot raise it to
-   * `not-applicable` by presenting a narrower diff. The server cannot enforce
-   * this, because the earlier call is not in the session it can see.
-   */
-  const skipBasis = (lens: string): LensCoverageBasis => {
-    const prior = priorCoverage[lens]?.basis;
-    if (prior === "self-reported") return "self-reported";
-    if (!anchorArtifact || fileUnion.length === 0) return "self-reported";
-    return coreLensApplicability(lens, declaredFiles, anchorArtifact) === "not-applicable"
-      ? "not-applicable"
-      : "self-reported";
-  };
+  const skipBasis = (lens: string): LensCoverageBasis =>
+    skipBasisForLens({
+      lensId: lens,
+      declaredFiles,
+      artifact: anchorArtifact,
+      priorBasis: priorCoverage[lens]?.basis,
+      unionSize: fileUnion.length,
+    });
 
   /**
    * Whether an `ok` is this lens renaming the skip it already submitted.

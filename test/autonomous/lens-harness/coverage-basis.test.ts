@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleSynthesize } from "../../../src/autonomous/lens-harness/synthesize.js";
+import { handleSynthesize, skipBasisForLens } from "../../../src/autonomous/lens-harness/synthesize.js";
 
 const CORE = ["security", "error-handling", "clean-code", "concurrency"] as const;
 
@@ -330,5 +330,110 @@ describe("ISS-950 acceptance 5: cross-call relabel detection", () => {
       expect(entry(out, lens).relabeled).toBeUndefined();
     }
     expect(out.reviewVerdict.capReasons).toEqual([]);
+  });
+});
+
+/**
+ * ISS-950 gate round: the basis computation, tested at its own seam.
+ *
+ * `runMergerPipeline` recomputes a supplied `not-applicable` from the anchoring
+ * artifact and demotes what it cannot confirm, which is the right contract and
+ * makes the harness's own union reading UNOBSERVABLE at the verdict: whichever
+ * way the harness reads the file set, the server's answer is what lands. That
+ * is defense in depth, not a gap, but it means the union rule cannot be pinned
+ * through `handleSynthesize`. It is pinned here instead, on the exported
+ * function, so M-UNION-DECLARED-ONLY has a test of its own.
+ */
+describe("skipBasisForLens: the union is the declared files AND the diff", () => {
+  it("M-UNION-DECLARED-ONLY: a declared docs-only change that DELETES source is applicable", () => {
+    // Read from the declaration alone this is four excused core lenses over
+    // unreviewed auth code. A deletion names its file on `--- a/path` and
+    // `diff --git` and nowhere else.
+    expect(
+      skipBasisForLens({
+        lensId: "error-handling",
+        declaredFiles: ["docs/guide.md"],
+        artifact: DECLARED_DOCS_DELETES_CODE,
+      }),
+    ).toBe("self-reported");
+    expect(
+      skipBasisForLens({
+        lensId: "security",
+        declaredFiles: ["docs/guide.md"],
+        artifact: DECLARED_DOCS_DELETES_CODE,
+      }),
+    ).toBe("self-reported");
+  });
+
+  it("a genuinely docs-only change is not-applicable", () => {
+    expect(
+      skipBasisForLens({
+        lensId: "error-handling",
+        declaredFiles: ["docs/guide.md"],
+        artifact: DOCS_DIFF,
+      }),
+    ).toBe("not-applicable");
+  });
+
+  it("an absent or empty artifact can never excuse a lens", () => {
+    // Nothing there proves the lens had no surface. A PLAN_REVIEW and a review
+    // whose retained artifact was lost both land here.
+    expect(
+      skipBasisForLens({ lensId: "error-handling", declaredFiles: [], artifact: undefined }),
+    ).toBe("self-reported");
+    expect(
+      skipBasisForLens({ lensId: "error-handling", declaredFiles: [], artifact: "" }),
+    ).toBe("self-reported");
+  });
+
+  it("a recorded self-reported basis pins the answer whatever the diff says", () => {
+    expect(
+      skipBasisForLens({
+        lensId: "error-handling",
+        declaredFiles: ["docs/guide.md"],
+        artifact: DOCS_DIFF,
+        priorBasis: "self-reported",
+      }),
+    ).toBe("self-reported");
+  });
+});
+
+describe("ISS-950 gate round: self-reported is sticky across rounds", () => {
+  it("M-STICKY-LOST: a no-submission round does not erase an earlier self-reported skip", () => {
+    const reviewId = "lens-cov-sticky";
+
+    // Round 1: the lens skips a change the server judges applicable.
+    const first = synthesize({
+      outputs: { "error-handling": skippedOutput() },
+      diff: CODE_DIFF,
+      changedFiles: ["src/example.ts"],
+      reviewId,
+    });
+    expect(entry(first, "error-handling").basis).toBe("self-reported");
+
+    // Round 2: the lens does not submit at all. Its entry carries
+    // `no-submission`, which must not become the memory's answer -- overwriting
+    // here is what let round 3 escape the restriction round 1 established.
+    const second = synthesize({
+      outputs: {},
+      diff: CODE_DIFF,
+      changedFiles: ["src/example.ts"],
+      reviewId,
+      reviewRound: 2,
+      omit: ["error-handling"],
+    });
+    expect(entry(second, "error-handling").basis).toBe("no-submission");
+
+    // Round 3: the same skip, now presented with a docs-only diff. Still
+    // self-reported, because round 1 is still on the record.
+    const third = synthesize({
+      outputs: { "error-handling": skippedOutput() },
+      diff: DOCS_DIFF,
+      changedFiles: ["docs/guide.md"],
+      reviewId,
+      reviewRound: 3,
+    });
+    expect(entry(third, "error-handling").basis).toBe("self-reported");
+    expect(third.reviewVerdict.verdict).toBe("revise");
   });
 });

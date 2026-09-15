@@ -23,12 +23,107 @@
  * flag), which is a weaker check, never a wrong one.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import lockfile from "proper-lockfile";
 import type { LensCoverageBasis, LensCoverageEntry } from "@storybloq/lenses";
 import { telemetryDirPath } from "../liveness.js";
 
 const MEMORY_FILE = "lens-coverage-memory.json";
+
+/**
+ * Matches `withTelemLock` in telemetry-writer.ts, which locks this same
+ * directory, so the two writers interlock rather than each guarding half of it.
+ *
+ * It is not a call to that helper for one reason: the retry below. A lost write
+ * here is not a lost telemetry line, it is a RESTRICTION that silently stops
+ * applying, so a call that finds the lock held should wait rather than give up
+ * on the first attempt.
+ */
+const LOCK_OPTIONS = { stale: 10_000 };
+
+/**
+ * proper-lockfile REFUSES `retries` on the sync API (`toSyncOptions` throws
+ * `ESYNC`, since backing off requires an async flow), so the retry is a bounded
+ * loop here rather than an option passed down.
+ *
+ * Four retries at 10ms is at most 40ms of blocking, and only under real
+ * contention: two synthesize calls for one session finishing within the same
+ * few milliseconds. The write it protects is a single small JSON file.
+ */
+const LOCK_RETRIES = 4;
+const LOCK_RETRY_MS = 10;
+
+/** A synchronous wait. `updateCoverageMemory` is called from a sync tool path. */
+function sleepSync(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch {
+    // No SharedArrayBuffer in this environment: retry immediately instead. The
+    // retry is an optimization, never a correctness requirement.
+  }
+}
+
+/**
+ * Run `fn` holding the telemetry directory lock, or not at all.
+ *
+ * Returns without calling `fn` when the lock cannot be taken, which keeps the
+ * whole mechanism best-effort: an unwritten record costs the NEXT call its
+ * cross-call checks, and a weaker check is always preferable to a wrong one.
+ */
+function withCoverageLock(sessionDir: string, fn: () => void): void {
+  const tDir = telemetryDirPath(sessionDir);
+  let release: (() => void) | undefined;
+  for (let attempt = 0; attempt <= LOCK_RETRIES; attempt += 1) {
+    try {
+      // INSIDE the guarded region, as withTelemLock does it: an unmakeable
+      // directory is the same fact as an untakeable lock.
+      mkdirSync(tDir, { recursive: true });
+      release = lockfile.lockSync(tDir, LOCK_OPTIONS);
+      break;
+    } catch {
+      if (attempt === LOCK_RETRIES) return;
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+  if (!release) return;
+  try {
+    fn();
+  } finally {
+    try {
+      release();
+    } catch {
+      /* ignore unlock errors */
+    }
+  }
+}
+
+/**
+ * Replace the memory file in one step.
+ *
+ * A partial write to the target itself is worse than no write: the file reads
+ * back as unparseable, `readMemoryFile` answers `{}`, and every restriction the
+ * file held is released at once. Writing a sibling temp file and renaming over
+ * the target makes a failed write leave the previous content exactly as it was.
+ * The temp file is in the SAME directory so the rename stays within one
+ * filesystem and is therefore atomic.
+ */
+function replaceMemoryFile(sessionDir: string, file: MemoryFile): void {
+  const target = coverageMemoryPath(sessionDir);
+  const temp = `${target}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify(file, null, 2));
+    renameSync(temp, target);
+  } catch (err) {
+    try {
+      unlinkSync(temp);
+    } catch {
+      /* nothing to clean up */
+    }
+    throw err;
+  }
+}
 
 /** What an earlier synthesize established about one lens in one review. */
 export interface LensCoverageRecord {
@@ -64,6 +159,24 @@ function readMemoryFile(sessionDir: string): MemoryFile {
  * What earlier calls recorded for this review. Empty for a first call, for a
  * sessionless synthesize, and for an unreadable file -- all three are the same
  * statement: nothing is known, so nothing is held against this round.
+ *
+ * DELIBERATELY UNLOCKED, and read before the verdict is computed, which leaves
+ * one residual worth naming. Two synthesize calls for the same review can both
+ * read before either writes, so the second one to finish may compute its own
+ * round without seeing the restriction the first established, and that round's
+ * verdict can carry a `not-applicable` the peer had already ruled out.
+ *
+ * What the residual is NOT is a corrupted record. `updateCoverageMemory` merges
+ * under the lock, re-reading inside it and applying the sticky rule, so the
+ * PERSISTED memory always carries the strictest basis any call established and
+ * every later call is held to it. The window is one round wide and closes by
+ * itself.
+ *
+ * Locking here instead would not close it either: the read happens before the
+ * pipeline runs, so any lock taken for it would have to be held across the
+ * whole merge to mean anything, which serializes every concurrent review in a
+ * session behind one file. The cost is not worth a window that costs at most
+ * one round's strictness and never a wrong record.
  */
 export function readCoverageMemory(
   sessionDir: string | undefined,
@@ -80,9 +193,31 @@ export function readCoverageMemory(
  *
  * `everSkipped` only ever accumulates: a lens that skipped once has skipped,
  * whatever it submits afterwards, and that is precisely what makes a later
- * zero-finding `ok` readable as a relabel. The recorded `basis` is the one the
- * VERDICT carried, not the one this harness proposed, so a basis the server
- * demoted is what a later call is held to.
+ * zero-finding `ok` readable as a relabel.
+ *
+ * SELF-REPORTED IS STICKY, and it has to be rather than merely being the basis
+ * of the latest round. The recorded basis is a RESTRICTION, not a status, and
+ * the latest round is not always the strictest one. The sequence that showed it:
+ * a lens skips on an applicable change (`self-reported`), then a round goes by
+ * where it submits nothing at all (`no-submission`), then it skips again on a
+ * narrower diff. Written last-wins, round two replaces the restriction with
+ * `no-submission`, round three no longer sees a self-reported skip to be held
+ * to, and the raise round one was supposed to make impossible happens anyway.
+ *
+ * Every other basis still takes the latest value, and `not-applicable` is the
+ * one the stickiness exists to refuse: nothing a later round observes can
+ * un-skip a lens that already skipped when it mattered.
+ *
+ * The recorded basis is the one the VERDICT carried, not the one this harness
+ * proposed, so a basis the server demoted is what a later call is held to.
+ *
+ * READ-MODIFY-WRITE UNDER THE LOCK. The file is shared by every synthesize call
+ * in the session, so the current content is re-read INSIDE the lock rather than
+ * carried in from a read taken earlier: a peer that established a restriction
+ * while this call was computing its round must not be overwritten by it. The
+ * write itself goes to a temp file and is renamed over the target, so a failure
+ * part way through leaves the previous content intact instead of releasing
+ * every restriction the file held.
  *
  * Other reviews' records in the same file are preserved: one session runs many
  * reviews and a write must not be a truncation.
@@ -93,24 +228,27 @@ export function updateCoverageMemory(
   coverage: readonly LensCoverageEntry[],
 ): void {
   if (!sessionDir) return;
-  try {
-    const file = readMemoryFile(sessionDir);
-    const prior = file[reviewId] ?? {};
-    const next: Record<string, LensCoverageRecord> = { ...prior };
-    for (const entry of coverage) {
-      const before = prior[entry.lensId];
-      const everSkipped = before?.everSkipped === true || entry.status === "skipped";
-      const basis = entry.basis ?? before?.basis;
-      next[entry.lensId] = {
-        everSkipped,
-        ...(basis === undefined ? {} : { basis }),
-      };
+  withCoverageLock(sessionDir, () => {
+    try {
+      const file = readMemoryFile(sessionDir);
+      const prior = file[reviewId] ?? {};
+      const next: Record<string, LensCoverageRecord> = { ...prior };
+      for (const entry of coverage) {
+        const before = prior[entry.lensId];
+        const everSkipped = before?.everSkipped === true || entry.status === "skipped";
+        const basis = before?.basis === "self-reported"
+          ? "self-reported"
+          : entry.basis ?? before?.basis;
+        next[entry.lensId] = {
+          everSkipped,
+          ...(basis === undefined ? {} : { basis }),
+        };
+      }
+      file[reviewId] = next;
+      replaceMemoryFile(sessionDir, file);
+    } catch {
+      // Best effort. A lost write costs the next call its cross-call checks; it
+      // can never produce a WRONG verdict, only a less suspicious one.
     }
-    file[reviewId] = next;
-    mkdirSync(telemetryDirPath(sessionDir), { recursive: true });
-    writeFileSync(coverageMemoryPath(sessionDir), JSON.stringify(file, null, 2));
-  } catch {
-    // Best effort. A lost write costs the next call its cross-call checks; it
-    // can never produce a WRONG verdict, only a less suspicious one.
-  }
+  });
 }
