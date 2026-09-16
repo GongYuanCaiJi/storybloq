@@ -104,13 +104,19 @@ describe("the Claude plugin manifest stays in lockstep and names one hooks modul
     expect(existsSync(join(pkgRoot, "plugins", "storybloq", "hooks", "mod.ts"))).toBe(true);
   });
 
-  it("every Mod option is a boolean that defaults to off", () => {
+  it("every Mod option is a boolean, and the dashboard defaults to on (T-516)", () => {
     const userConfig = claudeManifest().userConfig as Record<string, { type?: unknown; default?: unknown; title?: unknown }>;
     expect(Object.keys(userConfig).sort()).toEqual(["sidebar"]);
     for (const [name, option] of Object.entries(userConfig)) {
       expect(option.type, name).toBe("boolean");
-      expect(option.default, name).toBe(false);
+      expect(typeof option.default, name).toBe("boolean");
       expect(typeof option.title, name).toBe("string");
     }
+    // T-516 owner ruling: the dashboard ships ON in 1.15, so a normal session
+    // draws it with nothing configured. `default` is the only switch a client
+    // that hands userConfig defaults through reads, so pin its value.
+    expect(userConfig.sidebar!.default).toBe(true);
+    // "experimental" came off the title in the same ruling.
+    expect(String(userConfig.sidebar!.title).toLowerCase()).not.toContain("experimental");
   });
 });

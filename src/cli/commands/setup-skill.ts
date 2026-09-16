@@ -1179,6 +1179,127 @@ export async function removeHook(
 }
 
 // ---------------------------------------------------------------------------
+// T-516: the function-hooks switch in settings.json
+// ---------------------------------------------------------------------------
+
+/**
+ * The environment variable Claude Code reads to decide whether a plugin's
+ * hooks modules (our Mods) load at all. Early access: the client loads them
+ * when this is set in its process environment or when the rollout flag
+ * `tengu_plugin_hooks_modules` is on, and that flag is off by default.
+ * `~/.claude/settings.json`'s `env` block reaches that environment, measured
+ * against 2.1.273, so it is the switch a plain install can write.
+ */
+export const FUNCTION_HOOKS_ENV_KEY = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS";
+
+/** Reads and parses settings.json defensively, exactly as the hook writers do. */
+async function readSettingsObject(
+  path: string,
+  what: string,
+): Promise<Record<string, unknown> | null> {
+  let raw = "{}";
+  if (existsSync(path)) {
+    try {
+      raw = await readFile(path, "utf-8");
+    } catch {
+      process.stderr.write(`Could not read ${path} -- skipping ${what}.\n`);
+      return null;
+    }
+  }
+
+  try {
+    const settings = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+      process.stderr.write(`${path} is not a JSON object -- skipping ${what}.\n`);
+      return null;
+    }
+    return settings;
+  } catch {
+    process.stderr.write(`${path} contains invalid JSON -- skipping ${what}.\n`);
+    process.stderr.write("  Fix the file manually or delete it to reset.\n");
+    return null;
+  }
+}
+
+/**
+ * Ensures `env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is "1" in settings.json, so
+ * the ledger dashboard appears after a plain `storybloq setup --client all`
+ * (T-516, owner ruling: it ships on in 1.15).
+ *
+ * A value that is already there was chosen by whoever put it there, so it is
+ * left alone whatever it says, "0" and "" included: turning the dashboard off
+ * has to survive the next upgrade. Same atomic, symlink-following write the
+ * hook registrars use, and the same "touch nothing we cannot parse" rule.
+ */
+export async function enableFunctionHooksEnv(
+  settingsPath?: string,
+): Promise<"set" | "exists" | "skipped"> {
+  const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
+  const what = "the function-hooks switch";
+
+  const settings = await readSettingsObject(path, what);
+  if (settings === null) return "skipped";
+
+  if ("env" in settings) {
+    if (typeof settings.env !== "object" || settings.env === null || Array.isArray(settings.env)) {
+      process.stderr.write(`${path} has unexpected env format -- skipping ${what}.\n`);
+      return "skipped";
+    }
+  } else {
+    settings.env = {};
+  }
+
+  const env = settings.env as Record<string, unknown>;
+
+  // The user's own value wins over the default, so the file is not rewritten
+  // at all when the key is present.
+  if (FUNCTION_HOOKS_ENV_KEY in env) return "exists";
+
+  env[FUNCTION_HOOKS_ENV_KEY] = "1";
+
+  try {
+    await atomicWriteFollowingSymlink(path, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    return "skipped";
+  }
+
+  return "set";
+}
+
+/**
+ * The counterpart of `enableFunctionHooksEnv` for an uninstall or opt-out
+ * path: removes the key only when it still reads exactly "1", the value the
+ * installer writes. Anything else in there is the user's and stays.
+ */
+export async function removeFunctionHooksEnv(
+  settingsPath?: string,
+): Promise<"removed" | "not_found" | "skipped"> {
+  const path = settingsPath ?? join(homedir(), ".claude", "settings.json");
+
+  if (!existsSync(path)) return "not_found";
+
+  const settings = await readSettingsObject(path, "the function-hooks switch removal");
+  if (settings === null) return "skipped";
+
+  if (typeof settings.env !== "object" || settings.env === null || Array.isArray(settings.env)) {
+    return "not_found";
+  }
+
+  const env = settings.env as Record<string, unknown>;
+  if (env[FUNCTION_HOOKS_ENV_KEY] !== "1") return "not_found";
+
+  delete env[FUNCTION_HOOKS_ENV_KEY];
+
+  try {
+    await atomicWriteFollowingSymlink(path, JSON.stringify(settings, null, 2) + "\n");
+  } catch {
+    return "skipped";
+  }
+
+  return "removed";
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
@@ -1517,19 +1638,34 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
     process.stderr.write("  This may indicate a corrupt installation. Try: npm install -g @storybloq/storybloq@latest\n");
   }
 
-  // T-507 commit D: the Mods copy (Claude Code function hooks), off by
-  // default, with hooks/install.ts generated to answer the absolute path of
-  // the global binary. Non-fatal: the skill and hooks above do not depend
-  // on it, and the version-marker refresh retries it on the next upgrade.
+  // T-507 commit D: the Mods copy (Claude Code function hooks), with
+  // hooks/install.ts generated to answer the absolute path of the global
+  // binary. Non-fatal: the skill and hooks above do not depend on it, and
+  // the version-marker refresh retries it on the next upgrade.
   try {
     const { installMods, MODS_DISPLAY_PATH } = await import("../../core/mods-install.js");
     const modsBin = resolveStorybloqBin();
     const mods = await installMods({ bin: modsBin });
-    log(`Installed Mods (function hooks, off by default) at ${MODS_DISPLAY_PATH}`);
+    log(`Installed Mods (function hooks) at ${MODS_DISPLAY_PATH}`);
     log(`  ${mods.written.length} files written; storybloq resolved to ${modsBin ?? "the bare name (not found on PATH)"}`);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`Warning: Mods copy failed (non-fatal): ${msg}\n`);
+  }
+
+  // T-516: the copy above is inert until the client is allowed to load hooks
+  // modules at all, which the settings `env` block is what switches on. Runs
+  // whether or not the copy succeeded (a later upgrade refreshes the copy and
+  // finds the switch already written) and is silent on every rerun.
+  try {
+    const settingsFile = join(homedir(), ".claude", "settings.json");
+    const envState = await enableFunctionHooksEnv();
+    if (envState === "set") {
+      log(`  Set env.${FUNCTION_HOOKS_ENV_KEY}=1 in ${settingsFile} (draws the ledger dashboard)`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`Warning: could not set ${FUNCTION_HOOKS_ENV_KEY} (non-fatal): ${msg}\n`);
   }
 
   // Attempt MCP registration -- requires both `storybloq` and `claude` in PATH.

@@ -767,8 +767,16 @@ describe("setup-skill wires the Mods copy (T-507 D)", () => {
     const installTs = await readFile(join(tempDir, ".claude", "skills", "storybloq", "hooks", "install.ts"), "utf-8");
     expect(installTs).toContain(`return ${JSON.stringify(join(tempDir, "shims", "storybloq"))};`);
     expect(existsSync(join(tempDir, ".claude", "skills", "storybloq", "hooks", "mod.ts"))).toBe(true);
-    expect(out.join("")).toContain("Installed Mods (function hooks, off by default) at ~/.claude/skills/storybloq/");
+    expect(out.join("")).toContain("Installed Mods (function hooks) at ~/.claude/skills/storybloq/");
     expect(err.join("")).not.toContain("Mods copy failed");
+
+    // T-516: the copy is inert unless the client is allowed to load hooks
+    // modules, so the same run writes the settings switch and says it did.
+    const settings = JSON.parse(await readFile(join(tempDir, ".claude", "settings.json"), "utf-8")) as {
+      env?: Record<string, unknown>;
+    };
+    expect(settings.env?.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS).toBe("1");
+    expect(out.join("")).toContain("Set env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1");
   });
 
   it("a failing Mods copy is a warning, and the rest of the Claude setup still completes", async () => {

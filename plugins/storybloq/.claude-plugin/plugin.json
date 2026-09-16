@@ -21,13 +21,13 @@
   "hooks": "./hooks/hooks.json",
   "userConfig": {
     "sidebar": {
-      "title": "Ledger sidebar Mod (experimental)",
+      "title": "Ledger dashboard",
       "type": "boolean",
-      "default": false,
-      "description": "Draw the .story/ ledger in a pane beside the transcript. Loads only when Claude Code runs with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 (T-508)."
+      "default": true,
+      "description": "Draw the .story/ ledger in a pane beside the transcript. On by default; turn it off with /plugin configure storybloq. Projects with no .story/ directory show nothing either way (T-508, T-516)."
     }
   },
   "metadata": {
-    "functionHooks": "Early-access Claude Code API (client 2.1.273, see hooks/client-api.ts). The Mod is off until its userConfig option is set; no product decision on shipping it is implied by its presence here (T-505)."
+    "functionHooks": "Early-access Claude Code API (client 2.1.273, see hooks/client-api.ts). By owner decision the ledger dashboard ships on by default in 1.15 (T-516): storybloq setup writes env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 into ~/.claude/settings.json, which is what lets the client load this module at all, and the userConfig default above is what turns the Mod on inside it."
   }
 }

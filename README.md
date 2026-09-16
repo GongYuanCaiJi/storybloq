@@ -63,6 +63,8 @@ Requires Node.js 20+ and at least one AI client: Claude Code or Codex CLI 0.130.
 
 `setup --client all` installs the Storybloq skill for Claude and Codex, registers this package as an MCP server, and configures available client hooks. It also registers the bundled [codex-claude-bridge](https://www.npmjs.com/package/codex-claude-bridge) review backend as the `codex-bridge` MCP server when Codex is installed; the bridge ships as an optional dependency of this package, so a copy you registered yourself is left alone and `storybloq health` launches whichever one is registered and reports whether it answers. The bridge needs a Codex CLI login to review (or `agy` for its Gemini failover); without one it registers but reviews fail. Re-running it is safe. Codex reports installed hooks with trust `unknown`; open `/hooks` in Codex to review and trust them. `setup-skill` remains as a compatibility alias for Claude-only setup.
 
+Setup also installs the ledger dashboard for Claude Code. On version 2.1.272 or newer, a project with a `.story/` directory draws its tickets, issues, and progress in a pane beside the transcript, with no extra flags on the install command and nothing to configure. Projects without `.story/` show nothing. Turn the dashboard off with `/plugin configure storybloq`.
+
 ## Your first two sessions
 
 1. Open your project in Claude Code or Codex. Type `/story` in Claude Code chat or `$story` in Codex chat. For a new project, the skill guides you through setup.

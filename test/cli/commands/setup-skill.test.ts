@@ -2731,3 +2731,155 @@ describe("--skip-skill (ISS-834)", () => {
     expect(threw).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-516: the function-hooks env switch in settings.json
+//
+// Claude Code loads a plugin's hooks modules only when
+// CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is set in the process environment (or the
+// rollout flag is on), and the settings `env` field reaches that environment.
+// The installer writes the switch so the ledger dashboard appears after a
+// plain `storybloq setup --client all`, with one rule that outranks the
+// ruling: a value already in the file was chosen by the user, so it is never
+// overwritten, not even "0" or "".
+// ---------------------------------------------------------------------------
+
+describe("enableFunctionHooksEnv / removeFunctionHooksEnv (T-516)", () => {
+  let tempDir: string;
+  let settingsPath: string;
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `storybloq-fnhooks-env-${randomUUID()}`);
+    await mkdir(tempDir, { recursive: true });
+    settingsPath = join(tempDir, "settings.json");
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const KEY = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS";
+
+  async function api() {
+    const mod = await import("../../../src/cli/commands/setup-skill.js");
+    return {
+      enable: (path?: string) => mod.enableFunctionHooksEnv(path ?? settingsPath),
+      remove: (path?: string) => mod.removeFunctionHooksEnv(path ?? settingsPath),
+    };
+  }
+
+  async function env(): Promise<Record<string, unknown>> {
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8")) as { env?: Record<string, unknown> };
+    return settings.env ?? {};
+  }
+
+  it("creates settings.json with the env block when the file is absent", async () => {
+    const { enable } = await api();
+    expect(await enable()).toBe("set");
+    expect(await env()).toEqual({ [KEY]: "1" });
+  });
+
+  it("adds the env block to an existing settings.json without disturbing the rest", async () => {
+    await writeFile(settingsPath, JSON.stringify({ hooks: { PreCompact: [] }, model: "opus" }, null, 2) + "\n", "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("set");
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8")) as Record<string, unknown>;
+    expect((settings.env as Record<string, unknown>)[KEY]).toBe("1");
+    expect(settings.model).toBe("opus");
+    expect(settings.hooks).toEqual({ PreCompact: [] });
+  });
+
+  it("sets the key inside an env block that already holds other keys", async () => {
+    await writeFile(settingsPath, JSON.stringify({ env: { FOO: "bar" } }, null, 2) + "\n", "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("set");
+    expect(await env()).toEqual({ FOO: "bar", [KEY]: "1" });
+  });
+
+  it("leaves an explicit \"0\" alone and rewrites nothing (m1)", async () => {
+    // Deliberately unusual formatting: any rewrite at all reformats it, so
+    // byte equality is the assertion, not just the value.
+    const original = `{\n    "env": {\n        "${KEY}": "0"\n    }\n}\n`;
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("exists");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("leaves an explicit empty string alone", async () => {
+    const original = `{\n    "env": {\n        "${KEY}": ""\n    }\n}\n`;
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("exists");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("leaves an existing \"1\" untouched and rewrites nothing", async () => {
+    const original = `{\n    "env": {\n        "${KEY}": "1"\n    }\n}\n`;
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("exists");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("is idempotent on rerun: the second call writes nothing", async () => {
+    const { enable } = await api();
+    expect(await enable()).toBe("set");
+    const afterFirst = await readFile(settingsPath, "utf-8");
+    expect(await enable()).toBe("exists");
+    expect(await readFile(settingsPath, "utf-8")).toBe(afterFirst);
+  });
+
+  it("skips a settings.json that is not a JSON object, leaving it byte-identical", async () => {
+    const original = "[1, 2, 3]\n";
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("skipped");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("skips a settings.json whose env field is not an object", async () => {
+    const original = `{ "env": "nope" }\n`;
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable } = await api();
+    expect(await enable()).toBe("skipped");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("removal deletes the key when its value is exactly \"1\" and keeps everything else", async () => {
+    await writeFile(settingsPath, JSON.stringify({ model: "opus", env: { FOO: "bar", [KEY]: "1" } }, null, 2) + "\n", "utf-8");
+    const { remove } = await api();
+    expect(await remove()).toBe("removed");
+    expect(await env()).toEqual({ FOO: "bar" });
+    const settings = JSON.parse(await readFile(settingsPath, "utf-8")) as Record<string, unknown>;
+    expect(settings.model).toBe("opus");
+  });
+
+  it("skips malformed JSON in both directions, leaving the file byte-identical", async () => {
+    const original = "{ invalid }\n";
+    await writeFile(settingsPath, original, "utf-8");
+    const { enable, remove } = await api();
+    expect(await enable()).toBe("skipped");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+    expect(await remove()).toBe("skipped");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("removal leaves a value the user chose, including \"0\"", async () => {
+    const original = `{\n    "env": {\n        "${KEY}": "0"\n    }\n}\n`;
+    await writeFile(settingsPath, original, "utf-8");
+    const { remove } = await api();
+    expect(await remove()).toBe("not_found");
+    expect(await readFile(settingsPath, "utf-8")).toBe(original);
+  });
+
+  it("removal reports not_found when the key or the file is absent", async () => {
+    const { remove } = await api();
+    expect(await remove()).toBe("not_found");
+    expect(existsSync(settingsPath)).toBe(false);
+
+    await writeFile(settingsPath, JSON.stringify({ env: { FOO: "bar" } }, null, 2) + "\n", "utf-8");
+    expect(await remove()).toBe("not_found");
+    expect(await env()).toEqual({ FOO: "bar" });
+  });
+});

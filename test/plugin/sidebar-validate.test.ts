@@ -132,21 +132,23 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
     ).toBe(true);
   });
 
-  it("declares the plugin exists but leaves the Mod off by default", () => {
+  it("declares the Mod on by default (T-516)", () => {
+    // Owner ruling for 1.15: the dashboard ships on, so a session that loads
+    // the plugin with nothing configured draws it.
     const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, ".claude-plugin", "plugin.json"), "utf8")) as {
       userConfig?: { sidebar?: { default?: unknown } };
     };
-    expect(manifest.userConfig?.sidebar?.default).toBe(false);
+    expect(manifest.userConfig?.sidebar?.default).toBe(true);
   });
 
-  it("registers the Mod only where the option says so", () => {
-    // The manifest defaults the option off, and this is the other half of
-    // that: the wiring reads the option and registers behind it. M-SIDEBAR
-    // -ALWAYS-ON drops the condition and every session that loads the plugin
-    // gets a pane it never asked for.
+  it("registers the Mod behind the option, reading an absent option as on", () => {
+    // The manifest defaults the option on, and this is the other half of
+    // that: the wiring still reads the option, so turning it off in
+    // /plugin configure is obeyed. M-SIDEBAR-ALWAYS-ON drops the condition
+    // and a user who turned the dashboard off gets it back anyway.
     const mod = readFileSync(join(PLUGIN_DIR, "hooks", "mod.ts"), "utf8");
     expect(mod).toContain('import { registerSidebar } from "./sidebar.js";');
-    expect(mod).toContain('const sidebar = options["sidebar"] === true;');
+    expect(mod).toContain('const sidebar = options["sidebar"] !== false;');
     expect(mod).toContain("if (sidebar) registerSidebar(on, options);");
     // And nowhere else: one registration, one gate.
     expect(mod.split("registerSidebar(on").length - 1).toBe(1);

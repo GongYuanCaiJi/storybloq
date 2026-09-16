@@ -19,6 +19,7 @@
 
 import { test, expect } from "claude-code/testing";
 import { registerSidebar } from "./sidebar.js";
+import { register } from "./mod.js";
 
 interface Fixture {
   files: Record<string, string>;
@@ -2056,4 +2057,36 @@ test("leaves the narrow fallback a single line, board or no board", async () => 
   expect(narrow).toContain("Storybloq:");
   expect(narrow).not.toContain("Blocked");
   expect(narrow.length).toBeLessThanOrEqual(80);
+});
+
+// ---------------------------------------------------------------------------
+// T-516: the register gate. The dashboard ships on by default in 1.15 (owner
+// ruling), so `register` draws unless the option is explicitly false. A client
+// that hands userConfig defaults through passes `sidebar: true`; one that does
+// not passes nothing at all, and both must end up with the hooks registered.
+// These drive `register` with a recording `on` of their own: no `$`, no
+// fixture, nothing but the branch.
+// ---------------------------------------------------------------------------
+
+function registeredEvents(options: Record<string, unknown>): string[] {
+  const events: string[] = [];
+  const on = (event: string, _hook: unknown) => {
+    events.push(event);
+    return { catch: (_fn: (error: unknown) => void) => undefined };
+  };
+  register(on as any, options as any);
+  return events;
+}
+
+test("register turns the dashboard on when the client passes no options at all", () => {
+  // M-DEFAULT-OFF: `options["sidebar"] === true` here registers nothing.
+  expect(registeredEvents({})).toContain("session.start");
+});
+
+test("register turns the dashboard on when the option is explicitly true", () => {
+  expect(registeredEvents({ sidebar: true })).toContain("session.start");
+});
+
+test("register stays silent when the option is explicitly false", () => {
+  expect(registeredEvents({ sidebar: false })).toEqual([]);
 });

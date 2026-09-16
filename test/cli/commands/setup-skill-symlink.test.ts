@@ -71,6 +71,25 @@ describe("setup-skill symlink preservation (issue #12)", () => {
     expect(await noTmpArtifacts(dir)).toBe(true);
   });
 
+  it("enableFunctionHooksEnv preserves a symlinked settings.json (T-516)", async () => {
+    if (process.platform === "win32") return;
+    const real = join(dir, "real-settings.json");
+    const link = join(dir, "settings.json");
+    await writeFile(real, '{"model": "opus"}\n', "utf-8");
+    await symlink(real, link);
+
+    const { enableFunctionHooksEnv } = await import(SKILL);
+    const result = await enableFunctionHooksEnv(link);
+
+    expect(result).toBe("set");
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    const written = JSON.parse(await readFile(real, "utf-8")) as { model?: unknown; env?: Record<string, unknown> };
+    expect(written.env?.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS).toBe("1");
+    // The write updates the env block, it does not replace the file.
+    expect(written.model).toBe("opus");
+    expect(await noTmpArtifacts(dir)).toBe(true);
+  });
+
   it("migrateLegacyHookVariants preserves a symlinked settings.json", async () => {
     if (process.platform === "win32") return;
     const { migrateLegacyHookVariants, PRECOMPACT_SUBCOMMAND } = await import(SKILL);
