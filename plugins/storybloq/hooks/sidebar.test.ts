@@ -1010,12 +1010,11 @@ test("keeps the handover names off the board", async () => {
 test("caps a column at six and ends it with dots", async () => {
   const h = harness(manyOpen(12));
   await started(h);
-  // Seventeen open tickets: six rows and a dotted tail, in a pane with the
-  // rows to spare. M-CAP-IGNORED draws all seventeen and writes no tail,
-  // which is the column that ran off the bottom of the owner's pane;
-  // M-ROW-OVERFLOW ignores the budget that keeps the tail on screen, and
-  // M-CAP-EIGHT leaves the cap at the eight it was before the owner asked
-  // for the height back.
+  // Eighteen open items: six rows and a dotted tail, in a pane with the rows
+  // to spare. M-CAP-IGNORED draws all eighteen and writes no tail, which is
+  // the column that ran off the bottom of the owner's pane, and M-CAP-EIGHT
+  // leaves the cap at the eight it was before the owner asked for the height
+  // back.
   const tree = await h.render(paneEvent(160, 30));
   const cards = cardsOf(tree, "board-open");
 
@@ -1023,6 +1022,21 @@ test("caps a column at six and ends it with dots", async () => {
   expect(cards[6]).toBe("...");
   expect(cards.slice(0, 6).every((row) => row.startsWith("T-"))).toBe(true);
   expect(headingOf(tree, "board-open")).toBe("Open 18");
+
+  // And where the pane is too short for the cap, the BUDGET is what bounds
+  // the column: fewer rows than the cap allows, the last of them still the
+  // tail, and the heading still the true total. At this height the two agree
+  // on nothing, which is what makes M-ROW-OVERFLOW visible: it spends the
+  // whole column on cards and the tail goes over the edge with the footer
+  // under it.
+  const tight = await h.render(paneEvent(160, 12));
+  const short = cardsOf(tight, "board-open");
+
+  expect(short.length).toBeLessThan(7);
+  expect(short[short.length - 1]).toBe("...");
+  expect(short.slice(0, -1).every((row) => row.startsWith("T-"))).toBe(true);
+  expect(headingOf(tight, "board-open")).toBe("Open 18");
+  expect(paneHeight(tight)).toBeLessThanOrEqual(12);
 });
 
 test("treats a seventh card as the tail, not as a seventh card", async () => {
