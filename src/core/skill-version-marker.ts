@@ -206,6 +206,33 @@ async function refreshCodexConfigIfPresent(): Promise<void> {
  * from before the sidecar existed is rewritten once to gain it. Best-effort,
  * logged, never blocking.
  */
+/**
+ * ISS-1233: the settings switch follows the Mods copy.
+ *
+ * An upgrade that is only `npm install -g @storybloq/storybloq@latest` never
+ * reaches `storybloq setup`, so this refresh is all an existing install gets,
+ * and a Mods copy the client is not allowed to load draws nothing. Same rule
+ * as the installer's: a value already in the file is the user's and is never
+ * rewritten, so a dashboard someone turned off stays off across every
+ * upgrade. Best-effort and quiet unless it actually wrote.
+ *
+ * Imported dynamically like every other reach into `setup-skill` from here,
+ * which is also what keeps the two modules' mutual references out of the
+ * static graph.
+ */
+async function ensureFunctionHooksSwitch(): Promise<void> {
+  try {
+    const { enableFunctionHooksEnv, FUNCTION_HOOKS_ENV_KEY } = await import("../cli/commands/setup-skill.js");
+    if ((await enableFunctionHooksEnv()) !== "set") return;
+    process.stderr.write(
+      `storybloq: set env.${FUNCTION_HOOKS_ENV_KEY}=1 in ${join(homedir(), ".claude", "settings.json")} (draws the ledger dashboard)\n`,
+    );
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`storybloq: could not set the function-hooks switch (non-fatal): ${msg}\n`);
+  }
+}
+
 async function refreshModsIfBinMoved(): Promise<void> {
   try {
     const { installMods, modsInstalled, readModsBin, MODS_DISPLAY_PATH } = await import("./mods-install.js");
@@ -214,10 +241,21 @@ async function refreshModsIfBinMoved(): Promise<void> {
     const bin = resolveStorybloqBin();
     const recorded = readModsBin();
     if (recorded !== undefined && recorded === bin) return;
-    await installMods({ bin });
-    process.stderr.write(
-      `storybloq: the storybloq binary moved; refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
-    );
+    // Same shape as the version-advance branch: the copy is on disk either
+    // way, so the switch is not conditional on this re-copy succeeding.
+    try {
+      await installMods({ bin });
+      process.stderr.write(
+        `storybloq: the storybloq binary moved; refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
+      );
+    } catch (copyErr: unknown) {
+      const copyMsg = copyErr instanceof Error ? copyErr.message : String(copyErr);
+      process.stderr.write(
+        `storybloq: Mods refresh failed (non-fatal): ${copyMsg}\n` +
+        `  Run 'storybloq setup --client claude' manually to retry.\n`,
+      );
+    }
+    await ensureFunctionHooksSwitch();
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(
@@ -313,10 +351,25 @@ export async function autoRefreshSkillIfStale(
       try {
         const { installMods, modsInstalled, MODS_DISPLAY_PATH } = await import("./mods-install.js");
         if (modsInstalled()) {
-          await installMods({ bin });
-          process.stderr.write(
-            `storybloq: refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
-          );
+          // ISS-1233: the switch follows the copy EXISTING, not this refresh
+          // succeeding, so its own try. A copy already on disk is loadable
+          // whether or not today's re-copy worked, and a transient failure
+          // here (a held lock, a full disk) must not be what leaves someone's
+          // dashboard dark for good: the next invocation would find the
+          // marker current and never come back through this branch.
+          try {
+            await installMods({ bin });
+            process.stderr.write(
+              `storybloq: refreshed Mods at ${MODS_DISPLAY_PATH} (storybloq at ${bin ?? "the bare name, not found on PATH"})\n`,
+            );
+          } catch (copyErr: unknown) {
+            const copyMsg = copyErr instanceof Error ? copyErr.message : String(copyErr);
+            process.stderr.write(
+              `storybloq: Mods refresh failed (non-fatal): ${copyMsg}\n` +
+              `  Run 'storybloq setup --client claude' manually to retry.\n`,
+            );
+          }
+          await ensureFunctionHooksSwitch();
         }
       } catch (modsErr: unknown) {
         const modsMsg = modsErr instanceof Error ? modsErr.message : String(modsErr);
