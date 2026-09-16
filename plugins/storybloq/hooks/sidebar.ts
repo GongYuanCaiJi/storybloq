@@ -844,26 +844,63 @@ interface Token {
  * lexer's, so `<<'EOF'` does not read as a quote left open and throw the rest
  * of the head away.
  */
-function afterHeredocDelimiter(command: string, from: number): number {
+function afterHeredocDelimiter(command: string, from: number): { index: number; delimiter: string; dashed: boolean } {
   let index = from;
-  while (index + 1 < command.length && (command[index + 1] === " " || command[index + 1] === "\t")) index += 1;
-  let quote = "";
-  while (index + 1 < command.length) {
-    const character = command[index + 1]!;
-    if (quote !== "") {
+  let delimiter = "";
+  let dashed = false;
+  for (let word = 0; word < 2; word += 1) {
+    while (index + 1 < command.length && (command[index + 1] === " " || command[index + 1] === "\t")) index += 1;
+    let quote = "";
+    while (index + 1 < command.length) {
+      const character = command[index + 1]!;
+      if (quote !== "") {
+        index += 1;
+        if (character === quote) quote = "";
+        else delimiter += character;
+        continue;
+      }
+      if (character === '"' || character === "'") {
+        quote = character;
+        index += 1;
+        continue;
+      }
+      if (character === " " || character === "\t" || character === "\n" || OPERATOR_CHARACTERS.includes(character)) break;
+      delimiter += character;
       index += 1;
-      if (character === quote) quote = "";
-      continue;
     }
-    if (character === '"' || character === "'") {
-      quote = character;
-      index += 1;
-      continue;
-    }
-    if (character === " " || character === "\t" || character === "\n" || OPERATOR_CHARACTERS.includes(character)) break;
-    index += 1;
+    // `<<-EOF` allows leading tabs on the terminator; `<<- EOF` writes the
+    // dash as a word of its own, so one more word is read for it.
+    if (!delimiter.startsWith("-")) break;
+    dashed = true;
+    delimiter = delimiter.slice(1);
+    if (delimiter !== "") break;
   }
-  return index;
+  return { index, delimiter, dashed };
+}
+
+/**
+ * Where a heredoc's body ends: the index of the newline that closes its
+ * terminator line, or -1 where the terminator never comes and the rest of the
+ * command is body.
+ *
+ * The body is never read as shell, but what follows it is: a script that
+ * writes a note and then updates a ticket is one Bash call, and stopping at
+ * the body would lose the write.
+ */
+function afterHeredocBody(command: string, from: number, delimiter: string, dashed: boolean): number {
+  let start = from + 1;
+  while (start <= command.length) {
+    const cut = command.indexOf("\n", start);
+    const last = cut === -1;
+    const end = last ? command.length : cut;
+    let line = command.slice(start, end);
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (dashed) line = line.replace(/^\t+/, "");
+    if (line === delimiter) return last ? command.length - 1 : end;
+    if (last) return -1;
+    start = end + 1;
+  }
+  return -1;
 }
 
 function lex(command: string): { tokens: Token[]; ok: boolean } {
@@ -873,8 +910,15 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
   let quote = "";
   /** How many tokens were whole when the quote now open was opened. */
   let opened = 0;
-  /** A heredoc head is being read, so the next newline starts its body. */
+  /**
+   * A heredoc head is being read, so the next newline starts its body, and
+   * the word that ends it. Two heredocs on one head line (`cat <<A <<B`) are
+   * read as one body ending at the LAST delimiter, which is close enough: the
+   * body is never read either way and what follows it still is.
+   */
   let heredoc = false;
+  let delimiter = "";
+  let dashed = false;
   const flush = (): void => {
     if (started) tokens.push({ text, operator: false });
     text = "";
@@ -927,18 +971,35 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
         run += character;
         index += 1;
       }
-      // The body of a heredoc starts at the newline after its head, and it is
+      // The body of a heredoc starts at the newline after its head and is
       // never read: it is a document, and a line of it that looks like a write
-      // is prose someone is filing.
-      if (heredoc && run.startsWith("\n")) return { tokens, ok: true };
+      // is prose someone is filing. What comes AFTER the terminator is shell
+      // again, and dropping it was losing the write in the commonest script
+      // Claude Code produces: a note written with `cat <<EOF`, then a ticket
+      // updated on the line below its EOF.
+      if (heredoc && run.startsWith("\n")) {
+        const end = afterHeredocBody(command, index, delimiter, dashed);
+        if (end === -1) return { tokens, ok: true };
+        index = end;
+        heredoc = false;
+        tokens.push({ text: "\n", operator: true });
+        continue;
+      }
       // `<<` and `<<<`: the head is still a command and the REST OF ITS LINE
       // still counts, because `cat <<'EOF' > .story/tickets/T-001.json` writes
       // a ticket with the redirect sitting after the delimiter. So the
       // operator and its delimiter are stepped over and the line goes on being
       // read as shell.
       if (run.startsWith(HEREDOC)) {
-        index = afterHeredocDelimiter(command, index);
-        heredoc = true;
+        const head = afterHeredocDelimiter(command, index);
+        index = head.index;
+        // `<<<` is a here-string: its word IS the input, and there is no body
+        // to step over.
+        if (run === HEREDOC) {
+          heredoc = true;
+          delimiter = head.delimiter;
+          dashed = head.dashed;
+        }
         continue;
       }
       // `>&` and `&>` are one redirect written two ways, and a run of one

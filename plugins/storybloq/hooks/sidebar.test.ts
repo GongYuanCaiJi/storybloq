@@ -1801,10 +1801,45 @@ test("reads a heredoc's head and never its body", async () => {
   for (const [index, command] of [
     "cat > /tmp/notes.md <<EOF\nrm .story/tickets/T-001.json\nEOF",
     "cat <<EOF > /tmp/notes.md\nrm .story/tickets/T-001.json\nEOF",
+    // And still not on its own when the script goes on afterwards.
+    "cat > /tmp/notes.md <<EOF\nrm .story/tickets/T-001.json\nEOF\nls /tmp",
   ].entries()) {
     await h.fire("tool.call", { tool: "Bash", command, tool_use_id: `body-${index}` });
     await h.tick();
     expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+});
+
+test("goes on reading the script after a heredoc's terminator", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // The commonest script Claude Code writes: a note filed with a heredoc, and
+  // then the ticket updated on the line below its EOF. M-HEREDOC-DROPS-TAIL
+  // stops at the body and the write on the other side of it is never seen.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await h.fire("tool.call", {
+    tool: "Bash",
+    command: "cat > /tmp/notes.md <<'EOF'\nsome prose\nEOF\nstorybloq ticket update T-001 --status complete",
+    tool_use_id: "tail",
+  });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+
+  // A tabbed terminator under `<<-`, and a here-string, which has no body at
+  // all and must not eat the line after it.
+  for (const [index, command] of [
+    "cat > /tmp/notes.md <<-EOF\n\tsome prose\n\tEOF\nstorybloq ticket update T-001",
+    "grep -q x <<< 'some prose'\nstorybloq ticket update T-001",
+  ].entries()) {
+    const own = harness(newFixture());
+    await started(own);
+    own.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+    own.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+    await own.fire("tool.call", { tool: "Bash", command, tool_use_id: `tail-${index}` });
+    await own.tick();
+    expect(headingOf(await own.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
   }
 });
 
