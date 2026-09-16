@@ -82,7 +82,11 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // like a findings cap). 37,312 measured; 38,000 to leave the generated file
   // one step of headroom, since it grows with the tool registry rather than
   // with prose.
-  "reference.md": 38000,
+  // 38,340 measured at the 1.15 release gate (2026-09-15): the roster CLI and
+  // storybloq_roster_get (T-507 commit B) and the bundled bridge in the health
+  // docs (T-509) grew the generated inventory past 38,000. 39,000 leaves the
+  // same one-step headroom as before.
+  "reference.md": 39000,
   "federation-setup.md": 14000,
   "orchestrator-mode.md": 47000,
   // Was 9000 (T-496 post-split measurement). The file was already at
