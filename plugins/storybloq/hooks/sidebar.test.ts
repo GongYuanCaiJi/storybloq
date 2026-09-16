@@ -18,7 +18,7 @@
  */
 
 import { test, expect } from "claude-code/testing";
-import { registerSidebar } from "./sidebar.js";
+import { IDLE_POLL_TICKS, registerSidebar } from "./sidebar.js";
 import { register } from "./mod.js";
 
 interface Fixture {
@@ -66,7 +66,21 @@ function newFixture(): Fixture {
   };
   const mtimes: Record<string, number> = {};
   for (const path of Object.keys(files)) mtimes[path] = 1000;
+  // The directories the idle poll watches carry mtimes of their own (T-517).
+  for (const dir of [".story", ".story/tickets", ".story/issues", ".story/handovers"]) mtimes[dir] = 1000;
   return { files, mtimes };
+}
+
+/**
+ * What a write by ANOTHER process looks like from in here: the file lands and
+ * the directory it landed in moves, which is what a rename into a directory
+ * does. Nothing in this session is told about it.
+ */
+function foreignWrite(fixture: Fixture, path: string, text: string, at: number): void {
+  fixture.files[path] = text;
+  fixture.mtimes[path] = at;
+  const slash = path.lastIndexOf("/");
+  if (slash >= 0) fixture.mtimes[path.slice(0, slash)] = at;
 }
 
 /** The fixture plus `count` more open leaves in the current phase. */
@@ -169,8 +183,16 @@ function harness(fixture: Fixture): Harness {
       exists: async (path: string): Promise<boolean> =>
         fixture.files[path] !== undefined || Object.keys(fixture.files).some((file) => file.startsWith(`${path}/`)),
       stat: async (path: string): Promise<{ kind: string; size: number; mtimeMs: number }> => {
-        if (fixture.files[path] === undefined) throw new Error(`ENOENT: ${path}`);
-        return { kind: "file", size: fixture.files[path]!.length, mtimeMs: fixture.mtimes[path]! };
+        const text = fixture.files[path];
+        if (text !== undefined) return { kind: "file", size: text.length, mtimeMs: fixture.mtimes[path]! };
+        // T-517: the idle poll stats DIRECTORIES, which a flat path map has to
+        // answer for the way a filesystem does. A directory is any prefix
+        // something lives under, and it carries its own mtime: a create, a
+        // delete or an atomic replace moves it, an in-place edit does not.
+        // An empty directory exists too: one the fixture gave an mtime.
+        const known = fixture.mtimes[path] !== undefined || Object.keys(fixture.files).some((file) => file.startsWith(`${path}/`));
+        if (!known) throw new Error(`ENOENT: ${path}`);
+        return { kind: "directory", size: 0, mtimeMs: fixture.mtimes[path] ?? 0 };
       },
     },
     ui: {
@@ -2057,6 +2079,97 @@ test("leaves the narrow fallback a single line, board or no board", async () => 
   expect(narrow).toContain("Storybloq:");
   expect(narrow).not.toContain("Blocked");
   expect(narrow.length).toBeLessThanOrEqual(80);
+});
+
+// ---------------------------------------------------------------------------
+// T-517: the idle poll. Writes by another process (a peer session, the Mac
+// app, a git pull, the CLI in a terminal) reach the pane without this session
+// taking a turn. All three drive the ONE existing timer, because that is the
+// claim: no second timer, and an idle tick that finds nothing costs four
+// stats.
+// ---------------------------------------------------------------------------
+
+test("shows a write by another session with no turn and no tool call", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  const timersBefore = h.counters.timers;
+
+  // Another session files a ticket. This session is sitting at the prompt:
+  // no turn.complete, no tool.call, nothing but the clock.
+  foreignWrite(
+    h.fixture,
+    ".story/tickets/T-030.json",
+    ticketText({ id: "T-030", status: "inprogress", order: 30, title: "Filed elsewhere" }),
+    2000,
+  );
+
+  // M-NO-IDLE-POLL: without the directory stat the pane sits on the old
+  // projection until this session next finishes a turn, which is the bug the
+  // owner hit (In progress 3 against a ledger that said 4). A full interval
+  // guarantees one poll wherever the counter stands, and the extra ticks let
+  // the rescan it asks for drain, so this does not lean on how many ticks
+  // `started` happened to spend.
+  await h.tick(IDLE_POLL_TICKS + 20);
+
+  const tree = await h.render(paneEvent());
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 2");
+  expect(textOf(tree)).toContain("T-030");
+  // And it came out of the timer that was already running.
+  expect(h.counters.timers).toBe(timersBefore);
+});
+
+test("an idle poll that finds nothing reads nothing and redraws nothing", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  await h.render(paneEvent());
+
+  const reads = h.reads;
+  const sets = h.counters.storeSets;
+  const invalidations = h.invalidated.length;
+
+  // Two whole poll intervals with an unchanged ledger. M-POLL-ALWAYS-RESCANS
+  // drops the mtime comparison, and then every interval re-reads the ledger,
+  // rewrites the store cache and invalidates the pane for as long as the
+  // session lasts.
+  await h.tick(IDLE_POLL_TICKS * 2);
+
+  expect(h.reads).toBe(reads);
+  expect(h.counters.storeSets).toBe(sets);
+  expect(h.invalidated.length).toBe(invalidations);
+});
+
+test("a write that lands while a scan is draining is not lost", async () => {
+  // The arithmetic below counts ticks against the poll interval.
+  expect(IDLE_POLL_TICKS).toBe(80);
+  const h = harness(manyOpen(40));
+  await started(h);
+  // `started` ticks forty times, so thirty-nine more leave the counter one
+  // tick short of a poll: the poll then falls INSIDE the scan started below.
+  await h.tick(39);
+
+  // The turn's scan takes its worklist from the ledger as it stands...
+  await h.fire("turn.complete", {});
+  // ...and only then does another process file a ticket, so the scan now
+  // draining will never see it: the file was not there to be listed.
+  foreignWrite(
+    h.fixture,
+    ".story/tickets/T-900.json",
+    ticketText({ id: "T-900", status: "inprogress", order: 900, title: "Filed mid scan" }),
+    3000,
+  );
+
+  // One tick: a chunk drains (the worklist is longer than one chunk) and then
+  // the poll runs with the scan still active, so the rescan it asks for is
+  // remembered rather than started. M-POLL-SKIPS-DURING-SCAN returns early
+  // while a scan runs and the write waits a whole further interval.
+  await h.tick(1);
+  // Enough for the scan to finish and the remembered refresh to run.
+  await h.tick(20);
+
+  const tree = await h.render(paneEvent());
+  expect(headingOf(tree, "board-inprogress")).toBe("In progress 2");
+  expect(textOf(tree)).toContain("T-900");
 });
 
 // ---------------------------------------------------------------------------

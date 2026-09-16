@@ -20,6 +20,14 @@
  * its mtime and the handful of fields the pane shows, so a later session
  * starts warm and a refresh re-reads only what moved.
  *
+ * WHY IT POLLS. Nothing tells a session that another process wrote the
+ * ledger: a peer session, the Mac app, a git pull and the CLI in a terminal
+ * all leave this Mod's events silent, so the pane used to sit on the last
+ * projection until this session next finished a turn (T-517). The client
+ * exposes no `$.fs.watch`, so the refresh is a poll on the timer that is
+ * already running: four `$.fs.stat` calls every two seconds, and nothing
+ * further unless one of those four mtimes moved.
+ *
  * WIDTH. The client will not draw a pane a plugin opened on its own below 144
  * terminal columns, or below 110 once the person has asked for that id. Below
  * that the same numbers go out as one `AbovePrompt` line, which is how the
@@ -63,6 +71,14 @@ const STORE_BUDGET_BYTES = 3_000_000;
 /** Files per tick, and the tick, so no single dispatch sits on the budget. */
 const SCAN_CHUNK = 25;
 const SCAN_TICK_MS = 25;
+
+/**
+ * T-517: ticks between idle polls, so eighty of a 25 ms tick is two seconds.
+ *
+ * Exported because the Mod's own tests count ticks against it, and a poll
+ * interval they had to restate as a number would drift from this one.
+ */
+export const IDLE_POLL_TICKS = 80;
 
 /**
  * How many cards a column ever draws, and the line that stands for the rest.
@@ -272,6 +288,9 @@ let project = "";
 let phases: { readonly id: string; readonly name: string }[] = [];
 let handoverFilenames: string[] = [];
 let queue: ScanItem[] = [];
+/** Ticks since the last idle poll, and the mtimes that poll compares against. */
+let idleTicks = 0;
+let polledMtimes: Record<string, number> = {};
 /** A scan is building its worklist, or has one left to drain. */
 let scanInitializing = false;
 let scanActive = false;
@@ -302,6 +321,8 @@ function forgetEverything(): void {
   phases = [];
   handoverFilenames = [];
   queue = [];
+  idleTicks = 0;
+  polledMtimes = {};
   scanInitializing = false;
   scanActive = false;
   pendingRefresh = false;
@@ -571,7 +592,7 @@ function startTimer($: any): void {
   if (timerStarted) return;
   try {
     $.clock.every(SCAN_TICK_MS, () => {
-      drainChunk($).catch(() => {
+      tick($).catch(() => {
         finalizeScan($, "failed");
       });
     });
@@ -652,6 +673,12 @@ async function attach($: any): Promise<void> {
   contextPercent = await readContextFill($);
   await readHeader($);
   await loadCache($);
+  // The idle poll's baseline (T-517). Taken before the timer starts and before
+  // the scan below, so the first poll compares against the ledger as it was
+  // when this session read it: a write between the two is a change, not a
+  // missed one. Taken after the timer, a tick could poll against an empty
+  // baseline, find every path "moved" and rescan for nothing.
+  polledMtimes = await ledgerMtimes($);
   startTimer($);
   requestScan($);
 }
@@ -721,6 +748,94 @@ async function beginScan($: any): Promise<void> {
   } finally {
     scanInitializing = false;
   }
+}
+
+/**
+ * What one turn of the module's single timer does: drain an active scan, and
+ * once every IDLE_POLL_TICKS look for a write nothing told this session about
+ * (T-517).
+ *
+ * The counter lives here rather than in a second `$.clock.every`, because a
+ * second timer would be a second dispatch on every 25 ms tick for the life of
+ * the session, and the poll is a two-second thing.
+ */
+async function tick($: any): Promise<void> {
+  await drainChunk($);
+  idleTicks += 1;
+  if (idleTicks < IDLE_POLL_TICKS) return;
+  idleTicks = 0;
+  try {
+    await pollLedger($);
+  } catch {
+    // The timer's catch finalizes the ACTIVE scan as failed, which a poll that
+    // could not stat or read the header has no business doing: the scan is
+    // unrelated to it. A failed poll costs nothing and runs again in two
+    // seconds.
+  }
+}
+
+/**
+ * The four directory mtimes the idle poll watches.
+ *
+ * Directories and not files: every CLI and MCP write lands by rename or link
+ * INTO a directory (project-loader's atomicWrite and atomicCreate), so a
+ * create, a delete and a replace all move the directory's own mtime, and four
+ * stats stand in for a walk of a couple of thousand files. `.story` itself is
+ * where roadmap.json, config.json and status.json land. An in-place edit by
+ * an editor moves no directory, and that case is what the turn-end rescan is
+ * still for.
+ *
+ * A path that cannot be stat-ed reads 0, so one that appears later moves.
+ */
+const POLLED_PATHS = [LEDGER_DIR, TICKETS_DIR, ISSUES_DIR, HANDOVERS_DIR] as const;
+
+async function ledgerMtimes($: any): Promise<Record<string, number>> {
+  const seen: Record<string, number> = {};
+  for (const path of POLLED_PATHS) {
+    try {
+      const stat = await $.fs.stat(path);
+      seen[path] = typeof stat?.mtimeMs === "number" ? stat.mtimeMs : 0;
+    } catch {
+      seen[path] = 0;
+    }
+  }
+  return seen;
+}
+
+/**
+ * Has anything moved since the last look? If so, refresh.
+ *
+ * Deliberately NOT gated on `paneOpen`, for the same reason the AbovePrompt
+ * line is not: below the client's dock width there is no pane and that line
+ * IS the sidebar, so a poll tied to the pane would leave the only thing drawn
+ * standing still.
+ *
+ * Deliberately NOT skipped while a scan is draining either: the running scan
+ * took its worklist before this write existed, so it will not see it. Asking
+ * mid-scan is what `requestScan`'s pending flag is for, and the rescan
+ * follows the one in flight instead of being dropped.
+ *
+ * Never while `noLedger`: a project with no `.story/` draws nothing at all,
+ * and `turn.complete` and a ledger-writing tool call already carry the one
+ * question worth asking there (has a ledger arrived?).
+ */
+async function pollLedger($: any): Promise<void> {
+  if (!uiAvailable || !sidebarEnabled || noLedger) return;
+  const seen = await ledgerMtimes($);
+  let moved = false;
+  for (const path of POLLED_PATHS) {
+    if (polledMtimes[path] !== seen[path]) moved = true;
+  }
+  // The whole of the idle cost: four stats and this comparison. Dropping it
+  // is M-POLL-ALWAYS-RESCANS, which re-reads the ledger every two seconds
+  // whether or not anyone wrote it.
+  if (!moved) return;
+  polledMtimes = seen;
+  // The header files (roadmap, config, status, the handover names) land in
+  // `.story` itself, and a scan does not re-read them, so this mirrors what
+  // `turn.complete` does. It runs only when something actually moved.
+  await readHeader($);
+  requestScan($);
 }
 
 /**
