@@ -203,12 +203,30 @@ const CLI_VERB_DEPTH = 2;
 const OPERATOR_CHARACTERS = [";", "|", "&", "\n", ">", "<"];
 const SEPARATOR_CHARACTERS = [";", "|", "&", "\n"];
 const REDIRECT = ">";
+/** `&>`, the other way of writing a redirect that takes both streams. */
+const BOTH_STREAMS = "&>";
 /** `<<` and `<<<`: past one, the line is a document rather than a command. */
 const HEREDOC = "<<";
 /** A leading `NAME=value`, which is an assignment and not the command. */
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** The few commands that only lead up to the one that runs. */
 const WRAPPER_COMMANDS = new Set(["env", "npx", "time", "nice", "sudo", "command"]);
+/**
+ * The options of those that take a VALUE in the next word, per wrapper.
+ *
+ * `sudo -u someone storybloq ticket update` runs the CLI, and a reader that
+ * steps over `-u` and stops at `someone` decides the command is a username.
+ * `--option=value` is one word already and needs none of this.
+ */
+const WRAPPER_VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  sudo: ["-u", "-g", "-h", "-p"],
+  nice: ["-n"],
+  env: ["-u", "-C", "-S"],
+  time: ["-f", "-o"],
+  npx: ["-p", "--package", "-c", "--call"],
+};
+/** The CLI's own global options that take the next word as their value. */
+const CLI_VALUE_OPTIONS = ["--node", "--format", "--client"];
 /** The shell commands that write, by what each of them writes. */
 const COPY_COMMANDS = new Set(["cp", "install"]);
 const MOVE_COMMAND = "mv";
@@ -923,6 +941,19 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
         heredoc = true;
         continue;
       }
+      // `>&` and `&>` are one redirect written two ways, and a run of one
+      // character would split them: the `&` would then cut the segment and
+      // the redirect would lose its target. `2>&1` is the same shape and
+      // still names no file of ours, so it neither sweeps nor cuts.
+      if (run[0] === REDIRECT && command[index + 1] === "&") {
+        run += "&";
+        index += 1;
+      } else if (run[0] === "&" && command[index + 1] === REDIRECT) {
+        while (command[index + 1] === REDIRECT) {
+          run += REDIRECT;
+          index += 1;
+        }
+      }
       tokens.push({ text: run, operator: true });
       continue;
     }
@@ -964,8 +995,13 @@ function executableOf(words: readonly string[]): { name: string; args: string[] 
   for (;;) {
     while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
     if (index < words.length && WRAPPER_COMMANDS.has(basename(words[index]!))) {
+      const takesValue = WRAPPER_VALUE_OPTIONS[basename(words[index]!)] ?? [];
       index += 1;
-      while (index < words.length && words[index]!.startsWith("-")) index += 1;
+      while (index < words.length && words[index]!.startsWith("-")) {
+        const option = words[index]!;
+        index += 1;
+        if (!option.includes("=") && takesValue.includes(option)) index += 1;
+      }
       continue;
     }
     break;
@@ -996,7 +1032,7 @@ function segmentWrote(tokens: readonly Token[]): boolean {
     }
     // A redirect writes what follows it; `<` reads it, and the rest of the
     // operators never reach here (they are what the segments were cut on).
-    if (token.text.startsWith(REDIRECT)) {
+    if (token.text.startsWith(REDIRECT) || token.text.startsWith(BOTH_STREAMS)) {
       const target = tokens[index + 1];
       if (target !== undefined && !target.operator && inLedger(target.text)) return true;
       index += 1;
@@ -1013,8 +1049,18 @@ function segmentWrote(tokens: readonly Token[]): boolean {
   // argument (`storybloq note list --tags update`) or prose in a flag's
   // value, and neither writes anything.
   if (name === CLI_NAME) {
-    for (let index = 0; index < CLI_VERB_DEPTH && index < args.length; index += 1) {
-      if (WRITE_VERBS.includes(args[index]!)) return true;
+    // Only the words that are SUBCOMMANDS count toward the depth: a global
+    // option before the verb (`storybloq --node x ticket update`) would
+    // otherwise push it out of reach and the write would go unseen.
+    let depth = 0;
+    for (let index = 0; index < args.length && depth < CLI_VERB_DEPTH; index += 1) {
+      const word = args[index]!;
+      if (word.startsWith("-")) {
+        if (!word.includes("=") && CLI_VALUE_OPTIONS.includes(word)) index += 1;
+        continue;
+      }
+      depth += 1;
+      if (WRITE_VERBS.includes(word)) return true;
     }
     return false;
   }
@@ -1036,7 +1082,9 @@ function commandWroteLedger(command: string): boolean {
   const { tokens, ok } = lex(command);
   let segment: Token[] = [];
   for (const token of tokens) {
-    if (token.operator && SEPARATOR_CHARACTERS.includes(token.text[0]!)) {
+    // `&>` opens with a separator character and is not one: it is a redirect,
+    // and cutting the segment there would leave its target orphaned.
+    if (token.operator && SEPARATOR_CHARACTERS.includes(token.text[0]!) && !token.text.startsWith(BOTH_STREAMS)) {
       if (segmentWrote(segment)) return true;
       segment = [];
       continue;

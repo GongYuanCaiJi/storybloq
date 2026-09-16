@@ -1860,6 +1860,64 @@ test("does not sweep when the bad quote is in the only segment there is", async 
   }
 });
 
+test("reads the command past a wrapper's option value and its own global flags", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // The reading still stops where it should: a flag is not a subcommand, so a
+  // writing word past the depth is still an argument. This one first, because
+  // a second harness takes the module's state over from this one.
+  await h.fire("tool.call", { tool: "Bash", command: "storybloq --format json note list --tags update", tool_use_id: "wrap-no" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+
+  // M-WRAPPER-VALUE reads `someone` as the command and the CLI behind it is
+  // never seen; M-FLAG-COUNTS-AS-VERB counts `--node` and its value toward
+  // the subcommand depth and pushes the verb out of reach.
+  for (const [index, command] of [
+    "sudo -u someone storybloq ticket update T-001",
+    "storybloq --node other ticket update T-001",
+    "nice -n 10 env -u HOME storybloq --format json note create --content x",
+  ].entries()) {
+    const own = harness(newFixture());
+    await started(own);
+    own.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+    own.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+    await own.fire("tool.call", { tool: "Bash", command, tool_use_id: `wrap-${index}` });
+    await own.tick();
+    expect(headingOf(await own.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+  }
+});
+
+test("keeps a redirect that names both streams in one piece", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  // The duplication that names no file of ours neither sweeps nor cuts: the
+  // storybloq behind it is a read, and it stays one. First, for the same
+  // reason as above.
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await h.fire("tool.call", { tool: "Bash", command: "storybloq status 2>&1 | head", tool_use_id: "amp-dup" });
+  await h.tick();
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+
+  // `>&` and `&>` are one redirect written two ways. M-AMP-REDIRECT-SPLIT
+  // reads the ampersand as a separator, the redirect loses its target, and a
+  // write into the ledger goes unseen.
+  for (const [index, command] of ["echo x >& .story/tickets/T-099.json", "echo x &> .story/tickets/T-099.json"].entries()) {
+    const own = harness(newFixture());
+    await started(own);
+    own.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+    own.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+    await own.fire("tool.call", { tool: "Bash", command, tool_use_id: `amp-${index}` });
+    await own.tick();
+    expect(headingOf(await own.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+  }
+});
+
 test("sweeps for the CLI writing under a flag that reads like prose", async () => {
   const h = harness(newFixture());
   await started(h);
