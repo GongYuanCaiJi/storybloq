@@ -1548,9 +1548,14 @@ export async function atomicCreate(
     try {
       const parentFd = await open(dirname(targetPath), "r");
       try { await parentFd.sync(); } finally { await parentFd.close(); }
-    } catch {
-      // The link already committed the create; directory fsync is best-effort
-      // because directory handles cannot be synced reliably on Windows.
+    } catch (syncErr) {
+      // The link already committed the create. A platform that refuses to
+      // open or sync a directory handle (Windows answers EPERM, some
+      // filesystems EINVAL or ENOTSUP) must not turn a published create into
+      // a reported failure, which a retrying caller answers with a duplicate
+      // id. Any other error (EIO, ENOSPC) still surfaces: the entry may not
+      // be durable and the caller must know.
+      if (!DIRECTORY_SYNC_UNSUPPORTED_CODES.has((syncErr as NodeJS.ErrnoException).code ?? "")) throw syncErr;
     }
   } catch (err) {
     if (err instanceof ProjectLoaderError) throw err;
@@ -1697,10 +1702,18 @@ export async function guardPath(
 // can fence their commit syscall without changing withLock's ~13 internal call
 // sites or withProjectLock/runTransactionUnlocked's external ones.
 const projectLockContext = new AsyncLocalStorage<ProjectLockHandle>();
-const PROJECT_LOCK_FENCING_MESSAGE = "Lock ownership lost before commit; write was not applied";
+/**
+ * Marker carried as the `cause` of every fencing error, so a caller can tell
+ * "the lock was lost before this commit syscall" from any other io_error
+ * without comparing message text.
+ */
+const PROJECT_LOCK_FENCING_CAUSE: unique symbol = Symbol("project-lock-fencing");
+
+/** Error codes a platform answers when a directory handle cannot be opened or synced at all. */
+const DIRECTORY_SYNC_UNSUPPORTED_CODES: ReadonlySet<string> = new Set(["EPERM", "EACCES", "EINVAL", "ENOTSUP"]);
 
 function isProjectLockFencingError(err: unknown): err is ProjectLoaderError {
-  return err instanceof ProjectLoaderError && err.message === PROJECT_LOCK_FENCING_MESSAGE;
+  return err instanceof ProjectLoaderError && err.cause === PROJECT_LOCK_FENCING_CAUSE;
 }
 
 /**
@@ -1715,7 +1728,7 @@ function checkProjectLockFencing(): void {
   const handle = projectLockContext.getStore();
   if (!handle) return;
   if (!verifyProjectLockOwnership(handle)) {
-    throw new ProjectLoaderError("io_error", PROJECT_LOCK_FENCING_MESSAGE);
+    throw new ProjectLoaderError("io_error", "Lock ownership lost before commit; write was not applied", PROJECT_LOCK_FENCING_CAUSE);
   }
 }
 

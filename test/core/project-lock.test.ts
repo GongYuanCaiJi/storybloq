@@ -71,17 +71,18 @@ vi.mock("../../src/core/project-lock.js", async (importOriginal) => {
 // bypassed when the test process runs as root (common in CI containers),
 // which would make that technique silently no-op rather than fail loudly.
 const statOverride = vi.hoisted(() => ({ failPathSuffix: null as string | null }));
-const openOverride = vi.hoisted(() => ({ failDirectoryPath: null as string | null }));
+const openOverride = vi.hoisted(() => ({ failDirectoryPath: null as string | null, failCode: "EPERM" }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  const open = (async (path: unknown, flags: unknown, mode?: unknown) => {
+  const open = (async (...args: unknown[]) => {
+    const [path] = args;
     if (openOverride.failDirectoryPath && path === openOverride.failDirectoryPath) {
       openOverride.failDirectoryPath = null;
       const err = new Error("simulated Windows directory fsync failure") as NodeJS.ErrnoException;
-      err.code = "EPERM";
+      err.code = openOverride.failCode;
       throw err;
     }
-    return (actual.open as (...a: unknown[]) => Promise<unknown>)(path, flags, mode);
+    return (actual.open as (...a: unknown[]) => Promise<unknown>)(...args);
   }) as typeof actual.open;
   const stat = (async (path: unknown, opts?: unknown) => {
     if (statOverride.failPathSuffix && typeof path === "string" && path.endsWith(statOverride.failPathSuffix)) {
@@ -830,6 +831,19 @@ describe("project-lock integration (project-loader.ts wiring)", () => {
 
     await expect(atomicCreate(target, content)).resolves.toBeUndefined();
     expect(await readFile(target, "utf-8")).toBe(content);
+  });
+
+  it("atomicCreate still reports a parent-directory sync failure that is not a platform refusal (EIO)", async () => {
+    testRoot = await createProject();
+    const ticketsDir = join(testRoot, ".story", "tickets");
+    const target = join(ticketsDir, "T-025.json");
+    openOverride.failDirectoryPath = ticketsDir;
+    openOverride.failCode = "EIO";
+    try {
+      await expect(atomicCreate(target, JSON.stringify(ticket("T-025")))).rejects.toMatchObject({ code: "io_error" });
+    } finally {
+      openOverride.failCode = "EPERM";
+    }
   });
 
   it("treats fence loss at journal removal as success and leaves an idempotent recovery journal", async () => {
