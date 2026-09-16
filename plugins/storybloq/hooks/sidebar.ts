@@ -864,9 +864,6 @@ function afterHeredocDelimiter(command: string, from: number): { index: number; 
       // A backslash quotes the next character of the delimiter, so `<<\\EOF`
       // ends at a line reading EOF. Keeping the backslash means the
       // terminator is never found and the rest of the script is read as body.
-      // A backslash quotes the next character of the delimiter, so `<<\\EOF`
-      // ends at a line reading EOF. Keeping the backslash means the
-      // terminator is never found and the rest of the script is read as body.
       if (character === "\\") {
         index += 1;
         const escaped = command[index + 1];
