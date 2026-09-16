@@ -1152,8 +1152,13 @@ test("marks a severe issue on its id and nowhere else", async () => {
   const tree = await h.render(paneEvent(160, 30));
   const idOf = (row: any): any => (row.props.children as any[])[0];
   const titleOf = (row: any): any => (row.props.children as any[])[1];
-  const rowFor = (key: string, id: string): any =>
-    cardNodesOf(tree, key).find((row) => textOf(row).startsWith(id));
+  const rowFor = (key: string, id: string): any => {
+    // Found before it is read: an absent row would otherwise throw on .props
+    // rather than saying which row the board is missing.
+    const row = cardNodesOf(tree, key).find((card) => textOf(card).startsWith(id));
+    expect(row).toBeDefined();
+    return row;
+  };
 
   // The id carries the mark and the title never does, so the row still reads
   // as a row. Critical is red, high yellow, and the two that do not ask to be
@@ -1846,6 +1851,9 @@ test("goes on reading the script after a heredoc's terminator", async () => {
   for (const [index, command] of [
     "cat > /tmp/notes.md <<-EOF\n\tsome prose\n\tEOF\nstorybloq ticket update T-001",
     "grep -q x <<< 'some prose'\nstorybloq ticket update T-001",
+    // A backslash quotes the delimiter as the quotes do: M-ESCAPED-DELIMITER
+    // keeps it, never finds the terminator, and reads the write as body.
+    "cat <<\\EOF > /tmp/x\nbody\nEOF\nstorybloq ticket update T-001",
   ].entries()) {
     const own = harness(newFixture());
     await started(own);

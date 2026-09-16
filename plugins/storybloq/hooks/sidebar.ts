@@ -838,11 +838,13 @@ interface Token {
  */
 /**
  * Steps over a heredoc's delimiter word, quoted or bare, and answers with the
- * index of its last character.
+ * index of its last character, the word its terminator line must equal, and
+ * whether `<<-` allowed that line leading tabs.
  *
  * The delimiter's own quotes are opened and closed here rather than by the
  * lexer's, so `<<'EOF'` does not read as a quote left open and throw the rest
- * of the head away.
+ * of the head away, and a backslash quotes the character after it as it does
+ * in the shell.
  */
 function afterHeredocDelimiter(command: string, from: number): { index: number; delimiter: string; dashed: boolean } {
   let index = from;
@@ -857,6 +859,21 @@ function afterHeredocDelimiter(command: string, from: number): { index: number; 
         index += 1;
         if (character === quote) quote = "";
         else delimiter += character;
+        continue;
+      }
+      // A backslash quotes the next character of the delimiter, so `<<\\EOF`
+      // ends at a line reading EOF. Keeping the backslash means the
+      // terminator is never found and the rest of the script is read as body.
+      // A backslash quotes the next character of the delimiter, so `<<\\EOF`
+      // ends at a line reading EOF. Keeping the backslash means the
+      // terminator is never found and the rest of the script is read as body.
+      if (character === "\\") {
+        index += 1;
+        const escaped = command[index + 1];
+        if (escaped !== undefined) {
+          delimiter += escaped;
+          index += 1;
+        }
         continue;
       }
       if (character === '"' || character === "'") {
