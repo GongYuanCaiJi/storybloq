@@ -818,6 +818,36 @@ interface Token {
  * its head is a command and its body is data, so reading the body as shell
  * would take words out of a document and call them a write.
  */
+/**
+ * Steps over a heredoc's delimiter word, quoted or bare, and answers with the
+ * index of its last character.
+ *
+ * The delimiter's own quotes are opened and closed here rather than by the
+ * lexer's, so `<<'EOF'` does not read as a quote left open and throw the rest
+ * of the head away.
+ */
+function afterHeredocDelimiter(command: string, from: number): number {
+  let index = from;
+  while (index + 1 < command.length && (command[index + 1] === " " || command[index + 1] === "\t")) index += 1;
+  let quote = "";
+  while (index + 1 < command.length) {
+    const character = command[index + 1]!;
+    if (quote !== "") {
+      index += 1;
+      if (character === quote) quote = "";
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      index += 1;
+      continue;
+    }
+    if (character === " " || character === "\t" || character === "\n" || OPERATOR_CHARACTERS.includes(character)) break;
+    index += 1;
+  }
+  return index;
+}
+
 function lex(command: string): { tokens: Token[]; ok: boolean } {
   const tokens: Token[] = [];
   let text = "";
@@ -825,6 +855,8 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
   let quote = "";
   /** How many tokens were whole when the quote now open was opened. */
   let opened = 0;
+  /** A heredoc head is being read, so the next newline starts its body. */
+  let heredoc = false;
   const flush = (): void => {
     if (started) tokens.push({ text, operator: false });
     text = "";
@@ -834,7 +866,9 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
     const character = command[index]!;
     if (quote !== "") {
       // Inside single quotes a backslash is a backslash; inside double quotes
-      // it escapes the next character, as the shell reads them.
+      // it escapes the next character, as the shell reads them. (Bash keeps
+      // the backslash before anything but $ \ " ` and a newline; this drops
+      // it either way, which costs a character in a path nobody writes.)
       if (character === "\\" && quote === '"' && index + 1 < command.length) {
         index += 1;
         text += command[index];
@@ -875,9 +909,20 @@ function lex(command: string): { tokens: Token[]; ok: boolean } {
         run += character;
         index += 1;
       }
-      // `<<` and `<<<`: the head is a command, the rest of the line and the
-      // body after it are a document. Stop, and judge the head.
-      if (run.startsWith(HEREDOC)) return { tokens, ok: true };
+      // The body of a heredoc starts at the newline after its head, and it is
+      // never read: it is a document, and a line of it that looks like a write
+      // is prose someone is filing.
+      if (heredoc && run.startsWith("\n")) return { tokens, ok: true };
+      // `<<` and `<<<`: the head is still a command and the REST OF ITS LINE
+      // still counts, because `cat <<'EOF' > .story/tickets/T-001.json` writes
+      // a ticket with the redirect sitting after the delimiter. So the
+      // operator and its delimiter are stepped over and the line goes on being
+      // read as shell.
+      if (run.startsWith(HEREDOC)) {
+        index = afterHeredocDelimiter(command, index);
+        heredoc = true;
+        continue;
+      }
       tokens.push({ text: run, operator: true });
       continue;
     }

@@ -1797,14 +1797,48 @@ test("reads a heredoc's head and never its body", async () => {
   // The body is a document, not shell: a line of it that reads like a write
   // is prose someone is filing, and sweeping the whole ledger for it would
   // happen on every note that quotes a command. M-HEREDOC-BODY reads the body
-  // as segments and this line writes a ticket that was never touched.
+  // as segments and these lines write a ticket that was never touched.
+  for (const [index, command] of [
+    "cat > /tmp/notes.md <<EOF\nrm .story/tickets/T-001.json\nEOF",
+    "cat <<EOF > /tmp/notes.md\nrm .story/tickets/T-001.json\nEOF",
+  ].entries()) {
+    await h.fire("tool.call", { tool: "Bash", command, tool_use_id: `body-${index}` });
+    await h.tick();
+    expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  }
+});
+
+test("reads the rest of a heredoc's head, past the delimiter", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  h.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+
+  // The redirect sits AFTER the delimiter as often as before it, and it is
+  // the whole of what the command does. M-HEREDOC-HEAD-CUT stops at the
+  // operator, loses the redirect, and a ticket written this way never reaches
+  // the board until the turn ends. The apostrophe in the body is the same
+  // trap as before: the delimiter's quotes are its own and close there.
   await h.fire("tool.call", {
     tool: "Bash",
-    command: "cat > /tmp/notes.md <<EOF\nrm .story/tickets/T-001.json\nEOF",
-    tool_use_id: "body",
+    command: "cat <<'EOF' > .story/tickets/T-099.json\nthe pen's ruling\nEOF",
+    tool_use_id: "head",
   });
   await h.tick();
-  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 1");
+  expect(headingOf(await h.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
+
+  // And a bare delimiter, with the write behind an && on the same line.
+  const second = harness(newFixture());
+  await started(second);
+  second.fixture.files[".story/tickets/T-010.json"] = ticketText({ id: "T-010", status: "inprogress", order: 10, title: "Open ten" });
+  second.fixture.mtimes[".story/tickets/T-010.json"] = 2000;
+  await second.fire("tool.call", {
+    tool: "Bash",
+    command: "cat <<EOF > /tmp/x && storybloq ticket update T-001\nbody\nEOF",
+    tool_use_id: "head-and",
+  });
+  await second.tick();
+  expect(headingOf(await second.render(paneEvent()), "board-inprogress")).toBe("In progress 2");
 });
 
 test("does not sweep when the bad quote is in the only segment there is", async () => {
