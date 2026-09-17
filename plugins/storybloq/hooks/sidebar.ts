@@ -57,12 +57,15 @@ const PANE_ID = "storybloq";
 const PANE_TITLE = "Storybloq";
 
 /**
- * The narrowest terminal the client will dock a pane into, from the API's own
- * rule: a plugin's unasked open "waits undrawn below 144 columns (110 once
- * asked)". Below this the pane may not be on screen at all, so the one-line
- * fallback draws instead.
+ * The narrowest terminal the client will dock THIS pane into, from the API's
+ * own rule: a plugin's unasked open "waits undrawn below 144 columns (110 once
+ * asked)". Ours is always the unasked kind (nothing the person types opens
+ * it), so 144 is the floor that applies; 110 was the wrong one and left
+ * 110-143 columns with nothing drawn at all (ISS-1235). Below this the pane
+ * is not on screen, so the one-line fallback draws instead, and says so.
  */
-const DOCK_MIN_COLUMNS = 110;
+const DOCK_COLUMNS = 144;
+const BAND_HINT = `, board at ${DOCK_COLUMNS}+ cols`;
 
 const STORE_KEY = "sidebar-ledger-cache-v1";
 /** Under the store's 4 MiB, with room for whatever else the plugin keeps. */
@@ -302,6 +305,13 @@ let timerStarted = false;
 /** The Mod is on and something is drawn: not the same as the pane existing. */
 let sidebarEnabled = false;
 let paneOpen = false;
+/**
+ * The pane has actually RENDERED, which `paneOpen` does not say: the client
+ * parks an unasked open undrawn below the dock width, and a session started
+ * narrow and resized wide keeps that parked pane (ISS-1235). The band stands
+ * down only once this is true.
+ */
+let paneDrawn = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
 let warm = false;
@@ -330,6 +340,7 @@ function forgetEverything(): void {
   timerStarted = false;
   sidebarEnabled = false;
   paneOpen = false;
+  paneDrawn = false;
   sessionActive = false;
   contextPercent = null;
   warm = false;
@@ -496,6 +507,18 @@ function summaryLine(withContext: boolean): string {
   if (withContext && contextPercent !== null) parts.push(`context ${contextPercent}%`);
   if (busy) parts.push(`reading ${queue.length}`);
   return `Storybloq: ${parts.join(", ")}`;
+}
+
+/**
+ * The band, cut to the terminal. Below the dock width it ends with what width
+ * the board needs, since that is the moment the question comes up, but only
+ * when the whole summary fits beside it: the numbers are the band's job and
+ * the hint never costs one of them (80 columns keeps the issues count).
+ */
+function bandText(columns: number, narrow: boolean): string {
+  const line = summaryLine(true);
+  const hint = narrow && cellWidth(line) + cellWidth(BAND_HINT) <= columns ? BAND_HINT : "";
+  return truncate(`${line}${hint}`, columns);
 }
 
 /** config.json, roadmap.json, the handover names and the session flag. */
@@ -1718,6 +1741,13 @@ export function registerSidebar(on: On, _options: Options): void {
     // to render into, and the band's line would be the empty board in one row.
     if (noLedger) return next(e);
     if (e.component === "Pane" && e.requestId === PANE_ID) {
+      if (!paneDrawn) {
+        // The band may have drawn on this same pass believing the pane
+        // parked (a reload runs `register` fresh, so this flag starts false
+        // while the client keeps the pane up). One redraw and it stands down.
+        paneDrawn = true;
+        $.ui.invalidate("ui.render");
+      }
       const elements = $.ui.resolve(e);
       const { Box, Text } = elements;
       const width: number = typeof e.props?.bodyColumns === "number" ? e.props.bodyColumns : 40;
@@ -1748,15 +1778,18 @@ export function registerSidebar(on: On, _options: Options): void {
     }
     // The narrow fallback: the client leaves a plugin's pane undrawn on a
     // small terminal, so the same numbers go out as one line above the prompt.
-    // Gated on the Mod being on and on the width, and deliberately NOT on
-    // the pane existing. Below DOCK_MIN_COLUMNS the client draws no pane at
-    // all, so this line IS the sidebar; tying it to `paneOpen` would let a
-    // close of something never drawn turn off the only thing that was.
+    // Gated on the Mod being on, and deliberately NOT on the pane being OPEN:
+    // below DOCK_COLUMNS the client draws no pane at all, so this line IS the
+    // sidebar, and tying it to `paneOpen` would let a close of something never
+    // drawn turn off the only thing that was. It IS tied to the pane having
+    // been DRAWN: a pane opened narrow stays parked after a resize (ISS-1235),
+    // and a wide terminal with a parked pane still has to show the numbers.
     if (e.component === "AbovePrompt" && sidebarEnabled) {
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
-      if (columns > 0 && columns < DOCK_MIN_COLUMNS) {
+      const narrow = columns < DOCK_COLUMNS;
+      if (columns > 0 && (narrow || !paneDrawn)) {
         const { Text } = $.ui.resolve(e);
-        return Text({ dimColor: true, children: truncate(summaryLine(true), columns) });
+        return Text({ dimColor: true, children: bandText(columns, narrow) });
       }
     }
     return next(e);
@@ -1849,7 +1882,10 @@ export function registerSidebar(on: On, _options: Options): void {
   // later `session.start` may open it again. This does not turn the Mod off,
   // which is why it touches `paneOpen` and not `sidebarEnabled`.
   on("ui.close", ($: any, e: any, next: (e: any) => unknown) => {
-    if (e.requestId === PANE_ID) paneOpen = false;
+    if (e.requestId === PANE_ID) {
+      paneOpen = false;
+      paneDrawn = false;
+    }
     return next(e);
   });
 }

@@ -69,6 +69,16 @@ function log(msg: string): void {
 }
 
 /**
+ * ISS-1235: said once at the end of setup, and never measured. The client
+ * docks a plugin's pane only from 144 columns; `process.stdout.columns` here
+ * is the shell setup ran in, not the window claude will run in, and the
+ * version-marker refresh runs setup with stdout piped, so a measured verdict
+ * would be wrong as often as right.
+ */
+export const MODS_WIDTH_NOTE =
+  "The Storybloq board docks beside the transcript in terminals 144+ columns wide; narrower ones show a one-line summary above the prompt.";
+
+/**
  * Resolves the directory containing bundled skill files.
  * Probes both layouts:
  *   - Bundled (npm): dist/cli.js → ../src/skill/
@@ -1848,6 +1858,7 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
   log("");
   if (mcpRegistered) {
     log("Done! Restart Claude Code, then type /story in any project.");
+    log(MODS_WIDTH_NOTE);
   } else {
     log("Skill installed. After registering MCP, restart Claude Code and type /story.");
   }

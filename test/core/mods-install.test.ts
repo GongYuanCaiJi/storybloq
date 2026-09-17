@@ -829,13 +829,16 @@ describe("setup-skill wires the Mods copy (T-507 D)", () => {
   });
 
   it("handleSetup --client claude installs the copy with the binary it resolved, and says so", async () => {
-    const { handleSetup } = await import("../../src/cli/commands/setup-skill.js");
+    const { handleSetup, MODS_WIDTH_NOTE } = await import("../../src/cli/commands/setup-skill.js");
     await handleSetup({ client: "claude" });
     const installTs = await readFile(join(tempDir, ".claude", "skills", "storybloq", "hooks", "install.ts"), "utf-8");
     expect(installTs).toContain(`return ${JSON.stringify(join(tempDir, "shims", "storybloq"))};`);
     expect(existsSync(join(tempDir, ".claude", "skills", "storybloq", "hooks", "mod.ts"))).toBe(true);
     expect(out.join("")).toContain("Installed Mods (function hooks) at ~/.claude/skills/storybloq/");
     expect(err.join("")).not.toContain("Mods copy failed");
+    // ISS-1235: setup says what width the board needs, once, unmeasured.
+    expect(out.join("")).toContain("144+ columns");
+    expect(MODS_WIDTH_NOTE).toContain("144+ columns");
 
     // T-516: the copy is inert unless the client is allowed to load hooks
     // modules, so the same run writes the settings switch and says it did.

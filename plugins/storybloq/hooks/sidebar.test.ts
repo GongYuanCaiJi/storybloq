@@ -669,8 +669,69 @@ test("falls back to one line above the prompt on a narrow terminal", async () =>
   expect(narrow).toContain("Storybloq:");
   expect(narrow).toContain("issues");
 
-  // Wide enough to dock: the pane carries it and the band stays out of the way.
+  // Wide enough to dock, and the pane HAS been drawn: it carries the numbers
+  // and the band stays out of the way.
+  await h.render(paneEvent(160));
   expect(textOf(await h.render(abovePromptEvent(160)))).toBe("");
+});
+
+// ISS-1235: the client docks a pane the plugin opened on its own only from
+// 144 columns; 110 is the floor for a pane the person asked for, which ours
+// never is. Gating the band on 110 left 110-143 columns with nothing drawn.
+test("draws the band up to 143 columns, and says what width the board needs (ISS-1235)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  for (const columns of [80, 108, 110, 143]) {
+    const band = textOf(await h.render(abovePromptEvent(columns)));
+    expect(band, `${columns} columns`).toContain("Storybloq:");
+    expect(cells(band), `${columns} columns`).toBeLessThanOrEqual(columns);
+  }
+  // The hint rides along only where the whole summary fits beside it: at 80
+  // the numbers win (the issues count stays), from 108 both fit.
+  expect(textOf(await h.render(abovePromptEvent(80)))).toContain("issues");
+  for (const columns of [108, 110, 143]) {
+    expect(textOf(await h.render(abovePromptEvent(columns))), `${columns} columns`).toContain("board at 144+ cols");
+  }
+});
+
+// ISS-1235: a session started narrow and resized wide showed nothing. The
+// pane was opened once at session.start and parked undrawn by the client;
+// after the resize the band saw a wide viewport and stood down, and nothing
+// re-placed the pane. The band now stands down only once the pane has
+// actually rendered.
+test("keeps the band until the pane has actually been drawn, whatever the width (ISS-1235)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+
+  const before = textOf(await h.render(abovePromptEvent(80)));
+  expect(before).toContain("Storybloq:");
+
+  // Resized past the dock width with no Pane render in between: still the band,
+  // without the width hint (the terminal is wide enough now).
+  const wide = textOf(await h.render(abovePromptEvent(200)));
+  expect(wide).toContain("Storybloq:");
+  expect(wide).not.toContain("board at 144+ cols");
+
+  // The pane draws: the band stands down. The first draw asks for one redraw
+  // so a band drawn on the same pass (a reload starts this flag false while
+  // the client keeps the pane up) stands down too; a second draw asks nothing.
+  const asked = h.invalidated.length;
+  await h.render(paneEvent(200));
+  expect(h.invalidated.slice(asked)).toEqual(["ui.render"]);
+  await h.render(paneEvent(200));
+  expect(h.invalidated.length).toBe(asked + 1);
+  expect(textOf(await h.render(abovePromptEvent(200)))).toBe("");
+
+  // Narrow again while the pane counts as drawn: the client undraws it below
+  // the dock width without a close event, so the band draws by width alone
+  // (M-DRAWN-ONLY).
+  expect(textOf(await h.render(abovePromptEvent(100)))).toContain("Storybloq:");
+
+  // The person closes the pane: there is nothing else drawn, so the band is
+  // back at any width.
+  await h.fire("ui.close", { requestId: "storybloq" });
+  expect(textOf(await h.render(abovePromptEvent(200)))).toContain("Storybloq:");
 });
 
 test("keeps the fallback line inside the terminal's width", async () => {
