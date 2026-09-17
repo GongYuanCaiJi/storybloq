@@ -693,6 +693,12 @@ async function ledgerPresent($: any): Promise<boolean> {
  */
 async function attach($: any): Promise<void> {
   if (!paneOpen) {
+    // T-519: the pane's background is the client's. As of the 2.1.273 d.ts,
+    // `PaneOpenArgs` is { id, title, focus, closeOnEscape, holdToasts, rows }
+    // and the `Pane` props are read-only placement data: nothing names a
+    // theme or background. `Box`/`Text` take `backgroundColor`, but that
+    // fixes a colour rather than following the terminal, so none is set and
+    // the tones below are chosen for the client's own pane background.
     await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
     paneOpen = true;
   }
