@@ -755,6 +755,44 @@ test("keeps the band until the pane has actually been drawn, whatever the width 
   expect(textOf(await h.render(abovePromptEvent(200)))).toContain("Storybloq:");
 });
 
+test("asks the client to place the parked pane again, once per crossing into the dock width (ISS-1235)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  expect(h.opened).toHaveLength(1);
+
+  // Narrow: the pane is parked, the band draws, nothing is re-asked.
+  await h.render(abovePromptEvent(80));
+  expect(h.opened).toHaveLength(1);
+
+  // Resized wide with the pane never drawn: the client judges the width at
+  // each open (2.1.274 d.ts, `$.ui.open`), so one repeat open re-places it.
+  // The band still draws on this pass; the pane's own render stands it down.
+  expect(textOf(await h.render(abovePromptEvent(200)))).toContain("Storybloq:");
+  expect(h.opened).toHaveLength(2);
+  expect(h.opened[1]).toEqual({ id: "storybloq", title: "Storybloq" });
+
+  // The same width again asks nothing more (M-REOPEN-EVERY-RENDER).
+  await h.render(abovePromptEvent(200));
+  await h.render(abovePromptEvent(220));
+  expect(h.opened).toHaveLength(2);
+
+  // Back below and across again: a fresh crossing, one more ask.
+  await h.render(abovePromptEvent(100));
+  await h.render(abovePromptEvent(160));
+  expect(h.opened).toHaveLength(3);
+
+  // Once the pane has drawn, a wide AbovePrompt render asks nothing.
+  await h.render(paneEvent(160));
+  await h.render(abovePromptEvent(160));
+  expect(h.opened).toHaveLength(3);
+
+  // The person closed it: the band is back, and no re-open is asked for a
+  // pane the person dismissed (M-REOPEN-AFTER-CLOSE).
+  await h.fire("ui.close", { requestId: "storybloq" });
+  expect(textOf(await h.render(abovePromptEvent(200)))).toContain("Storybloq:");
+  expect(h.opened).toHaveLength(3);
+});
+
 test("keeps the fallback line inside the terminal's width", async () => {
   const h = harness(newFixture());
   await started(h);

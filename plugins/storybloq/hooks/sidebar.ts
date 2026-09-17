@@ -312,6 +312,13 @@ let paneOpen = false;
  * down only once this is true.
  */
 let paneDrawn = false;
+/**
+ * A repeat `$.ui.open` was asked for this crossing into the dock width
+ * (ISS-1235). The client judges the width at each open, so one repeat open
+ * re-places a pane parked by a narrow start; one per crossing, never per
+ * render. Cleared below the dock width, when the pane draws, and on close.
+ */
+let reopenAsked = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
 /**
@@ -347,6 +354,7 @@ function forgetEverything(): void {
   sidebarEnabled = false;
   paneOpen = false;
   paneDrawn = false;
+  reopenAsked = false;
   sessionActive = false;
   contextPercent = null;
   autoCompactWindow = null;
@@ -1806,6 +1814,7 @@ export function registerSidebar(on: On, _options: Options): void {
         // parked (a reload runs `register` fresh, so this flag starts false
         // while the client keeps the pane up). One redraw and it stands down.
         paneDrawn = true;
+        reopenAsked = false;
         $.ui.invalidate("ui.render");
       }
       const elements = $.ui.resolve(e);
@@ -1847,6 +1856,27 @@ export function registerSidebar(on: On, _options: Options): void {
     if (e.component === "AbovePrompt" && sidebarEnabled) {
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       const narrow = columns < DOCK_COLUMNS;
+      if (narrow) {
+        reopenAsked = false;
+      } else if (paneOpen && !paneDrawn && !reopenAsked) {
+        // Wide, open, parked: ask the client to place it again. The width is
+        // judged at each open (ISS-1235), so this is what a narrow-then-wide
+        // session needs; once per crossing, and never for a pane the person
+        // closed (`paneOpen` is false then). A refusal costs nothing: the
+        // band below is still drawn on this pass.
+        // Not awaited: a render never waits on an open, and the hook is sync.
+        reopenAsked = true;
+        Promise.resolve()
+          .then(() => {
+            // Re-checked on the microtask: a close or a draw that landed in
+            // between makes the ask stale, and a closed pane must stay closed.
+            if (!paneOpen || paneDrawn) return;
+            return $.ui.open({ id: PANE_ID, title: PANE_TITLE });
+          })
+          .catch(() => {
+            // The band stands in; the next crossing asks again.
+          });
+      }
       if (columns > 0 && (narrow || !paneDrawn)) {
         const { Text } = $.ui.resolve(e);
         return Text({ dimColor: true, children: bandText(columns, narrow) });
@@ -1945,6 +1975,7 @@ export function registerSidebar(on: On, _options: Options): void {
     if (e.requestId === PANE_ID) {
       paneOpen = false;
       paneDrawn = false;
+      reopenAsked = false;
     }
     return next(e);
   });

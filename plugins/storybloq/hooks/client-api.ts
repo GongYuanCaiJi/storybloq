@@ -5,7 +5,7 @@
  * The plugin API is early access. Its own declaration file, written by the
  * client's `/plugin-types` command, opens with:
  *
- *   "Written by Claude Code 2.1.272."
+ *   "Written by Claude Code 2.1.274."
  *   "EARLY ACCESS: this surface may change between releases without notice."
  *
  * Every name below was read from that file on 2026-09-15 (spike T-506, note
@@ -19,7 +19,7 @@
  */
 
 /** The client version the names below were read from. */
-export const CLIENT_API_VERSION = "2.1.273";
+export const CLIENT_API_VERSION = "2.1.274";
 
 /** Events a Mod registers with `on("<name>", hook)`; the literal must match. */
 export const EVENTS = {
