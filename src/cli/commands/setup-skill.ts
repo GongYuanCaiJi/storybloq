@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { atomicWriteFollowingSymlink, resolveSymlinkTarget } from "../../core/symlink-write.js";
+import { assertNoSelfOverlap, atomicWriteFollowingSymlink, resolveSymlinkTarget } from "../../core/symlink-write.js";
 import { resolveBundledBridge, type BundledBridge } from "../../core/bridge-resolve.js";
 import { cmdExpands, shellArg, winShellArgv } from "../../core/shell-arg.js";
 import { readFileThreeValued } from "../../core/health/deps.js";
@@ -150,6 +150,7 @@ async function runCopyDir(srcDir: string, destDir: string, testHooks?: CopyDirTe
     }
   }
 
+  await assertNoSelfOverlap(srcDir, destDir, targetDir);
   return copyDirSwap(srcDir, targetDir, testHooks);
 }
 

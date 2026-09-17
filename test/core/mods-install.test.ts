@@ -18,7 +18,7 @@
  * M-NO-DEAD-RECLAIM, M-NO-STALE-TAKEOVER, M-RELEASE-ANY, M-RECLAIM-AUTO, M-RECLAIM-DEAD-AUTO, M-NO-PATH-TRACK, M-RECOPY-ALWAYS.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdir, writeFile, readFile, rm, chmod, readdir } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rm, chmod, readdir, lstat, symlink } from "node:fs/promises";
 import { existsSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -600,6 +600,73 @@ describe("installMods (T-507 D)", () => {
     expect(copyScan.find((row) => row.includes("mod.ts hooks:"))).toContain("ui.render");
     expect(copyScan.find((row) => row.includes("mod.ts calls:"))).toContain("$.fs.read (via drainChunk, readHeader)");
     expect(copyScan).toEqual(repoScan);
+  });
+});
+
+describe("installMods self-overlap guard (ISS-1234)", () => {
+  let tempDir: string;
+  let originalHome: string | undefined;
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `storybloq-mods-overlap-${randomUUID()}`);
+    await mkdir(tempDir, { recursive: true });
+    originalHome = process.env.HOME;
+    process.env.HOME = tempDir;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** A copy of the repository plugin under `root`, plus files a sync would delete. */
+  async function pluginSource(root: string): Promise<void> {
+    await mkdir(join(root, ".claude-plugin"), { recursive: true });
+    await mkdir(join(root, "hooks"), { recursive: true });
+    await writeFile(join(root, ".claude-plugin", "plugin.json"), await readFile(join(PLUGIN_SRC, ".claude-plugin", "plugin.json")));
+    for (const name of await readdir(join(PLUGIN_SRC, "hooks"))) {
+      await writeFile(join(root, "hooks", name), await readFile(join(PLUGIN_SRC, "hooks", name)));
+    }
+    await writeFile(join(root, "LICENSE"), "the licence a sync deletes\n", "utf-8");
+    await mkdir(join(root, "skills", "story"), { recursive: true });
+    await writeFile(join(root, "skills", "story", "SKILL.md"), "# the skill a sync deletes\n", "utf-8");
+  }
+
+  it("refuses when ~/.claude/skills/storybloq is a symlink to the plugin source, names both paths, and touches nothing (M-NO-OVERLAP-GUARD)", async () => {
+    if (process.platform === "win32") return;
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const source = join(tempDir, "workspace", "storybloq", "plugins", "storybloq");
+    await pluginSource(source);
+    await mkdir(dirname(modsDir()), { recursive: true });
+    await symlink(source, modsDir());
+    const before = await snapshotTree(source);
+
+    const attempt = installMods({ bin: "/elsewhere/storybloq", sourceDir: source });
+    await expect(attempt).rejects.toThrow(/refusing to install/);
+    await expect(installMods({ bin: "/elsewhere/storybloq", sourceDir: source })).rejects.toThrow(source);
+
+    expect((await lstat(modsDir())).isSymbolicLink()).toBe(true);
+    expect(await snapshotTree(source)).toEqual(before);
+    expect(existsSync(join(source, "hooks", ".storybloq-bin"))).toBe(false);
+    const siblings = (await readdir(dirname(modsDir()))).filter((n) => n !== "storybloq");
+    expect(siblings).toEqual([]);
+  });
+
+  it("still installs through a symlink to an unrelated directory (issue #12 stays), link intact", async () => {
+    if (process.platform === "win32") return;
+    const { installMods, modsDir } = await import("../../src/core/mods-install.js");
+    const real = join(tempDir, "dotfiles", "storybloq-mods");
+    await mkdir(real, { recursive: true });
+    await mkdir(dirname(modsDir()), { recursive: true });
+    await symlink(real, modsDir());
+
+    const result = await installMods({ bin: "/elsewhere/storybloq" });
+
+    expect(result.dir).toBe(modsDir());
+    expect((await lstat(modsDir())).isSymbolicLink()).toBe(true);
+    expect(await readFile(join(real, "hooks", "install.ts"), "utf-8")).toContain('return "/elsewhere/storybloq";');
+    expect(existsSync(join(real, "hooks", "mod.ts"))).toBe(true);
   });
 });
 
