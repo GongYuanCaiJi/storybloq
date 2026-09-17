@@ -279,3 +279,5 @@ Turn checks off in `.story/config.json`. Omitted keys default to on; a non-boole
 Setting `enabled` to `false` skips every check with reason `disabled in .story/config.json`. There is also a global off switch in `~/.claude/storybloq/config.json` (`healthCheck.enabled = false`) for machines where the command should stay quiet everywhere.
 
 When the skill runs `/story health`: relay each `advise` message and its fix verbatim, list the `skip` reasons in one line, and then stop. Do not offer to make the changes; they are the user's files.
+
+`/story` priming runs this once per session, relaying only `advise` lines; the registry lookup is cached six hours (ISS-1237).
