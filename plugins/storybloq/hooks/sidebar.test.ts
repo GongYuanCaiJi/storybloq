@@ -148,7 +148,10 @@ function harness(fixture: Fixture): Harness {
     failNextInvalidate: false,
     failTimer: false,
     failUsage: false,
+    failSettings: false,
     usage: { context: { window: 200_000, tokens: 40_000 }, rateLimits: [] } as any,
+    /** What `$.settings.read()` answers: the merged settings, empty by default. */
+    settings: {} as Record<string, unknown>,
   };
   const counters = { timers: 0, storeSets: 0 };
 
@@ -218,6 +221,12 @@ function harness(fixture: Fixture): Harness {
         return state.usage;
       },
     },
+    settings: {
+      read: async () => {
+        if (state.failSettings) throw new Error("the host refused settings.read");
+        return state.settings;
+      },
+    },
     store: {
       get: async (key: string): Promise<unknown> => stored[key],
       set: async (key: string, value: unknown): Promise<void> => {
@@ -272,6 +281,18 @@ function harness(fixture: Fixture): Harness {
     },
     set usage(value: any) {
       state.usage = value;
+    },
+    get settings() {
+      return state.settings;
+    },
+    set settings(value: Record<string, unknown>) {
+      state.settings = value;
+    },
+    get failSettings() {
+      return state.failSettings;
+    },
+    set failSettings(value: boolean) {
+      state.failSettings = value;
     },
     get reads() {
       return state.reads;
@@ -842,7 +863,7 @@ test("shows the context pressure once a turn has reported it", async () => {
   const h = harness(newFixture());
   await started(h);
   await h.fire("session.compact", {});
-  expect(textOf(await h.render(paneEvent()))).toContain("context 20%");
+  expect(textOf(await h.render(paneEvent()))).toContain("context 22%");
 });
 
 test("keeps the ledger cache in the store, so the next session starts warm", async () => {
@@ -1050,19 +1071,96 @@ test("works out the context fill from the fields the usage actually carries", as
   // `percent` only once the window has had an API response, so the header
   // stayed empty against a read that wanted `percent`. M-PERCENT-ONLY puts
   // that read back and this goes red.
+  // 50_000 over the compaction ceiling of 200_000 (0.925 * 200_000 = 185_000)
+  // is 27.03, the figure the pressure banner would state; over the raw window
+  // it would read 25.
   h.usage = { context: { window: 200_000, tokens: 50_000 }, rateLimits: [] };
   await h.fire("turn.complete", {});
-  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 25%");
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 27%");
 });
 
-test("prefers the percent the engine states over its own arithmetic", async () => {
+test("measures the tokens itself even when the engine states a percent, since the engine's is over the raw window (ISS-1236)", async () => {
   const h = harness(newFixture());
   await started(h);
-  // The engine's own figure counts the window the way the status line does,
-  // so where it exists it wins.
-  h.usage = { context: { window: 200_000, tokens: 50_000, percent: 73 }, rateLimits: [] };
+  // `percent` is tokens over the model's window, the 1M figure that made the
+  // pane read 22% while the banner said 28%. Tokens present, the pane does its
+  // own arithmetic against the compaction ceiling. M-PERCENT-WINS puts the
+  // engine's figure back and this goes red.
+  h.usage = { context: { window: 200_000, tokens: 50_000, percent: 25 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 27%");
+});
+
+test("falls back to the engine's percent only when it has no token count", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.usage = { context: { window: 200_000, percent: 73 }, rateLimits: [] };
   await h.fire("turn.complete", {});
   expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 73%");
+});
+
+test("divides by the autoCompactWindow the settings carry, times the compaction ceiling, so it matches the pressure banner (ISS-1236)", async () => {
+  const h = harness(newFixture());
+  // The owner's screen: a 1M model window, 226_269 tokens, and
+  // `autoCompactWindow: 800000` in settings. The banner reads
+  // 226_269 / (0.925 * 800_000) = 30.6; the pane read 226_269 / 1_000_000 = 23.
+  // M-RAW-WINDOW ignores the setting and draws 24 (over 925_000).
+  h.settings = { autoCompactWindow: 800_000 };
+  await started(h);
+  h.usage = { context: { window: 1_000_000, tokens: 226_269 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 31%");
+
+  // A setting that changes mid-session is picked up by the next turn, the
+  // cadence the header's other figures already have.
+  h.settings = {};
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 24%");
+});
+
+test("reads the settings once per attach and per turn, never per render (ISS-1236)", async () => {
+  const h = harness(newFixture());
+  let reads = 0;
+  h.settings = new Proxy({} as Record<string, unknown>, {
+    get(target, key) {
+      reads += 1;
+      return Reflect.get(target, key);
+    },
+  });
+  await started(h);
+  const afterStart = reads;
+  expect(afterStart).toBeGreaterThan(0);
+  await h.render(paneEvent());
+  await h.render(paneEvent());
+  await h.render(paneEvent());
+  expect(reads).toBe(afterStart);
+});
+
+test("a refused or malformed settings read costs the window figure, never the pane (ISS-1236)", async () => {
+  const h = harness(newFixture());
+  h.failSettings = true;
+  await started(h);
+  h.usage = { context: { window: 200_000, tokens: 50_000 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  let footer = textOf(nodeByKey(await h.render(paneEvent()), "footer"));
+  expect(footer).toContain("context 27%");
+
+  // Out of the CLI reader's bounds, or not a number: the model window stands.
+  h.failSettings = false;
+  for (const bad of ["800000", 12.5, 1_000, 20_000_000, -1, null]) {
+    h.settings = { autoCompactWindow: bad };
+    await h.fire("turn.complete", {});
+    footer = textOf(nodeByKey(await h.render(paneEvent()), "footer"));
+    expect(footer, `autoCompactWindow ${String(bad)}`).toContain("context 27%");
+  }
+});
+
+test("caps the context figure at 100 once the window is past its ceiling", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  h.usage = { context: { window: 200_000, tokens: 199_000 }, rateLimits: [] };
+  await h.fire("turn.complete", {});
+  expect(textOf(nodeByKey(await h.render(paneEvent()), "footer"))).toContain("context 100%");
 });
 
 test("says nothing about context on a window that has had no response yet", async () => {
@@ -1640,7 +1738,7 @@ test("shortens the severity labels when the row is too narrow for them", async (
   const text = textOf(nodeByKey(narrow, "issues"));
   expect(text).toContain("1 crit");
   expect(text).not.toContain("critical");
-  expect(textOf(nodeByKey(narrow, "context"))).toBe("context 20%");
+  expect(textOf(nodeByKey(narrow, "context"))).toBe("context 22%");
 });
 
 test("keeps the issues line to one row when the counts outgrow the room", async () => {
@@ -1659,7 +1757,7 @@ test("keeps the issues line to one row when the counts outgrow the room", async 
   // One row, not two. M-FOOTER-WRAPS drops the truncation and the row wraps,
   // which spends a row the budget counted for the board.
   const tree = await h.render(paneEvent(40, 30));
-  expect(textOf(nodeByKey(tree, "context"))).toBe("context 20%");
+  expect(textOf(nodeByKey(tree, "context"))).toBe("context 22%");
   expect(paneHeight(nodeByKey(tree, "footer"), 40)).toBe(1);
   // And the numbers are still there to be cut, not quietly dropped first.
   expect(textOf(nodeByKey(tree, "issues"))).toContain("101 crit");
@@ -1678,7 +1776,7 @@ test("keeps the header clear of the cell the engine draws its close mark in", as
   // it. The foot of the pane needs none: the mark is a top-right thing.
   expect(nodeByKey(tree, "header").props.marginRight).toBeGreaterThanOrEqual(3);
   expect(nodeByKey(tree, "footer").props.marginRight).toBeUndefined();
-  expect(textOf(nodeByKey(tree, "footer"))).toContain("context 20%");
+  expect(textOf(nodeByKey(tree, "footer"))).toContain("context 22%");
 });
 
 test("moves a ticket on the board during the turn that moved it", async () => {

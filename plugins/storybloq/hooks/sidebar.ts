@@ -314,6 +314,12 @@ let paneOpen = false;
 let paneDrawn = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
+/**
+ * `autoCompactWindow` from the merged settings, or null when none is set or
+ * the read was refused (ISS-1236). Read at attach and refreshed per turn,
+ * never per render: `ui.render` runs on every resize and invalidate.
+ */
+let autoCompactWindow: number | null = null;
 let warm = false;
 let uiAvailable = true;
 /** The project has no `.story/` at all, so the Mod draws nothing anywhere. */
@@ -343,6 +349,7 @@ function forgetEverything(): void {
   paneDrawn = false;
   sessionActive = false;
   contextPercent = null;
+  autoCompactWindow = null;
   warm = false;
   uiAvailable = true;
   noLedger = false;
@@ -915,16 +922,60 @@ async function drainChunk($: any): Promise<void> {
  * "from the first API response of the live window": a fresh session or one
  * just compacted has neither until its next response. Live, the owner's
  * header stayed empty because this read `percent` alone, so the percent is
- * computed from `tokens` over `window` whenever the engine did not state it,
- * and null (draw nothing) only when there is no reading at all.
+ * computed from `tokens` whenever they exist, the engine's `percent` stands
+ * in only when they do not, and null (draw nothing) only when there is no
+ * reading at all. `compactWindow` is the settings' auto-compact window, or
+ * null for the model's own.
  */
-function contextFill(usage: any): number | null {
+function contextFill(usage: any, compactWindow: number | null): number | null {
   const context = usage?.context;
-  if (typeof context?.percent === "number") return Math.round(context.percent);
   const tokens = context?.tokens;
-  const window = context?.window;
-  if (typeof tokens !== "number" || typeof window !== "number" || window <= 0) return null;
-  return Math.round((tokens / window) * 100);
+  const window = typeof compactWindow === "number" ? compactWindow : context?.window;
+  if (typeof tokens === "number" && typeof window === "number" && window > 0) {
+    // ISS-1236: the same arithmetic as the pressure banner (session intel):
+    // tokens over the compaction ceiling of the auto-compact window, not over
+    // the model's raw window. The engine's `percent` is the raw figure, which
+    // is why the pane said 22% while the banner said 28% on the same screen.
+    return Math.min(100, Math.round((tokens / (COMPACT_CEILING * window)) * 100));
+  }
+  if (typeof context?.percent === "number") return Math.round(context.percent);
+  return null;
+}
+
+/**
+ * The fraction of the auto-compact window at which compaction runs, the
+ * ceiling the pressure banner measures against
+ * (`src/core/session-intel/config.ts`, `ceilingFraction`). The plugin has no
+ * import path to that module, so the figure is restated here; a test pins
+ * the arithmetic against the banner's numbers.
+ */
+const COMPACT_CEILING = 0.925;
+
+/**
+ * The bounds the CLI's settings reader accepts for `autoCompactWindow`
+ * (`src/core/claude-settings.ts`, `AUTO_COMPACT_WINDOW_BOUNDS`); a figure
+ * outside them is treated as unset there, and so here.
+ */
+const AUTO_COMPACT_WINDOW_MIN = 10_000;
+const AUTO_COMPACT_WINDOW_MAX = 10_000_000;
+
+/**
+ * `autoCompactWindow` from the merged settings, or null: unset, out of the
+ * CLI reader's bounds, not a safe integer, or the host refused the read. The
+ * merge is the engine's own (user, project, local, flag, policy), the same
+ * layers the CLI reader walks. One call at attach and one per turn; never
+ * from `ui.render`.
+ */
+async function readAutoCompactWindow($: any): Promise<number | null> {
+  try {
+    const settings = await $.settings.read();
+    const value = settings?.autoCompactWindow;
+    if (!Number.isSafeInteger(value)) return null;
+    if (value < AUTO_COMPACT_WINDOW_MIN || value > AUTO_COMPACT_WINDOW_MAX) return null;
+    return value;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -937,9 +988,12 @@ function contextFill(usage: any): number | null {
  * for all three call sites so the shape cannot drift between them.
  */
 async function readContextFill($: any): Promise<number | null> {
+  // The window setting rides along on the same cadence (attach, turn,
+  // compact) so the two figures can never disagree between refreshes.
+  autoCompactWindow = await readAutoCompactWindow($);
   try {
     const usage = await $.session.usage();
-    return contextFill(usage);
+    return contextFill(usage, autoCompactWindow);
   } catch {
     return null;
   }
