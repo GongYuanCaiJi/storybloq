@@ -3294,6 +3294,7 @@ export function formatReference(
   lines.push("1. `npm install -g @storybloq/storybloq@latest` - install CLI");
   lines.push("2. `storybloq setup --client all` - install Storybloq skill, MCP, and hooks for Claude Code and Codex");
   lines.push("3. `storybloq init --name my-project` - initialize .story/ in your project");
+  lines.push("4. `storybloq update` - later: install the newest version and re-run setup in one step, then restart the client");
   lines.push("");
   lines.push("## Troubleshooting");
   lines.push("");

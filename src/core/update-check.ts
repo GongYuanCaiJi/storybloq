@@ -320,7 +320,7 @@ export function formatUpdateBanner(info: UpdateInfo | null): string {
   if (!info || !info.updateAvailable) return "";
   return (
     `\nstorybloq v${info.latestVersion} is available (you have v${info.currentVersion}).\n` +
-    `Update: npm install -g @storybloq/storybloq@latest\n`
+    `Update: storybloq update\n`
   );
 }
 

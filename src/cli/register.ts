@@ -4857,6 +4857,24 @@ export function registerCodexReviewCommand(yargs: Argv): Argv {
 // setup
 // ---------------------------------------------------------------------------
 
+export function registerUpdateCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "update",
+    "Install the newest storybloq, re-run setup for your AI clients, and say when to restart",
+    (y) =>
+      y.option("client", {
+        type: "string",
+        default: "all",
+        choices: ["claude", "codex", "all"] as const,
+        description: "Client to re-run setup for after the install",
+      }),
+    async (argv) => {
+      const { handleUpdate } = await import("./commands/update.js");
+      await handleUpdate({ client: argv.client as SetupClient });
+    },
+  );
+}
+
 export function registerSetupCommand(yargs: Argv): Argv {
   return yargs.command(
     "setup",

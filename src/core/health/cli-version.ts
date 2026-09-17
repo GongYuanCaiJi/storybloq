@@ -86,7 +86,7 @@ export async function checkCliVersion(
   if (cmp < 0) {
     return adviseCheck(
       ID,
-      `storybloq ${installed} is installed; ${latest} is published. Update with \`npm install -g @storybloq/storybloq@latest\`, then run \`storybloq setup\`.`,
+      `storybloq ${installed} is installed; ${latest} is published. Update with \`storybloq update\` (installs it and re-runs setup).`,
       detail,
     );
   }

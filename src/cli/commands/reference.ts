@@ -397,6 +397,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--skip-hooks"],
   },
   {
+    name: "update",
+    description: "Install the newest storybloq into the running Node's prefix, re-run setup for your AI clients, and say when to restart (on Windows it prints the two manual steps instead)",
+    usage: "storybloq update [--client <claude|codex|all>]",
+    flags: ["--client"],
+  },
+  {
     name: "reconcile",
     description: "Detect and fix duplicate displayIds across all entity types",
     usage: "storybloq reconcile [--dry-run] [--ci] [--rebalance-ranks] [--format <json|md>]",

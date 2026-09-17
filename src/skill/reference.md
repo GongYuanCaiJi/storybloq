@@ -72,6 +72,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **session intel** (--session-id?, --transcript?, --caller-model?, --full?, --client-task-id?, --format?) - Context usage, expected auto-compaction point with provenance, pressure state (ok/advisory/imperative/compact-needed), session facts. Works without .story/. --transcript must be ~/.claude/projects/<project>/<sessionId>.jsonl (a regular file, not a symlink); a refusal names the rule that failed
 - **setup** (--client?, --skip-hooks?, --skip-skill?) - Install Storybloq skill, MCP, and hooks for Claude, Codex, or both
 - **setup-skill** (--skip-hooks?) - Compatibility alias for `storybloq setup --client claude`
+- **update** (--client?) - Install the newest storybloq into the running Node's prefix, re-run setup for your AI clients, and say when to restart (on Windows it prints the two manual steps instead)
 - **reconcile** (--dry-run?, --ci?, --rebalance-ranks?, --format?) - Detect and fix duplicate displayIds across all entity types
 - **conflicts list** (--format?) - List all items with unresolved merge conflicts
 - **conflicts show <id>** (--format?) - Show field-level conflict detail for an item
@@ -326,6 +327,7 @@ Coordinate an owner-paired manager and worker with a proved return route and dur
 1. `npm install -g @storybloq/storybloq@latest` - install CLI
 2. `storybloq setup --client all` - install Storybloq skill, MCP, and hooks for Claude Code and Codex
 3. `storybloq init --name my-project` - initialize .story/ in your project
+4. `storybloq update` - later: install the newest version and re-run setup in one step, then restart the client
 
 ## Troubleshooting
 
