@@ -31,6 +31,8 @@ export const EVENTS = {
   toolCall: "tool.call",
   uiRender: "ui.render",
   uiClose: "ui.close",
+  /** The `theme` row changing, so pane text keeps its contrast (ISS-1238). */
+  configSet: "config.set",
 } as const;
 
 export type EventKey = keyof typeof EVENTS;
@@ -43,6 +45,8 @@ export type EventKey = keyof typeof EVENTS;
 export const CALLS = {
   sidebar: [
     "$.clock.every",
+    /** The client's `theme` row, for pane text contrast (ISS-1238). */
+    "$.config.list",
     "$.fs.exists",
     "$.fs.list",
     "$.fs.read",

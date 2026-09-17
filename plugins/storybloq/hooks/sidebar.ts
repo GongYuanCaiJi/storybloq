@@ -319,6 +319,16 @@ let paneDrawn = false;
  * render. Cleared below the dock width, when the pane draws, and on close.
  */
 let reopenAsked = false;
+/**
+ * The client's theme is light (ISS-1238). The pane background is painted by
+ * the client from ITS theme, while a Text with no colour draws in the
+ * TERMINAL's default foreground: on a light terminal with a dark client theme
+ * that is dark on dark. So every pane Text gets an explicit colour for the
+ * client's theme. Read at attach from `$.config.list()`, followed through
+ * `config.set`; the dark default is the safe one (the pane was dark in every
+ * screenshot so far).
+ */
+let themeLight = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
 /**
@@ -355,6 +365,7 @@ function forgetEverything(): void {
   paneOpen = false;
   paneDrawn = false;
   reopenAsked = false;
+  themeLight = false;
   sessionActive = false;
   contextPercent = null;
   autoCompactWindow = null;
@@ -715,6 +726,7 @@ async function attach($: any): Promise<void> {
   // response. Reading them only on `turn.complete` is why the owner's header
   // was blank after a reload, with the fill only appearing a turn later.
   contextPercent = await readContextFill($);
+  themeLight = await readThemeLight($);
   await readHeader($);
   await loadCache($);
   // The idle poll's baseline (T-517). Taken before the timer starts and before
@@ -980,6 +992,35 @@ const AUTO_COMPACT_WINDOW_MAX = 10_000_000;
  * layers the CLI reader walks. One call at attach and one per turn; never
  * from `ui.render`.
  */
+/** Whether a theme name is a light one: `light`, `light-daltonized`, `light-ansi`. */
+function isLightTheme(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith("light");
+}
+
+/**
+ * The client's `theme` row, as `$.config.list()` answers it (ISS-1238). A
+ * refused or unexpected answer keeps the dark default, never the board.
+ */
+async function readThemeLight($: any): Promise<boolean> {
+  try {
+    const rows = await $.config.list();
+    const row = Array.isArray(rows) ? rows.find((r: any) => r?.key === "theme") : undefined;
+    return isLightTheme(row?.value);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A pane Text with an explicit colour for the client's theme (ISS-1238):
+ * white on a dark theme, black on a light one, unless the props already
+ * carry a tone (`yellow`, `cyan`). Never the terminal's default foreground,
+ * which does not know what the client painted behind it.
+ */
+function paneText(Text: (props: Record<string, unknown>) => unknown, props: Record<string, unknown>): unknown {
+  return Text({ color: themeLight ? "black" : "white", ...props });
+}
+
 async function readAutoCompactWindow($: any): Promise<number | null> {
   try {
     const settings = await $.settings.read();
@@ -1528,13 +1569,13 @@ function cardRow(elements: any, card: SidebarBoardCard, width: number): unknown 
   const idProps: Record<string, unknown> = { dimColor: true, children: truncate(card.id, width) };
   const tone = card.kind === "issue" && card.severity !== null ? SEVERITY_TONES[card.severity] : undefined;
   if (tone !== undefined) idProps["color"] = tone;
-  return elements.Text({
+  return paneText(elements.Text, {
     wrap: "truncate",
     children: [
       // The id whole, never cut: a half id is worse than no id. The title
       // takes what is left, and the eye runs down the titles.
-      elements.Text(idProps),
-      elements.Text({ children: title === "" ? "" : ` ${title}` }),
+      paneText(elements.Text, idProps),
+      paneText(elements.Text, { children: title === "" ? "" : ` ${title}` }),
     ],
   });
 }
@@ -1558,12 +1599,12 @@ function bodyRowsOf(
 ): unknown[] {
   const rows: unknown[] = [];
   if (cards.length === 0) {
-    rows.push(elements.Text({ dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
+    rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
   } else {
     for (const card of cards.slice(0, shown)) rows.push(cardRow(elements, card, width));
-    if (cards.length > shown) rows.push(elements.Text({ dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
+    if (cards.length > shown) rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
   }
-  while (rows.length < height) rows.push(elements.Text({ children: " " }));
+  while (rows.length < height) rows.push(paneText(elements.Text, { children: " " }));
   return rows;
 }
 
@@ -1605,13 +1646,13 @@ function boardColumn(
     width,
     overflow: "hidden",
     children: [
-      elements.Text({
+      paneText(elements.Text, {
         key: `${key}-heading`,
         ...style,
         wrap: "truncate",
         children: headingText(heading, cards.length, textWidth),
       }),
-      elements.Text({ key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
+      paneText(elements.Text, { key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
       ...bodyRowsOf(elements, cards, textWidth, shown, height),
     ],
   });
@@ -1625,7 +1666,7 @@ function compactBoard(elements: any, board: any, width: number): unknown {
     style: Readonly<Record<string, unknown>>,
     cards: readonly SidebarBoardCard[],
   ): unknown =>
-    elements.Text({ key, ...style, wrap: "truncate", children: headingText(label, cards.length, width) });
+    paneText(elements.Text, { key, ...style, wrap: "truncate", children: headingText(label, cards.length, width) });
   return elements.Box({
     key: "board",
     flexDirection: "column",
@@ -1705,7 +1746,7 @@ function headerNode(elements: any): unknown {
     flexDirection: "row",
     alignItems: "center",
     marginRight: PANE_EDGE_CLEARANCE,
-    children: [elements.Text({ bold: true, children: "Storybloq" })],
+    children: [paneText(elements.Text, { bold: true, children: "Storybloq" })],
   });
 }
 
@@ -1749,9 +1790,9 @@ function footerNode(
           flexDirection: "row",
           width: Math.min(room, cellWidth(NO_ISSUES)),
           overflow: "hidden",
-          children: [elements.Text({ dimColor: true, wrap: "truncate", children: NO_ISSUES })],
+          children: [paneText(elements.Text, { dimColor: true, wrap: "truncate", children: NO_ISSUES })],
         }),
-        elements.Text({ key: "context", wrap: "truncate", children: contextText }),
+        paneText(elements.Text, { key: "context", wrap: "truncate", children: contextText }),
       ],
     });
   }
@@ -1760,7 +1801,7 @@ function footerNode(
   const abbreviated = cellWidth(long) > room;
 
   const parts: unknown[] = [];
-  if (!abbreviated) parts.push(elements.Text({ children: "issues: " }));
+  if (!abbreviated) parts.push(paneText(elements.Text, { children: "issues: " }));
   SEVERITY_ORDER.forEach((severity, index) => {
     const count = counts[index] ?? 0;
     const props: Record<string, unknown> = {
@@ -1769,9 +1810,9 @@ function footerNode(
     if (count === 0) props["dimColor"] = true;
     else if (severity.tone !== null) props["color"] = severity.tone;
     if (index > 0) {
-      parts.push(elements.Text({ dimColor: true, children: abbreviated ? " " : ", " }));
+      parts.push(paneText(elements.Text, { dimColor: true, children: abbreviated ? " " : ", " }));
     }
-    parts.push(elements.Text(props));
+    parts.push(paneText(elements.Text, props));
   });
 
   return elements.Box({
@@ -1791,9 +1832,9 @@ function footerNode(
         flexDirection: "row",
         width: Math.min(room, cellWidth(abbreviated ? short : long)),
         overflow: "hidden",
-        children: [elements.Text({ wrap: "truncate", children: parts })],
+        children: [paneText(elements.Text, { wrap: "truncate", children: parts })],
       }),
-      elements.Text({ key: "context", wrap: "truncate", children: contextText }),
+      paneText(elements.Text, { key: "context", wrap: "truncate", children: contextText }),
     ],
   });
 }
@@ -1827,20 +1868,20 @@ export function registerSidebar(on: On, _options: Options): void {
       const stacked = isStacked(width);
       const budget = rowBudget(e, stacked);
       const rows: unknown[] = [headerNode(elements)];
-      if (budget.gaps) rows.push(Text({ key: "header-gap", children: " " }));
+      if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
-        rows.push(Text({ children: truncate(summaryLine(false), width) }));
+        rows.push(paneText(Text, { children: truncate(summaryLine(false), width) }));
       } else {
         rows.push(
           budget.compact
             ? compactBoard(elements, projection.board, width)
             : boardNode(elements, projection.board, width, stacked, budget.body),
         );
-        if (budget.gaps) rows.push(Text({ key: "issues-gap", children: " " }));
+        if (budget.gaps) rows.push(paneText(Text, { key: "issues-gap", children: " " }));
         rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
         if (sessionActive) {
-          rows.push(Text({ dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+          rows.push(paneText(Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
         }
       }
       return Box({ flexDirection: "column", children: rows });
@@ -1976,6 +2017,20 @@ export function registerSidebar(on: On, _options: Options): void {
       paneOpen = false;
       paneDrawn = false;
       reopenAsked = false;
+    }
+    return next(e);
+  });
+
+  // The person switches theme in /config: the pane's text follows on the next
+  // draw (ISS-1238). The event fires before the write, so the new value is
+  // `e.value`, and any other row is not ours.
+  on("config.set", ($: any, e: any, next: (e: any) => unknown) => {
+    if (e?.key === "theme" && uiAvailable && sidebarEnabled) {
+      const light = isLightTheme(e.value);
+      if (light !== themeLight) {
+        themeLight = light;
+        $.ui.invalidate("ui.render");
+      }
     }
     return next(e);
   });

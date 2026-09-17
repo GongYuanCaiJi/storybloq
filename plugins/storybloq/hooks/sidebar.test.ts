@@ -149,6 +149,9 @@ function harness(fixture: Fixture): Harness {
     failTimer: false,
     failUsage: false,
     failSettings: false,
+    failConfig: false,
+    /** The client's `theme` row as `$.config.list()` answers it (ISS-1238). */
+    theme: "dark" as string,
     usage: { context: { window: 200_000, tokens: 40_000 }, rateLimits: [] } as any,
     /** What `$.settings.read()` answers: the merged settings, empty by default. */
     settings: {} as Record<string, unknown>,
@@ -227,6 +230,15 @@ function harness(fixture: Fixture): Harness {
         return state.settings;
       },
     },
+    config: {
+      list: async () => {
+        if (state.failConfig) throw new Error("the host refused config.list");
+        return [
+          { key: "verbose", label: "Verbose", kind: "boolean", value: false },
+          { key: "theme", label: "Theme", kind: "choice", value: state.theme },
+        ];
+      },
+    },
     store: {
       get: async (key: string): Promise<unknown> => stored[key],
       set: async (key: string, value: unknown): Promise<void> => {
@@ -293,6 +305,18 @@ function harness(fixture: Fixture): Harness {
     },
     set failSettings(value: boolean) {
       state.failSettings = value;
+    },
+    get theme() {
+      return state.theme;
+    },
+    set theme(value: string) {
+      state.theme = value;
+    },
+    get failConfig() {
+      return state.failConfig;
+    },
+    set failConfig(value: boolean) {
+      state.failConfig = value;
     },
     get reads() {
       return state.reads;
@@ -791,6 +815,64 @@ test("asks the client to place the parked pane again, once per crossing into the
   await h.fire("ui.close", { requestId: "storybloq" });
   expect(textOf(await h.render(abovePromptEvent(200)))).toContain("Storybloq:");
   expect(h.opened).toHaveLength(3);
+});
+
+/** Every Text node of a tree, nested children included. */
+function allTexts(node: any, out: any[] = []): any[] {
+  if (Array.isArray(node)) {
+    for (const child of node) allTexts(child, out);
+    return out;
+  }
+  if (!node || typeof node !== "object") return out;
+  if (node.element === "Text") out.push(node);
+  allTexts(node.props?.children, out);
+  return out;
+}
+
+test("colours every pane text for the client's theme, not the terminal's default foreground (ISS-1238)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  // The Air: a light terminal whose default foreground is dark, and a dark
+  // client theme whose pane is dark. A Text with no colour vanished. On a
+  // dark theme every Text is white unless it sets its own tone; the tones
+  // stay. M-DEFAULT-FOREGROUND drops the fill and this goes red.
+  const texts = allTexts(await h.render(paneEvent()));
+  expect(texts.length).toBeGreaterThan(10);
+  for (const t of texts) expect(t.props.color, JSON.stringify(t.props)).toBeDefined();
+  expect(texts.some((t) => t.props.color === "yellow")).toBe(true);
+  expect(texts.filter((t) => t.props.color === "white").length).toBeGreaterThan(5);
+});
+
+test("a light client theme fills with black, by prefix (ISS-1238)", async () => {
+  const h = harness(newFixture());
+  h.theme = "light-daltonized";
+  await started(h);
+  const texts = allTexts(await h.render(paneEvent()));
+  expect(texts.filter((t) => t.props.color === "black").length).toBeGreaterThan(5);
+  expect(texts.some((t) => t.props.color === "white")).toBe(false);
+});
+
+test("follows a theme change through config.set with one redraw (ISS-1238)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  await h.render(paneEvent());
+  const asked = h.invalidated.length;
+  await h.fire("config.set", { key: "theme", value: "light", previous: "dark" });
+  expect(h.invalidated.slice(asked)).toEqual(["ui.render"]);
+  const texts = allTexts(await h.render(paneEvent()));
+  expect(texts.filter((t) => t.props.color === "black").length).toBeGreaterThan(5);
+  // Another row changing is not ours.
+  await h.fire("config.set", { key: "verbose", value: true, previous: false });
+  expect(h.invalidated.length).toBe(asked + 1);
+});
+
+test("a refused config read keeps the dark default and still draws the board (ISS-1238)", async () => {
+  const h = harness(newFixture());
+  h.failConfig = true;
+  await started(h);
+  const tree = await h.render(paneEvent());
+  expect(textOf(tree)).toContain("Storybloq");
+  expect(allTexts(tree).filter((t) => t.props.color === "white").length).toBeGreaterThan(5);
 });
 
 test("keeps the fallback line inside the terminal's width", async () => {
@@ -1386,11 +1468,11 @@ test("marks a severe issue on its id and nowhere else", async () => {
   const critical = rowFor("board-open", "ISS-011");
   expect(idOf(critical).props.color).toBe("red");
   expect(idOf(critical).props.dimColor).toBe(true);
-  expect(titleOf(critical).props.color).toBeUndefined();
+  expect(titleOf(critical).props.color).toBe("white");
   expect(idOf(rowFor("board-inprogress", "ISS-012")).props.color).toBe("yellow");
-  expect(idOf(rowFor("board-open", "ISS-010")).props.color).toBeUndefined();
-  expect(idOf(rowFor("board-done", "ISS-013")).props.color).toBeUndefined();
-  expect(idOf(rowFor("board-open", "T-010")).props.color).toBeUndefined();
+  expect(idOf(rowFor("board-open", "ISS-010")).props.color).toBe("white");
+  expect(idOf(rowFor("board-done", "ISS-013")).props.color).toBe("white");
+  expect(idOf(rowFor("board-open", "T-010")).props.color).toBe("white");
   expect(idOf(rowFor("board-open", "T-010")).props.dimColor).toBe(true);
 });
 
@@ -1518,10 +1600,10 @@ test("emphasises the column being worked, and lets the finished one recede", asy
   expect(heading("board-inprogress").bold).toBe(true);
   expect(heading("board-blocked").color).toBe("yellow");
   expect(heading("board-blocked").bold).toBeUndefined();
-  expect(heading("board-open").color).toBeUndefined();
+  expect(heading("board-open").color).toBe("white");
   expect(heading("board-open").bold).toBeUndefined();
   expect(heading("board-done").dimColor).toBe(true);
-  expect(heading("board-done").color).toBeUndefined();
+  expect(heading("board-done").color).toBe("white");
   expect(heading("board-done").bold).toBeUndefined();
 });
 
@@ -1758,10 +1840,10 @@ test("colours the severities that exist and dims the ones that do not", async ()
   expect(parts[1].props.color).toBe("yellow");
   expect(parts[2].props.children).toBe("0 medium");
   expect(parts[2].props.dimColor).toBe(true);
-  expect(parts[2].props.color).toBeUndefined();
+  expect(parts[2].props.color).toBe("white");
   expect(parts[3].props.dimColor).toBe(true);
   // The context fill stays neutral.
-  expect(nodeByKey(tree, "context").props.color).toBeUndefined();
+  expect(nodeByKey(tree, "context").props.color).toBe("white");
 });
 
 test("shortens the severity labels when the row is too narrow for them", async () => {
