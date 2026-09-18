@@ -2213,6 +2213,20 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
               sourceRefs,
               dedupeKey: generateReviewFilingKey(args.reviewId ?? "unknown", f),
               createdBy: `review-lenses:${f.contributingLenses.join(",")}`,
+              // ISS-1113: this path already KNOWS the answer -- it files from
+              // `result.preExistingFindings`, the set the classifier put on
+              // the pre-existing side of the introduced/pre-existing split --
+              // and was throwing it away at the create. Stamped at birth so
+              // `recommend` and the issue sweep can act on it without having
+              // to re-derive it from the "[pre-existing]" title prefix.
+              disposition: "pre_existing",
+              metadata: {
+                review: {
+                  origin: "pre-existing",
+                  reviewId: args.reviewId ?? "unknown",
+                  findingDisposition: "pre_existing",
+                },
+              },
             };
             let issueResult;
             try {
