@@ -140,6 +140,8 @@ import { handleRecommend } from "./commands/recommend.js";
 import { handleDispatchRecommend, handleDispatch } from "./commands/dispatch.js";
 import {
   handleNodeAdd,
+  handleNodeLink,
+  resolveOrchestratorArg,
   handleNodeRemove,
   handleNodeUpdate,
   handleNodeList,
@@ -4509,6 +4511,43 @@ export function registerNodeCommand(yargs: Argv): Argv {
                 process.exitCode = ExitCode.USER_ERROR;
                 return;
               }
+              const message = err instanceof Error ? err.message : String(err);
+              writeOutput(formatError("io_error", message, format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .command(
+          "link [orchestrator]",
+          "Record which orchestrator THIS project belongs to (run from the node)",
+          (y2) =>
+            addFormatOption(
+              y2.positional("orchestrator", {
+                type: "string",
+                describe: "Path to the orchestrator project (defaults to the recorded one, revalidated)",
+              }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const root = (
+              await import("../core/project-root-discovery.js")
+            ).discoverProjectRoot();
+            if (!root) {
+              writeOutput(formatError("not_found", "No .story/ project found.", format));
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            try {
+              const result = await handleNodeLink(
+                // T-520: resolved against the SHELL's directory, not the
+                // project root -- see `resolveOrchestratorArg`.
+                { orchestrator: resolveOrchestratorArg(argv.orchestrator, process.cwd()) },
+                format,
+                root,
+              );
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (err: unknown) {
               const message = err instanceof Error ? err.message : String(err);
               writeOutput(formatError("io_error", message, format));
               process.exitCode = ExitCode.USER_ERROR;

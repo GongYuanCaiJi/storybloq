@@ -11,6 +11,7 @@ import { NODE_NAME_REGEX } from "../models/federation-config.js";
 import { CROSS_NODE_REF_REGEX } from "../models/ticket.js";
 import { resolveNodeRoot, checkNodeWritePermission, readOrchestratorConfig, detectNodeCollision, ORCHESTRATOR_NODE_SENTINEL, type McpToolResult } from "./node-resolution.js";
 import { initProject } from "../core/init.js";
+import { writeOrchestratorPointer, type OrchestratorLinkResult } from "../core/orchestrator-link.js";
 import { handleNodeList } from "../cli/commands/node.js";
 import { resolveNodePath } from "../federation/resolver.js";
 import { TARGET_WORK_ID_REGEX, LENS_FINDING_DISPOSITIONS, OwnerGoneCandidateTakeoverSchema, OwnerGoneCandidateCancelSchema } from "../autonomous/session-types.js";
@@ -412,6 +413,25 @@ function boardLabelFor(pinnedRoot: string, nodeName?: string): string | undefine
   const config = readOrchestratorConfig(pinnedRoot);
   if (!config || config.type !== "orchestrator") return undefined;
   return nodeName ?? "the orchestrator board";
+}
+
+/**
+ * T-520: one line about the upward pointer, appended to whatever `node_init`
+ * was already going to say.
+ *
+ * A failure here is REPORTED, never fatal: the node's `.story/` was created,
+ * which is what the caller asked for, and a missing back-pointer degrades to
+ * the pre-T-520 behaviour (citations to the root board do not resolve) rather
+ * than to anything broken. Silently swallowing it would leave a federation
+ * wondering why upward citations never work.
+ */
+function orchestratorLinkNote(link: OrchestratorLinkResult): string {
+  if (link.ok) {
+    return link.unchanged
+      ? "\nOrchestrator back-pointer already recorded."
+      : "\nRecorded the orchestrator back-pointer, so citations to root rulings resolve from this node.";
+  }
+  return `\nCould not record the orchestrator back-pointer (${link.reason}). Run \`storybloq node link\` in the node to add it; citations to root rulings will not resolve until then.`;
 }
 
 /**
@@ -1644,7 +1664,8 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
             type: args.type ?? (typeof nodeConf.stack === "string" ? nodeConf.stack : undefined),
             language: args.language,
           });
-          return { content: [{ type: "text" as const, text: `Initialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}` }] };
+          const link = await writeOrchestratorPointer(resolved.absolutePath, pinnedRoot);
+          return { content: [{ type: "text" as const, text: `Initialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}${orchestratorLinkNote(link)}` }] };
         }
         return { content: [{ type: "text" as const, text: `Cannot resolve node "${args.node}": ${resolved.reason}` }], isError: true };
       }
@@ -1658,7 +1679,8 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         type: args.type ?? (typeof nodeConf.stack === "string" ? nodeConf.stack : undefined),
         language: args.language,
       });
-      return { content: [{ type: "text" as const, text: `Reinitialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}` }] };
+      const relink = await writeOrchestratorPointer(resolved.absolutePath, pinnedRoot);
+      return { content: [{ type: "text" as const, text: `Reinitialized .story/ in ${args.node} (${resolved.absolutePath}).\nCreated: ${result.created.join(", ")}${orchestratorLinkNote(relink)}` }] };
     } catch (err) {
       return { content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }], isError: true };
     }

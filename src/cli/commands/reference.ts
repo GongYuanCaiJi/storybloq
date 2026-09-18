@@ -565,6 +565,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--path", "--stack", "--role", "--kind", "--summary", "--depends-on", "--link", "--format"],
   },
   {
+    name: "node link",
+    description: "Record which orchestrator this project belongs to (run from the node)",
+    usage: "storybloq node link [orchestrator] [--format <json|md>]",
+    flags: ["--format"],
+  },
+  {
     name: "node update",
     description: "Update a federation node's metadata",
     usage: "storybloq node update <name> [--path <value>] [--stack <value>] [--role <value>] [--kind <value>] [--summary <value>] [--clear-depends-on] [--clear-links] [--depends-on <value>] [--link <value>] [--format <json|md>]",

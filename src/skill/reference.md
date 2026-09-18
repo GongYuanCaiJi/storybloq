@@ -100,6 +100,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **bus check** (--ship, --format?) - Run the critical Bus release gate
 - **bus export <thread-id>** (--format?) - Explicitly export one Bus transcript
 - **node add <name>** (--path, --stack?, --role?, --kind?, --summary?, --depends-on?, --link?, --format?) - Add a federation node to an orchestrator project
+- **node link [orchestrator]** (--format?) - Record which orchestrator this project belongs to (run from the node)
 - **node update <name>** (--path?, --stack?, --role?, --kind?, --summary?, --clear-depends-on?, --clear-links?, --depends-on?, --link?, --format?) - Update a federation node's metadata
 - **node remove <name>** (--force?, --prune?, --format?) - Remove a federation node from an orchestrator project
 - **arrangement coordinate <id>** (--json, --client-task-id?, --format?) - Record a pen-owned duet coordination operation
