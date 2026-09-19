@@ -50,7 +50,7 @@
   },
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
     "dev": "tsup --watch",
     "prepublishOnly": "npm run build && npm test"
