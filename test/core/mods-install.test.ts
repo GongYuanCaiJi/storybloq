@@ -837,8 +837,12 @@ describe("setup-skill wires the Mods copy (T-507 D)", () => {
     expect(out.join("")).toContain("Installed Mods (function hooks) at ~/.claude/skills/storybloq/");
     expect(err.join("")).not.toContain("Mods copy failed");
     // ISS-1235: setup says what width the board needs, once, unmeasured.
-    expect(out.join("")).toContain("144+ columns");
-    expect(MODS_WIDTH_NOTE).toContain("144+ columns");
+    expect(out.join("")).toContain("fullscreen renderer");
+    expect(MODS_WIDTH_NOTE).toContain("fullscreen renderer");
+    // ISS-1247: docking is the renderer's, not a column count; the 144 is the
+    // floor for the plugin's own open, and the first prompt lifts it (ISS-1251).
+    expect(MODS_WIDTH_NOTE).not.toContain("144+ columns wide");
+    expect(MODS_WIDTH_NOTE).toContain("until your first prompt");
 
     // T-516: the copy is inert unless the client is allowed to load hooks
     // modules, so the same run writes the settings switch and says it did.

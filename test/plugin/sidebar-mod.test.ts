@@ -426,3 +426,134 @@ describe("ISS-1239: the ledger root is pinned at session.start", () => {
     expect(h.fs.relativeLedgerCalls()).toEqual([]);
   });
 });
+
+/**
+ * ISS-1251 / ISS-1252, on the same harness. `plugins/storybloq/hooks/
+ * sidebar.test.ts` carries the same cases for `claude plugin test`, but that
+ * runner opens no pane at all on 2.1.278 (ISS-1253), so the gate is here.
+ */
+describe("ISS-1251: the person's prompt re-opens a pane parked by a narrow start", () => {
+  let h: Harness;
+  let opened: unknown[];
+  beforeEach(() => {
+    h = new Harness();
+    opened = [];
+    h.$.ui.open = async (pane: unknown) => void opened.push(pane);
+  });
+
+  function abovePrompt(columns: number): string {
+    const handler = h.handlers.get("ui.render")!;
+    const node = handler(h.$, { component: "AbovePrompt", requestId: "above-prompt", viewport: { columns, rows: 30 }, props: { bodyColumns: columns } }, () => null);
+    return JSON.stringify(node ?? "");
+  }
+  async function prompt(): Promise<unknown> {
+    const handler = h.handlers.get("prompt.submit")!;
+    const e = { text: "hello", turnId: "t1" };
+    const passed = await handler(h.$, e, (x: any) => x);
+    await Promise.resolve();
+    await Promise.resolve();
+    return passed === e;
+  }
+
+  it("asks once per prompt while the pane is open and undrawn, and passes the prompt on unchanged", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(opened).toHaveLength(1);
+
+    // Narrow: the band draws and says the board opens at the prompt.
+    expect(abovePrompt(120)).toContain("board opens at your next prompt");
+
+    expect(await prompt()).toBe(true);
+    expect(opened).toHaveLength(2);
+    expect(opened[1]).toEqual({ id: "storybloq", title: "Storybloq" });
+
+    // The client placed it: one Pane render marks it drawn, then a prompt asks nothing.
+    h.render();
+    expect(await prompt()).toBe(true);
+    expect(opened).toHaveLength(2);
+
+    // Drawn and narrow (the pane keeps its inline seat when the window
+    // shrinks): the band still carries the counts, without the hint.
+    const under = abovePrompt(120);
+    expect(under).toContain("Storybloq:");
+    expect(under).not.toContain("board opens at your next prompt");
+  });
+
+  it("never re-opens a pane the person closed", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    await h.fire("ui.close", { requestId: PANE_ID, origin: "person" });
+    expect(await prompt()).toBe(true);
+    expect(opened).toHaveLength(1);
+    // The band is still the sidebar at this width.
+    expect(abovePrompt(120)).toContain("Storybloq:");
+  });
+
+  it("asks nothing in a project with no ledger", async () => {
+    await h.start("/nowhere");
+    await h.settle();
+    expect(opened).toHaveLength(0);
+    expect(await prompt()).toBe(true);
+    expect(opened).toHaveLength(0);
+  });
+});
+
+describe("ISS-1252: below 60 body columns the pane draws the narrow board", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  function pane(bodyColumns: number): string {
+    const handler = h.handlers.get("ui.render")!;
+    const node = handler(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: bodyColumns + 4, rows: 20 }, props: { bodyColumns, placement: "inline", scroll: { offset: 0, bodyRows: 20 } } },
+      (e: any) => e,
+    );
+    return JSON.stringify(node);
+  }
+
+  it("shows In progress with three cards and a tail, the footer, and nothing of the four columns", async () => {
+    seedLedger(h.fs, "/repo");
+    for (const id of ["T-003", "T-004", "T-005", "T-006", "T-007"]) {
+      h.fs.addFile(`/repo/.story/tickets/${id}.json`, ticket(id, "inprogress"));
+    }
+    await h.start("/repo");
+    await h.settle();
+    const drawn = pane(45);
+    expect(drawn).toContain('"In progress 6"');
+    expect(drawn).toContain('"narrow-card-0"');
+    expect(drawn).toContain('"narrow-card-2"');
+    expect(drawn).not.toContain('"narrow-card-3"');
+    expect(drawn).toContain('"... 3 more"');
+    expect(drawn).toContain('"footer"');
+    for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done", "header-gap", "issues-gap"]) {
+      expect(drawn, key).not.toContain(`"${key}"`);
+    }
+    expect(drawn).not.toContain("Blocked");
+    expect(drawn).not.toContain("Done");
+  });
+
+  it("says none when nothing is in progress", async () => {
+    seedLedger(h.fs, "/repo");
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "open"));
+    await h.start("/repo");
+    await h.settle();
+    const drawn = pane(45);
+    expect(drawn).toContain('"In progress 0"');
+    expect(drawn).toContain('"narrow-none"');
+    expect(drawn).not.toContain('"narrow-tail"');
+  });
+
+  it("keeps the four-column board from 60 body columns up", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(pane(60)).toContain('"board-inprogress"');
+    expect(pane(60)).not.toContain('"narrow-heading"');
+    expect(pane(59)).toContain('"narrow-heading"');
+  });
+});

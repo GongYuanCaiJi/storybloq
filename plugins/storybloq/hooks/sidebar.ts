@@ -28,10 +28,17 @@
  * already running: four `$.fs.stat` calls every two seconds, and nothing
  * further unless one of those four mtimes moved.
  *
- * WIDTH. The client will not draw a pane a plugin opened on its own below 144
- * terminal columns, or below 110 once the person has asked for that id. Below
- * that the same numbers go out as one `AbovePrompt` line, which is how the
- * ticket's 80-column acceptance is met.
+ * WIDTH AND PLACEMENT (ISS-1247, ISS-1251; the 2.1.277 declarations). Two
+ * client rules, neither ours to set. WHERE a pane sits is the renderer's: the
+ * fullscreen (alternate-screen) layout docks it beside the transcript from 110
+ * columns, the main-screen layout seats it inline above the prompt at any
+ * width; `e.props.placement` says which on every Pane render. WHETHER it draws
+ * is judged at each `$.ui.open`: an open answering the person's input (a
+ * prompt they entered, a command, a press) is placed at any width; one the
+ * plugin makes on its own waits undrawn below 144 columns (110 once asked).
+ * The `session.start` open is the plugin's own, so a session started narrow
+ * shows the one `AbovePrompt` line instead, and the person's first prompt
+ * re-opens the pane (`prompt.submit`), which the client then places.
  *
  * EVENT NAMES AND `$`. Every event name is a string literal at its `on()` call
  * and every call is spelled `$.noun.member(...)` inline, because the client
@@ -57,15 +64,17 @@ const PANE_ID = "storybloq";
 const PANE_TITLE = "Storybloq";
 
 /**
- * The narrowest terminal the client will dock THIS pane into, from the API's
- * own rule: a plugin's unasked open "waits undrawn below 144 columns (110 once
- * asked)". Ours is always the unasked kind (nothing the person types opens
- * it), so 144 is the floor that applies; 110 was the wrong one and left
- * 110-143 columns with nothing drawn at all (ISS-1235). Below this the pane
- * is not on screen, so the one-line fallback draws instead, and says so.
+ * The narrowest terminal the client will place a plugin's OWN open into, from
+ * the API's rule: an unasked open "waits undrawn below 144 columns (110 once
+ * asked)". The `session.start` open is that kind, so below this a narrow
+ * start has no pane and the one-line fallback draws instead; the person's
+ * first prompt re-opens it as an open answering their input, which is placed
+ * at any width (ISS-1251). 110 was the wrong floor and left 110-143 columns
+ * with nothing drawn at all (ISS-1235). This is not the dock width: whether
+ * a placed pane docks or sits inline is the renderer's call (ISS-1247).
  */
 const DOCK_COLUMNS = 144;
-const BAND_HINT = `, board at ${DOCK_COLUMNS}+ cols`;
+const BAND_HINT = ", board opens at your next prompt";
 
 const STORE_KEY = "sidebar-ledger-cache-v1";
 /** Under the store's 4 MiB, with room for whatever else the plugin keeps. */
@@ -185,11 +194,14 @@ const PANE_EDGE_CLEARANCE = 3;
 
 /**
  * Narrower than this and four columns are shredded rather than laid out, so
- * the same four sections stack instead. Well below the 110 the client needs
- * to dock a pane at all, so this is the in-between case: a pane that exists
- * but is too narrow to be a board.
+ * the pane draws the narrow board instead (ISS-1252): the work in hand and
+ * the footer, nothing else. A placed pane keeps its seat when the window
+ * shrinks (inline on the main screen, docked in fullscreen), so this is the
+ * in-between case: a pane that exists but is too narrow to be a board.
  */
 const BOARD_MIN_COLUMNS = 60;
+/** Cards the narrow board shows before it says how many more there are. */
+const NARROW_BOARD_CARDS = 3;
 
 /**
  * How a ledger write is recognised at `tool.call`. The MCP names arrive
@@ -1801,6 +1813,46 @@ function compactBoard(elements: any, board: any, width: number): unknown {
 }
 
 /**
+ * The narrow board (ISS-1252): below BOARD_MIN_COLUMNS the four framed
+ * columns stacked into a strip the person had to scroll, past a cut-off Open
+ * card and an empty In progress frame. Owner: "in that view we can just show
+ * top 3 in progress and context pressure." So this draws the work in hand
+ * only: the In progress heading with its count, up to NARROW_BOARD_CARDS
+ * cards, a tail when more exist, or the dim word for none. Blocked, Open and
+ * Done keep their counts in the band's summary line under the pane. At most
+ * five rows, so the client's inline block shows it whole, without a budget.
+ */
+function narrowBoard(elements: any, board: any, width: number): unknown {
+  const cards = board.inProgress as readonly SidebarBoardCard[];
+  const rows: unknown[] = [
+    paneText(elements.Text, {
+      key: "narrow-heading",
+      ...COLUMN_STYLES.inProgress,
+      wrap: "truncate",
+      children: headingText("In progress", cards.length, width),
+    }),
+  ];
+  if (cards.length === 0) {
+    rows.push(paneText(elements.Text, { key: "narrow-none", dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
+  } else {
+    cards.slice(0, NARROW_BOARD_CARDS).forEach((card, index) => {
+      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(elements, card, width)] }));
+    });
+    if (cards.length > NARROW_BOARD_CARDS) {
+      rows.push(
+        paneText(elements.Text, {
+          key: "narrow-tail",
+          dimColor: true,
+          wrap: "truncate",
+          children: truncate(`... ${cards.length - NARROW_BOARD_CARDS} more`, width),
+        }),
+      );
+    }
+  }
+  return elements.Box({ key: "board", flexDirection: "column", children: rows });
+}
+
+/**
  * The four column widths.
  *
  * Stacked, every card takes the pane. Side by side, the width less the three
@@ -1987,12 +2039,21 @@ export function registerSidebar(on: On, _options: Options): void {
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
       const stacked = isStacked(width);
-      const budget = rowBudget(e, stacked);
+      // The narrow board is at most five rows and skips the blank rows, so it
+      // needs no budget: a pane too narrow for four columns is also the one
+      // seated inline on a small window, where every row is paid for.
+      const budget = stacked ? { body: 0, gaps: false, compact: false } : rowBudget(e, false);
       const rows: unknown[] = [headerNode(elements)];
       if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
         rows.push(paneText(Text, { children: truncate(summaryLine(false), width) }));
+      } else if (stacked) {
+        rows.push(narrowBoard(elements, projection.board, width));
+        rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
+        if (sessionActive) {
+          rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+        }
       } else {
         rows.push(
           budget.compact
@@ -2041,7 +2102,10 @@ export function registerSidebar(on: On, _options: Options): void {
       }
       if (columns > 0 && (narrow || !paneDrawn)) {
         const { Text } = $.ui.resolve(e);
-        return Text({ dimColor: true, children: bandText(columns, narrow) });
+        // The hint only while there is no board on screen: a placed pane keeps
+        // its seat when the window shrinks (inline, ISS-1247), and the band
+        // under it carries the counts the narrow board leaves out (ISS-1252).
+        return Text({ dimColor: true, children: bandText(columns, narrow && !paneDrawn) });
       }
     }
     return next(e);
@@ -2194,6 +2258,26 @@ export function registerSidebar(on: On, _options: Options): void {
         themeLight = light;
         $.ui.invalidate("ui.render");
       }
+    }
+    return next(e);
+  });
+
+  // The person entered a prompt (ISS-1251). An open made here answers their
+  // input, which the client places at any width, where the session.start open
+  // (the plugin's own) waits undrawn below 144 columns. So a pane that is
+  // open but has never drawn is asked for again, once per prompt, and the
+  // client seats it (inline on the main screen, docked in fullscreen). A pane
+  // the person closed stays closed (`paneOpen` is false then), and a drawn
+  // one is left alone. The prompt itself is never touched: `next(e)` runs
+  // with `e` as it came, and the open is not awaited, so a refused or failing
+  // open cannot delay the turn.
+  on("prompt.submit", ($: any, e: any, next: (e: any) => unknown) => {
+    if (uiAvailable && sidebarEnabled && !noLedger && paneOpen && !paneDrawn) {
+      Promise.resolve()
+        .then(() => $.ui.open({ id: PANE_ID, title: PANE_TITLE }))
+        .catch(() => {
+          // The band stands in; the next prompt asks again.
+        });
     }
     return next(e);
   });

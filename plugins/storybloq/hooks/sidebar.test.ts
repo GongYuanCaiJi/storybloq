@@ -736,7 +736,7 @@ test("draws the band up to 143 columns, and says what width the board needs (ISS
   // the numbers win (the issues count stays), from 108 both fit.
   expect(textOf(await h.render(abovePromptEvent(80)))).toContain("issues");
   for (const columns of [108, 110, 143]) {
-    expect(textOf(await h.render(abovePromptEvent(columns))), `${columns} columns`).toContain("board at 144+ cols");
+    expect(textOf(await h.render(abovePromptEvent(columns))), `${columns} columns`).toContain("board opens at your next prompt");
   }
 });
 
@@ -756,7 +756,7 @@ test("keeps the band until the pane has actually been drawn, whatever the width 
   // without the width hint (the terminal is wide enough now).
   const wide = textOf(await h.render(abovePromptEvent(200)));
   expect(wide).toContain("Storybloq:");
-  expect(wide).not.toContain("board at 144+ cols");
+  expect(wide).not.toContain("board opens at your next prompt");
 
   // The pane draws: the band stands down. The first draw asks for one redraw
   // so a band drawn on the same pass (a reload starts this flag false while
@@ -1526,10 +1526,10 @@ test("draws one bordered card per column, its heading ruled off from the body", 
   await started(h);
   const keys = ["board-blocked", "board-open", "board-inprogress", "board-done"];
 
-  // Below the stacking threshold each card takes the pane's whole width;
-  // above it the four share it, less the three gaps. The bound is the event's
-  // own bodyColumns, not a number fitted to one terminal.
-  for (const columns of [50, 110, 144, 158, 160]) {
+  // Side by side the four share the width, less the three gaps. The bound is
+  // the event's own bodyColumns, not a number fitted to one terminal; below
+  // 60 body columns the narrow board draws instead (ISS-1252, its own test).
+  for (const columns of [110, 144, 158, 160]) {
     const bodyColumns = columns - 4;
     const stacked = bodyColumns < 60;
     const tree = await h.render(paneEvent(columns, 30));
@@ -2481,4 +2481,106 @@ test("register turns the dashboard on when the option is explicitly true", () =>
 
 test("register stays silent when the option is explicitly false", () => {
   expect(registeredEvents({ sidebar: false })).toEqual([]);
+});
+
+// ISS-1251: a session started under 144 columns opened its pane at
+// session.start, which is the plugin's own open and waits undrawn; nothing
+// re-asked until the window crossed 144. The person's prompt is an open
+// "answering their input", placed at any width, so the Mod asks again there.
+test("re-opens the parked pane on the person's prompt, at any width (ISS-1251)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  expect(h.opened).toHaveLength(1);
+
+  // Narrow: parked, the band draws and says the board opens at the prompt.
+  const band = textOf(await h.render(abovePromptEvent(120)));
+  expect(band).toContain("Storybloq:");
+  expect(band).toContain("board opens at your next prompt");
+
+  // The prompt: one more open with the same id, the prompt passed on as it came.
+  const prompt = { text: "hello", turnId: "t1" };
+  expect(await h.fire("prompt.submit", prompt)).toBe(prompt);
+  expect(h.opened).toHaveLength(2);
+  expect(h.opened[1]).toEqual({ id: "storybloq", title: "Storybloq" });
+
+  // The client places it and it draws. At this width the band stays under
+  // the pane with the counts (a placed pane keeps its inline seat), but
+  // without the hint; a further prompt asks nothing (M-REOPEN-EVERY-PROMPT).
+  await h.render(paneEvent(120));
+  const under = textOf(await h.render(abovePromptEvent(120)));
+  expect(under).toContain("Storybloq:");
+  expect(under).not.toContain("board opens at your next prompt");
+  expect(await h.fire("prompt.submit", prompt)).toBe(prompt);
+  expect(h.opened).toHaveLength(2);
+});
+
+test("never re-opens on a prompt a pane the person closed (ISS-1251)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  await h.render(abovePromptEvent(120));
+  await h.fire("ui.close", { requestId: "storybloq", origin: "person" });
+  const prompt = { text: "hello" };
+  expect(await h.fire("prompt.submit", prompt)).toBe(prompt);
+  expect(h.opened).toHaveLength(1);
+  // The band is still the sidebar at this width.
+  expect(textOf(await h.render(abovePromptEvent(120)))).toContain("Storybloq:");
+});
+
+test("asks nothing on a prompt in a project with no ledger (ISS-1251)", async () => {
+  const h = harness({ files: {}, mtimes: {} });
+  await started(h);
+  expect(h.opened).toHaveLength(0);
+  const prompt = { text: "hello" };
+  expect(await h.fire("prompt.submit", prompt)).toBe(prompt);
+  expect(h.opened).toHaveLength(0);
+});
+
+// ISS-1252: below 60 body columns the four framed columns stacked into a
+// scrolling strip. The owner: "in that view we can just show top 3 in
+// progress and context pressure."
+test("draws the narrow board below 60 body columns: In progress, three cards, a tail, the footer (ISS-1252)", async () => {
+  const h = harness(manyInProgress(5));
+  h.usage = { context: { window: 200_000, tokens: 40_000, percent: 20 }, rateLimits: [] };
+  await started(h);
+
+  const tree = await h.render(paneEvent(49, 20));
+  const text = textOf(tree);
+  // Five in the fixture's five plus T-001, which is also in progress: six.
+  expect(nodeByKey(tree, "narrow-heading")).toBeTruthy();
+  expect(textOf(nodeByKey(tree, "narrow-heading"))).toBe("In progress 6");
+  expect(nodeByKey(tree, "narrow-card-0")).toBeTruthy();
+  expect(nodeByKey(tree, "narrow-card-2")).toBeTruthy();
+  expect(nodeByKey(tree, "narrow-card-3")).toBeNull();
+  expect(textOf(nodeByKey(tree, "narrow-tail"))).toBe("... 3 more");
+  expect(text).toContain("context 20%");
+  // Nothing else of the four-column board.
+  for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done", "header-gap", "issues-gap"]) {
+    expect(nodeByKey(tree, key), key).toBeNull();
+  }
+  expect(text).not.toContain("Blocked");
+  expect(text).not.toContain("Done");
+  // Every row fits the body.
+  for (const node of allTexts(tree)) {
+    const row = textOf(node);
+    expect(cells(row), row).toBeLessThanOrEqual(45);
+  }
+});
+
+test("narrow board with nothing in progress says so in a word, then the footer (ISS-1252)", async () => {
+  const h = harness(newFixture());
+  h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "open", title: "Not started" });
+  await started(h);
+  const tree = await h.render(paneEvent(49, 20));
+  expect(textOf(nodeByKey(tree, "narrow-heading"))).toBe("In progress 0");
+  expect(textOf(nodeByKey(tree, "narrow-none"))).toBe("none");
+  expect(nodeByKey(tree, "narrow-tail")).toBeNull();
+  expect(textOf(tree)).toContain("issues");
+});
+
+test("the four-column board is unchanged from 60 body columns up (ISS-1252 boundary)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const tree = await h.render(paneEvent(64, 30));
+  expect(nodeByKey(tree, "board-inprogress")).toBeTruthy();
+  expect(nodeByKey(tree, "narrow-heading")).toBeNull();
 });

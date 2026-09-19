@@ -69,14 +69,17 @@ function log(msg: string): void {
 }
 
 /**
- * ISS-1235: said once at the end of setup, and never measured. The client
- * docks a plugin's pane only from 144 columns; `process.stdout.columns` here
- * is the shell setup ran in, not the window claude will run in, and the
- * version-marker refresh runs setup with stdout piped, so a measured verdict
- * would be wrong as often as right.
+ * ISS-1235: said once at the end of setup, and never measured. Where the pane
+ * sits is the client renderer's call (ISS-1247: docked under the fullscreen
+ * renderer, inline above the prompt on the main screen), and the client
+ * places a plugin's own open only from 144 columns, which the person's first
+ * prompt lifts (ISS-1251). `process.stdout.columns` here is the shell setup
+ * ran in, not the window claude will run in, and the version-marker refresh
+ * runs setup with stdout piped, so a measured verdict would be wrong as often
+ * as right.
  */
 export const MODS_WIDTH_NOTE =
-  "The Storybloq board docks beside the transcript in terminals 144+ columns wide; narrower ones show a one-line summary above the prompt.";
+  "The Storybloq board docks beside the transcript under Claude Code's fullscreen renderer (/tui fullscreen) and sits above the prompt otherwise; a session started narrower than 144 columns shows a one-line summary until your first prompt.";
 
 /**
  * Resolves the directory containing bundled skill files.
