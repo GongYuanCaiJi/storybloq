@@ -537,14 +537,15 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     expect(drawn).not.toContain("Done");
   });
 
-  it("says none when nothing is in progress", async () => {
+  it("shows the Open column when nothing is in progress (ISS-1254)", async () => {
     seedLedger(h.fs, "/repo");
     h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "open"));
     await h.start("/repo");
     await h.settle();
     const drawn = pane(45);
-    expect(drawn).toContain('"In progress 0"');
-    expect(drawn).toContain('"narrow-none"');
+    expect(drawn).toContain('"Open 3"');
+    expect(drawn).toContain('"narrow-card-0"');
+    expect(drawn).not.toContain('"narrow-none"');
     expect(drawn).not.toContain('"narrow-tail"');
   });
 
@@ -555,5 +556,104 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     expect(pane(60)).toContain('"board-inprogress"');
     expect(pane(60)).not.toContain('"narrow-heading"');
     expect(pane(59)).toContain('"narrow-heading"');
+  });
+});
+
+describe("ISS-1254: a docked pane stacks the four columns at any width", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  function pane(bodyColumns: number, placement?: "dock" | "inline"): any {
+    const handler = h.handlers.get("ui.render")!;
+    const props: Record<string, unknown> = { bodyColumns, scroll: { offset: 0, bodyRows: 40 } };
+    if (placement !== undefined) props["placement"] = placement;
+    return handler(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: bodyColumns + 4, rows: 40 }, props },
+      (e: any) => e,
+    );
+  }
+
+  function board(node: any): any {
+    if (node === null || typeof node !== "object") return null;
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = board(child);
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    if (node.key === "board") return node;
+    return board(node.children ?? null);
+  }
+
+  it("docked: the sidebar, four framed columns one under another, at 40, 60 and 156 body columns", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    for (const width of [40, 60, 156]) {
+      const node = board(pane(width, "dock"));
+      expect(node?.flexDirection, String(width)).toBe("column");
+      const drawn = JSON.stringify(node);
+      expect(drawn).toContain('"board-blocked"');
+      expect(drawn).toContain('"board-done"');
+      expect(drawn).not.toContain('"narrow-heading"');
+    }
+  });
+
+  it("inline: side by side from 60 body columns, the narrow strip below", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(board(pane(156, "inline"))?.flexDirection).toBe("row");
+    expect(JSON.stringify(pane(40, "inline"))).toContain('"narrow-heading"');
+  });
+
+  it("no placement reported: the width alone decides, stacked below 60 (the 1.15.4 rule)", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(board(pane(40))?.flexDirection).toBe("column");
+    expect(JSON.stringify(pane(40))).not.toContain('"narrow-heading"');
+    expect(board(pane(156))?.flexDirection).toBe("row");
+  });
+});
+
+describe("ISS-1255: inline text takes the terminal's foreground, docked text the theme's", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  function contextColor(placement: "dock" | "inline"): unknown {
+    const handler = h.handlers.get("ui.render")!;
+    const node = handler(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: 164, rows: 40 }, props: { bodyColumns: 160, placement, scroll: { offset: 0, bodyRows: 40 } } },
+      (e: any) => e,
+    );
+    const find = (n: any): any => {
+      if (n === null || typeof n !== "object") return null;
+      if (Array.isArray(n)) {
+        for (const c of n) {
+          const f = find(c);
+          if (f !== null) return f;
+        }
+        return null;
+      }
+      if (n.key === "context") return n;
+      return find(n.children ?? null);
+    };
+    return find(node)?.color;
+  }
+
+  it("forces no colour inline and white in the dock under the dark theme", async () => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(contextColor("inline")).toBeUndefined();
+    expect(contextColor("dock")).toBe("white");
   });
 });

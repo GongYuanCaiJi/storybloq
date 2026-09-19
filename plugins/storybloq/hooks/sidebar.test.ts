@@ -348,7 +348,10 @@ const START = { cwd: "/repo", surface: "terminal", isInteractive: true };
 
 // The screen defaults to the rows the pane reports, because that is the case
 // the row budget has to survive: a terminal no taller than what was drawn.
-function paneEvent(columns = 160, bodyRows = 30, rows = bodyRows): unknown {
+// Inline by default: the strip above the prompt is where the width decides
+// the layout. A docked pane is the sidebar and always stacks (ISS-1254), so
+// the tests that read the side-by-side arithmetic are inline ones.
+function paneEvent(columns = 160, bodyRows = 30, rows = bodyRows, placement: "dock" | "inline" = "inline"): unknown {
   return {
     surface: "terminal",
     component: "Pane",
@@ -358,7 +361,7 @@ function paneEvent(columns = 160, bodyRows = 30, rows = bodyRows): unknown {
       title: "Storybloq",
       isFocused: false,
       bodyColumns: columns - 4,
-      placement: "dock",
+      placement,
       scroll: { offset: 0, bodyRows },
     },
   };
@@ -836,7 +839,7 @@ test("colours every pane text for the client's theme, not the terminal's default
   // client theme whose pane is dark. A Text with no colour vanished. On a
   // dark theme every Text is white unless it sets its own tone; the tones
   // stay. M-DEFAULT-FOREGROUND drops the fill and this goes red.
-  const texts = allTexts(await h.render(paneEvent()));
+  const texts = allTexts(await h.render(paneEvent(160, 60, 60, "dock")));
   expect(texts.length).toBeGreaterThan(10);
   for (const t of texts) expect(t.props.color, JSON.stringify(t.props)).toBeDefined();
   expect(texts.some((t) => t.props.color === "yellow")).toBe(true);
@@ -847,7 +850,7 @@ test("a light client theme fills with black, by prefix (ISS-1238)", async () => 
   const h = harness(newFixture());
   h.theme = "light-daltonized";
   await started(h);
-  const texts = allTexts(await h.render(paneEvent()));
+  const texts = allTexts(await h.render(paneEvent(160, 60, 60, "dock")));
   expect(texts.filter((t) => t.props.color === "black").length).toBeGreaterThan(5);
   expect(texts.some((t) => t.props.color === "white")).toBe(false);
 });
@@ -855,11 +858,11 @@ test("a light client theme fills with black, by prefix (ISS-1238)", async () => 
 test("follows a theme change through config.set with one redraw (ISS-1238)", async () => {
   const h = harness(newFixture());
   await started(h);
-  await h.render(paneEvent());
+  await h.render(paneEvent(160, 60, 60, "dock"));
   const asked = h.invalidated.length;
   await h.fire("config.set", { key: "theme", value: "light", previous: "dark" });
   expect(h.invalidated.slice(asked)).toEqual(["ui.render"]);
-  const texts = allTexts(await h.render(paneEvent()));
+  const texts = allTexts(await h.render(paneEvent(160, 60, 60, "dock")));
   expect(texts.filter((t) => t.props.color === "black").length).toBeGreaterThan(5);
   // Another row changing is not ours.
   await h.fire("config.set", { key: "verbose", value: true, previous: false });
@@ -870,7 +873,7 @@ test("a refused config read keeps the dark default and still draws the board (IS
   const h = harness(newFixture());
   h.failConfig = true;
   await started(h);
-  const tree = await h.render(paneEvent());
+  const tree = await h.render(paneEvent(160, 60, 60, "dock"));
   expect(textOf(tree)).toContain("Storybloq");
   expect(allTexts(tree).filter((t) => t.props.color === "white").length).toBeGreaterThan(5);
 });
@@ -1451,7 +1454,7 @@ test("counts the issues in the column headings", async () => {
 test("marks a severe issue on its id and nowhere else", async () => {
   const h = harness(withIssues());
   await started(h);
-  const tree = await h.render(paneEvent(160, 30));
+  const tree = await h.render(paneEvent(160, 60, 60, "dock"));
   const idOf = (row: any): any => (row.props.children as any[])[0];
   const titleOf = (row: any): any => (row.props.children as any[])[1];
   const rowFor = (key: string, id: string): any => {
@@ -1591,7 +1594,7 @@ test("weights the board toward the work in hand on a wide pane", async () => {
 test("emphasises the column being worked, and lets the finished one recede", async () => {
   const h = harness(newFixture());
   await started(h);
-  const tree = await h.render(paneEvent(160, 30));
+  const tree = await h.render(paneEvent(160, 60, 60, "dock"));
   const heading = (key: string) => nodeByKey(tree, `${key}-heading`).props;
 
   // In progress is the only bold coloured heading; Done recedes.
@@ -1725,7 +1728,7 @@ test("falls back to four counted rows when no frame will fit", async () => {
   // Stacked, four framed cards need their frames before a single card is
   // drawn. Under that the board is the four counts and nothing else, which is
   // still the board.
-  const tree = await h.render(paneEvent(50, 12));
+  const tree = await h.render(paneEvent(50, 12, 12, "dock"));
   expect(paneHeight(tree)).toBeLessThanOrEqual(12);
   expect(headingOf(tree, "board-open")).toBe("Open 18");
   expect(nodeByKey(tree, "board-open").element).toBe("Text");
@@ -1825,7 +1828,7 @@ test("colours the severities that exist and dims the ones that do not", async ()
   h.fixture.files[".story/issues/ISS-002.json"] = issueText({ id: "ISS-002", severity: "high" });
   h.fixture.mtimes[".story/issues/ISS-002.json"] = 1000;
   await started(h);
-  const tree = await h.render(paneEvent(160, 30));
+  const tree = await h.render(paneEvent(160, 60, 60, "dock"));
   // The fragments hang inside the one truncating Text that holds the row.
   const line = (nodeByKey(tree, "issues").props.children as any[])[0];
   const parts = (line.props.children as any[]).filter(
@@ -2566,21 +2569,65 @@ test("draws the narrow board below 60 body columns: In progress, three cards, a 
   }
 });
 
-test("narrow board with nothing in progress says so in a word, then the footer (ISS-1252)", async () => {
+test("narrow board with nothing in progress shows the Open column instead (ISS-1252, ISS-1254)", async () => {
   const h = harness(newFixture());
   h.fixture.files[".story/tickets/T-001.json"] = ticketText({ id: "T-001", status: "open", title: "Not started" });
   await started(h);
   const tree = await h.render(paneEvent(49, 20));
-  expect(textOf(nodeByKey(tree, "narrow-heading"))).toBe("In progress 0");
-  expect(textOf(nodeByKey(tree, "narrow-none"))).toBe("none");
-  expect(nodeByKey(tree, "narrow-tail")).toBeNull();
+  // The owner's project had no work in hand and the strip said "In progress
+  // 0, none": a count, not the work. The next thing to pick up is shown then.
+  expect(textOf(nodeByKey(tree, "narrow-heading"))).toMatch(/^Open \d+$/);
+  expect(nodeByKey(tree, "narrow-card-0")).toBeTruthy();
+  expect(nodeByKey(tree, "narrow-none")).toBeNull();
   expect(textOf(tree)).toContain("issues");
 });
 
-test("the four-column board is unchanged from 60 body columns up (ISS-1252 boundary)", async () => {
+test("the four-column board is unchanged from 60 body columns up inline (ISS-1252 boundary)", async () => {
   const h = harness(newFixture());
   await started(h);
   const tree = await h.render(paneEvent(64, 30));
   expect(nodeByKey(tree, "board-inprogress")).toBeTruthy();
   expect(nodeByKey(tree, "narrow-heading")).toBeNull();
+});
+
+// ISS-1254: the docked pane is the sidebar and stacks its four columns at any
+// width. 1.15.5 drew the narrow board in a 132 column dock and four squeezed
+// frames in a 150 column one; the owner: "sidebar should be always showing
+// boards stacked vertically not horizontally."
+test("a docked pane stacks the four framed columns whatever its width (ISS-1254)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  for (const columns of [44, 64, 94, 160]) {
+    const tree = await h.render(paneEvent(columns, 40, 40, "dock"));
+    const board = nodeByKey(tree, "board");
+    expect(board.props.flexDirection, String(columns)).toBe("column");
+    expect(board.props.gap).toBe(0);
+    expect(nodeByKey(tree, "narrow-heading")).toBeNull();
+    const width = columns - 4;
+    for (const key of ["board-blocked", "board-open", "board-inprogress", "board-done"]) {
+      expect(nodeByKey(tree, key).props.width, key).toBe(width);
+    }
+  }
+});
+
+test("a pane with no placement reported follows the width alone, as 1.15.4 did (ISS-1254)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const event = paneEvent(49, 40) as { props: Record<string, unknown> };
+  delete event.props["placement"];
+  const tree = await h.render(event);
+  expect(nodeByKey(tree, "board").props.flexDirection).toBe("column");
+  expect(nodeByKey(tree, "narrow-heading")).toBeNull();
+});
+
+// ISS-1255: only the docked pane is painted by the client; inline, the pane
+// sits on the terminal's background, and a forced white on the owner's light
+// Terminal left no Open heading, no titles and no footer counts.
+test("inline text carries no forced colour; docked text does (ISS-1255)", async () => {
+  const h = harness(newFixture());
+  await started(h);
+  const inline = await h.render(paneEvent(160, 30, 30, "inline"));
+  expect(nodeByKey(inline, "context").props.color).toBeUndefined();
+  const docked = await h.render(paneEvent(160, 60, 60, "dock"));
+  expect(nodeByKey(docked, "context").props.color).toBe("white");
 });

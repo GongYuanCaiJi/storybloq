@@ -40,6 +40,18 @@
  * shows the one `AbovePrompt` line instead, and the person's first prompt
  * re-opens the pane (`prompt.submit`), which the client then places.
  *
+ * LAYOUT FOLLOWS PLACEMENT (ISS-1254). A docked pane is a sidebar: tall and
+ * never wider than 90 columns, so its four columns always stack one under
+ * another, whatever its width (the 1.15.4 sidebar the owner asked back after
+ * 1.15.5 squeezed four frames side by side at 150 columns and drew only the
+ * narrow board at 132). An inline pane is a strip above the prompt: the four
+ * columns side by side from BOARD_MIN_COLUMNS up, the narrow board below.
+ * A client that reports no placement gets the width rule alone, as 1.15.4
+ * did. Colour follows placement too (ISS-1255): the client paints a docked
+ * pane's background from its theme, so text there gets a colour for that
+ * theme; an inline pane sits on the terminal's own background, so its text
+ * takes the terminal's default foreground, which is the one that matches.
+ *
  * EVENT NAMES AND `$`. Every event name is a string literal at its `on()` call
  * and every call is spelled `$.noun.member(...)` inline, because the client
  * reads both from this source rather than from a manifest. `client-api.ts` is
@@ -341,6 +353,15 @@ let reopenAsked = false;
  * screenshot so far).
  */
 let themeLight = false;
+/**
+ * The pane being drawn sits inline above the prompt (ISS-1255). Set at the
+ * top of every Pane render from `e.props.placement`, read by `paneText` for
+ * the rest of that render: an inline pane is on the terminal's background,
+ * not the client's, so its text keeps the terminal's default foreground. On
+ * the owner's light Terminal with the dark client theme, the forced white
+ * left the inline board with no Open heading, no titles and no footer counts.
+ */
+let paneInline = false;
 let sessionActive = false;
 let contextPercent: number | null = null;
 /**
@@ -399,6 +420,7 @@ function forgetEverything(): void {
   paneDrawn = false;
   reopenAsked = false;
   themeLight = false;
+  paneInline = false;
   sessionActive = false;
   contextPercent = null;
   autoCompactWindow = null;
@@ -1151,6 +1173,9 @@ async function readThemeLight($: any): Promise<boolean> {
  * which does not know what the client painted behind it.
  */
 function paneText(Text: (props: Record<string, unknown>) => unknown, props: Record<string, unknown>): unknown {
+  // Inline, the pane is on the terminal's own background and the default
+  // foreground is the one that matches it (ISS-1255); only the dock is painted.
+  if (paneInline) return Text(props);
   return Text({ color: themeLight ? "black" : "white", ...props });
 }
 
@@ -1611,9 +1636,27 @@ function wroteLedger(e: any): boolean {
   return false;
 }
 
-/** Side by side, or one column after another on a narrow pane. */
-function isStacked(width: number): boolean {
-  return width < BOARD_MIN_COLUMNS;
+/** Where the client seated the pane, as its Pane props say; null when they do not. */
+type PanePlacement = "dock" | "inline";
+
+function panePlacement(e: any): PanePlacement | null {
+  const value: unknown = e?.props?.placement;
+  return value === "dock" || value === "inline" ? value : null;
+}
+
+/**
+ * The board's shape (ISS-1254): `stacked` is the four framed columns one
+ * under another, the sidebar; `columns` is the four side by side; `narrow`
+ * is the In progress strip. Docked, always stacked. Inline, side by side
+ * from BOARD_MIN_COLUMNS up and the strip below it. No placement reported,
+ * the width alone decides between stacked and side by side, as 1.15.4 did.
+ */
+type BoardLayout = "stacked" | "columns" | "narrow";
+
+function boardLayout(placement: PanePlacement | null, width: number): BoardLayout {
+  if (placement === "dock") return "stacked";
+  if (width >= BOARD_MIN_COLUMNS) return "columns";
+  return placement === "inline" ? "narrow" : "stacked";
 }
 
 /**
@@ -1818,18 +1861,25 @@ function compactBoard(elements: any, board: any, width: number): unknown {
  * card and an empty In progress frame. Owner: "in that view we can just show
  * top 3 in progress and context pressure." So this draws the work in hand
  * only: the In progress heading with its count, up to NARROW_BOARD_CARDS
- * cards, a tail when more exist, or the dim word for none. Blocked, Open and
- * Done keep their counts in the band's summary line under the pane. At most
- * five rows, so the client's inline block shows it whole, without a budget.
+ * cards, a tail when more exist. Blocked, Open and Done keep their counts in
+ * the band's summary line under the pane. At most five rows, so the client's
+ * inline block shows it whole, without a budget.
+ *
+ * Nothing in progress and the strip shows the Open column the same way
+ * (ISS-1254): the owner's project had no work in hand and the strip said
+ * "In progress 0, none", which is a count and not the work; the next thing to
+ * pick up is what the strip is for then.
  */
 function narrowBoard(elements: any, board: any, width: number): unknown {
-  const cards = board.inProgress as readonly SidebarBoardCard[];
+  const inProgress = board.inProgress as readonly SidebarBoardCard[];
+  const fallback = inProgress.length === 0;
+  const cards = fallback ? (board.open as readonly SidebarBoardCard[]) : inProgress;
   const rows: unknown[] = [
     paneText(elements.Text, {
       key: "narrow-heading",
-      ...COLUMN_STYLES.inProgress,
+      ...(fallback ? COLUMN_STYLES.open : COLUMN_STYLES.inProgress),
       wrap: "truncate",
-      children: headingText("In progress", cards.length, width),
+      children: headingText(fallback ? "Open" : "In progress", cards.length, width),
     }),
   ];
   if (cards.length === 0) {
@@ -2038,17 +2088,20 @@ export function registerSidebar(on: On, _options: Options): void {
       // wordmark does not read as part of the first column heading. A single
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
-      const stacked = isStacked(width);
+      const placement = panePlacement(e);
+      paneInline = placement === "inline";
+      const layout = boardLayout(placement, width);
+      const stacked = layout === "stacked";
       // The narrow board is at most five rows and skips the blank rows, so it
-      // needs no budget: a pane too narrow for four columns is also the one
-      // seated inline on a small window, where every row is paid for.
-      const budget = stacked ? { body: 0, gaps: false, compact: false } : rowBudget(e, false);
+      // needs no budget: it is the inline strip on a small window, where
+      // every row is paid for.
+      const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked);
       const rows: unknown[] = [headerNode(elements)];
       if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
         rows.push(paneText(Text, { children: truncate(summaryLine(false), width) }));
-      } else if (stacked) {
+      } else if (layout === "narrow") {
         rows.push(narrowBoard(elements, projection.board, width));
         rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
         if (sessionActive) {
