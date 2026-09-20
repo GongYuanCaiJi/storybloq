@@ -33,40 +33,20 @@ export const DEFAULT_TIMEOUT_MS = 180_000;
 export const DEFAULT_SIGKILL_GRACE_MS = 10_000;
 export const DEFAULT_OUTPUT_ROOT = resolve(SCRIPT_DIR, "../.5c-run-output");
 
-/**
- * Env vars that would divert auth away from the authorized subscription
- * path (API key, or a third-party provider such as Bedrock/Vertex). This
- * list is a disclosed best effort, not an exhaustive guarantee -- it
- * covers the variables this codebase and Claude Code itself are known to
- * read; a genuinely unknown alternate-auth mechanism would not be caught.
- */
-export const ALTERNATE_AUTH_ENV_VARS = [
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_CUSTOM_HEADERS",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "ANTHROPIC_BEDROCK_BASE_URL",
-  "ANTHROPIC_VERTEX_BASE_URL",
-  "ANTHROPIC_VERTEX_PROJECT_ID",
-  "CLOUD_ML_REGION",
-  "AWS_BEARER_TOKEN_BEDROCK",
-] as const;
+import {
+  ALTERNATE_AUTH_ENV_VARS,
+  assertSubscriptionAuthOnly as assertSubscriptionAuthOnlyShared,
+  SessionKilledError,
+  RecordPersistenceError,
+  assertValidTimerMs as assertValidTimerMsShared,
+  type SpawnKillKind,
+} from "./headless-common.js";
 
-/**
- * Refuses to proceed if the PARENT process's own environment already has
- * an alternate-auth variable set -- fail fast and visibly rather than
- * silently overriding what may be a real, deliberate configuration on this
- * machine. Stripping happens separately, in the child's env only.
- */
+export { ALTERNATE_AUTH_ENV_VARS, SessionKilledError, RecordPersistenceError, type SpawnKillKind };
+
+/** Same check as the shared primitive, with this runner's historical message prefix. */
 export function assertSubscriptionAuthOnly(env: NodeJS.ProcessEnv = process.env): void {
-  const present = ALTERNATE_AUTH_ENV_VARS.filter((name) => env[name] !== undefined);
-  if (present.length > 0) {
-    throw new Error(
-      `behavioral-gate-run: refusing to start -- subscription auth is required for the 5c run, but these env vars are set: ${present.join(", ")}. Unset them (they would divert billing away from the authorized subscription path) before running.`,
-    );
-  }
+  assertSubscriptionAuthOnlyShared(env, "behavioral-gate-run");
 }
 
 export interface ClaudeCliResult {
@@ -92,28 +72,6 @@ function isClaudeCliResult(value: unknown): value is ClaudeCliResult {
   );
 }
 
-/**
- * "timeout" is our own SIGTERM-then-SIGKILL escalation. "external-kill" is
- * an unrequested SIGKILL we did not send -- most plausibly the OS's OOM
- * killer on a swap-pressured machine, but SIGKILL alone cannot prove that
- * (an operator, a supervisor, or a container runtime could also send it),
- * so it is labelled honestly rather than asserted as confirmed OOM. Only
- * "external-kill" is retried (once, then stop-on-two-in-a-row); a plain
- * "timeout" is recorded as a failure and the run moves on without retrying it.
- */
-export type SpawnKillKind = "timeout" | "external-kill";
-
-export class SessionKilledError extends Error {
-  constructor(
-    public readonly kind: SpawnKillKind,
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-export class RecordPersistenceError extends Error {}
-
 export interface DispatchResult {
   readonly transcript: string;
   readonly cli: ClaudeCliResult;
@@ -135,13 +93,8 @@ export type SpawnFn = (command: string, args: readonly string[], options: Record
  * injected so every path is unit-testable without ever invoking the real
  * CLI.
  */
-/** Node's setTimeout silently fires almost immediately above this (a 32-bit signed ms count); a caller-supplied timeout past it would turn into a near-instant timeout on every session instead of a visible error. */
-const MAX_TIMER_MS = 2_147_483_647;
-
 function assertValidTimerMs(value: number, label: string): void {
-  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0 || value > MAX_TIMER_MS) {
-    throw new Error(`behavioral-gate-run: ${label} must be a positive integer <= ${MAX_TIMER_MS}ms, got ${value}`);
-  }
+  assertValidTimerMsShared(value, label, "behavioral-gate-run");
 }
 
 export function createClaudeCliDispatcher(opts: {

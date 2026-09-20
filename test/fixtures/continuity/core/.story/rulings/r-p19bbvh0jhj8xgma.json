@@ -1,0 +1,16 @@
+{
+  "id": "r-p19bbvh0jhj8xgma",
+  "text": "Owner, 2026-09-15: \"Background work carries the request id of the job that enqueued it. When a job runs, anything it logs is under the request id of the request that put it on the queue, not a fresh id.\"",
+  "attribution": "owner-direct",
+  "recordedBy": {
+    "client": "claude",
+    "id": "fixture-seed-0000-0000-000000000000"
+  },
+  "date": "2026-09-15",
+  "scopeTags": [
+    "logging",
+    "jobs"
+  ],
+  "supersedes": null,
+  "createdAt": "2026-09-15T09:10:00.000Z"
+}

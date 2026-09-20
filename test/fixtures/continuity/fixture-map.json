@@ -1,0 +1,23 @@
+{
+  "rulings": {
+    "R1": "r-eftp2zdb6as643np",
+    "R2": "r-p19bbvh0jhj8xgma",
+    "R3": "r-fxdxynjdpcxprdhn",
+    "R4": "r-jemcfa3pw2r8w0av",
+    "R5": "r-rvcf99q7dwhzzpav"
+  },
+  "tickets": {
+    "T-1": "T-1",
+    "T-2": "T-2",
+    "T-3": "T-3",
+    "T-4": "T-4"
+  },
+  "notes": {
+    "N-1": "N-1",
+    "N-2": "N-2"
+  },
+  "handovers": {
+    "T-1": "2026-09-15-t-1-applogger.md"
+  },
+  "note": "R4 (proposed against R1) exists only in overlays/lifecycle once T-522 lands; it is never part of a behavioural arm."
+}

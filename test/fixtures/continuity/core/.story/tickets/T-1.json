@@ -1,0 +1,14 @@
+{
+  "id": "T-1",
+  "title": "Introduce AppLogger with redaction and request ids",
+  "description": "Add the one logger this service uses. Every line carries the request id of the work it belongs to; secret-looking keys and values are redacted before a line is written. Lives at src/platform/logging/AppLogger.ts with three tests beside it. The HTTP router logs through it under the incoming request id.",
+  "type": "task",
+  "status": "complete",
+  "phase": "p1",
+  "order": 10,
+  "createdDate": "2026-09-14",
+  "completedDate": "2026-09-15",
+  "blockedBy": [],
+  "parentTicket": null,
+  "citesRulings": ["r-eftp2zdb6as643np"]
+}

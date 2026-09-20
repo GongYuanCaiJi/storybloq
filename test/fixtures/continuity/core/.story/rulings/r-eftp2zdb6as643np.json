@@ -1,0 +1,15 @@
+{
+  "id": "r-eftp2zdb6as643np",
+  "text": "Owner, 2026-09-14: \"Logging keeps redaction and request ids on every path. One logger, AppLogger; nothing else writes log lines. Every line carries the request id of the work it belongs to, and secrets are redacted before the line is written.\"",
+  "attribution": "owner-direct",
+  "recordedBy": {
+    "client": "claude",
+    "id": "fixture-seed-0000-0000-000000000000"
+  },
+  "date": "2026-09-14",
+  "scopeTags": [
+    "logging"
+  ],
+  "supersedes": "r-rvcf99q7dwhzzpav",
+  "createdAt": "2026-09-14T17:30:00.000Z"
+}

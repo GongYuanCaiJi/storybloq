@@ -1,0 +1,13 @@
+{
+  "title": "continuity-fixture",
+  "date": "2026-09-15",
+  "phases": [
+    {
+      "id": "p1",
+      "label": "PHASE 1",
+      "name": "Platform",
+      "description": "Shared platform pieces: logging, routing, background jobs."
+    }
+  ],
+  "blockers": []
+}

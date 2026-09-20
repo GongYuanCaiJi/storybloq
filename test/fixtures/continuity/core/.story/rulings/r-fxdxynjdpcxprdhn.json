@@ -1,0 +1,15 @@
+{
+  "id": "r-fxdxynjdpcxprdhn",
+  "text": "Owner, 2026-09-12: \"Billing amounts are integer cents. No floats anywhere in the billing path, including tests.\"",
+  "attribution": "owner-direct",
+  "recordedBy": {
+    "client": "claude",
+    "id": "fixture-seed-0000-0000-000000000000"
+  },
+  "date": "2026-09-12",
+  "scopeTags": [
+    "billing"
+  ],
+  "supersedes": null,
+  "createdAt": "2026-09-12T11:00:00.000Z"
+}

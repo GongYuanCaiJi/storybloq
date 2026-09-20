@@ -1,0 +1,15 @@
+{
+  "id": "r-rvcf99q7dwhzzpav",
+  "text": "Owner, 2026-09-10: \"All logging goes through one logger and every line has the request id on it.\"",
+  "attribution": "owner-direct",
+  "recordedBy": {
+    "client": "claude",
+    "id": "fixture-seed-0000-0000-000000000000"
+  },
+  "date": "2026-09-10",
+  "scopeTags": [
+    "logging"
+  ],
+  "supersedes": null,
+  "createdAt": "2026-09-10T15:00:00.000Z"
+}

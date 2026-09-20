@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "project": "continuity-fixture",
+  "type": "npm",
+  "language": "typescript",
+  "features": {
+    "tickets": true,
+    "issues": true,
+    "handovers": true,
+    "roadmap": true,
+    "reviews": true
+  },
+  "recipeOverrides": {
+    "branchStrategy": "none"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "rubricNote": "P-1: every behavioural fact is present in every arm; arm 3 adds structure (capabilities, glossary), never facts. Each entry names the fact string that must appear and the file that carries it per arm (paths relative to the materialised project root).",
+  "facts": [
+    {
+      "id": "applogger-location",
+      "text": "src/platform/logging/AppLogger.ts",
+      "carriers": {
+        "arm1": [
+          ".story/notes/N-1.json",
+          ".story/handovers/2026-09-15-t-1-applogger.md"
+        ],
+        "arm2": [
+          ".story/notes/N-1.json",
+          ".story/handovers/2026-09-15-t-1-applogger.md"
+        ],
+        "arm3": [
+          ".story/notes/N-1.json",
+          ".story/capabilities.json"
+        ]
+      }
+    },
+    {
+      "id": "applogger-contract-redact",
+      "text": "redact(fields)",
+      "carriers": {
+        "arm1": [
+          ".story/notes/N-1.json"
+        ],
+        "arm2": [
+          ".story/notes/N-1.json"
+        ],
+        "arm3": [
+          ".story/notes/N-1.json",
+          ".story/capabilities.json"
+        ]
+      }
+    },
+    {
+      "id": "applogger-contract-request-id",
+      "text": "withRequestId",
+      "carriers": {
+        "arm1": [
+          ".story/notes/N-1.json"
+        ],
+        "arm2": [
+          ".story/notes/N-1.json"
+        ],
+        "arm3": [
+          ".story/notes/N-1.json",
+          ".story/capabilities.json"
+        ]
+      }
+    },
+    {
+      "id": "redaction-ruling",
+      "text": "r-eftp2zdb6as643np",
+      "carriers": {
+        "arm1": [
+          ".story/notes/N-1.json",
+          ".story/tickets/T-1.json"
+        ],
+        "arm2": [
+          ".story/notes/N-1.json",
+          ".story/tickets/T-1.json"
+        ],
+        "arm3": [
+          ".story/notes/N-1.json",
+          ".story/tickets/T-1.json",
+          ".story/capabilities.json"
+        ]
+      }
+    },
+    {
+      "id": "request-routing-location",
+      "text": "src/http/router.ts",
+      "carriers": {
+        "arm1": [
+          ".story/notes/N-2.json"
+        ],
+        "arm2": [
+          ".story/notes/N-2.json"
+        ],
+        "arm3": [
+          ".story/notes/N-2.json",
+          ".story/capabilities.json"
+        ]
+      }
+    }
+  ],
+  "arm2MustNotContain": [
+    ".story/capabilities.json",
+    ".story/glossary.json"
+  ]
+}

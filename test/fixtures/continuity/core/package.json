@@ -1,0 +1,10 @@
+{
+  "name": "continuity-fixture",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A small service with a shared logger. Fixture for the storybloq continuity evaluation.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

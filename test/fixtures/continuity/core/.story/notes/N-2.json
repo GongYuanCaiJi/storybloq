@@ -1,0 +1,12 @@
+{
+  "id": "N-2",
+  "title": "Request routing",
+  "content": "Request routing lives in src/http/router.ts: Router.add(method, path, handler) registers a route and Router.dispatch(req) picks the handler for method plus path, passing it an AppLogger bound to req.requestId. The request id itself is assigned in src/http/handler.ts from the x-request-id header or a new UUID.",
+  "tags": [
+    "http",
+    "architecture"
+  ],
+  "status": "active",
+  "createdDate": "2026-09-15",
+  "updatedDate": "2026-09-15"
+}

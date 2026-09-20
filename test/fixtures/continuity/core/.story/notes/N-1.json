@@ -1,0 +1,12 @@
+{
+  "id": "N-1",
+  "title": "AppLogger: where it lives and what it guarantees",
+  "content": "AppLogger is the one logger in this service. It lives at src/platform/logging/AppLogger.ts with AppLogger.test.ts beside it.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id.",
+  "tags": [
+    "logging",
+    "architecture"
+  ],
+  "status": "active",
+  "createdDate": "2026-09-15",
+  "updatedDate": "2026-09-15"
+}

@@ -1,0 +1,6 @@
+node_modules/
+.story/sessions/
+.story/snapshots/
+.story/telemetry/
+.story/servers/
+.story/status.json
