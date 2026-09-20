@@ -2310,8 +2310,7 @@ export function registerSidebar(on: On, _options: Options): void {
       // The narrow board is at most five rows and skips the blank rows, so it
       // needs no budget: it is the inline strip on a small window, where
       // every row is paid for.
-      const phaseWindow = warm && projection ? phaseTimelineLayout(projection.phases, width, e.props?.scroll?.bodyRows, placement) : null;
-      const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked, phaseWindow ? PHASE_STRIP_ROWS : 0);
+      const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked);
       // Use the actual pane window: viewport.rows includes the transcript
       // and prompt and is never the available height of an inline pane.
       const bodyRows = e.props?.scroll?.bodyRows;
@@ -2331,7 +2330,6 @@ export function registerSidebar(on: On, _options: Options): void {
         ] });
       }
       const rows: unknown[] = [headerNode(elements)];
-      if (phaseWindow && projection) rows.push(phaseTimelineNode(elements, projection.phases, phaseWindow));
       if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.

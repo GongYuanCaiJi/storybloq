@@ -938,31 +938,6 @@ describe("live animation hooks", () => {
     expect(context().children).toBe("context [━·······] 10%");
   });
 
-  it("animates a phase handoff at a fixed size and leaves the final statuses intact", async () => {
-    const h = new Harness(); seedLedger(h.fs, "/repo");
-    h.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: [{ id: "p1", name: "Foundation" }, { id: "p2", name: "Build" }] }));
-    h.fs.addFile("/repo/.story/tickets/T-002.json", JSON.stringify({ ...JSON.parse(ticket("T-002", "open")), phase: "p2" }));
-    await h.start("/repo"); await h.settle();
-    const draw = () => h.handlers.get("ui.render")!(h.$, {
-      component: "Pane", requestId: PANE_ID, props: { bodyColumns: 156, placement: "inline", scroll: { bodyRows: 18 } },
-      viewport: { columns: 160, rows: 40 },
-    }, () => null) as any;
-    const baseline = draw();
-    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
-    h.fs.addFile("/repo/.story/tickets/T-002.json", JSON.stringify({ ...JSON.parse(ticket("T-002", "inprogress")), phase: "p2" }));
-    await h.fire("turn.complete"); await h.settle(8);
-    expect(JSON.stringify(findUi(draw(), "phase-p1"))).toMatch(/◔|◑|◕|●/);
-    await h.settle(60);
-    expect(JSON.stringify(findUi(draw(), "phase-timeline"))).toContain("•");
-    expect(draw().children.length).toBe(baseline.children.length);
-    await h.settle(30);
-    const settled = JSON.stringify(findUi(draw(), "phase-timeline"));
-    expect(settled).toContain("✓"); expect(settled).toContain("◎");
-    expect(settled).not.toContain("•");
-    await h.fire("turn.complete"); await h.settle(8);
-    expect(JSON.stringify(findUi(draw(), "phase-timeline"))).toBe(settled);
-  });
-
   it("disables startup and ongoing animation with one switch while retaining live state", async () => {
     const h = new Harness(true, true, false); seedLedger(h.fs, "/repo");
     await h.start("/repo"); await h.settle();
@@ -1037,7 +1012,7 @@ describe("inline phase overview", () => {
     expect(complete.count).toBe(2);
   });
 
-  it("renders actual out-of-order statuses and removes the strip when docking", async () => {
+  it("keeps the phase strip hidden across pane sizes and placements", async () => {
     const h = new Harness(); seedLedger(h.fs, "/repo");
     h.fs.files.delete("/repo/.story/tickets/T-001.json");
     h.fs.files.delete("/repo/.story/tickets/T-002.json");
@@ -1055,30 +1030,21 @@ describe("inline phase overview", () => {
     }, (e: any) => e);
     const inline = draw(189, 18, "inline");
     const timeline = findUi(inline, "phase-timeline");
-    expect(timeline).toBeDefined();
+    expect(timeline).toBeUndefined();
     expect(findUi(inline, "header")).toBeDefined();
-    expect(JSON.stringify(findUi(timeline, "phase-p9"))).toContain("◎");
-    expect(JSON.stringify(findUi(timeline, "phase-p10"))).toContain("●");
-    expect(findUi(timeline, "phase-p7")).toBeUndefined();
-    expect(findUi(timeline, "phase-p11")).toBeUndefined();
-    expect(JSON.stringify(findUi(timeline, "phase-p8"))).toContain("✓");
-    expect(JSON.stringify(timeline)).not.toContain("PHASE 9");
-    expect(JSON.stringify(timeline)).not.toContain("current");
-    expect(JSON.stringify(timeline)).not.toContain("earlier");
-    expect(findUi(timeline, "phase-p9").children).toHaveLength(2);
-    expect(findUi(timeline, "phase-p9").children[1].bold).toBe(true);
     expect(findUi(draw(189, 18, "dock"), "phase-timeline")).toBeUndefined();
     expect(findUi(draw(189, 18, "dock"), "header")).toBeDefined();
     expect(findUi(draw(90, 18, "inline"), "phase-timeline")).toBeUndefined();
     expect(findUi(draw(90, 18, "inline"), "header")).toBeDefined();
     expect(findUi(draw(189, 10, "inline"), "phase-timeline")).toBeUndefined();
-    expect(findUi(draw(189, 18, "inline"), "phase-timeline")).toBeDefined();
+    expect(findUi(draw(189, 18, "inline"), "phase-timeline")).toBeUndefined();
     const height = (node: any): number => {
       if (node.node === "Text") return 1;
       const children = node.children || [];
       return (node.flexDirection === "row" ? Math.max(0, ...children.map(height)) : children.reduce((n: number, child: any) => n + height(child), 0)) + (node.borderStyle ? 2 : 0);
     };
-    for (const rows of [13, 14, 15, 18, 30]) expect(height(draw(189, rows, "inline"))).toBeLessThanOrEqual(rows);
+    // Without the timeline, use the normal board budget rather than its last drawn height.
+    for (const rows of [13, 14, 15, 18, 30]) expect(height(draw(189, rows, "inline"))).toBe(height(inline));
   });
 });
 
