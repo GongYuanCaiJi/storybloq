@@ -19,6 +19,7 @@ import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
   validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
+  environmentSecrets,
 } from "./continuity-lib.js";
 import { killSidecar } from "../src/autonomous/liveness.js";
 import { loadRulingsSafe } from "../src/core/ruling-loader.js";
@@ -33,6 +34,8 @@ export const WORKSPACE_ROOT = resolve(PKG_ROOT, "..");
 export const FIXTURE_ROOT = join(PKG_ROOT, "test", "fixtures", "continuity");
 export const DEFAULT_OUT = join(FIXTURE_ROOT, "baseline");
 export const DEFAULT_RAW_OUT = join(WORKSPACE_ROOT, "eval-runs", "continuity");
+/** Read once, at process start, so every publication in this run is checked against the same set of real values. */
+const RUNNER_SECRETS = environmentSecrets(process.env);
 export const DIST_FILES = ["dist/mcp.js", "dist/cli.js", "dist/index.js", "dist/presence.js"] as const;
 /** The executable and fixture inputs whose hash is the experiment's identity; output directories are exempt. */
 export const INPUT_PATHS = [
@@ -544,7 +547,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     const published: Record<string, boolean> = {};
     const publish = (name: string, text: string): boolean => {
       const s = sanitize(text, sctx);
-      const verdict = publicationCheck(s.text, pf.allowlist);
+      const verdict = publicationCheck(s.text, pf.allowlist, { secrets: RUNNER_SECRETS });
       (redactionFull.substitutions as Record<string, unknown>)[name] = s.substitutions;
       (redactionPublic.substitutions as Record<string, unknown>)[name] = s.substitutions;
       (redactionFull.fixtureDerived as Record<string, unknown>)[name] = verdict.fixtureDerived;
@@ -603,7 +606,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
       guideStates: usage.guideStates.map((g) => g.state), survivorsKilled: survivors ? survivors.split("\n").length : 0, sidecarOutcome, headBefore: initialHead, headAfter, published, finishedAt: new Date().toISOString(),
     };
     const recordText = sanitize(JSON.stringify(record, null, 2), sctx).text;
-    const recordVerdict = publicationCheck(recordText, pf.allowlist);
+    const recordVerdict = publicationCheck(recordText, pf.allowlist, { secrets: RUNNER_SECRETS });
     if (!recordVerdict.ok) throw new Error(`record.json would publish blocked content (${recordVerdict.blocked.map((b) => b.label).join(",")}); runner bug`);
     await writeAtomic(join(pubDir, "record.json"), recordText);
     // Completed marker only after the published artefacts re-hash to what the manifest lists.
@@ -677,7 +680,7 @@ function writeExperiment(o: RunOptions, pf: Preflight, cells: CellRow[], summary
   const expDir = join(o.out, pf.experiment.slice(0, 12));
   mkdirSync(expDir, { recursive: true });
   const text = sanitize(JSON.stringify({ experimentHash: pf.experiment, arm: o.arm, model: o.model, effort: o.effort, isolation: o.isolation, ownerException: pf.ownerException, inputTreeHash: pf.inputTreeHash, buildManifestHash: pf.buildManifestHash, configHash: pf.configHash, build: pf.build, cells, qualification: q, writtenAt: new Date().toISOString() }, null, 2), { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist }).text;
-  const verdict = publicationCheck(text, pf.allowlist);
+  const verdict = publicationCheck(text, pf.allowlist, { secrets: RUNNER_SECRETS });
   if (!verdict.ok) throw new Error(`experiment.json would publish blocked content (${verdict.blocked.map((b) => b.label).join(",")}); runner bug`);
   writeFileSync(join(expDir, "experiment.json"), text);
   const marker = join(expDir, "QUALIFYING");

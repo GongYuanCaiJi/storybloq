@@ -501,7 +501,7 @@ export function sanitize(text: string, ctx: SanitizeContext): { readonly text: s
    * span carrying a credential is skipped, and stays intact for publicationCheck to refuse.
    */
   const replaceSpans = (find: (decoded: string) => readonly { readonly start: number; readonly end: number; readonly value: string }[], token: string, label: string): number => {
-    const dec = decodeWithMap(out);
+    const dec = decodeForSpans(out);
     // Credentials are located across the WHOLE text, not inside each candidate: `Bearer /tmp/secret`
     // is one credential match that starts outside the path it swallows, so judging the path alone
     // would erase the secret's only alarm. Any overlap at all, partial included, protects the span.
@@ -607,6 +607,47 @@ function credentialSpans(decoded: string, allowed: ReadonlySet<string>): { start
   return out;
 }
 
+/** JSON's escapes only mean anything inside JSON. In plain text a backslash is a filename character. */
+function parsesJson(t: string): boolean {
+  try { JSON.parse(t); return true; } catch { return false; }
+}
+
+/** Every code unit maps to itself, for text whose backslashes are filename characters rather than escapes. */
+function identityDecode(src: string, offset: number): DecodedText {
+  const chars: string[] = [];
+  const spans: { start: number; end: number }[] = [];
+  for (let i = 0; i < src.length; i++) { chars.push(src[i]!); spans.push({ start: offset + i, end: offset + i + 1 }); }
+  return { text: chars.join(""), spans };
+}
+
+/**
+ * decodeWithMap applied only where JSON escapes mean anything: a JSON document decoded whole, a JSONL file
+ * decoded line by line (a line that does not parse keeps its bytes), and plain text left alone. Decoding
+ * unconditionally reads a literal backslash-n in a plain-text filename as a line break, which hid the rest of
+ * the path from the quoted matcher: the sanitiser then replaced only the rooted head, and the identifying tail
+ * published, because the check could no longer see a rooted path to refuse. ONE classification, used by the
+ * sanitiser and by the publication check, so the two can never judge an artefact differently again.
+ */
+function decodeForSpans(src: string): DecodedText {
+  if (parsesJson(src)) return decodeWithMap(src);
+  const lines = src.split("\n");
+  if (!lines.some((l) => l.trim() !== "" && parsesJson(l))) return identityDecode(src, 0);
+  const chars: string[] = [];
+  const spans: { start: number; end: number }[] = [];
+  let offset = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const d = line.trim() !== "" && parsesJson(line) ? decodeWithMap(line) : identityDecode(line, 0);
+    for (let k = 0; k < d.spans.length; k++) {
+      chars.push(d.text[k]!);
+      spans.push({ start: offset + d.spans[k]!.start, end: offset + d.spans[k]!.end });
+    }
+    offset += line.length;
+    if (i < lines.length - 1) { chars.push("\n"); spans.push({ start: offset, end: offset + 1 }); offset += 1; }
+  }
+  return { text: chars.join(""), spans };
+}
+
 /** True when a document that parsed before still parses after: a replacement must never break evidence. */
 export function jsonShapePreserved(before: string, after: string): boolean {
   const parses = (t: string): boolean => { try { JSON.parse(t); return true; } catch { return false; } };
@@ -627,9 +668,27 @@ const CREDENTIAL_PATTERNS: readonly { readonly label: string; readonly re: RegEx
   { label: "sk-key", re: /\bsk-[A-Za-z0-9_-]{8,}/g },
   { label: "anthropic-env", re: /ANTHROPIC_[A-Z_]+/g },
   { label: "oauth", re: /oauth[A-Za-z0-9_-]*/gi },
-  { label: "bearer", re: /Bearer\s+[A-Za-z0-9._~+/=-]+/g },
+  // A bearer credential is long (an OAuth token, a PAT, a JWT). `Bearer abc123` in a test the agent wrote while
+  // implementing a redactor is content, and refusing it costs a whole observation. Shorter matches are left to the
+  // sk- patterns above, which stay unconditional, and to the known-secret check below, which compares by value.
+  { label: "bearer", re: /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/g },
   { label: "email", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
 ];
+
+/**
+ * The values this machine actually holds secret, read from the runner's own environment: any variable whose name
+ * ends in TOKEN, KEY, SECRET or PASSWORD, long enough to be a credential rather than a flag. These are compared by
+ * value, never by shape, are never allowlistable, and their sample is always a fixed string so a refusal cannot
+ * print the thing it refused. This is what makes the shape patterns safe to tune.
+ */
+export function environmentSecrets(env: NodeJS.ProcessEnv): string[] {
+  const out = new Set<string>();
+  for (const [k, v] of Object.entries(env)) {
+    if (!v || v.length < 20) continue;
+    if (/(TOKEN|KEY|SECRET|PASSWORD)$/.test(k)) out.add(v);
+  }
+  return [...out];
+}
 
 /** Every credential-looking string the fixture itself contains, so a read of N-1 or the test file can be published. */
 export function fixtureCredentialAllowlist(fixtureDir: string): string[] {
@@ -658,7 +717,6 @@ const ABSOLUTE_PATH = /(?<![\p{L}\p{N}_.:<>/\\-])\/(?:[\p{L}\p{N}_.@+~-]+\/)+[\p
 const FILE_URL = /file:\/\/(\/[^\s"'`)\]<>]+)/g;
 /** A quoted path may contain spaces, which the bare matcher stops at. */
 const QUOTED_PATH = /["'`](\/[^"'`\n]*?)["'`]/g;
-
 /**
  * Every absolute-path candidate with the span it occupies: bare paths, file URLs, and quoted paths
  * with spaces. A file URL reports its WHOLE span, because its path may be percent-encoded and only
@@ -707,32 +765,45 @@ export function decodedStrings(text: string): string[] {
 }
 
 /**
- * Refuses when any credential-looking string survives that is not an exact fixture-derived allowlist entry, or
- * when any absolute path survives that is neither a sanitiser token nor under an explicitly public prefix.
+ * Refuses when any credential-looking string survives that is not an exact fixture-derived allowlist entry, when
+ * any value in `secrets` survives at all, or when any absolute path survives that is neither a sanitiser token nor
+ * under an explicitly public prefix.
  * JSON and JSONL artefacts are scanned both as serialised text and as their decoded string values, so an escape
  * sequence cannot hide a credential. Paths are normalised before the boundary check, so `/bin/../etc/x` is
  * judged as `/etc/x`. Allowed prefixes are directory boundaries: `/x/dist` never admits `/x/dist-private`.
  */
-export function publicationCheck(text: string, allowlist: readonly string[], opts: { readonly allowedAbsolutePrefixes?: readonly string[] } = {}): PublicationVerdict {
+export function publicationCheck(text: string, allowlist: readonly string[], opts: { readonly allowedAbsolutePrefixes?: readonly string[]; readonly secrets?: readonly string[] } = {}): PublicationVerdict {
   const allow = new Set(allowlist);
   const blocked: { label: string; sample: string }[] = [];
   const derived = new Map<string, number>();
   const prefixes = [...PUBLIC_ABSOLUTE_PREFIXES, ...(opts.allowedAbsolutePrefixes ?? [])];
-  const scan = (t: string, countDerived: boolean): void => {
+  const secrets = (opts.secrets ?? []).filter((v) => v.length >= 20);
+  const decoded = decodedStrings(text);
+  // A known secret is refused by value, before any shape rule, and it is the ONLY thing the verdict then carries.
+  // A shape pattern matching the same value would put its first 24 characters into a sample, and from there into
+  // a thrown error or a redaction ledger; an allowlisted one would land in fixtureDerived whole. Neither can
+  // happen if the shape scans never run. Refusing is not allowlistable: `secrets` outranks `allowlist`.
+  const hits = secrets.filter((v) => text.includes(v) || decoded.some((d) => d.includes(v)));
+  if (hits.length > 0) return { ok: false, blocked: hits.map(() => ({ label: "known-secret", sample: "a value from the runner environment" })), fixtureDerived: [] };
+  const scan = (t: string, countDerived: boolean, decodeEscapes: boolean): void => {
     for (const p of CREDENTIAL_PATTERNS) {
       for (const m of t.match(p.re) ?? []) {
         if (allow.has(m)) { if (countDerived) derived.set(m, (derived.get(m) ?? 0) + 1); }
         else blocked.push({ label: p.label, sample: m.slice(0, 24) });
       }
     }
-    const stripped = t.replace(/\\\//g, "/").replace(SANITIZED_TOKEN, "");
+    // Decoded with the sanitiser's own decoder, and only where JSON escapes mean anything, so both sides
+    // judge the same text: a `\n` that is two characters in a JSON artefact is a real newline in the decoded
+    // form the sanitiser saw, and a quoted candidate cannot run past a line break on one side and stop at it
+    // on the other. Values from decodedStrings are already decoded, so they are not decoded twice.
+    const stripped = (decodeEscapes ? decodeForSpans(t).text : t).replace(SANITIZED_TOKEN, "");
     for (const m of absolutePathCandidates(stripped)) {
       const norm = posix.normalize(m);
       if (!prefixes.some((p) => withinPrefix(norm, p))) blocked.push({ label: "absolute-path", sample: norm.slice(0, 48) });
     }
   };
-  scan(text, true);
-  for (const s of decodedStrings(text)) scan(s, false);
+  scan(text, true, true);
+  for (const s of decoded) scan(s, false, false);
   return { ok: blocked.length === 0, blocked, fixtureDerived: [...derived].map(([value, count]) => ({ value, count })) };
 }
 
