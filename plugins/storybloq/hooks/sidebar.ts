@@ -1,850 +1,466 @@
+import { createDashboardState, type DashboardState, type ScanItem, type CachedRecord } from "./dashboard-state.js";
+import { paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel } from "./dashboard-view.js";
+export { contextLabel, MOD_VERSION } from "./dashboard-view.js";
+import { wroteLedger } from "./ledger-write-detection.js";
+import { cellWidth, truncate } from "./terminal-text.js";
 /**
- * T-508: the ledger sidebar Mod. Draws `.story/` beside the transcript.
- *
- * Read-only by construction: it reads the ledger through `$.fs` and never
- * writes it. The write path stays the CLI and the MCP server, as the ticket
- * requires, and `claude plugin validate` prints the calls this module makes so
- * a `$.fs.write` added here would show up in a list the tests compare.
- *
- * WHERE THE NUMBERS COME FROM. `sidebar-projection.ts`, which the repo's own
- * vitest holds equal to `storybloq status --compact`. Nothing in this file
- * counts anything; it reads files, caches what it read, and draws.
- *
- * WHY THE SCAN IS CHUNKED. The compact numbers come from the whole
- * file-per-item ledger, which on a mature project is a couple of thousand
- * files, and `.story/status.json` is not a projection of them (it is a session
- * flag, four fields). A hook that read them all in one go would sit on the
- * client's budget, so the first pass runs in chunks on `$.clock.every` and the
- * pane says how many files are left. Afterwards `$.fs.stat` is the only cost
- * for a file that has not changed: the cache in `$.store` is keyed by path to
- * its mtime and the handful of fields the pane shows, so a later session
- * starts warm and a refresh re-reads only what moved.
- *
- * WHY IT POLLS. Nothing tells a session that another process wrote the
- * ledger: a peer session, the Mac app, a git pull and the CLI in a terminal
- * all leave this Mod's events silent, so the pane used to sit on the last
- * projection until this session next finished a turn (T-517). The client
- * exposes no `$.fs.watch`, so the refresh is a poll on the timer that is
- * already running: four `$.fs.stat` calls every two seconds, and nothing
- * further unless one of those four mtimes moved.
- *
- * WIDTH AND PLACEMENT (ISS-1247, ISS-1251; the 2.1.277 declarations). Two
- * client rules, neither ours to set. WHERE a pane sits is the renderer's: the
- * fullscreen (alternate-screen) layout docks it beside the transcript from 110
- * columns, the main-screen layout seats it inline above the prompt at any
- * width; `e.props.placement` says which on every Pane render. WHETHER it draws
- * is judged at each `$.ui.open`: an open answering the person's input (a
- * prompt they entered, a command, a press) is placed at any width; one the
- * plugin makes on its own waits undrawn below 144 columns (110 once asked).
- * The `session.start` open is the plugin's own, so a session started narrow
- * shows the one `AbovePrompt` line instead, and the person's first prompt
- * re-opens the pane (`prompt.submit`), which the client then places.
- *
- * LAYOUT FOLLOWS PLACEMENT (ISS-1254). A docked pane is a sidebar: tall and
- * never wider than 90 columns, so its three columns always stack one under
- * another, whatever its width (the 1.15.4 sidebar the owner asked back after
- * 1.15.5 squeezed four frames side by side at 150 columns and drew only the
- * narrow board at 132). An inline pane is a strip above the prompt: the three
- * columns side by side from BOARD_MIN_COLUMNS up, the narrow board below.
- * A client that reports no placement gets the width rule alone, as 1.15.4
- * did. Colour follows placement too (ISS-1255): the client paints a docked
- * pane's background from its theme, so text there gets a colour for that
- * theme; an inline pane sits on the terminal's own background, so its text
- * takes the terminal's default foreground, which is the one that matches.
- *
- * EVENT NAMES AND `$`. Every event name is a string literal at its `on()` call
- * and every call is spelled `$.noun.member(...)` inline, because the client
- * reads both from this source rather than from a manifest. `client-api.ts` is
- * the documentary pin the tests compare that reading against.
- */
-
+* T-508: the ledger sidebar Mod. Draws `.story/` beside the transcript.
+*
+* Read-only by construction: it reads the ledger through `$.fs` and never
+* writes it. The write path stays the CLI and the MCP server, as the ticket
+* requires, and `claude plugin validate` prints the calls this module makes so
+* a `$.fs.write` added here would show up in a list the tests compare.
+*
+* WHERE THE NUMBERS COME FROM. `sidebar-projection.ts`, which the repo's own
+* vitest holds equal to `storybloq status --compact`. Nothing in this file
+* counts anything; it reads files, caches what it read, and draws.
+*
+* WHY THE SCAN IS CHUNKED. The compact numbers come from the whole
+* file-per-item ledger, which on a mature project is a couple of thousand
+* files, and `.story/status.json` is not a projection of them (it is a session
+* flag, four fields). A hook that read them all in one go would sit on the
+* client's budget, so the first pass runs in chunks on `$.clock.every` and the
+* pane says how many files are left. Afterwards `$.fs.stat` is the only cost
+* for a file that has not changed: the cache in `$.store` is keyed by path to
+* its mtime and the handful of fields the pane shows, so a later session
+* starts warm and a refresh re-reads only what moved.
+*
+* WHY IT POLLS. Nothing tells a session that another process wrote the
+* ledger: a peer session, the Mac app, a git pull and the CLI in a terminal
+* all leave this Mod's events silent, so the pane used to sit on the last
+* projection until this session next finished a turn (T-517). The client
+* exposes no `$.fs.watch`, so the refresh is a poll on the timer that is
+* already running: four `$.fs.stat` calls every two seconds, and nothing
+* further unless one of those four mtimes moved.
+*
+* WIDTH AND PLACEMENT (ISS-1247, ISS-1251; the 2.1.277 declarations). Two
+* client rules, neither ours to set. WHERE a pane sits is the renderer's: the
+* fullscreen (alternate-screen) layout docks it beside the transcript from 110
+* columns, the main-screen layout seats it inline above the prompt at any
+* width; `e.props.placement` says which on every Pane render. WHETHER it draws
+* is judged at each `$.ui.open`: an open answering the person's input (a
+* prompt they entered, a command, a press) is placed at any width; one the
+* plugin makes on its own waits undrawn below 144 columns (110 once asked).
+* The `session.start` open is the plugin's own, so a session started narrow
+* shows the one `AbovePrompt` line instead, and the person's first prompt
+* re-opens the pane (`prompt.submit`), which the client then places.
+*
+* LAYOUT FOLLOWS PLACEMENT (ISS-1254). A docked pane is a sidebar: tall and
+* never wider than 90 columns, so its three columns always stack one under
+* another, whatever its width (the 1.15.4 sidebar the owner asked back after
+* 1.15.5 squeezed four frames side by side at 150 columns and drew only the
+* narrow board at 132). An inline pane is a strip above the prompt: the three
+* columns side by side from BOARD_MIN_COLUMNS up, the narrow board below.
+* A client that reports no placement gets the width rule alone, as 1.15.4
+* did. Colour follows placement too (ISS-1255): the client paints a docked
+* pane's background from its theme, so text there gets a colour for that
+* theme; an inline pane sits on the terminal's own background, so its text
+* takes the terminal's default foreground, which is the one that matches.
+*
+* EVENT NAMES AND `$`. Every event name is a string literal at its `on()` call
+* and every call is spelled `$.noun.member(...)` inline, because the client
+* reads both from this source rather than from a manifest. `client-api.ts` is
+* the documentary pin the tests compare that reading against.
+*/
 import { logoFrame, logoLayout, LOGO_DURATION_MS } from "./storyfield-logo.js";
 import { DashboardMotion } from "./dashboard-motion.js";
 import type { On } from "./mod.js";
-import {
-  extractRecord,
-  projectSidebar,
-  type SidebarBoardCard,
-  type SidebarIssue,
-  type SidebarProjection,
-  type SidebarRecord,
-  type SidebarTicket,
-} from "./sidebar-projection.js";
-
+import { extractRecord, projectSidebar, type SidebarIssue, type SidebarRecord, type SidebarTicket, } from "./sidebar-projection.js";
 type Options = Readonly<Record<string, string | number | boolean | readonly string[]>>;
-
 /** The pane's id. Also the `requestId` its `ui.render` and `ui.close` carry. */
 const PANE_ID = "storybloq";
 const PANE_TITLE = "Storybloq";
-
 /**
- * The narrowest terminal the client will place a plugin's OWN open into, from
- * the API's rule: an unasked open "waits undrawn below 144 columns (110 once
- * asked)". The `session.start` open is that kind, so below this a narrow
- * start has no pane and the one-line fallback draws instead; the person's
- * first prompt re-opens it as an open answering their input, which is placed
- * at any width (ISS-1251). 110 was the wrong floor and left 110-143 columns
- * with nothing drawn at all (ISS-1235). This is not the dock width: whether
- * a placed pane docks or sits inline is the renderer's call (ISS-1247).
- */
+* The narrowest terminal the client will place a plugin's OWN open into, from
+* the API's rule: an unasked open "waits undrawn below 144 columns (110 once
+* asked)". The `session.start` open is that kind, so below this a narrow
+* start has no pane and the one-line fallback draws instead; the person's
+* first prompt re-opens it as an open answering their input, which is placed
+* at any width (ISS-1251). 110 was the wrong floor and left 110-143 columns
+* with nothing drawn at all (ISS-1235). This is not the dock width: whether
+* a placed pane docks or sits inline is the renderer's call (ISS-1247).
+*/
 const DOCK_COLUMNS = 144;
 const BAND_HINT = ", board opens at your next prompt";
-
 const STORE_KEY = "sidebar-ledger-cache-v1";
 /** Under the store's 4 MiB, with room for whatever else the plugin keeps. */
-const STORE_BUDGET_BYTES = 3_000_000;
-
+const STORE_BUDGET_BYTES = 3000000;
 /** Files per tick, and the tick, so no single dispatch sits on the budget. */
 const SCAN_CHUNK = 25;
 const SCAN_TICK_MS = 25;
-
 /**
- * T-517: ticks between idle polls, so eighty of a 25 ms tick is two seconds.
- *
- * Exported because the Mod's own tests count ticks against it, and a poll
- * interval they had to restate as a number would drift from this one.
- */
+* T-517: ticks between idle polls, so eighty of a 25 ms tick is two seconds.
+*
+* Exported because the Mod's own tests count ticks against it, and a poll
+* interval they had to restate as a number would drift from this one.
+*/
 export const IDLE_POLL_TICKS = 80;
-
 /**
- * How many cards a column ever draws, and the line that stands for the rest.
- *
- * A fixed six, by the owner's ruling, and not a figure derived from
- * `props.scroll.bodyRows`. The derived cap is what produced the bug the owner
- * hit live: a Done column of 27 was headed 27 correctly, drew 18 rows and
- * showed no tail, because the pane clips at `bodyRows` and the tail WAS drawn,
- * below the cut, along with the issues and handover lines under it. Six
- * bounds every column's body at seven rows whatever the pane reports, so the
- * board is the same height on every terminal and nothing is silently cut. It
- * was eight until the owner asked for the height back.
- *
- * The tail is three dots and not "+19 more": the heading already carries the
- * true total, so the tail only has to say that the column goes on.
- */
-const COLUMN_CARD_CAP = 6;
-const COLUMN_TAIL = "...";
-const BOARD_COLUMNS = 3;
-/** What a column with nothing in it says, rather than drawing a blank frame. */
-const EMPTY_COLUMNS = {
-  "board-open": { symbol: "◇", title: "Queue clear", short: "Queue clear", hint: "Add your next story." },
-  "board-inprogress": { symbol: "○", title: "Ready to begin", short: "Ready to start", hint: "Start a story from Open." },
-  "board-done": { symbol: "·", title: "Progress starts here", short: "Room to grow", hint: "Completed work gathers here." },
-} as const;
-type BoardColumnKey = keyof typeof EMPTY_COLUMNS;
-
-/**
- * The rows the pane spends on everything that is not a card: the header, the
- * two blank rows around the board and the footer, and per column the heading
- * box (text plus its two border rows) and the body box's two border rows.
- */
-const CHROME_ROWS = 4;
-const GAP_ROWS = 2;
-/** Card rows per column below which the blank rows are not worth their cost. */
-const GAPS_MIN_BODY = 3;
-/** The card's two border rows, its heading row and the rule under it. */
-const COLUMN_FRAME_ROWS = 4;
-
-/** Each column is a bordered card, and the border costs a column each side. */
-const COLUMN_BORDER = "round";
-const BORDER_COLUMNS = 2;
-/** The rule under a heading, and the gaps between the three columns. */
-const HEADING_RULE = "\u2500";
-const COLUMN_GAP = 1;
-const GAP_TOTAL = COLUMN_GAP * (BOARD_COLUMNS - 1);
-/**
- * From this width, In progress is widened and Done narrowed by about a
- * twentieth of the pane: at that size there is room to weight the board
- * toward the column being worked rather than the one already finished.
- */
-const WIDE_COLUMNS = 158;
-const WIDE_SHIFT = 0.05;
-const MIN_COLUMN_WIDTH = 12;
-
-/**
- * The severity buckets in the order the footer names them, with the colour a
- * nonzero one carries and the short label it falls back to.
- */
-/** What the issues line says when every bucket is empty. */
-const NO_ISSUES = "issues: none";
-
-const SEVERITY_ORDER = [
-  { key: "critical", long: "critical", short: "crit", tone: "red" },
-  { key: "high", long: "high", short: "high", tone: "yellow" },
-  { key: "medium", long: "medium", short: "med", tone: null },
-  { key: "low", long: "low", short: "low", tone: null },
-] as const;
-
-/**
- * The colour an issue's id carries on a board row, by severity.
- *
- * The same two tones the footer already uses for the same two buckets, so one
- * red on the board means what a red in the issues line means. Medium and low
- * carry none: a column where every row is coloured marks nothing.
- */
-const SEVERITY_TONES: Readonly<Record<string, string>> = { critical: "red", high: "yellow" };
-
-/**
- * How each column's heading is drawn.
- *
- * One column is emphasised and it is the one that says what is happening
- * now: In progress, bold and cyan. Open is plain, being the resting state and the
- * column a reader lands on most; Done recedes, since finished work is
- * reference rather than news. Counts use a quieter weight inside each heading.
- */
-const COLUMN_STYLES = {
-  open: {},
-  inProgress: { color: "cyan", bold: true },
-  done: { dimColor: true },
-} as const;
-
-/**
- * Cells kept clear to the right of the pane's own rows.
- *
- * The engine draws its close mark in the last cell of the pane, and the
- * context fill was right-aligned straight into it: live it read "context 7%×",
- * with the mark looking like part of our string. `BoxProps` carries
- * `marginRight`, so the row simply stops short of the edge. The fill now sits
- * at the foot rather than the head, and keeps the clearance there.
- */
-const PANE_EDGE_CLEARANCE = 3;
-
-/**
- * Narrower than this and three columns are shredded rather than laid out, so
- * the pane draws the narrow board instead (ISS-1252): the work in hand and
- * the footer, nothing else. A placed pane keeps its seat when the window
- * shrinks (inline on the main screen, docked in fullscreen), so this is the
- * in-between case: a pane that exists but is too narrow to be a board.
- */
-const BOARD_MIN_COLUMNS = 60;
-/** Cards the narrow board shows before it says how many more there are. */
-const NARROW_BOARD_CARDS = 3;
-
-/**
- * How a ledger write is recognised at `tool.call`. The MCP names arrive
- * prefixed by their server, the CLI's own do not; the verb at the end is what
- * separates a write from a read.
- */
-const MCP_PREFIX = "mcp__storybloq__";
-const LEDGER_TOOL_PREFIX = "storybloq_";
-const LEDGER_WRITE_VERB = /_(create|update|set|unset|add|init|snapshot|reinforce|supersede)$/;
-/**
- * The built-in tools that can write a file, from this build's own tool table
- * (`BuiltinToolInputs` in claude-code.d.ts carries Edit, Write and
- * NotebookEdit; MultiEdit is named here for builds that have it, and costs
- * nothing where it does not exist).
- */
-const MUTATING_FILE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const BASH_TOOL = "Bash";
-/**
- * The storybloq CLI's writing subcommands, the same verbs the tool names end
- * in, and how far after `storybloq` one still counts as the subcommand
- * (`storybloq note create`, so two words).
- */
-const CLI_NAME = "storybloq";
-const WRITE_VERBS = ["create", "update", "set", "unset", "add", "init", "snapshot", "reinforce", "supersede"];
-const CLI_VERB_DEPTH = 2;
-/**
- * The characters that are operators outside a quoted run, the runs of them
- * that cut one segment from the next, and the one that redirects.
- */
-const OPERATOR_CHARACTERS = [";", "|", "&", "\n", ">", "<"];
-const SEPARATOR_CHARACTERS = [";", "|", "&", "\n"];
-const REDIRECT = ">";
-/** `&>`, the other way of writing a redirect that takes both streams. */
-const BOTH_STREAMS = "&>";
-/** `<<` and `<<<`: past one, the line is a document rather than a command. */
-const HEREDOC = "<<";
-/** A leading `NAME=value`, which is an assignment and not the command. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** The few commands that only lead up to the one that runs. */
-const WRAPPER_COMMANDS = new Set(["env", "npx", "time", "nice", "sudo", "command"]);
-/**
- * The options of those that take a VALUE in the next word, per wrapper.
- *
- * `sudo -u someone storybloq ticket update` runs the CLI, and a reader that
- * steps over `-u` and stops at `someone` decides the command is a username.
- * `--option=value` is one word already and needs none of this.
- */
-const WRAPPER_VALUE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
-  sudo: ["-u", "-g", "-h", "-p"],
-  nice: ["-n"],
-  env: ["-u", "-C", "-S"],
-  time: ["-f", "-o"],
-  npx: ["-p", "--package", "-c", "--call"],
-};
-/** The CLI's own global options that take the next word as their value. */
-const CLI_VALUE_OPTIONS = ["--node", "--format", "--client"];
-/** The shell commands that write, by what each of them writes. */
-const COPY_COMMANDS = new Set(["cp", "install"]);
-const MOVE_COMMAND = "mv";
-const TEE_COMMAND = "tee";
-const REMOVE_COMMAND = "rm";
-const SED_COMMAND = "sed";
-/** Where a path can arrive on a built-in file tool's event. */
-const PATH_ARGUMENTS = ["file_path", "path", "notebook_path"] as const;
-const STORY_DIR = ".story/";
-/** The ledger directory itself, which is what says a project HAS a ledger. */
+* How many cards a column ever draws, and the line that stands for the rest.
+*
+* A fixed six, by the owner's ruling, and not a figure derived from
+* `props.scroll.bodyRows`. The derived cap is what produced the bug the owner
+* hit live: a Done column of 27 was headed 27 correctly, drew 18 rows and
+* showed no tail, because the pane clips at `bodyRows` and the tail WAS drawn,
+* below the cut, along with the issues and handover lines under it. Six
+* bounds every column's body at seven rows whatever the pane reports, so the
+* board is the same height on every terminal and nothing is silently cut. It
+* was eight until the owner asked for the height back.
+*
+* The tail is three dots and not "+19 more": the heading already carries the
+* true total, so the tail only has to say that the column goes on.
+*/
 const LEDGER_DIR = ".story";
-
-/** The cell-width approximation's special code points, and the cut mark. */
-const ZERO_WIDTH_JOINER = 0x200d;
-const VARIATION_SELECTOR = 0xfe0f;
-const ELLIPSIS = "\u2026";
-
 const TICKETS_DIR = ".story/tickets";
 const ISSUES_DIR = ".story/issues";
 const HANDOVERS_DIR = ".story/handovers";
 const CONFIG_PATH = ".story/config.json";
 const ROADMAP_PATH = ".story/roadmap.json";
 const STATUS_PATH = ".story/status.json";
-
-interface CachedRecord {
-  readonly mtimeMs: number;
-  readonly record: SidebarRecord;
+function forgetEverything(dashboard: DashboardState): void {
+  dashboard.cache = {};
+  dashboard.cacheLoaded = false;
+  dashboard.projection = null;
+  dashboard.project = "";
+  dashboard.phases = [];
+  dashboard.handoverFilenames = [];
+  dashboard.queue = [];
+  dashboard.idleTicks = 0;
+  dashboard.polledMtimes = {};
+  dashboard.scanInitializing = false;
+  dashboard.scanActive = false;
+  dashboard.pendingRefresh = false;
+  dashboard.ticking = false;
+  dashboard.timerStarted = false;
+  dashboard.logoElapsed = 0;
+  dashboard.logoStarted = false;
+  dashboard.logoFinished = false;
+  dashboard.logoTicks = 0;
+  dashboard.motion = new DashboardMotion();
+  dashboard.bandDrawn = false;
+  dashboard.sidebarEnabled = false;
+  dashboard.paneOpen = false;
+  dashboard.paneDrawn = false;
+  dashboard.reopenAsked = false;
+  dashboard.themeLight = false;
+  dashboard.paneInline = false;
+  dashboard.sessionActive = false;
+  dashboard.contextPercent = null;
+  dashboard.warm = false;
+  dashboard.uiAvailable = true;
+  dashboard.noLedger = false;
+  dashboard.saidNoUi = false;
+  dashboard.saidNoLedger = false;
+  dashboard.saidScanFailed = false;
+  dashboard.saidRootUnresolved = false;
+  dashboard.initialCwd = null;
+  dashboard.ledgerRoot = null;
 }
-
-interface ScanItem {
-  readonly path: string;
-  readonly kind: "ticket" | "issue";
-}
-
-/**
- * Everything this Mod remembers for the session. Module scope, not a closure,
- * so the render hook can draw what the refresh hooks left without awaiting.
- */
-let cache: Record<string, CachedRecord> = {};
-let cacheLoaded = false;
-let projection: SidebarProjection | null = null;
-let project = "";
-let phases: { readonly id: string; readonly name: string; readonly label?: string }[] = [];
-let handoverFilenames: string[] = [];
-let queue: ScanItem[] = [];
-/** Ticks since the last idle poll, and the mtimes that poll compares against. */
-let idleTicks = 0;
-let polledMtimes: Record<string, number> = {};
-/** A scan is building its worklist, or has one left to drain. */
-let scanInitializing = false;
-let scanActive = false;
-/** A refresh asked for while a scan was in flight, to run when it finishes. */
-let pendingRefresh = false;
-let ticking = false;
-/** One timer for the module's life, not one per scan. */
-let timerStarted = false;
-let logoElapsed = 0;
-let logoStarted = false;
-let logoFinished = false;
-let logoTicks = 0;
-let motion = new DashboardMotion();
-let bandDrawn = false;
-/** The Mod is on and something is drawn: not the same as the pane existing. */
-let sidebarEnabled = false;
-let paneOpen = false;
-/**
- * The pane has actually RENDERED, which `paneOpen` does not say: the client
- * parks an unasked open undrawn below the dock width, and a session started
- * narrow and resized wide keeps that parked pane (ISS-1235). The band stands
- * down only once this is true.
- */
-let paneDrawn = false;
-/**
- * A repeat `$.ui.open` was asked for this crossing into the dock width
- * (ISS-1235). The client judges the width at each open, so one repeat open
- * re-places a pane parked by a narrow start; one per crossing, never per
- * render. Cleared below the dock width, when the pane draws, and on close.
- */
-let reopenAsked = false;
-/**
- * The client's theme is light (ISS-1238). The pane background is painted by
- * the client from ITS theme, while a Text with no colour draws in the
- * TERMINAL's default foreground: on a light terminal with a dark client theme
- * that is dark on dark. So every pane Text gets an explicit colour for the
- * client's theme. Read at attach from `$.config.list()`, followed through
- * `config.set`; the dark default is the safe one (the pane was dark in every
- * screenshot so far).
- */
-let themeLight = false;
-/**
- * The pane being drawn sits inline above the prompt (ISS-1255). Set at the
- * top of every Pane render from `e.props.placement`, read by `paneText` for
- * the rest of that render: an inline pane is on the terminal's background,
- * not the client's, so its text keeps the terminal's default foreground. On
- * the owner's light Terminal with the dark client theme, the forced white
- * left the inline board with no Open heading, no titles and no footer counts.
- */
-let paneInline = false;
-let sessionActive = false;
-let contextPercent: number | null = null;
-/**
- * `autoCompactWindow` from the merged settings, or null when none is set or
- * the read was refused (ISS-1236). Read at attach and refreshed per turn,
- * never per render: `ui.render` runs on every resize and invalidate.
- */
-let autoCompactWindow: number | null = null;
-let warm = false;
-let uiAvailable = true;
-/** The project has no `.story/` at all, so the Mod draws nothing anywhere. */
-let noLedger = false;
-let saidNoUi = false;
-let saidNoLedger = false;
-let saidScanFailed = false;
-let saidRootUnresolved = false;
-
-/**
- * ISS-1239: where the ledger IS, decided once at `session.start`.
- *
- * The Mod used to address the ledger with bare relative constants, which the
- * client resolves against the session's CURRENT working directory. One `cd`
- * in the session and `.story/tickets` pointed somewhere with no ledger in it,
- * the scan listed nothing, and the board silently cleared. So the root is
- * resolved once from the directory the session STARTED in and everything is
- * addressed from it; the working directory may wander and the pane does not
- * notice.
- *
- * `initialCwd` is kept separately from `ledgerRoot` because late attachment
- * (a project that gains a `.story/` mid-session) has to re-walk from the same
- * fixed origin. Re-walking from the live cwd would search wherever the person
- * last cd-ed to and attach to an unrelated nested ledger, which is the same
- * class of bug.
- */
-let initialCwd: string | null = null;
-let ledgerRoot: string | null = null;
-
-/** Reset between tests; a session only ever loads this module once. */
-function forgetEverything(): void {
-  cache = {};
-  cacheLoaded = false;
-  projection = null;
-  project = "";
-  phases = [];
-  handoverFilenames = [];
-  queue = [];
-  idleTicks = 0;
-  polledMtimes = {};
-  scanInitializing = false;
-  scanActive = false;
-  pendingRefresh = false;
-  ticking = false;
-  timerStarted = false;
-  logoElapsed = 0;
-  logoStarted = false;
-  logoFinished = false;
-  logoTicks = 0;
-  motion = new DashboardMotion();
-  bandDrawn = false;
-  sidebarEnabled = false;
-  paneOpen = false;
-  paneDrawn = false;
-  reopenAsked = false;
-  themeLight = false;
-  paneInline = false;
-  sessionActive = false;
-  contextPercent = null;
-  autoCompactWindow = null;
-  warm = false;
-  uiAvailable = true;
-  noLedger = false;
-  saidNoUi = false;
-  saidNoLedger = false;
-  saidScanFailed = false;
-  saidRootUnresolved = false;
-  initialCwd = null;
-  ledgerRoot = null;
-}
-
 function isTicketRecord(record: SidebarRecord): record is SidebarTicket {
   return record.kind === "ticket";
 }
-
 function isIssueRecord(record: SidebarRecord): record is SidebarIssue {
   return record.kind === "issue";
 }
-
 /** Rebuilds the projection from whatever the cache holds right now. */
-function reproject(completedScan = false): void {
+function reproject(dashboard: DashboardState, completedScan = false): void {
   const tickets: SidebarTicket[] = [];
   const issues: SidebarIssue[] = [];
-  for (const entry of Object.values(cache)) {
-    if (isTicketRecord(entry.record)) tickets.push(entry.record);
-    else if (isIssueRecord(entry.record)) issues.push(entry.record);
+  for (const entry of Object.values(dashboard.cache)) {
+    if (isTicketRecord(entry.record))
+      tickets.push(entry.record);
+    else if (isIssueRecord(entry.record))
+      issues.push(entry.record);
   }
-  projection = projectSidebar({ project, phases, tickets, issues, handoverFilenames });
-  if (completedScan) motion.observe(projection, ledgerRoot);
+  dashboard.projection = projectSidebar({ project: dashboard.project, phases: dashboard.phases, tickets, issues, handoverFilenames: dashboard.handoverFilenames });
+  if (completedScan)
+    dashboard.motion.observe(dashboard.projection, dashboard.ledgerRoot);
 }
-
-/**
- * The graphemes of a string with the cells each one takes.
- *
- * One routine, used by both the measuring and the cutting, because two that
- * disagree is how "👩‍💻abc" cut to four cells came apart in the middle of the
- * emoji: the measure suppressed the code point after the zero-width joiner
- * and the cut counted it again. `Intl.Segmenter` gives the clusters (this
- * runtime has it; where it does not, the fallback is code points, which is
- * the old behaviour and no worse). A cluster is two cells wide if any code
- * point in it is wide, or if it carries the emoji variation selector, which
- * is what makes a text glyph like "♥️" render double.
- */
-function graphemes(text: string): { cluster: string; cells: number }[] {
-  const out: { cluster: string; cells: number }[] = [];
-  for (const cluster of clustersOf(text)) {
-    let cells = 0;
-    let emoji = false;
-    for (const character of cluster) {
-      const point = character.codePointAt(0) ?? 0;
-      if (point === VARIATION_SELECTOR) emoji = true;
-      if (isCombining(point) || point === VARIATION_SELECTOR || point === ZERO_WIDTH_JOINER) continue;
-      cells = Math.max(cells, isWide(point) ? 2 : 1);
-    }
-    out.push({ cluster, cells: emoji ? 2 : Math.max(cells, cluster === "" ? 0 : 1) });
-  }
-  return out;
-}
-
-/** Grapheme clusters where the runtime has them, code points where it does not. */
-function clustersOf(text: string): string[] {
-  const segmenter = (Intl as unknown as { Segmenter?: any }).Segmenter;
-  if (typeof segmenter === "function") {
-    const out: string[] = [];
-    for (const part of new segmenter(undefined, { granularity: "grapheme" }).segment(text)) {
-      out.push(part.segment as string);
-    }
-    return out;
-  }
-  return [...text];
-}
-
-/**
- * How many terminal cells a string takes, which is not its length.
- *
- * A CJK ideograph or an emoji occupies two cells and a combining mark none,
- * so measuring `.length` overruns a column by a cell per wide character, the
- * row wraps, and the board comes apart. This is the usual approximation (the
- * East Asian Wide and Fullwidth blocks plus the emoji planes), not a full
- * Unicode width table, which is more than a sidebar can carry.
- */
-function cellWidth(text: string): number {
-  let width = 0;
-  for (const { cells } of graphemes(text)) width += cells;
-  return width;
-}
-
-function isCombining(point: number): boolean {
-  return (
-    (point >= 0x0300 && point <= 0x036f)
-    || (point >= 0x0483 && point <= 0x0489)
-    || (point >= 0x0591 && point <= 0x05bd)
-    || (point >= 0x0610 && point <= 0x061a)
-    || (point >= 0x064b && point <= 0x065f)
-    || (point >= 0x1ab0 && point <= 0x1aff)
-    || (point >= 0x1dc0 && point <= 0x1dff)
-    || (point >= 0x20d0 && point <= 0x20ff)
-    || (point >= 0xfe20 && point <= 0xfe2f)
-  );
-}
-
-function isWide(point: number): boolean {
-  return (
-    (point >= 0x1100 && point <= 0x115f)
-    || (point >= 0x2e80 && point <= 0x303e)
-    || (point >= 0x3041 && point <= 0x33ff)
-    || (point >= 0x3400 && point <= 0x4dbf)
-    || (point >= 0x4e00 && point <= 0x9fff)
-    || (point >= 0xa000 && point <= 0xa4cf)
-    || (point >= 0xac00 && point <= 0xd7a3)
-    || (point >= 0xf900 && point <= 0xfaff)
-    || (point >= 0xfe10 && point <= 0xfe19)
-    || (point >= 0xfe30 && point <= 0xfe6f)
-    || (point >= 0xff00 && point <= 0xff60)
-    || (point >= 0xffe0 && point <= 0xffe6)
-    || (point >= 0x1f300 && point <= 0x1f64f)
-    || (point >= 0x1f680 && point <= 0x1f6ff)
-    || (point >= 0x1f900 && point <= 0x1f9ff)
-    || (point >= 0x20000 && point <= 0x3fffd)
-  );
-}
-
-/**
- * Cuts a string to fit `cells` terminal cells, ending in one ellipsis where
- * anything was cut.
- *
- * Cluster by cluster, on the same measure the width uses, so a family emoji
- * or an accented letter is either wholly in or wholly out and never halved.
- * The ellipsis is U+2026, one cell wide.
- */
-function truncate(text: string, cells: number): string {
-  if (cells <= 0) return "";
-  const parts = graphemes(text);
-  let total = 0;
-  for (const part of parts) total += part.cells;
-  if (total <= cells) return text;
-  const room = cells - 1;
-  let width = 0;
-  let out = "";
-  for (const part of parts) {
-    if (width + part.cells > room) break;
-    width += part.cells;
-    out += part.cluster;
-  }
-  return `${out}${ELLIPSIS}`;
-}
-
 /** The one line the narrow fallback draws, and the pane's own summary row. */
-function summaryLine(): string {
+function summaryLine(dashboard: DashboardState): string {
   // Until one scan has finished (or a warm cache came out of the store) the
   // numbers are a partial read, and drawing them would be a figure that
   // changes a second later for no reason the reader can see.
-  const busy = scanActive || scanInitializing;
-  if (!warm || projection === null) {
+  const busy = dashboard.scanActive || dashboard.scanInitializing;
+  if (!dashboard.warm || dashboard.projection === null) {
     return busy
-      ? `Storybloq: reading the ledger, ${queue.length} files left`
+      ? `Storybloq: reading the ledger, ${dashboard.queue.length} files left`
       : "Storybloq: no ledger read yet";
   }
   // The phase in hand; failing that, why there is none: a project whose
   // every phase is complete is finished, not phaseless (ISS-1257, the
   // `complete` sample), and only a roadmap with no phases says "no phase".
-  const phase = projection.currentPhase
-    ? projection.currentPhase.name
-    : projection.phases.length > 0
+  const phase = dashboard.projection.currentPhase
+    ? dashboard.projection.currentPhase.name
+    : dashboard.projection.phases.length > 0
       ? "all phases complete"
       : "no phase";
   const parts = [
     phase,
-    `${projection.openTickets} open`,
-    `${projection.inProgressTickets.length} in progress`,
-    `${projection.blockedTickets} blocked`,
-    `${projection.openIssues} issues`,
+    `${dashboard.projection.openTickets} open`,
+    `${dashboard.projection.inProgressTickets.length} in progress`,
+    `${dashboard.projection.blockedTickets} blocked`,
+    `${dashboard.projection.openIssues} issues`,
   ];
-  if (busy) parts.push(`reading ${queue.length}`);
+  if (busy)
+    parts.push(`reading ${dashboard.queue.length}`);
   return `Storybloq: ${parts.join(", ")}`;
 }
-
 /**
- * The band, cut to the terminal. Below the dock width it ends with what width
- * the board needs, but only when the whole summary fits beside it. Reserve
- * context pressure first so a long phase name cannot push it out of view.
- */
-function bandText(columns: number, narrow: boolean): string {
-  const context = contextLabel(contextPercent, Math.min(columns, 20));
+* The band, cut to the terminal. Below the dock width it ends with what width
+* the board needs, but only when the whole summary fits beside it. Reserve
+* context pressure first so a long phase name cannot push it out of view.
+*/
+function bandText(dashboard: DashboardState, columns: number, narrow: boolean): string {
+  const context = contextLabel(dashboard.contextPercent, Math.min(columns, 20));
   const room = columns - cellWidth(context) - 2;
-  if (room <= 0) return context;
-  const summary = summaryLine().replace("Storybloq:", `Storybloq: ${motion.activity().glyph}`);
+  if (room <= 0)
+    return context;
+  const summary = summaryLine(dashboard).replace("Storybloq:", `Storybloq: ${dashboard.motion.activity().glyph}`);
   const line = `${truncate(summary, room)}  ${context}`;
   const hint = narrow && cellWidth(line) + cellWidth(BAND_HINT) <= columns ? BAND_HINT : "";
   return truncate(`${line}${hint}`, columns);
 }
-
 /** config.json, roadmap.json, the handover names and the session flag. */
-async function readHeader($: any): Promise<void> {
+async function readHeader(dashboard: DashboardState, $: any): Promise<void> {
   try {
-    const configText = await $.fs.read(p(CONFIG_PATH));
-    const parsed = JSON.parse(configText) as { project?: unknown };
-    project = typeof parsed.project === "string" ? parsed.project : "";
-  } catch {
-    project = "";
+    const configText = await $.fs.read(p(dashboard, CONFIG_PATH));
+    const parsed = JSON.parse(configText) as {
+      project?: unknown;
+    };
+    dashboard.project = typeof parsed.project === "string" ? parsed.project : "";
+  }
+  catch {
+    dashboard.project = "";
   }
   try {
-    const roadmapText = await $.fs.read(p(ROADMAP_PATH));
-    const parsed = JSON.parse(roadmapText) as { phases?: readonly { id?: unknown; name?: unknown; label?: unknown }[] };
-    const found: { id: string; name: string; label?: string }[] = [];
+    const roadmapText = await $.fs.read(p(dashboard, ROADMAP_PATH));
+    const parsed = JSON.parse(roadmapText) as {
+      phases?: readonly {
+        id?: unknown;
+        name?: unknown;
+        label?: unknown;
+      }[];
+    };
+    const found: {
+      id: string;
+      name: string;
+      label?: string;
+    }[] = [];
     for (const phase of parsed.phases ?? []) {
       if (typeof phase.id === "string") {
         found.push({ id: phase.id, name: typeof phase.name === "string" ? phase.name : phase.id, label: typeof phase.label === "string" ? phase.label : undefined });
       }
     }
-    phases = found;
-  } catch {
-    phases = [];
+    dashboard.phases = found;
+  }
+  catch {
+    dashboard.phases = [];
   }
   try {
-    const entries = await $.fs.list(p(HANDOVERS_DIR));
-    handoverFilenames = entries
-      .filter((entry: { kind: string }) => entry.kind === "file")
-      .map((entry: { name: string }) => entry.name);
-  } catch {
-    handoverFilenames = [];
+    const entries = await $.fs.list(p(dashboard, HANDOVERS_DIR));
+    dashboard.handoverFilenames = entries
+      .filter((entry: {
+      kind: string;
+    }) => entry.kind === "file")
+      .map((entry: {
+      name: string;
+    }) => entry.name);
+  }
+  catch {
+    dashboard.handoverFilenames = [];
   }
   // status.json is a session flag and nothing else; the ledger numbers do
   // not come from it.
-  sessionActive = false;
-  if (await $.fs.exists(p(STATUS_PATH))) {
+  dashboard.sessionActive = false;
+  if (await $.fs.exists(p(dashboard, STATUS_PATH))) {
     try {
-      const parsed = JSON.parse(await $.fs.read(p(STATUS_PATH))) as { sessionActive?: unknown };
-      sessionActive = parsed.sessionActive === true;
-    } catch {
-      sessionActive = false;
+      const parsed = JSON.parse(await $.fs.read(p(dashboard, STATUS_PATH))) as {
+        sessionActive?: unknown;
+      };
+      dashboard.sessionActive = parsed.sessionActive === true;
+    }
+    catch {
+      dashboard.sessionActive = false;
     }
   }
 }
-
-async function loadCache($: any): Promise<void> {
-  if (cacheLoaded) return;
-  cacheLoaded = true;
+async function loadCache(dashboard: DashboardState, $: any): Promise<void> {
+  if (dashboard.cacheLoaded)
+    return;
+  dashboard.cacheLoaded = true;
   try {
     const stored = await $.store.get(STORE_KEY);
     if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-      cache = stored as Record<string, CachedRecord>;
+      dashboard.cache = stored as Record<string, CachedRecord>;
       // A cache from an earlier session is enough to draw real numbers while
       // this session's scan confirms them.
-      warm = Object.keys(cache).length > 0;
+      dashboard.warm = Object.keys(dashboard.cache).length > 0;
     }
-  } catch {
-    cache = {};
+  }
+  catch {
+    dashboard.cache = {};
   }
 }
-
-async function saveCache($: any): Promise<void> {
-  const text = JSON.stringify(cache);
+async function saveCache(dashboard: DashboardState, $: any): Promise<void> {
+  const text = JSON.stringify(dashboard.cache);
   if (text.length > STORE_BUDGET_BYTES) {
     $.ui.log(`storybloq sidebar: the ledger cache is over ${STORE_BUDGET_BYTES} bytes, so it is not kept between sessions`);
     return;
   }
   try {
-    await $.store.set(STORE_KEY, cache);
-  } catch {
+    await $.store.set(STORE_KEY, dashboard.cache);
+  }
+  catch {
     // A store that refuses costs a cold start next session, nothing more.
   }
 }
-
 /** One guarded line, once: a failing sidebar must not become a chatty one. */
-function noteFailure($: any, what: string): void {
-  if (saidScanFailed) return;
-  saidScanFailed = true;
+function noteFailure(dashboard: DashboardState, $: any, what: string): void {
+  if (dashboard.saidScanFailed)
+    return;
+  dashboard.saidScanFailed = true;
   try {
     $.ui.log(`storybloq sidebar: ${what}, so the pane may be behind the ledger until a later turn`);
-  } catch {
+  }
+  catch {
     // A refused log is not worth a second failure.
   }
 }
-
 /**
- * ONE timer for the module's life, not one per scan.
- *
- * `$.clock.every` runs until its `cancel()`, and a scan that registered its
- * own would leave it running: two scans, two timers, every later tick paying
- * for both. The callback returns at once unless a scan is actually draining.
- */
-function startTimer($: any): void {
-  if (timerStarted) return;
+* ONE timer for the module's life, not one per scan.
+*
+* `$.clock.every` runs until its `cancel()`, and a scan that registered its
+* own would leave it running: two scans, two timers, every later tick paying
+* for both. The callback returns at once unless a scan is actually draining.
+*/
+function startTimer(dashboard: DashboardState, $: any): void {
+  if (dashboard.timerStarted)
+    return;
   try {
     $.clock.every(SCAN_TICK_MS, () => {
-      tick($).catch(() => {
-        finalizeScan($, "failed");
+      tick(dashboard, $).catch(() => {
+        finalizeScan(dashboard, $, "failed");
       });
     });
-  } catch {
+  }
+  catch {
     // A hook beneath may refuse the registration. Marking it started before
     // it returned would mean no later attempt is ever made, and a scan begun
     // with no timer builds a queue that nothing drains.
-    noteFailure($, "the scan timer could not be started");
+    noteFailure(dashboard, $, "the scan timer could not be started");
     return;
   }
-  timerStarted = true;
+  dashboard.timerStarted = true;
 }
-
 /**
- * The one exit from a scan, whichever way it ended.
- *
- * Releasing the in-flight flags and consuming the pending refresh belong
- * together: a failure path that released the flags but left the pending flag
- * set would strand the request, because every later tick returns at once with
- * no scan active and nothing else reads that flag. Consumed exactly once, so
- * a failed scan nobody asked to repeat is not retried on its own.
- */
-function finalizeScan($: any, outcome: "done" | "failed"): void {
-  scanActive = false;
-  scanInitializing = false;
-  ticking = false;
-  if (outcome === "failed") noteFailure($, "a ledger scan did not finish");
-  if (!pendingRefresh) return;
-  pendingRefresh = false;
-  requestScan($);
+* The one exit from a scan, whichever way it ended.
+*
+* Releasing the in-flight flags and consuming the pending refresh belong
+* together: a failure path that released the flags but left the pending flag
+* set would strand the request, because every later tick returns at once with
+* no scan active and nothing else reads that flag. Consumed exactly once, so
+* a failed scan nobody asked to repeat is not retried on its own.
+*/
+function finalizeScan(dashboard: DashboardState, $: any, outcome: "done" | "failed"): void {
+  dashboard.scanActive = false;
+  dashboard.scanInitializing = false;
+  dashboard.ticking = false;
+  if (outcome === "failed")
+    noteFailure(dashboard, $, "a ledger scan did not finish");
+  if (!dashboard.pendingRefresh)
+    return;
+  dashboard.pendingRefresh = false;
+  requestScan(dashboard, $);
 }
-
 /**
- * Asks for a scan, coalescing.
- *
- * A refresh asked for while one is in flight is REMEMBERED, not dropped: the
- * queue the running scan is draining was listed before the write that
- * prompted this call, so that write would otherwise never be listed at all.
- * Many requests during one scan collapse into the single scan that follows it.
- */
+* Asks for a scan, coalescing.
+*
+* A refresh asked for while one is in flight is REMEMBERED, not dropped: the
+* queue the running scan is draining was listed before the write that
+* prompted this call, so that write would otherwise never be listed at all.
+* Many requests during one scan collapse into the single scan that follows it.
+*/
 /**
- * Joins a pinned root to one of the ledger suffixes with exactly one
- * separator.
- *
- * The trailing-separator trim deliberately refuses to shorten a bare drive
- * root: on Windows `C:\` trimmed to `C:` stops being absolute and becomes
- * drive-RELATIVE, which would reintroduce the very bug this pins down. `/`
- * has the same shape and is left alone for the same reason.
- */
+* Joins a pinned root to one of the ledger suffixes with exactly one
+* separator.
+*
+* The trailing-separator trim deliberately refuses to shorten a bare drive
+* root: on Windows `C:\` trimmed to `C:` stops being absolute and becomes
+* drive-RELATIVE, which would reintroduce the very bug this pins down. `/`
+* has the same shape and is left alone for the same reason.
+*/
 function joinRoot(root: string, suffix: string): string {
   const bareDriveRoot = /^[A-Za-z]:[/\\]$/.test(root);
   const trimmed = root.length > 1 && !bareDriveRoot ? root.replace(/[/\\]+$/, "") : root;
   const separated = trimmed.endsWith("/") || trimmed.endsWith("\\");
   return separated ? `${trimmed}${suffix}` : `${trimmed}/${suffix}`;
 }
-
 /**
- * A ledger suffix as an absolute path under the pinned root.
- *
- * Every `$.fs` call that touches the ledger goes through here. The seven
- * suffix constants are left exactly as they are, so the ledger-write detector
- * further down, which matches command TEXT rather than filesystem paths, is
- * untouched by this change.
- */
-function p(suffix: string): string {
-  return ledgerRoot === null ? suffix : joinRoot(ledgerRoot, suffix);
+* A ledger suffix as an absolute path under the pinned root.
+*
+* Every `$.fs` call that touches the ledger goes through here. The seven
+* suffix constants are left exactly as they are, so the ledger-write detector
+* further down, which matches command TEXT rather than filesystem paths, is
+* untouched by this change.
+*/
+function p(dashboard: DashboardState, suffix: string): string {
+  return dashboard.ledgerRoot === null ? suffix : joinRoot(dashboard.ledgerRoot, suffix);
 }
-
 /** The parent of a directory, or the directory itself once it is a root. */
 function parentDir(dir: string): string {
   const cut = Math.max(dir.lastIndexOf("/"), dir.lastIndexOf("\\"));
-  if (cut < 0) return dir;
-  if (cut === 0) return dir.slice(0, 1);
+  if (cut < 0)
+    return dir;
+  if (cut === 0)
+    return dir.slice(0, 1);
   const parent = dir.slice(0, cut);
   return /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent;
 }
-
 /** An errno off a rejected `$.fs` call, when the host supplied one. */
 function errnoOf(error: unknown): string {
-  const code = (error as { code?: unknown } | null)?.code;
+  const code = (error as {
+    code?: unknown;
+  } | null)?.code;
   return typeof code === "string" ? code : "";
 }
-
 /** A missing path, as opposed to one the host refused to answer for. */
 function isMissing(error: unknown): boolean {
   return errnoOf(error) === "ENOENT";
 }
-
 /** How far up the walk will look before calling the question unanswerable. */
 const MAX_ROOT_WALK = 64;
-
-type RootResolution =
-  | { readonly kind: "pinned"; readonly root: string }
-  | { readonly kind: "absent" }
-  | { readonly kind: "unresolved"; readonly reason: string };
-
+type RootResolution = {
+  readonly kind: "pinned";
+  readonly root: string;
+} | {
+  readonly kind: "absent";
+} | {
+  readonly kind: "unresolved";
+  readonly reason: string;
+};
 /**
- * Walks up from `start` for the nearest directory holding a `.story/`.
- *
- * Three ANSWERS, and keeping them apart is the point. "pinned" is a root.
- * "absent" is a clean walk that reached the filesystem root without finding
- * one, which is a project that never ran `storybloq init` and is not a
- * failure. "unresolved" is the host refusing the question, which is a failure
- * and must never be mistaken for the second.
- *
- * A ledger is `.story/config.json`, the CLI's own rule (`checkRoot` in
- * src/core/project-root-shared.ts), not the bare directory (ISS-1256). A
- * fresh `storybloq init` writes the config, so it still counts; a `.story/`
- * with no config is a miss and the walk goes on past it. The owner's home
- * directory holds one such stray (`~/.story/sessions/` from May, nothing
- * else), and the bare-directory test pinned every ledgerless project under
- * the home directory to it and drew an all-zero board there.
- *
- * The walk stops when a directory is its own parent, so a filesystem root
- * cannot loop, and is bounded anyway: a bound that is never reached costs
- * nothing and a walk that never ends costs the session.
- */
-async function resolveLedgerRoot($: any, start: string): Promise<RootResolution> {
+* Walks up from `start` for the nearest directory holding a `.story/`.
+*
+* Three ANSWERS, and keeping them apart is the point. "pinned" is a root.
+* "absent" is a clean walk that reached the filesystem root without finding
+* one, which is a project that never ran `storybloq init` and is not a
+* failure. "unresolved" is the host refusing the question, which is a failure
+* and must never be mistaken for the second.
+*
+* A ledger is `.story/config.json`, the CLI's own rule (`checkRoot` in
+* src/core/project-root-shared.ts), not the bare directory (ISS-1256). A
+* fresh `storybloq init` writes the config, so it still counts; a `.story/`
+* with no config is a miss and the walk goes on past it. The owner's home
+* directory holds one such stray (`~/.story/sessions/` from May, nothing
+* else), and the bare-directory test pinned every ledgerless project under
+* the home directory to it and drew an all-zero board there.
+*
+* The walk stops when a directory is its own parent, so a filesystem root
+* cannot loop, and is bounded anyway: a bound that is never reached costs
+* nothing and a walk that never ends costs the session.
+*/
+async function resolveLedgerRoot(dashboard: DashboardState, $: any, start: string): Promise<RootResolution> {
   // A trailing separator would make the first step ask about `/repo//.story`
   // and the second, after `parentDir` trims it, ask about the same directory
   // again. Same shape as `joinRoot`: a bare drive root keeps its separator,
@@ -856,28 +472,29 @@ async function resolveLedgerRoot($: any, start: string): Promise<RootResolution>
       if ((await $.fs.exists(joinRoot(dir, CONFIG_PATH))) !== false) {
         return { kind: "pinned", root: dir };
       }
-    } catch (error) {
+    }
+    catch (error) {
       const code = errnoOf(error);
       return { kind: "unresolved", reason: code === "" ? "the client refused the read" : code };
     }
     const parent = parentDir(dir);
-    if (parent === dir) return { kind: "absent" };
+    if (parent === dir)
+      return { kind: "absent" };
     dir = parent;
   }
   return { kind: "absent" };
 }
-
 /**
- * Opens the pane and reads the ledger: everything `session.start` does once
- * it knows there is something to draw.
- *
- * Also the recovery path. A project that had no `.story/` when the session
- * started gets one the moment someone runs `storybloq init`, and the pane has
- * to appear then rather than at the next reload, so `turn.complete` and a
- * ledger-writing `tool.call` both come back through here.
- */
-async function attach($: any): Promise<void> {
-  if (!paneOpen) {
+* Opens the pane and reads the ledger: everything `session.start` does once
+* it knows there is something to draw.
+*
+* Also the recovery path. A project that had no `.story/` when the session
+* started gets one the moment someone runs `storybloq init`, and the pane has
+* to appear then rather than at the next reload, so `turn.complete` and a
+* ledger-writing `tool.call` both come back through here.
+*/
+async function attach(dashboard: DashboardState, $: any): Promise<void> {
+  if (!dashboard.paneOpen) {
     // T-519: the pane's background is the client's. As of the 2.1.273 d.ts,
     // `PaneOpenArgs` is { id, title, focus, closeOnEscape, holdToasts, rows }
     // and the `Pane` props are read-only placement data: nothing names a
@@ -885,65 +502,65 @@ async function attach($: any): Promise<void> {
     // fixes a colour rather than following the terminal, so none is set and
     // the tones below are chosen for the client's own pane background.
     await $.ui.open({ id: PANE_ID, title: PANE_TITLE });
-    paneOpen = true;
+    dashboard.paneOpen = true;
   }
   // The context figures belong to the window, not to the turn: they are
   // readable the moment the Mod loads into a session that has already had a
   // response. Reading them only on `turn.complete` is why the owner's header
   // was blank after a reload, with the fill only appearing a turn later.
-  contextPercent = await readContextFill($);
-  motion.setContext(contextPercent, true);
-  themeLight = await readThemeLight($);
-  await readHeader($);
-  await loadCache($);
+  dashboard.contextPercent = await readContextFill($);
+  dashboard.motion.setContext(dashboard.contextPercent, true);
+  dashboard.themeLight = await readThemeLight(dashboard, $);
+  await readHeader(dashboard, $);
+  await loadCache(dashboard, $);
   // The idle poll's baseline (T-517). Taken before the timer starts and before
   // the scan below, so the first poll compares against the ledger as it was
   // when this session read it: a write between the two is a change, not a
   // missed one. Taken after the timer, a tick could poll against an empty
   // baseline, find every path "moved" and rescan for nothing.
-  polledMtimes = await ledgerMtimes($);
-  startTimer($);
-  requestScan($);
+  dashboard.polledMtimes = await ledgerMtimes(dashboard, $);
+  startTimer(dashboard, $);
+  requestScan(dashboard, $);
 }
-
 /**
- * The ledger was missing; is it there now? Attaches if it is.
- *
- * Nothing is drawn while it is absent, so this is the only way back: every
- * refresh the Mod already made asks the question again, and the answer costs
- * one `$.fs.exists` on a project that has no ledger to read anyway.
- */
-async function attachIfLedgerArrived($: any): Promise<void> {
+* The ledger was missing; is it there now? Attaches if it is.
+*
+* Nothing is drawn while it is absent, so this is the only way back: every
+* refresh the Mod already made asks the question again, and the answer costs
+* one `$.fs.exists` on a project that has no ledger to read anyway.
+*/
+async function attachIfLedgerArrived(dashboard: DashboardState, $: any): Promise<void> {
   // From the ORIGIN, never from the live working directory: the session may
   // have cd-ed anywhere by now, and resolving from there would either miss
   // the project's ledger or attach to an unrelated nested one.
-  if (initialCwd === null) return;
-  const resolution = await resolveLedgerRoot($, initialCwd);
-  if (resolution.kind !== "pinned") return;
-  ledgerRoot = resolution.root;
-  noLedger = false;
-  await attach($);
+  if (dashboard.initialCwd === null)
+    return;
+  const resolution = await resolveLedgerRoot(dashboard, $, dashboard.initialCwd);
+  if (resolution.kind !== "pinned")
+    return;
+  dashboard.ledgerRoot = resolution.root;
+  dashboard.noLedger = false;
+  await attach(dashboard, $);
 }
-
-function requestScan($: any): void {
-  if (scanActive || scanInitializing) {
-    pendingRefresh = true;
+function requestScan(dashboard: DashboardState, $: any): void {
+  if (dashboard.scanActive || dashboard.scanInitializing) {
+    dashboard.pendingRefresh = true;
     return;
   }
   // The timer may still be missing because an earlier registration was
   // refused. Without it a queue would be built that nothing drains, so try
   // again here and start no scan while it is absent.
-  startTimer($);
-  if (!timerStarted) return;
-  beginScan($).catch(() => {
+  startTimer(dashboard, $);
+  if (!dashboard.timerStarted)
+    return;
+  beginScan(dashboard, $).catch(() => {
     // The scan is detached, so nothing else would hear this.
-    finalizeScan($, "failed");
+    finalizeScan(dashboard, $, "failed");
   });
 }
-
 /** Lists the ledger and leaves a queue for the ticker to drain. */
-async function beginScan($: any): Promise<void> {
-  scanInitializing = true;
+async function beginScan(dashboard: DashboardState, $: any): Promise<void> {
+  dashboard.scanInitializing = true;
   try {
     const items: ScanItem[] = [];
     // ISS-1239: a directory that is MISSING and one the host refused to read
@@ -951,24 +568,28 @@ async function beginScan($: any): Promise<void> {
     // `$.fs` rejects with the OS errno, so they are separable.
     let refused = false;
     try {
-      for (const entry of await $.fs.list(p(TICKETS_DIR))) {
+      for (const entry of await $.fs.list(p(dashboard, TICKETS_DIR))) {
         if (entry.kind === "file" && entry.name.endsWith(".json")) {
           items.push({ path: `${TICKETS_DIR}/${entry.name}`, kind: "ticket" });
         }
       }
-    } catch (error) {
+    }
+    catch (error) {
       // No tickets directory: nothing to read from it.
-      if (!isMissing(error)) refused = true;
+      if (!isMissing(error))
+        refused = true;
     }
     try {
-      for (const entry of await $.fs.list(p(ISSUES_DIR))) {
+      for (const entry of await $.fs.list(p(dashboard, ISSUES_DIR))) {
         if (entry.kind === "file" && entry.name.endsWith(".json")) {
           items.push({ path: `${ISSUES_DIR}/${entry.name}`, kind: "issue" });
         }
       }
-    } catch (error) {
+    }
+    catch (error) {
       // Same.
-      if (!isMissing(error)) refused = true;
+      if (!isMissing(error))
+        refused = true;
     }
     // A file the ledger no longer has must leave the cache, or a deleted
     // ticket would keep being counted.
@@ -981,1319 +602,259 @@ async function beginScan($: any): Promise<void> {
     // path throws ENOENT and leaves `refused` false.
     if (!refused) {
       const present = new Set(items.map((item) => item.path));
-      for (const path of Object.keys(cache)) {
-        if (!present.has(path)) delete cache[path];
+      for (const path of Object.keys(dashboard.cache)) {
+        if (!present.has(path))
+          delete dashboard.cache[path];
       }
     }
-    queue = items;
-    scanActive = true;
-    reproject();
+    dashboard.queue = items;
+    dashboard.scanActive = true;
+    reproject(dashboard);
     $.ui.invalidate("ui.render");
-  } finally {
-    scanInitializing = false;
+  }
+  finally {
+    dashboard.scanInitializing = false;
   }
 }
-
 /**
- * What one turn of the module's single timer does: drain an active scan, and
- * once every IDLE_POLL_TICKS look for a write nothing told this session about
- * (T-517).
- *
- * The counter lives here rather than in a second `$.clock.every`, because a
- * second timer would be a second dispatch on every 25 ms tick for the life of
- * the session, and the poll is a two-second thing.
- */
-async function tick($: any): Promise<void> {
+* What one turn of the module's single timer does: drain an active scan, and
+* once every IDLE_POLL_TICKS look for a write nothing told this session about
+* (T-517).
+*
+* The counter lives here rather than in a second `$.clock.every`, because a
+* second timer would be a second dispatch on every 25 ms tick for the life of
+* the session, and the poll is a two-second thing.
+*/
+async function tick(dashboard: DashboardState, $: any): Promise<void> {
   // Share the existing clock. Redraw only during the short, visible intro,
   // at 20 fps. Later effects use this same timer and stop redrawing when idle.
-  if (logoStarted && !logoFinished) {
-    if (!paneOpen || !sidebarEnabled) logoFinished = true;
+  if (dashboard.logoStarted && !dashboard.logoFinished) {
+    if (!dashboard.paneOpen || !dashboard.sidebarEnabled)
+      dashboard.logoFinished = true;
     else {
-      logoElapsed += SCAN_TICK_MS;
-      logoTicks += 1;
-      if (logoElapsed >= LOGO_DURATION_MS) logoFinished = true;
-      if (logoTicks % 2 === 0 || logoFinished) $.ui.invalidate("ui.render");
+      dashboard.logoElapsed += SCAN_TICK_MS;
+      dashboard.logoTicks += 1;
+      if (dashboard.logoElapsed >= LOGO_DURATION_MS)
+        dashboard.logoFinished = true;
+      if (dashboard.logoTicks % 2 === 0 || dashboard.logoFinished)
+        $.ui.invalidate("ui.render");
     }
   }
-  if (motion.advance(SCAN_TICK_MS) && sidebarEnabled && ((paneOpen && paneDrawn) || bandDrawn)) $.ui.invalidate("ui.render");
-  await drainChunk($);
-  idleTicks += 1;
-  if (idleTicks < IDLE_POLL_TICKS) return;
-  idleTicks = 0;
+  if (dashboard.motion.advance(SCAN_TICK_MS) && dashboard.sidebarEnabled && ((dashboard.paneOpen && dashboard.paneDrawn) || dashboard.bandDrawn))
+    $.ui.invalidate("ui.render");
+  await drainChunk(dashboard, $);
+  dashboard.idleTicks += 1;
+  if (dashboard.idleTicks < IDLE_POLL_TICKS)
+    return;
+  dashboard.idleTicks = 0;
   try {
-    await pollLedger($);
-  } catch {
+    await pollLedger(dashboard, $);
+  }
+  catch {
     // The timer's catch finalizes the ACTIVE scan as failed, which a poll that
     // could not stat or read the header has no business doing: the scan is
     // unrelated to it. A failed poll costs nothing and runs again in two
     // seconds.
   }
 }
-
 /**
- * The four directory mtimes the idle poll watches.
- *
- * Directories and not files: every CLI and MCP write lands by rename or link
- * INTO a directory (project-loader's atomicWrite and atomicCreate), so a
- * create, a delete and a replace all move the directory's own mtime, and four
- * stats stand in for a walk of a couple of thousand files. `.story` itself is
- * where roadmap.json, config.json and status.json land. An in-place edit by
- * an editor moves no directory, and that case is what the turn-end rescan is
- * still for.
- *
- * A path that cannot be stat-ed reads 0, so one that appears later moves.
- */
+* The four directory mtimes the idle poll watches.
+*
+* Directories and not files: every CLI and MCP write lands by rename or link
+* INTO a directory (project-loader's atomicWrite and atomicCreate), so a
+* create, a delete and a replace all move the directory's own mtime, and four
+* stats stand in for a walk of a couple of thousand files. `.story` itself is
+* where roadmap.json, config.json and status.json land. An in-place edit by
+* an editor moves no directory, and that case is what the turn-end rescan is
+* still for.
+*
+* A path that cannot be stat-ed reads 0, so one that appears later moves.
+*/
 const POLLED_PATHS = [LEDGER_DIR, TICKETS_DIR, ISSUES_DIR, HANDOVERS_DIR] as const;
-
-async function ledgerMtimes($: any): Promise<Record<string, number>> {
+async function ledgerMtimes(dashboard: DashboardState, $: any): Promise<Record<string, number>> {
   const seen: Record<string, number> = {};
   for (const path of POLLED_PATHS) {
     try {
-      const stat = await $.fs.stat(p(path));
+      const stat = await $.fs.stat(p(dashboard, path));
       seen[path] = typeof stat?.mtimeMs === "number" ? stat.mtimeMs : 0;
-    } catch {
+    }
+    catch {
       seen[path] = 0;
     }
   }
   return seen;
 }
-
 /**
- * Has anything moved since the last look? If so, refresh.
- *
- * Deliberately NOT gated on `paneOpen`, for the same reason the AbovePrompt
- * line is not: below the client's dock width there is no pane and that line
- * IS the sidebar, so a poll tied to the pane would leave the only thing drawn
- * standing still.
- *
- * Deliberately NOT skipped while a scan is draining either: the running scan
- * took its worklist before this write existed, so it will not see it. Asking
- * mid-scan is what `requestScan`'s pending flag is for, and the rescan
- * follows the one in flight instead of being dropped.
- *
- * Never while `noLedger`: a project with no `.story/` draws nothing at all,
- * and `turn.complete` and a ledger-writing tool call already carry the one
- * question worth asking there (has a ledger arrived?).
- */
-async function pollLedger($: any): Promise<void> {
-  if (!uiAvailable || !sidebarEnabled || noLedger) return;
-  const seen = await ledgerMtimes($);
+* Has anything moved since the last look? If so, refresh.
+*
+* Deliberately NOT gated on `paneOpen`, for the same reason the AbovePrompt
+* line is not: below the client's dock width there is no pane and that line
+* IS the sidebar, so a poll tied to the pane would leave the only thing drawn
+* standing still.
+*
+* Deliberately NOT skipped while a scan is draining either: the running scan
+* took its worklist before this write existed, so it will not see it. Asking
+* mid-scan is what `requestScan`'s pending flag is for, and the rescan
+* follows the one in flight instead of being dropped.
+*
+* Never while `noLedger`: a project with no `.story/` draws nothing at all,
+* and `turn.complete` and a ledger-writing tool call already carry the one
+* question worth asking there (has a ledger arrived?).
+*/
+async function pollLedger(dashboard: DashboardState, $: any): Promise<void> {
+  if (!dashboard.uiAvailable || !dashboard.sidebarEnabled || dashboard.noLedger)
+    return;
+  const seen = await ledgerMtimes(dashboard, $);
   let moved = false;
   for (const path of POLLED_PATHS) {
-    if (polledMtimes[path] !== seen[path]) moved = true;
+    if (dashboard.polledMtimes[path] !== seen[path])
+      moved = true;
   }
   // The whole of the idle cost: four stats and this comparison. Dropping it
   // is M-POLL-ALWAYS-RESCANS, which re-reads the ledger every two seconds
   // whether or not anyone wrote it.
-  if (!moved) return;
-  polledMtimes = seen;
+  if (!moved)
+    return;
+  dashboard.polledMtimes = seen;
   // The header files (roadmap, config, status, the handover names) land in
   // `.story` itself, and a scan does not re-read them, so this mirrors what
   // `turn.complete` does. It runs only when something actually moved.
-  await readHeader($);
-  requestScan($);
+  await readHeader(dashboard, $);
+  requestScan(dashboard, $);
 }
-
 /**
- * One tick: up to SCAN_CHUNK files, each stat-ed and re-read only when its
- * mtime moved. The mtime check is the whole of "updates within one prompt";
- * serving the cached fields without it is the M-STALE-CACHE mutant.
- */
-async function drainChunk($: any): Promise<void> {
+* One tick: up to SCAN_CHUNK files, each stat-ed and re-read only when its
+* mtime moved. The mtime check is the whole of "updates within one prompt";
+* serving the cached fields without it is the M-STALE-CACHE mutant.
+*/
+async function drainChunk(dashboard: DashboardState, $: any): Promise<void> {
   // The idle guard. Without it every tick after the first scan reprojects the
   // whole ledger, serializes it, writes it to the store and invalidates, for
   // as long as the session lasts.
-  if (ticking || !scanActive) return;
-  ticking = true;
+  if (dashboard.ticking || !dashboard.scanActive)
+    return;
+  dashboard.ticking = true;
   let outcome: "done" | "failed" | null = null;
   try {
     let read = 0;
-    while (queue.length > 0 && read < SCAN_CHUNK) {
-      const item = queue.shift()!;
+    while (dashboard.queue.length > 0 && read < SCAN_CHUNK) {
+      const item = dashboard.queue.shift()!;
       read += 1;
       try {
-        const stat = await $.fs.stat(p(item.path));
-        const cached = cache[item.path];
-        if (cached && cached.mtimeMs === stat.mtimeMs) continue;
-        const record = extractRecord(item.kind, await $.fs.read(p(item.path)));
-        if (record === null) delete cache[item.path];
-        else cache[item.path] = { mtimeMs: stat.mtimeMs, record };
-      } catch {
-        delete cache[item.path];
+        const stat = await $.fs.stat(p(dashboard, item.path));
+        const cached = dashboard.cache[item.path];
+        if (cached && cached.mtimeMs === stat.mtimeMs)
+          continue;
+        const record = extractRecord(item.kind, await $.fs.read(p(dashboard, item.path)));
+        if (record === null)
+          delete dashboard.cache[item.path];
+        else
+          dashboard.cache[item.path] = { mtimeMs: stat.mtimeMs, record };
+      }
+      catch (error) {
+        // Keep the last valid record on transient failures; retry next scan.
+        if (isMissing(error))
+          delete dashboard.cache[item.path];
+        else
+          noteFailure(dashboard, $, "a ledger record could not be read");
       }
     }
-    if (queue.length === 0) {
-      warm = true;
-      reproject(true);
-      await saveCache($);
+    if (dashboard.queue.length === 0) {
+      dashboard.warm = true;
+      reproject(dashboard, true);
+      await saveCache(dashboard, $);
       $.ui.invalidate("ui.render");
       outcome = "done";
     }
-  } catch {
+  }
+  catch {
     // Whatever failed, this scan is over. Which of the two it was changes
     // only the log line: both leave through the same door.
     outcome = "failed";
   }
   if (outcome === null) {
-    ticking = false;
+    dashboard.ticking = false;
     return;
   }
-  finalizeScan($, outcome);
+  finalizeScan(dashboard, $, outcome);
 }
-
 /**
- * The context fill from what `$.session.usage()` actually answers.
- *
- * `SessionContextUsage` carries `window` always, `tokens` and `percent` only
- * "from the first API response of the live window": a fresh session or one
- * just compacted has neither until its next response. Live, the owner's
- * header stayed empty because this read `percent` alone, so the percent is
- * computed from `tokens` whenever they exist, the engine's `percent` stands
- * in only when they do not, and null (show an unknown reading) when there is no
- * reading at all. `compactWindow` is the settings' auto-compact window, or
- * null for the model's own.
- */
-function contextFill(usage: any, compactWindow: number | null): number | null {
-  const context = usage?.context;
-  const tokens = context?.tokens;
-  const window = typeof compactWindow === "number" ? compactWindow : context?.window;
-  if (typeof tokens === "number" && typeof window === "number" && window > 0) {
-    // ISS-1236: the same arithmetic as the pressure banner (session intel):
-    // tokens over the compaction ceiling of the auto-compact window, not over
-    // the model's raw window. The engine's `percent` is the raw figure, which
-    // is why the pane said 22% while the banner said 28% on the same screen.
-    return Math.min(100, Math.round((tokens / (COMPACT_CEILING * window)) * 100));
-  }
-  if (typeof context?.percent === "number") return Math.round(context.percent);
-  return null;
-}
-
-/**
- * The fraction of the auto-compact window at which compaction runs, the
- * ceiling the pressure banner measures against
- * (`src/core/session-intel/config.ts`, `ceilingFraction`). The plugin has no
- * import path to that module, so the figure is restated here; a test pins
- * the arithmetic against the banner's numbers.
- */
-const COMPACT_CEILING = 0.925;
-
-/**
- * The bounds the CLI's settings reader accepts for `autoCompactWindow`
- * (`src/core/claude-settings.ts`, `AUTO_COMPACT_WINDOW_BOUNDS`); a figure
- * outside them is treated as unset there, and so here.
- */
-const AUTO_COMPACT_WINDOW_MIN = 10_000;
-const AUTO_COMPACT_WINDOW_MAX = 10_000_000;
-
-/**
- * `autoCompactWindow` from the merged settings, or null: unset, out of the
- * CLI reader's bounds, not a safe integer, or the host refused the read. The
- * merge is the engine's own (user, project, local, flag, policy), the same
- * layers the CLI reader walks. One call at attach and one per turn; never
- * from `ui.render`.
- */
+* The context fill from what `$.session.usage()` actually answers.
+*
+* `SessionContextUsage` carries `window` always, `tokens` and `percent` only
+* "from the first API response of the live window": a fresh session or one
+* just compacted has neither until its next response. Live, the owner's
+* header stayed empty because this read `percent` alone, so the percent is
+* computed from `tokens` whenever they exist, the engine's `percent` stands
+* in only when they do not, and null (show an unknown reading) when there is no
+* reading at all. `compactWindow` is the settings' auto-compact window, or
+* null for the model's own.
+*/
 /** Whether a theme name is a light one: `light`, `light-daltonized`, `light-ansi`. */
 function isLightTheme(value: unknown): boolean {
   return typeof value === "string" && value.startsWith("light");
 }
-
 /**
- * The client's `theme` row, as `$.config.list()` answers it (ISS-1238). A
- * refused or unexpected answer keeps the dark default, never the board.
- */
-async function readThemeLight($: any): Promise<boolean> {
+* The client's `theme` row, as `$.config.list()` answers it (ISS-1238). A
+* refused or unexpected answer keeps the dark default, never the board.
+*/
+async function readThemeLight(dashboard: DashboardState, $: any): Promise<boolean> {
   try {
     const rows = await $.config.list();
     const row = Array.isArray(rows) ? rows.find((r: any) => r?.key === "theme") : undefined;
     return isLightTheme(row?.value);
-  } catch {
+  }
+  catch {
     return false;
   }
 }
-
 /**
- * A pane Text with an explicit colour for the client's theme (ISS-1238):
- * white on a dark theme, black on a light one, unless the props already
- * carry a tone (`yellow`, `cyan`). Never the terminal's default foreground,
- * which does not know what the client painted behind it.
- */
-function paneText(Text: (props: Record<string, unknown>) => unknown, props: Record<string, unknown>): unknown {
-  // Inline, the pane is on the terminal's own background and the default
-  // foreground is the one that matches it (ISS-1255); only the dock is painted.
-  if (paneInline) return Text(props);
-  return Text({ color: themeLight ? "black" : "white", ...props });
-}
-
-async function readAutoCompactWindow($: any): Promise<number | null> {
-  try {
-    const settings = await $.settings.read();
-    const value = settings?.autoCompactWindow;
-    if (!Number.isSafeInteger(value)) return null;
-    if (value < AUTO_COMPACT_WINDOW_MIN || value > AUTO_COMPACT_WINDOW_MAX) return null;
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The context fill, or null, and never a rejection.
- *
- * The fill is telemetry on the header's right, and `$.session.usage` is a call
- * a host may not have or may refuse. Unguarded in `session.start` it rejects
- * AFTER the pane is opened, which takes the ledger read, the board and
- * `next(e)` with it: a missing figure would cost the whole sidebar. One helper
- * for all three call sites so the shape cannot drift between them.
- */
+* The context fill, or null, and never a rejection.
+*
+* The fill is telemetry on the header's right, and `$.session.usage` is a call
+* a host may not have or may refuse. Unguarded in `session.start` it rejects
+* AFTER the pane is opened, which takes the ledger read, the board and
+* `next(e)` with it: a missing figure would cost the whole sidebar. One helper
+* for all three call sites so the shape cannot drift between them.
+*/
 async function readContextFill($: any): Promise<number | null> {
-  // The window setting rides along on the same cadence (attach, turn,
-  // compact) so the two figures can never disagree between refreshes.
-  autoCompactWindow = await readAutoCompactWindow($);
   try {
-    const usage = await $.session.usage();
-    return contextFill(usage, autoCompactWindow);
-  } catch {
+    // Summary is local-only. The session's own threshold survives settings
+    // edits and plugin reloads; reading settings here would change history.
+    const usage = await $.session.usage({ breakdown: "summary" });
+    const threshold = usage?.context?.breakdown?.autoCompactThreshold;
+    const tokens = usage?.context?.tokens;
+    if (typeof threshold === "number" && Number.isFinite(threshold) && threshold > 0
+      && typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0) {
+      return Math.min(100, Math.round(tokens / threshold * 100));
+    }
+    // Native window percent is a different measure. An unavailable or
+    // disabled compaction threshold must not masquerade as pressure.
+    return null;
+  }
+  catch {
     return null;
   }
 }
-
-/** One piece of a command line: an operator, or a word to be read as one. */
-interface Token {
-  readonly text: string;
-  readonly operator: boolean;
-}
-
-/**
- * A command line read ONCE, quotes and escapes honoured, operators kept apart
- * from arguments.
- *
- * Splitting on separators before reading the quotes was the bug: `echo "x;
- * storybloq ticket update"` came apart into two segments and the second
- * looked like a CLI call, and `echo '>' .story/config.json` looked like a
- * redirect into the ledger. A separator, a redirect and a quote mark only
- * mean what they say OUTSIDE a quoted run, so there is one pass and it knows
- * which run it is in.
- *
- * An unterminated quote makes the REST of the line unreadable, not the whole
- * of it. Dropping everything was a regression: a heredoc writing a ticket
- * (`cat > .story/tickets/T-001.json <<'EOF'`) has a body full of apostrophes,
- * and so does a trailing `# that's it` comment, and the write on the line
- * before them stopped sweeping. So the tokens read before the bad quote
- * opened come back with `ok: false`, and the caller judges every segment that
- * closed before it and discards the one the quote is in.
- *
- * A heredoc operator ends the read for the same reason from the other side:
- * its head is a command and its body is data, so reading the body as shell
- * would take words out of a document and call them a write.
- */
-/**
- * Steps over a heredoc's delimiter word, quoted or bare, and answers with the
- * index of its last character, the word its terminator line must equal, and
- * whether `<<-` allowed that line leading tabs.
- *
- * The delimiter's own quotes are opened and closed here rather than by the
- * lexer's, so `<<'EOF'` does not read as a quote left open and throw the rest
- * of the head away, and a backslash quotes the character after it as it does
- * in the shell.
- */
-function afterHeredocDelimiter(command: string, from: number): { index: number; delimiter: string; dashed: boolean } {
-  let index = from;
-  let delimiter = "";
-  let dashed = false;
-  for (let word = 0; word < 2; word += 1) {
-    while (index + 1 < command.length && (command[index + 1] === " " || command[index + 1] === "\t")) index += 1;
-    let quote = "";
-    while (index + 1 < command.length) {
-      const character = command[index + 1]!;
-      if (quote !== "") {
-        index += 1;
-        if (character === quote) quote = "";
-        else delimiter += character;
-        continue;
-      }
-      // A backslash quotes the next character of the delimiter, so `<<\\EOF`
-      // ends at a line reading EOF. Keeping the backslash means the
-      // terminator is never found and the rest of the script is read as body.
-      if (character === "\\") {
-        index += 1;
-        const escaped = command[index + 1];
-        if (escaped !== undefined) {
-          delimiter += escaped;
-          index += 1;
-        }
-        continue;
-      }
-      if (character === '"' || character === "'") {
-        quote = character;
-        index += 1;
-        continue;
-      }
-      if (character === " " || character === "\t" || character === "\n" || OPERATOR_CHARACTERS.includes(character)) break;
-      delimiter += character;
-      index += 1;
-    }
-    // `<<-EOF` allows leading tabs on the terminator; `<<- EOF` writes the
-    // dash as a word of its own, so one more word is read for it.
-    if (!delimiter.startsWith("-")) break;
-    dashed = true;
-    delimiter = delimiter.slice(1);
-    if (delimiter !== "") break;
-  }
-  return { index, delimiter, dashed };
-}
-
-/**
- * Where a heredoc's body ends: the index of the newline that closes its
- * terminator line, or -1 where the terminator never comes and the rest of the
- * command is body.
- *
- * The body is never read as shell, but what follows it is: a script that
- * writes a note and then updates a ticket is one Bash call, and stopping at
- * the body would lose the write.
- */
-function afterHeredocBody(command: string, from: number, delimiter: string, dashed: boolean): number {
-  let start = from + 1;
-  while (start <= command.length) {
-    const cut = command.indexOf("\n", start);
-    const last = cut === -1;
-    const end = last ? command.length : cut;
-    let line = command.slice(start, end);
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    if (dashed) line = line.replace(/^\t+/, "");
-    if (line === delimiter) return last ? command.length - 1 : end;
-    if (last) return -1;
-    start = end + 1;
-  }
-  return -1;
-}
-
-function lex(command: string): { tokens: Token[]; ok: boolean } {
-  const tokens: Token[] = [];
-  let text = "";
-  let started = false;
-  let quote = "";
-  /** How many tokens were whole when the quote now open was opened. */
-  let opened = 0;
-  /**
-   * A heredoc head is being read, so the next newline starts its body, and
-   * the word that ends it. Two heredocs on one head line (`cat <<A <<B`) are
-   * read as one body ending at the LAST delimiter, which is close enough: the
-   * body is never read either way and what follows it still is.
-   */
-  let heredoc = false;
-  let delimiter = "";
-  let dashed = false;
-  const flush = (): void => {
-    if (started) tokens.push({ text, operator: false });
-    text = "";
-    started = false;
-  };
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command[index]!;
-    if (quote !== "") {
-      // Inside single quotes a backslash is a backslash; inside double quotes
-      // it escapes the next character, as the shell reads them. (Bash keeps
-      // the backslash before anything but $ \ " ` and a newline; this drops
-      // it either way, which costs a character in a path nobody writes.)
-      if (character === "\\" && quote === '"' && index + 1 < command.length) {
-        index += 1;
-        text += command[index];
-        started = true;
-        continue;
-      }
-      if (character === quote) quote = "";
-      else {
-        text += character;
-        started = true;
-      }
-      continue;
-    }
-    if (character === "\\") {
-      index += 1;
-      if (index < command.length) {
-        text += command[index];
-        started = true;
-      }
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      // Where the quote opened, so an unclosed one can give back what was
-      // whole before it rather than nothing at all.
-      quote = character;
-      opened = tokens.length;
-      started = true;
-      continue;
-    }
-    if (character === " " || character === "\t" || character === "\r") {
-      flush();
-      continue;
-    }
-    if (OPERATOR_CHARACTERS.includes(character)) {
-      flush();
-      let run = character;
-      while (index + 1 < command.length && command[index + 1] === character) {
-        run += character;
-        index += 1;
-      }
-      // The body of a heredoc starts at the newline after its head and is
-      // never read: it is a document, and a line of it that looks like a write
-      // is prose someone is filing. What comes AFTER the terminator is shell
-      // again, and dropping it was losing the write in the commonest script
-      // Claude Code produces: a note written with `cat <<EOF`, then a ticket
-      // updated on the line below its EOF.
-      if (heredoc && run.startsWith("\n")) {
-        const end = afterHeredocBody(command, index, delimiter, dashed);
-        if (end === -1) return { tokens, ok: true };
-        index = end;
-        heredoc = false;
-        tokens.push({ text: "\n", operator: true });
-        continue;
-      }
-      // `<<` and `<<<`: the head is still a command and the REST OF ITS LINE
-      // still counts, because `cat <<'EOF' > .story/tickets/T-001.json` writes
-      // a ticket with the redirect sitting after the delimiter. So the
-      // operator and its delimiter are stepped over and the line goes on being
-      // read as shell.
-      if (run.startsWith(HEREDOC)) {
-        const head = afterHeredocDelimiter(command, index);
-        index = head.index;
-        // `<<<` is a here-string: its word IS the input, and there is no body
-        // to step over.
-        if (run === HEREDOC) {
-          heredoc = true;
-          delimiter = head.delimiter;
-          dashed = head.dashed;
-        }
-        continue;
-      }
-      // `>&` and `&>` are one redirect written two ways, and a run of one
-      // character would split them: the `&` would then cut the segment and
-      // the redirect would lose its target. `2>&1` is the same shape and
-      // still names no file of ours, so it neither sweeps nor cuts.
-      if (run[0] === REDIRECT && command[index + 1] === "&") {
-        run += "&";
-        index += 1;
-      } else if (run[0] === "&" && command[index + 1] === REDIRECT) {
-        while (command[index + 1] === REDIRECT) {
-          run += REDIRECT;
-          index += 1;
-        }
-      }
-      tokens.push({ text: run, operator: true });
-      continue;
-    }
-    text += character;
-    started = true;
-  }
-  flush();
-  // An unclosed quote: give back what was already whole when it opened. The
-  // word it started, and everything after, is not shell this can read.
-  if (quote !== "") return { tokens: tokens.slice(0, opened), ok: false };
-  return { tokens, ok: true };
-}
-
-/** A word that names something inside the ledger directory. */
-function inLedger(word: string | undefined): boolean {
-  return typeof word === "string" && word.includes(STORY_DIR);
-}
-
-/** The last path segment of a word, which is the name a command runs under. */
-function basename(word: string): string {
-  const cut = word.lastIndexOf("/");
-  return cut === -1 ? word : word.slice(cut + 1);
-}
-
-/**
- * The command a segment actually runs, past the wrappers that only lead up to
- * one, and the arguments it was given.
- *
- * `storybloq` counts as the CLI only HERE, in executable position: `echo
- * storybloq ticket update` prints a sentence and writes nothing, and the two
- * read identically to anything that only looks for the word. The wrappers are
- * a named few (`env`, `npx`, `time`, `nice`, `sudo`, `command`) with their own
- * options and any leading `NAME=value` assignments stepped over. Anything
- * else in front of the command (`xargs`, a subshell, a substitution) is a
- * line this cannot read, and it returns nothing rather than guess.
- */
-function executableOf(words: readonly string[]): { name: string; args: string[] } | null {
-  let index = 0;
-  for (;;) {
-    while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
-    if (index < words.length && WRAPPER_COMMANDS.has(basename(words[index]!))) {
-      const takesValue = WRAPPER_VALUE_OPTIONS[basename(words[index]!)] ?? [];
-      index += 1;
-      while (index < words.length && words[index]!.startsWith("-")) {
-        const option = words[index]!;
-        index += 1;
-        if (!option.includes("=") && takesValue.includes(option)) index += 1;
-      }
-      continue;
-    }
-    break;
-  }
-  if (index >= words.length) return null;
-  return { name: words[index]!, args: words.slice(index + 1) };
-}
-
-/**
- * Did one segment of a command line write the ledger?
- *
- * Direction is the whole question. `cat .story/tickets/T-001.json > /tmp/x`
- * and `cp .story/tickets/T-001.json /tmp/x` both name the ledger and both
- * write a file, and neither changes a thing we draw; only where the ledger is
- * the DESTINATION has anything moved. So a redirect counts at its target and
- * a copy at its last operand. `mv` counts at either end, because moving a
- * ticket OUT of the ledger takes it off the board as surely as moving one in;
- * `tee` counts at any of its files, and `rm` and `sed -i` at the path they
- * are given.
- */
-function segmentWrote(tokens: readonly Token[]): boolean {
-  const words: string[] = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index]!;
-    if (!token.operator) {
-      words.push(token.text);
-      continue;
-    }
-    // A redirect writes what follows it; `<` reads it, and the rest of the
-    // operators never reach here (they are what the segments were cut on).
-    if (token.text.startsWith(REDIRECT) || token.text.startsWith(BOTH_STREAMS)) {
-      const target = tokens[index + 1];
-      if (target !== undefined && !target.operator && inLedger(target.text)) return true;
-      index += 1;
-    }
-  }
-
-  const run = executableOf(words);
-  if (run === null) return false;
-  const name = basename(run.name);
-  const args = run.args;
-
-  // The CLI resolves `.story/` itself, so the command line need not name it;
-  // what says it writes is the SUBCOMMAND. A verb further along is an
-  // argument (`storybloq note list --tags update`) or prose in a flag's
-  // value, and neither writes anything.
-  if (name === CLI_NAME) {
-    // Only the words that are SUBCOMMANDS count toward the depth: a global
-    // option before the verb (`storybloq --node x ticket update`) would
-    // otherwise push it out of reach and the write would go unseen.
-    let depth = 0;
-    for (let index = 0; index < args.length && depth < CLI_VERB_DEPTH; index += 1) {
-      const word = args[index]!;
-      if (word.startsWith("-")) {
-        if (!word.includes("=") && CLI_VALUE_OPTIONS.includes(word)) index += 1;
-        continue;
-      }
-      depth += 1;
-      if (WRITE_VERBS.includes(word)) return true;
-    }
-    return false;
-  }
-
-  if (name === MOVE_COMMAND || name === TEE_COMMAND || name === REMOVE_COMMAND) return args.some(inLedger);
-  if (COPY_COMMANDS.has(name)) return args.length >= 2 && inLedger(args[args.length - 1]);
-  if (name === SED_COMMAND) return args.some((word) => word.startsWith("-i")) && args.some(inLedger);
-  return false;
-}
-
-/**
- * Every segment of a command line, cut on the separators, each on its own.
- *
- * The last segment is judged only when the line was read to its end: where an
- * unterminated quote stopped the read, that segment is the one the quote is
- * in and there is no telling what it says.
- */
-function commandWroteLedger(command: string): boolean {
-  const { tokens, ok } = lex(command);
-  let segment: Token[] = [];
-  for (const token of tokens) {
-    // `&>` opens with a separator character and is not one: it is a redirect,
-    // and cutting the segment there would leave its target orphaned.
-    if (token.operator && SEPARATOR_CHARACTERS.includes(token.text[0]!) && !token.text.startsWith(BOTH_STREAMS)) {
-      if (segmentWrote(segment)) return true;
-      segment = [];
-      continue;
-    }
-    segment.push(token);
-  }
-  return ok && segmentWrote(segment);
-}
-
-/**
- * Did this tool call change the ledger?
- *
- * The question has to be answered from the tool NAME first, because a ledger
- * read is the common case and a sweep per read is the cost the chunked scan
- * exists to avoid. Reading a ticket, globbing `.story`, or catting a config
- * file all mention the directory and none of them change a thing.
- *
- *   tool                                              scan
- *   storybloq_* / mcp__storybloq__* whose last word   yes
- *     is a writing verb (ticket_update, meta_set)
- *   any other storybloq tool (status, list, get)      no
- *   Write, Edit, MultiEdit, NotebookEdit at a         yes
- *     path under .story/
- *   the same four anywhere else                       no
- *   Bash running the storybloq CLI in EXECUTABLE      yes
- *     position with a writing verb in SUBCOMMAND
- *      position (it resolves .story/ itself, so the
- *      command line need not name the directory)
- *   Bash writing INTO .story/ (a redirect whose       yes
- *     destination is there, cp whose last argument
- *      is, tee at one, rm or sed -i of one)
- *   Bash moving a file at either end of .story/       yes
- *     (mv out of it takes a ticket off the board
- *      as surely as mv into it puts one on)
- *   Bash reading .story/ and writing elsewhere        no
- *     (cat a ticket into /tmp, cp one out of it)
- *   Bash naming the CLI anywhere but executable       no
- *     position (echo storybloq ticket update), or
- *      inside quotes, or in a heredoc's body, or in
- *      the segment an unterminated quote is in
- *      (the segments that closed before it still
- *      count, one at a time)
- *   Bash otherwise (cat, ls, grep, git status,        no
- *     storybloq status, storybloq ticket list)
- *   Read, Glob, Grep, LS, anything else               no
- *
- * Bash is conservative by construction: what it cannot read confidently does
- * not sweep. A missed write costs one turn of staleness, since turn.complete
- * still scans; a false positive costs a stat sweep of the whole ledger for
- * every ledger read in the session, which is worse.
- *
- * Pure, and it reads only the few fields a path or a command arrives in, so a
- * Write of a megabyte is not serialized to answer a yes or no question.
- */
-function wroteLedger(e: any): boolean {
-  const tool: unknown = e?.tool;
-  if (typeof tool !== "string") return false;
-  const bare = tool.startsWith(MCP_PREFIX) ? tool.slice(MCP_PREFIX.length) : tool;
-  if (bare.startsWith(LEDGER_TOOL_PREFIX)) return LEDGER_WRITE_VERB.test(bare);
-  if (tool === BASH_TOOL) {
-    const command: unknown = e?.["command"];
-    return typeof command === "string" && commandWroteLedger(command);
-  }
-  if (!MUTATING_FILE_TOOLS.has(tool)) return false;
-  for (const key of PATH_ARGUMENTS) {
-    const value: unknown = e?.[key];
-    if (typeof value === "string" && value.includes(STORY_DIR)) return true;
-  }
-  return false;
-}
-
-/** Where the client seated the pane, as its Pane props say; null when they do not. */
-type PanePlacement = "dock" | "inline";
-
-function panePlacement(e: any): PanePlacement | null {
-  const value: unknown = e?.props?.placement;
-  return value === "dock" || value === "inline" ? value : null;
-}
-
-/**
- * The board's shape (ISS-1254): `stacked` is the three framed columns one
- * under another, the sidebar; `columns` is the three side by side; `narrow`
- * is the In progress strip. Docked, always stacked. Inline, side by side
- * from BOARD_MIN_COLUMNS up and the strip below it. No placement reported,
- * the width alone decides between stacked and side by side, as 1.15.4 did.
- */
-type BoardLayout = "stacked" | "columns" | "narrow";
-
-function boardLayout(placement: PanePlacement | null, width: number): BoardLayout {
-  if (placement === "dock") return "stacked";
-  if (width >= BOARD_MIN_COLUMNS) return "columns";
-  return placement === "inline" ? "narrow" : "stacked";
-}
-
-const PHASE_STRIP_ROWS = 2;
-const PHASE_STRIP_MIN_COLUMNS = 100;
-const PHASE_GUTTER = 4;
-
-/** A bounded window over the roadmap, centered on its first active phase.
- * Status is always derived per phase, including out-of-order completion.
- */
-export function phaseTimelineLayout(
-  items: SidebarProjection["phases"], width: number, bodyRows: number | undefined, placement: PanePlacement | null,
-): { start: number; count: number; slot: number; current: number; before: number; after: number; inset: number } | null {
-  if (placement !== "inline" || !Number.isFinite(width) || width < PHASE_STRIP_MIN_COLUMNS || !items.length) return null;
-  // 4 chrome + 4 frame + 2 timeline + at least 3 item rows. Unknown pane
-  // height waits for a measured render rather than guessing from the screen.
-  if (typeof bodyRows !== "number" || !Number.isFinite(bodyRows) || bodyRows < 13) return null;
-  const current = items.findIndex(item => item.status === "inprogress");
-  const next = items.findIndex(item => item.status === "notstarted");
-  const focus = current >= 0 ? current : next >= 0 ? next : items.length - 1;
-  // Keep at most one neighbor on each side, even at the roadmap's ends.
-  const start = Math.max(0, focus - 1);
-  const count = Math.min(items.length, focus + 2) - start;
-  const slot = Math.min(16, Math.floor((width - 2 * PHASE_GUTTER) / count));
-  const inset = Math.floor((width - slot * count - 2 * PHASE_GUTTER) / 2);
-  return { start, count, slot, current, before: start, after: items.length - start - count, inset };
-}
-
-/** Short display titles only; the roadmap keeps its full names unchanged. */
-export function phaseTimelineTitle(name: string, width = 14): string {
-  const title = name.replace(/\s+/g, " ").trim();
-  if (cellWidth(title) <= width) return title;
-  if (width < 5) return truncate(title, width);
-  let head = truncate(title, width - 2).slice(0, -1).trimEnd();
-  const boundary = head.lastIndexOf(" ");
-  if (boundary >= head.length * .55) head = head.slice(0, boundary);
-  return `${head}...`;
-}
-
-function phaseTimelineNode(elements: any, items: SidebarProjection["phases"], window: NonNullable<ReturnType<typeof phaseTimelineLayout>>): unknown {
-  const centered = (text: string, width: number): string => {
-    const clipped = truncate(text.replace(/\s+/g, " "), width);
-    const left = Math.max(0, Math.floor((width - cellWidth(clipped)) / 2));
-    return " ".repeat(left) + clipped + " ".repeat(Math.max(0, width - left - cellWidth(clipped)));
-  };
-  const gutter = (key: string, count: number, before: boolean) => elements.Box({
-    key, width: PHASE_GUTTER, flexDirection: "column", children: [
-      paneText(elements.Text, { dimColor: true, children: centered(count ? (before ? `‹ ${count}` : `${count} ›`) : "", PHASE_GUTTER) }),
-      paneText(elements.Text, { children: " " }),
-    ],
-  });
-  return elements.Box({ key: "phase-timeline", flexDirection: "row", marginLeft: window.inset, children: [
-    gutter("phases-before", window.before, true),
-    ...items.slice(window.start, window.start + window.count).map((phase, local) => {
-      const index = window.start + local;
-      const current = index === window.current;
-      const future = phase.status === "notstarted";
-      const left = Math.floor((window.slot - 3) / 2), right = window.slot - left - 3;
-      const connector = (length: number, neighbor: number) => {
-        const pending = future || items[neighbor]?.status === "notstarted" || current || neighbor === window.current;
-        const other = items[neighbor];
-        const incoming = neighbor < index;
-        const progress = other ? motion.connection(incoming ? other.id : phase.id, incoming ? phase.id : other.id) : null;
-        const fill = progress === null ? null : Math.max(0, Math.min(1, progress * 2 - (incoming ? 1 : 0)));
-        const offset = local * window.slot + (incoming ? 0 : left + 3);
-        const cells = Array.from({ length }, (_, cell) => {
-          const wave = motion.wave((offset + cell) / Math.max(1, window.count * window.slot - 1));
-          const filled = fill !== null && cell < Math.round(fill * length);
-          return { glyph: wave || (!other ? " " : filled || (fill === null && !pending) ? "━" : "─"), bright: !!wave || filled };
-        });
-        return paneText(elements.Text, {
-          dimColor: pending,
-          children: cells.map((cell, i) => paneText(elements.Text, {
-            key: `${i}`, dimColor: cell.bright ? false : pending, bold: cell.bright, children: cell.glyph,
-          })),
-        });
-      };
-      return elements.Box({ key: `phase-${phase.id}`, width: window.slot, flexDirection: "column", children: [
-        paneText(elements.Text, { wrap: "truncate", children: [
-          connector(left, index - 1),
-          paneText(elements.Text, { bold: current, dimColor: future, children: ` ${motion.phaseMarker(phase.id, current ? "◎" : phase.status === "complete" ? "✓" : future ? "○" : "●")} ` }),
-          connector(right, index + 1),
-        ] }),
-        paneText(elements.Text, { dimColor: !current, bold: current, wrap: "truncate", children: centered(phaseTimelineTitle(phase.name), window.slot) }),
-      ] });
-    }),
-    gutter("phases-after", window.after, false),
-  ] });
-}
-
-/**
- * How many card rows each column may draw, and whether the pane can afford
- * the blank rows around the board at all.
- *
- * The pane clips what will not fit, silently, so the budget is counted out
- * before anything is drawn:
- *
- *   header 1, header gap 1, footer gap 1, footer 1   = 4 chrome rows
- *   the card's border, above and below              = 2
- *   its heading row and the rule under it           = 2
- *
- * Side by side the three columns are parallel, so one column's four frame rows
- * are the board's; stacked they run one after another, so the frames cost
- * three times that and the rows left over are shared between them. The blank
- * rows go before the cards do, because a board with one card in it still says
- * something and a gap says nothing. When even three framed headings will not
- * fit, the board falls back to one plain counted row per column, which is the
- * smallest thing that is still the board.
- *
- * What comes back is the rows one BODY may draw, tail included; the board
- * decides how many of those are cards once it knows whether anything was left
- * out.
- *
- * WHY `bodyRows` IS NOT THE ROOM. The owner reloaded a 213 column, 61 row
- * terminal and got the compact fallback where the build before drew eight
- * cards a column. `scroll.bodyRows` is not the height the surface has for us:
- * `SiteScroll` is "where a site's window sits over THE TREE A HOOK DREW in
- * it", and `ui.scroll` spells the same field "how many rows of the tree the
- * window shows at once, AS DRAWN NOW", with `contentRows` beside it and
- * "the window's last offset is `contentRows - bodyRows`, none when the tree
- * fits". A tree that fits is its own window, so `bodyRows` is the height of
- * what we last drew. Reading it as a cap is a ratchet: one short board makes
- * the next budget shorter, the compact fallback draws six rows, and the pane
- * reports six rows for ever after.
- *
- * So the field is allowed to PROVE room and never to deny it. The cap comes
- * from `viewport.rows`, which is the whole surface and so an honest upper
- * bound on the pane ("cells down the whole surface, not the room left for
- * this component"), and `bodyRows` only raises that. Above the rows the whole
- * board needs neither matters and the layout is the one the owner had before
- * any budget existed: the capped cards, a tail, and the blank rows.
- */
-function rowBudget(e: any, stacked: boolean, extraRows = 0): { body: number; gaps: boolean; compact: boolean } {
-  const frames = stacked ? COLUMN_FRAME_ROWS * BOARD_COLUMNS : COLUMN_FRAME_ROWS;
-  const share = stacked ? BOARD_COLUMNS : 1;
-  const whole = CHROME_ROWS + extraRows + frames + share * (COLUMN_CARD_CAP + 1);
-  const drawn: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
-  const screen: number = typeof e.viewport?.rows === "number" ? e.viewport.rows : 0;
-  const room = extraRows > 0 ? drawn : Math.max(drawn, screen);
-  if (room <= 0 || room >= whole) return { body: COLUMN_CARD_CAP + 1, gaps: true, compact: false };
-  // With the blank rows first, but only while they are affordable: below
-  // GAPS_MIN_BODY rows of cards per column the gaps are costing more than
-  // they are worth, and a board with cards in it beats a tidy empty one.
-  for (const [gaps, floor] of [[true, GAPS_MIN_BODY], [false, 1]] as const) {
-    const chrome = CHROME_ROWS + extraRows - (gaps ? 0 : GAP_ROWS);
-    const left = room - chrome - frames;
-    if (left >= share * floor) {
-      return { body: Math.min(COLUMN_CARD_CAP + 1, Math.floor(left / share)), gaps, compact: false };
-    }
-  }
-  return { body: 0, gaps: false, compact: true };
-}
-
-/**
- * A heading that keeps its count when the column is too narrow for both.
- *
- * The count is the point of the heading, so the label is what gets cut:
- * "In progress 100" at fourteen cells is "In progr… 100", never
- * "In progress 1…", which would quietly report a different number.
- */
-function headingContent(elements: any, label: string, count: number, width: number): unknown[] {
-  const tail = ` ${count}`;
-  const emphasis = motion.count(label === "In progress" ? "inProgress" : label === "Done" ? "done" : "open");
-  return [
-    paneText(elements.Text, { children: truncate(label, Math.max(1, width - tail.length)) }),
-    paneText(elements.Text, { dimColor: !emphasis, bold: emphasis, children: tail }),
-  ];
-}
-
-/** IDs lead in muted text; titles carry emphasis and blockers stay visible. */
-function cardRow(elements: any, card: SidebarBoardCard, width: number, done = false): unknown {
-  const effect = motion.card(card.key);
-  const ready = effect.ready && !card.blocked && !done;
-  const blocked = card.blocked ? (width >= 32 ? "[Blocked] " : "[!] ") : ready ? (width >= 32 ? "✓ Ready " : "✓ ") : "";
-  const id = truncate(card.id, Math.max(1, width - cellWidth(blocked) - 3));
-  const room = Math.max(1, width - cellWidth(id) - cellWidth(blocked) - 1);
-  const tone = card.kind === "issue" && card.severity !== null ? SEVERITY_TONES[card.severity] : undefined;
-  return paneText(elements.Text, {
-    key: card.key,
-    wrap: "truncate",
-    children: [
-      paneText(elements.Text, { dimColor: true, ...(tone ? { color: tone } : {}), children: `${id} ` }),
-      paneText(elements.Text, { ...(card.blocked ? { color: "yellow" } : { dimColor: effect.fading }), children: blocked }),
-      paneText(elements.Text, { bold: !done, dimColor: done, children: shimmerTitle(elements, truncate(card.title, room), effect.progress) }),
-    ],
-  });
-}
-
-/** Preserve graphemes and cell widths while a narrow highlight crosses the text. */
-function shimmerTitle(elements: any, title: string, progress: number | null): unknown {
-  if (progress === null) return title;
-  const start = Math.round(progress * (cellWidth(title) + 6)) - 6;
-  const runs: { text: string; highlight: boolean }[] = [];
-  let position = 0;
-  for (const { cluster, cells } of graphemes(title)) {
-    const highlight = position >= start && position < start + 6;
-    const last = runs[runs.length - 1];
-    if (last?.highlight === highlight) last.text += cluster;
-    else runs.push({ text: cluster, highlight });
-    position += cells;
-  }
-  return runs.map((run, index) => paneText(elements.Text, {
-    key: `shimmer-${index}`, ...(run.highlight ? { dimColor: false, bold: true, underline: true } : {}), children: run.text,
-  }));
-}
-
-/**
- * The rows of one column's body, every body the same height.
- *
- * The three bodies draw the same number of rows, so the cards end level
- * instead of leaving a ragged edge: a column with fewer cards is padded with
- * blanks. Empty columns use that same height for a quiet, centered invitation.
- * The tail row is part of that common height, held
- * back by the budget, so a capped column can say it was capped without
- * standing a row taller than the rest.
- */
-function bodyRowsOf(
-  elements: any,
-  cards: readonly SidebarBoardCard[],
-  width: number,
-  shown: number,
-  height: number,
-  column: BoardColumnKey,
-): unknown[] {
-  const rows: unknown[] = [];
-  if (cards.length === 0) {
-    return emptyColumnRows(elements, column, width, height);
-  } else {
-    for (const card of cards.slice(0, shown)) rows.push(cardRow(elements, card, width, column === "board-done"));
-    if (cards.length > shown) rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
-  }
-  while (rows.length < height) rows.push(paneText(elements.Text, { children: " " }));
-  return rows;
-}
-
-function emptyColumnRows(elements: any, column: BoardColumnKey, width: number, height: number, centered = true): unknown[] {
-  const state = EMPTY_COLUMNS[column];
-  const title = cellWidth(`${state.symbol} ${state.title}`) <= width ? state.title : state.short;
-  const lines = [`${state.symbol} ${title}`];
-  if (height >= 3 && cellWidth(state.hint) <= width) lines.push(state.hint);
-  const top = centered ? Math.floor((height - lines.length) / 2) : 0;
-  return Array.from({ length: height }, (_, index) => {
-    const line = truncate(lines[index - top] ?? " ", width);
-    const inset = centered ? Math.max(0, Math.floor((width - cellWidth(line)) / 2)) : 0;
-    return paneText(elements.Text, {
-      key: `${column}-empty-${index}`, dimColor: true, wrap: "truncate", children: " ".repeat(inset) + line,
-    });
-  });
-}
-
-/**
- * One column: a bordered card with its heading at the top, a rule under the
- * heading, and the card rows beneath.
- *
- * One box and not two. The heading is enclosed by the card's own top and side
- * borders and the rule below it, which is the divider; two stacked bordered
- * boxes drew a double line between heading and body. The rule is a Text of
- * box-drawing dashes spanning the inner width, so it meets both side borders;
- * it cannot render the ├ and ┤ junctions, since a child of the box cannot
- * reach into the border cells the renderer owns.
- *
- * The count in the heading is the WHOLE column, not the rows drawn, so a
- * capped column still tells the truth about the project; the tail says the
- * column goes on. Titles are cut to the column's width, not the pane's.
- *
- * Takes the resolved element table rather than `$`: these are plain
- * constructors, and the client's scan is strict about where `$` may travel.
- */
-function boardColumn(
-  elements: any,
-  key: BoardColumnKey,
-  heading: string,
-  style: Readonly<Record<string, unknown>>,
-  cards: readonly SidebarBoardCard[],
-  width: number,
-  shown: number,
-  height: number,
-): unknown {
-  // The border takes a column on each side, so the text inside has that much
-  // less. Getting this wrong wraps every row and the board falls apart.
-  const textWidth = Math.max(1, width - BORDER_COLUMNS);
-  return elements.Box({
-    key,
-    flexDirection: "column",
-    borderStyle: COLUMN_BORDER,
-    width,
-    overflow: "hidden",
-    children: [
-      paneText(elements.Text, {
-        key: `${key}-heading`,
-        ...style,
-        wrap: "truncate",
-        children: headingContent(elements, heading, cards.length, textWidth),
-      }),
-      paneText(elements.Text, { key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
-      ...bodyRowsOf(elements, cards, textWidth, shown, height, key),
-    ],
-  });
-}
-
-/** The board reduced to three counted rows, when no frame will fit. */
-function compactBoard(elements: any, board: any, width: number): unknown {
-  const line = (
-    key: string,
-    label: string,
-    style: Readonly<Record<string, unknown>>,
-    cards: readonly SidebarBoardCard[],
-  ): unknown =>
-    paneText(elements.Text, { key, ...style, wrap: "truncate", children: headingContent(elements, label, cards.length, width) });
-  return elements.Box({
-    key: "board",
-    flexDirection: "column",
-    children: [
-      line("board-open", "Open", COLUMN_STYLES.open, board.open),
-      line("board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress),
-      line("board-done", "Done", COLUMN_STYLES.done, board.done),
-    ],
-  });
-}
-
-/**
- * The narrow board (ISS-1252): below BOARD_MIN_COLUMNS the three framed
- * columns stacked into a strip the person had to scroll, past a cut-off Open
- * card and an empty In progress frame. Owner: "in that view we can just show
- * top 3 in progress and context pressure." So this draws the work in hand
- * only: the In progress heading with its count, up to NARROW_BOARD_CARDS
- * cards, a tail when more exist. Open and Done keep their counts in
- * the band's summary line under the pane. At most five rows, so the client's
- * inline block shows it whole, without a budget.
- *
- * Nothing in progress and the strip shows the Open column the same way
- * (ISS-1254): the owner's project had no work in hand and the strip said
- * "In progress 0, none", which is a count and not the work; the next thing to
- * pick up is what the strip is for then.
- */
-function narrowBoard(elements: any, board: any, width: number): unknown {
-  const inProgress = board.inProgress as readonly SidebarBoardCard[];
-  const fallback = inProgress.length === 0;
-  const cards = fallback ? (board.open as readonly SidebarBoardCard[]) : inProgress;
-  const rows: unknown[] = [
-    paneText(elements.Text, {
-      key: "narrow-heading",
-      ...(fallback ? COLUMN_STYLES.open : COLUMN_STYLES.inProgress),
-      wrap: "truncate",
-      children: headingContent(elements, fallback ? "Open" : "In progress", cards.length, width),
-    }),
-  ];
-  if (cards.length === 0) {
-    rows.push(...emptyColumnRows(elements, fallback ? "board-open" : "board-inprogress", width, 1, false));
-  } else {
-    cards.slice(0, NARROW_BOARD_CARDS).forEach((card, index) => {
-      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(elements, card, width)] }));
-    });
-    if (cards.length > NARROW_BOARD_CARDS) {
-      rows.push(
-        paneText(elements.Text, {
-          key: "narrow-tail",
-          dimColor: true,
-          wrap: "truncate",
-          children: truncate(`... ${cards.length - NARROW_BOARD_CARDS} more`, width),
-        }),
-      );
-    }
-  }
-  return elements.Box({ key: "board", flexDirection: "column", children: rows });
-}
-
-/**
- * The three column widths.
- *
- * Stacked, every card takes the pane. Side by side, the width less the two
- * gaps splits three ways, the leftover cells going to Open; from WIDE_COLUMNS
- * up, a twentieth of the pane moves from Done to In progress, so the board
- * leans toward the work in hand. The three widths and the gaps always sum to
- * the pane's width, whatever the arithmetic above did.
- */
-function columnWidths(width: number, stacked: boolean): number[] {
-  if (stacked) return [width, width, width, width];
-  const base = Math.max(MIN_COLUMN_WIDTH, Math.floor((width - GAP_TOTAL) / BOARD_COLUMNS));
-  const widths = [base, base, base];
-  widths[0] = (widths[0] ?? base) + Math.max(0, width - GAP_TOTAL - base * BOARD_COLUMNS);
-  if (width >= WIDE_COLUMNS) {
-    const shift = Math.min(Math.round(width * WIDE_SHIFT), (widths[2] ?? base) - MIN_COLUMN_WIDTH);
-    if (shift > 0) {
-      widths[1] = (widths[1] ?? base) + shift;
-      widths[2] = (widths[2] ?? base) - shift;
-    }
-  }
-  return widths;
-}
-
-function boardNode(elements: any, board: any, width: number, stacked: boolean, body: number): unknown {
-  const widths = columnWidths(width, stacked);
-  // Every body the same height, and that height inside the budget: as many
-  // rows as the fullest column can show, one of them given up to the tail
-  // when anything was left out, so a capped column says so without standing a
-  // row taller than the rest.
-  const columns = [board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
-  const longest = Math.max(...columns.map((column) => column.length));
-  // Never more than the cap, whatever the budget allows: a body of seven rows
-  // is six cards and a tail, not seven cards.
-  let shown = Math.min(body, longest, COLUMN_CARD_CAP);
-  if (columns.some((column) => column.length > shown)) shown = Math.max(0, Math.min(shown, body - 1));
-  const omitted = columns.some((column) => column.length > shown);
-  const height = Math.max(1, Math.min(body, shown + (omitted ? 1 : 0)));
-  // Left to right in the order the work moves: what can be
-  // picked up, what is being done, what is finished.
-  return elements.Box({
-    key: "board",
-    flexDirection: stacked ? "column" : "row",
-    gap: stacked ? 0 : COLUMN_GAP,
-    children: [
-      boardColumn(elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[0]!, shown, height),
-      boardColumn(elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height),
-      boardColumn(elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[2]!, shown, height),
-    ],
-  });
-}
-
-/**
- * The header keeps identity and a one-cell activity indicator on one row.
- * Context pressure stays in the footer; the phase timeline has its own rows.
- */
-/**
- * The Mod's own version, drawn in the header (ISS-1266). The Mod cannot
- * read package.json through the client, so this is a literal, bumped with
- * the two plugin manifests on every release; test/plugin/sidebar-validate
- * holds it equal to package.json so a forgotten bump fails before publish.
- */
-export const MOD_VERSION = "1.15.9";
-
-function headerNode(elements: any): unknown {
-  // "Storybloq (1.15.8) - CPM" (ISS-1266): the wordmark, the version faint,
-  // then the project in the wordmark's own weight. The project is the folder
-  // the ledger sits in, so two checkouts of one project read apart; the
-  // config's `project` name would say "storybloq" for CPM.
-  const name = projectFolderName();
-  const activity = motion.activity();
-  return elements.Box({
-    key: "header",
-    flexDirection: "row",
-    alignItems: "center",
-    marginRight: PANE_EDGE_CLEARANCE,
-    children: [
-      paneText(elements.Text, {
-        wrap: "truncate",
-        children: [
-          paneText(elements.Text, { key: "wordmark", bold: true, children: "Storybloq" }),
-          paneText(elements.Text, { key: "activity", dimColor: !activity.bright, bold: activity.bright, children: ` ${activity.glyph}` }),
-          paneText(elements.Text, { key: "version", dimColor: true, children: ` (${MOD_VERSION})` }),
-          ...(name === "" ? [] : [paneText(elements.Text, { key: "project", bold: true, children: ` - ${name}` })]),
-        ],
-      }),
-    ],
-  });
-}
-
-/** The last segment of the pinned ledger root, or nothing before one is pinned. */
-function projectFolderName(): string {
-  if (ledgerRoot === null) return "";
-  const segments = ledgerRoot.replace(/[/\\]+$/, "").split(/[/\\]/);
-  return segments[segments.length - 1] ?? "";
-}
-
-/**
- * The foot of the pane: the issues breakdown flush left, the context fill
- * right-aligned on the same row.
- *
- * The four buckets are always all there, so the shape of the line does not
- * move about; what changes is the weight. A zero bucket is dim and a nonzero
- * one is not, critical reads red and high yellow when they have anything in
- * them, and the separators are dim throughout, so the eye lands on the
- * severities that exist. The context fill is neutral and gets its width
- * first, the issues line taking what is left and going to the short labels
- * when the long ones will not fit.
- *
- * No right margin here: the engine's close mark is a top-right thing, and the
- * header is what keeps clear of it.
- */
-export function contextLabel(context: number | null, width: number, meterValue = context): string {
-  if (width <= 0) return "";
-  if (context === null || !Number.isFinite(context)) return truncate(width < 6 ? "--" : width < 14 ? "-- ctx" : "context --", width);
-  const value = Math.max(0, Math.min(100, Math.round(context)));
-  if (width < 14) {
-    const compact = `${value}% ctx`;
-    return truncate(cellWidth(compact) <= width ? compact : `${value}%`, width);
-  }
-  const cells = width >= 48 ? 8 : width >= 32 ? 4 : 0;
-  const meterPercent = meterValue !== null && Number.isFinite(meterValue) ? Math.max(0, Math.min(100, meterValue)) : value;
-  const filled = Math.round(meterPercent / 100 * cells);
-  const meter = cells ? ` [${"━".repeat(filled)}${"·".repeat(cells - filled)}]` : "";
-  return `context${meter} ${value}%`;
-}
-
-function contextNode(elements: any, context: number | null, width: number): unknown {
-  const high = context !== null && Number.isFinite(context) && context >= 80;
-  return paneText(elements.Text, {
-    key: "context", dimColor: !high, bold: high, wrap: "truncate", children: contextLabel(context, width, motion.meterValue()),
-  });
-}
-
-function footerNode(
-  elements: any,
-  bySeverity: Readonly<Record<string, number>>,
-  context: number | null,
-  width: number,
-): unknown {
-  const contextText = contextLabel(context, width);
-  const room = Math.max(0, width - cellWidth(contextText) - 1);
-  const counts = SEVERITY_ORDER.map((severity) => bySeverity[severity.key] ?? 0);
-  // A ledger with nothing open says so in a word. Four zeros is four numbers
-  // to read before finding out there is nothing to read, and it looks like a
-  // pane that failed rather than a project with no open issues. The
-  // abbreviated row says the same word, since there is nothing to abbreviate.
-  if (counts.every((count) => count === 0)) {
-    return elements.Box({
-      key: "footer",
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      children: [
-        elements.Box({
-          key: "issues",
-          flexDirection: "row",
-          width: Math.min(room, cellWidth(NO_ISSUES)),
-          overflow: "hidden",
-          children: [paneText(elements.Text, { dimColor: true, wrap: "truncate", children: NO_ISSUES })],
-        }),
-        contextNode(elements, context, width),
-      ],
-    });
-  }
-  const long = `issues: ${SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.long}`).join(", ")}`;
-  const short = SEVERITY_ORDER.map((s, i) => `${counts[i]} ${s.short}`).join(" ");
-  const abbreviated = cellWidth(long) > room;
-
-  const parts: unknown[] = [];
-  if (!abbreviated) parts.push(paneText(elements.Text, { children: "issues: " }));
-  SEVERITY_ORDER.forEach((severity, index) => {
-    const count = counts[index] ?? 0;
-    const props: Record<string, unknown> = {
-      children: `${count} ${abbreviated ? severity.short : severity.long}`,
-    };
-    if (count === 0) props["dimColor"] = true;
-    else if (severity.tone !== null) props["color"] = severity.tone;
-    if (index > 0) {
-      parts.push(paneText(elements.Text, { dimColor: true, children: abbreviated ? " " : ", " }));
-    }
-    parts.push(paneText(elements.Text, props));
-  });
-
-  return elements.Box({
-    key: "footer",
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    children: [
-      // ONE Text, not a row of them. The coloured fragments are its children,
-      // which keeps each its colour, and the truncation is the parent's: a Box
-      // of Texts has no wrap prop to set, so when even the abbreviated buckets
-      // outgrew the room the row wrapped and the footer took two rows out of a
-      // budget counted for one. The room is the width, so the cut is the
-      // context fill's clearance and not the pane's edge.
-      elements.Box({
-        key: "issues",
-        flexDirection: "row",
-        width: Math.min(room, cellWidth(abbreviated ? short : long)),
-        overflow: "hidden",
-        children: [paneText(elements.Text, { wrap: "truncate", children: parts })],
-      }),
-      contextNode(elements, context, width),
-    ],
-  });
-}
-
 export function registerSidebar(on: On, _options: Options): void {
-  forgetEverything();
-  motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
-
+  const dashboard = createDashboardState();
+  forgetEverything(dashboard);
+  dashboard.motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
   // The pane. `ui.render` fires once per input value and again on
   // `$.ui.invalidate("ui.render")`, so this hook only draws what the refresh
   // hooks have already computed: it awaits nothing.
   (on("ui.render", ($: any, e: any, next: (e: any) => unknown) => {
     // Nothing is drawn without a ledger, pane or band: there is no pane open
     // to render into, and the band's line would be the empty board in one row.
-    if (noLedger) return next(e);
+    if (dashboard.noLedger)
+      return next(e);
     if (e.component === "Pane" && e.requestId === PANE_ID) {
-      if (!paneDrawn) {
+      if (!dashboard.paneDrawn) {
         // The band may have drawn on this same pass believing the pane
         // parked (a reload runs `register` fresh, so this flag starts false
         // while the client keeps the pane up). One redraw and it stands down.
-        paneDrawn = true;
-        reopenAsked = false;
+        dashboard.paneDrawn = true;
+        dashboard.reopenAsked = false;
         $.ui.invalidate("ui.render");
       }
       const elements = $.ui.resolve(e);
@@ -2304,7 +865,7 @@ export function registerSidebar(on: On, _options: Options): void {
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
       const placement = panePlacement(e);
-      paneInline = placement === "inline";
+      dashboard.paneInline = placement === "inline";
       const layout = boardLayout(placement, width);
       const stacked = layout === "stacked";
       // The narrow board is at most five rows and skips the blank rows, so it
@@ -2316,41 +877,43 @@ export function registerSidebar(on: On, _options: Options): void {
       const bodyRows = e.props?.scroll?.bodyRows;
       const intro = typeof bodyRows === "number" && bodyRows <= 1 ? null
         : logoLayout(width, typeof bodyRows === "number" ? bodyRows - 1 : undefined, placement);
-      if (motion.enabled && _options["startupLogo"] !== false && !logoFinished && intro) {
-        logoStarted = true;
-        const art = logoFrame(intro.columns, logoElapsed);
+      if (dashboard.motion.enabled && _options["startupLogo"] !== false && !dashboard.logoFinished && intro) {
+        dashboard.logoStarted = true;
+        const art = logoFrame(intro.columns, dashboard.logoElapsed);
         return Box({ flexDirection: "column", children: [
-          headerNode(elements),
-          ...Array.from({ length: intro.top }, (_, index) => Text({ key: `logo-space-${index}`, children: " " })),
-          ...art.map((cells, index) => Text({ key: `storyfield-${index}`, wrap: "truncate", children: [
-            Text({ key: "inset", children: " ".repeat(intro.left) }),
-            ...cells.map((cell, x) => Text({ key: `dot-${x}`, color: cell.color, children: cell.glyph })),
-          ] })),
-          contextNode(elements, contextPercent, width),
-        ] });
+            headerNode(dashboard, elements),
+            ...Array.from({ length: intro.top }, (_, index) => Text({ key: `logo-space-${index}`, children: " " })),
+            ...art.map((cells, index) => Text({ key: `storyfield-${index}`, wrap: "truncate", children: [
+                Text({ key: "inset", children: " ".repeat(intro.left) }),
+                ...cells.map((cell, x) => Text({ key: `dot-${x}`, color: cell.color, children: cell.glyph })),
+              ] })),
+            contextNode(dashboard, elements, dashboard.contextPercent, width),
+          ] });
       }
-      const rows: unknown[] = [headerNode(elements)];
-      if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
-      if (projection === null) {
+      const rows: unknown[] = [headerNode(dashboard, elements)];
+      if (budget.gaps)
+        rows.push(paneText(dashboard, Text, { key: "header-gap", children: " " }));
+      if (dashboard.projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
-        rows.push(paneText(Text, { children: truncate(summaryLine(), width) }));
-        rows.push(contextNode(elements, contextPercent, width));
-      } else if (layout === "narrow") {
-        rows.push(narrowBoard(elements, projection.board, width));
-        rows.push(Box({ key: "footer", flexDirection: "row", justifyContent: "flex-end", children: [contextNode(elements, contextPercent, width)] }));
-        if (sessionActive) {
-          rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+        rows.push(paneText(dashboard, Text, { children: truncate(summaryLine(dashboard), width) }));
+        rows.push(contextNode(dashboard, elements, dashboard.contextPercent, width));
+      }
+      else if (layout === "narrow") {
+        rows.push(narrowBoard(dashboard, elements, dashboard.projection.board, width));
+        rows.push(Box({ key: "footer", flexDirection: "row", justifyContent: "flex-end", children: [contextNode(dashboard, elements, dashboard.contextPercent, width)] }));
+        if (dashboard.sessionActive) {
+          rows.push(paneText(dashboard, elements.Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
         }
-      } else {
-        rows.push(
-          budget.compact
-            ? compactBoard(elements, projection.board, width)
-            : boardNode(elements, projection.board, width, stacked, budget.body),
-        );
-        if (budget.gaps) rows.push(paneText(Text, { key: "issues-gap", children: " " }));
-        rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
-        if (sessionActive) {
-          rows.push(paneText(Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+      }
+      else {
+        rows.push(budget.compact
+          ? compactBoard(dashboard, elements, dashboard.projection.board, width)
+          : boardNode(dashboard, elements, dashboard.projection.board, width, stacked, budget.body));
+        if (budget.gaps)
+          rows.push(paneText(dashboard, Text, { key: "issues-gap", children: " " }));
+        rows.push(footerNode(dashboard, elements, dashboard.projection.issuesBySeverity, dashboard.contextPercent, width));
+        if (dashboard.sessionActive) {
+          rows.push(paneText(dashboard, Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
         }
       }
       return Box({ flexDirection: "column", children: rows });
@@ -2363,54 +926,58 @@ export function registerSidebar(on: On, _options: Options): void {
     // drawn turn off the only thing that was. It IS tied to the pane having
     // been DRAWN: a pane opened narrow stays parked after a resize (ISS-1235),
     // and a wide terminal with a parked pane still has to show the numbers.
-    if (e.component === "AbovePrompt" && sidebarEnabled) {
+    if (e.component === "AbovePrompt" && dashboard.sidebarEnabled) {
       // Also catches a Mod reloaded during an already-running main turn.
-      if (!e.props?.view?.agentId && typeof e.props?.isWorking === "boolean") motion.setWorking(e.props.isWorking);
-      bandDrawn = false;
+      if (!e.props?.view?.agentId && typeof e.props?.isWorking === "boolean")
+        dashboard.motion.setWorking(e.props.isWorking);
+      dashboard.bandDrawn = false;
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       const narrow = columns < DOCK_COLUMNS;
       if (narrow) {
-        reopenAsked = false;
-      } else if (paneOpen && !paneDrawn && !reopenAsked) {
+        dashboard.reopenAsked = false;
+      }
+      else if (dashboard.paneOpen && !dashboard.paneDrawn && !dashboard.reopenAsked) {
         // Wide, open, parked: ask the client to place it again. The width is
         // judged at each open (ISS-1235), so this is what a narrow-then-wide
         // session needs; once per crossing, and never for a pane the person
         // closed (`paneOpen` is false then). A refusal costs nothing: the
         // band below is still drawn on this pass.
         // Not awaited: a render never waits on an open, and the hook is sync.
-        reopenAsked = true;
+        dashboard.reopenAsked = true;
         Promise.resolve()
           .then(() => {
-            // Re-checked on the microtask: a close or a draw that landed in
-            // between makes the ask stale, and a closed pane must stay closed.
-            if (!paneOpen || paneDrawn) return;
-            return $.ui.open({ id: PANE_ID, title: PANE_TITLE });
-          })
+          // Re-checked on the microtask: a close or a draw that landed in
+          // between makes the ask stale, and a closed pane must stay closed.
+          if (!dashboard.paneOpen || dashboard.paneDrawn)
+            return;
+          return $.ui.open({ id: PANE_ID, title: PANE_TITLE });
+        })
           .catch(() => {
-            // The band stands in; the next crossing asks again.
-          });
+          // The band stands in; the next crossing asks again.
+        });
       }
-      if (columns > 0 && (narrow || !paneDrawn)) {
-        bandDrawn = true;
+      if (columns > 0 && (narrow || !dashboard.paneDrawn)) {
+        dashboard.bandDrawn = true;
         const { Text } = $.ui.resolve(e);
         // The hint only while there is no board on screen: a placed pane keeps
         // its seat when the window shrinks (inline, ISS-1247), and the band
         // under it carries the counts the narrow board leaves out (ISS-1252).
-        return Text({ dimColor: true, children: bandText(columns, narrow && !paneDrawn) });
+        return Text({ dimColor: true, children: bandText(dashboard, columns, narrow && !dashboard.paneDrawn) });
       }
     }
     return next(e);
     // A client without the UI events refuses this registration rather than
     // throwing at the call site; that is the "renders nothing" case, and the
     // scan admits `.catch` here and nothing else.
-  }) as { catch: (fn: (error: unknown) => void) => void }).catch(() => {
-    uiAvailable = false;
+  }) as {
+    catch: (fn: (error: unknown) => void) => void;
+  }).catch(() => {
+    dashboard.uiAvailable = false;
   });
-
   on("session.start", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable) {
-      if (!saidNoUi) {
-        saidNoUi = true;
+    if (!dashboard.uiAvailable) {
+      if (!dashboard.saidNoUi) {
+        dashboard.saidNoUi = true;
         $.ui.log("storybloq sidebar: this client has no UI render events, so the pane is not drawn");
       }
       return next(e);
@@ -2418,43 +985,44 @@ export function registerSidebar(on: On, _options: Options): void {
     // A `-p` run and the SDK draw nowhere: `surface` is null and nobody is at
     // the prompt, so there is no pane to open and no ledger worth reading for
     // a sidebar nobody will see.
-    if (e.surface === null || e.isInteractive !== true) return next(e);
+    if (e.surface === null || e.isInteractive !== true)
+      return next(e);
     // On, whatever happens next: the refresh hooks stay armed so the pane can
     // appear the moment a ledger does.
-    sidebarEnabled = true;
-    motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
+    dashboard.sidebarEnabled = true;
+    dashboard.motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
     // ISS-1239: pin the root for the session, here and nowhere else. A reload
     // fires this event again and re-pins against the new directory, which is
     // wanted; `turn.complete` and `tool.call` must never re-resolve, which is
     // why neither of them touches these three.
-    ledgerRoot = null;
+    dashboard.ledgerRoot = null;
     // Said-once flags are per SESSION START, not per module load: a reload
     // fires this event again without re-registering, and leaving them set
     // would silently swallow the diagnostic the second time around.
-    saidNoLedger = false;
-    saidRootUnresolved = false;
-    initialCwd = typeof e.cwd === "string" && e.cwd.length > 0 ? e.cwd : null;
-    if (initialCwd === null) {
+    dashboard.saidNoLedger = false;
+    dashboard.saidRootUnresolved = false;
+    dashboard.initialCwd = typeof e.cwd === "string" && e.cwd.length > 0 ? e.cwd : null;
+    if (dashboard.initialCwd === null) {
       // No absolute origin to address from. Falling back to relative paths
       // here is precisely the defect, so the Mod stays closed and says why
       // rather than drawing a board that empties on the first `cd`.
-      noLedger = true;
-      if (!saidNoLedger) {
-        saidNoLedger = true;
+      dashboard.noLedger = true;
+      if (!dashboard.saidNoLedger) {
+        dashboard.saidNoLedger = true;
         $.ui.log("storybloq sidebar: this session start carried no working directory, so the pane stays closed");
       }
       return next(e);
     }
-    const resolution = await resolveLedgerRoot($, initialCwd);
+    const resolution = await resolveLedgerRoot(dashboard, $, dashboard.initialCwd);
     if (resolution.kind === "absent") {
       // No `.story/` means no pane, by the owner's ruling. A project that
       // never ran `storybloq init` was getting four bordered "none" columns
       // and an all-zero issues line, which is a dashboard reporting on
       // nothing; the Mod hides instead, and says so once in the log rather
       // than every turn.
-      noLedger = true;
-      if (!saidNoLedger) {
-        saidNoLedger = true;
+      dashboard.noLedger = true;
+      if (!dashboard.saidNoLedger) {
+        dashboard.saidNoLedger = true;
         $.ui.log("storybloq sidebar: no .story directory here, so the pane stays closed until storybloq init runs");
       }
       return next(e);
@@ -2467,48 +1035,44 @@ export function registerSidebar(on: On, _options: Options): void {
       // good and disable its own recovery. Hiding costs one board until the
       // refusal lifts; the retry loop then re-walks and pins properly. What
       // is never done either way is falling back to relative addressing.
-      noLedger = true;
-      if (!saidRootUnresolved) {
-        saidRootUnresolved = true;
-        $.ui.log(
-          `storybloq sidebar: could not resolve the ledger root (${resolution.reason}), so the pane stays closed until it can be read`,
-        );
+      dashboard.noLedger = true;
+      if (!dashboard.saidRootUnresolved) {
+        dashboard.saidRootUnresolved = true;
+        $.ui.log(`storybloq sidebar: could not resolve the ledger root (${resolution.reason}), so the pane stays closed until it can be read`);
       }
       return next(e);
     }
-    ledgerRoot = resolution.root;
-    noLedger = false;
+    dashboard.ledgerRoot = resolution.root;
+    dashboard.noLedger = false;
     // `session.start` fires again on a reload, and an open of an open id only
     // retitles it, but asking twice is still asking twice: `attach` asks once.
-    await attach($);
+    await attach(dashboard, $);
     return next(e);
   });
-
   on("turn.start", ($: any, e: any, next: (e: any) => unknown) => {
-    if (uiAvailable && sidebarEnabled && !noLedger) {
-      motion.setWorking(true, e.turnId);
+    if (dashboard.uiAvailable && dashboard.sidebarEnabled && !dashboard.noLedger) {
+      dashboard.motion.setWorking(true, e.turnId);
       $.ui.invalidate("ui.render");
     }
     return next(e);
   });
-
   // A turn is the unit the acceptance names: a `.story/` write during it shows
   // up by the next prompt.
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable || !sidebarEnabled) return next(e);
-    motion.finishTurn(e.turnId, e.agentId);
+    if (!dashboard.uiAvailable || !dashboard.sidebarEnabled)
+      return next(e);
+    dashboard.motion.finishTurn(e.turnId, e.agentId);
     $.ui.invalidate("ui.render");
-    if (noLedger) {
-      await attachIfLedgerArrived($);
+    if (dashboard.noLedger) {
+      await attachIfLedgerArrived(dashboard, $);
       return next(e);
     }
-    contextPercent = await readContextFill($);
-    motion.setContext(contextPercent);
-    await readHeader($);
-    requestScan($);
+    dashboard.contextPercent = await readContextFill($);
+    dashboard.motion.setContext(dashboard.contextPercent);
+    await readHeader(dashboard, $);
+    requestScan(dashboard, $);
     return next(e);
   });
-
   // A ledger write inside a turn has to show up inside that turn: the owner
   // moved a ticket to in progress, waited five seconds and moved it back, and
   // the board sat on the old column the whole time because nothing asked for
@@ -2522,50 +1086,49 @@ export function registerSidebar(on: On, _options: Options): void {
   // client-api.ts, which is not this Mod's file to change.
   on("tool.call", async ($: any, e: any, next: (e: any) => unknown) => {
     const result = await next(e);
-    if (uiAvailable && sidebarEnabled && wroteLedger(e)) {
+    if (dashboard.uiAvailable && dashboard.sidebarEnabled && wroteLedger(e)) {
       // `storybloq init` is a ledger write like any other, and it is the one
       // that turns a hidden Mod into a drawn one, so the no-ledger case goes
       // through the same filter rather than waiting for the turn to end.
-      if (noLedger) await attachIfLedgerArrived($);
-      else requestScan($);
+      if (dashboard.noLedger)
+        await attachIfLedgerArrived(dashboard, $);
+      else
+        requestScan(dashboard, $);
     }
     return result;
   });
-
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
-    if (!uiAvailable || !sidebarEnabled || noLedger) return next(e);
-    contextPercent = await readContextFill($);
-    motion.setContext(contextPercent);
+    if (!dashboard.uiAvailable || !dashboard.sidebarEnabled || dashboard.noLedger)
+      return next(e);
+    dashboard.contextPercent = await readContextFill($);
+    dashboard.motion.setContext(dashboard.contextPercent);
     $.ui.invalidate("ui.render");
     return next(e);
   });
-
   // The person closed the pane: there is no longer one to draw into, and a
   // later `session.start` may open it again. This does not turn the Mod off,
   // which is why it touches `paneOpen` and not `sidebarEnabled`.
   on("ui.close", ($: any, e: any, next: (e: any) => unknown) => {
     if (e.requestId === PANE_ID) {
-      paneOpen = false;
-      paneDrawn = false;
-      reopenAsked = false;
+      dashboard.paneOpen = false;
+      dashboard.paneDrawn = false;
+      dashboard.reopenAsked = false;
     }
     return next(e);
   });
-
   // The person switches theme in /config: the pane's text follows on the next
   // draw (ISS-1238). The event fires before the write, so the new value is
   // `e.value`, and any other row is not ours.
   on("config.set", ($: any, e: any, next: (e: any) => unknown) => {
-    if (e?.key === "theme" && uiAvailable && sidebarEnabled) {
+    if (e?.key === "theme" && dashboard.uiAvailable && dashboard.sidebarEnabled) {
       const light = isLightTheme(e.value);
-      if (light !== themeLight) {
-        themeLight = light;
+      if (light !== dashboard.themeLight) {
+        dashboard.themeLight = light;
         $.ui.invalidate("ui.render");
       }
     }
     return next(e);
   });
-
   // The person entered a prompt (ISS-1251). An open made here answers their
   // input, which the client places at any width, where the session.start open
   // (the plugin's own) waits undrawn below 144 columns. So a pane that is
@@ -2576,12 +1139,12 @@ export function registerSidebar(on: On, _options: Options): void {
   // with `e` as it came, and the open is not awaited, so a refused or failing
   // open cannot delay the turn.
   on("prompt.submit", ($: any, e: any, next: (e: any) => unknown) => {
-    if (uiAvailable && sidebarEnabled && !noLedger && paneOpen && !paneDrawn) {
+    if (dashboard.uiAvailable && dashboard.sidebarEnabled && !dashboard.noLedger && dashboard.paneOpen && !dashboard.paneDrawn) {
       Promise.resolve()
         .then(() => $.ui.open({ id: PANE_ID, title: PANE_TITLE }))
         .catch(() => {
-          // The band stands in; the next prompt asks again.
-        });
+        // The band stands in; the next prompt asks again.
+      });
     }
     return next(e);
   });

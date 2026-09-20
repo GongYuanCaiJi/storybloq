@@ -126,20 +126,20 @@ describe("sampleSession", () => {
     });
   });
 
-  it("no project: transcript-only, read-only, live setting read with its basis; absent setting falls to model evidence", () => {
+  it("no project: transcript-only reads never substitute current settings for missing startup evidence", () => {
     withFixture((f) => {
       const cwd = join(f.base, "nostory");
       mkdirSync(cwd);
       writeTranscript(f.projects, encoded(cwd), SID, [assistantRecord({ ts: at(0), read: 50_000 })]);
       writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 400_000 }));
       const r = sampleSession({ root: null, cwd, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
-      expect(r).toMatchObject({ binding: "read-only", presence: "no-project", usable: true });
-      expect(r.pressure?.ceiling).toMatchObject({ source: "setting", confidence: "medium", ceiling: 0.925 * 400_000 });
-      expect(r.pressure?.ceiling.basis).toMatch(/live read, no capture/);
+      expect(r).toMatchObject({ binding: "read-only", presence: "no-project", usable: false });
+      expect(r.pressure?.ceiling).toMatchObject({ source: "unknown", confidence: null, ceiling: null });
+      expect(r.pressure?.ceiling.basis).toMatch(/session-start.*not captured/);
       rmSync(f.userSettings);
       const m = sampleSession({ root: null, cwd, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
-      expect(m.pressure?.ceiling).toMatchObject({ source: "model", conflict: "no model-window evidence" });
-      expect(m.pressure?.state).toBe("advisory");
+      expect(m.pressure?.ceiling).toMatchObject({ source: "unknown", ceiling: null });
+      expect(m.pressure?.state).toBe("unknown");
     });
   });
 
@@ -193,7 +193,7 @@ describe("sampleSession", () => {
       const r = sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
       expect(r.binding).toBe("read-only");
       expect(r.bindingReason).toMatch(/no presence record/);
-      expect(r.pressure?.ceiling.basis).toMatch(/live read, unbound/);
+      expect(r.pressure?.ceiling.basis).toMatch(/session-start.*not captured/);
       expect(r.presence).toBe("skipped");
     });
   });
@@ -458,7 +458,8 @@ describe("ISS-1211: the boundary series is the repo's, not the cwd's", () => {
       // Acceptance 2: run from MAIN, the session's compaction is evidence
       // instead of a session that reads as never having compacted.
       const fromMain = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).result;
-      expect(fromMain.pressure?.ceiling.basis).toMatch(/raised to observed boundary 417000/);
+      expect(readLedger(f.main).some(entry => entry.preTokens === 417_000)).toBe(true);
+      expect(fromMain.pressure?.ceiling.source).toBe("unknown");
     });
   });
 
@@ -552,7 +553,8 @@ describe("ISS-1211: the boundary series is the repo's, not the cwd's", () => {
       expect(readLedger(f.main).map((e) => e.preTokens)).toEqual([417_000]);
       writeTranscript(f.projects, encoded(f.main), SID, [assistantRecord({ ts: at(2), read: 100_000 })]);
       const fromMain = handleSessionIntel({ cwd: f.main, format: "json", projectsDir: f.projects }).result;
-      expect(fromMain.pressure?.ceiling.basis).toMatch(/raised to observed boundary 417000/);
+      expect(readLedger(f.main).some(entry => entry.preTokens === 417_000)).toBe(true);
+      expect(fromMain.pressure?.ceiling.source).toBe("unknown");
     });
   });
 });
@@ -645,5 +647,21 @@ describe("sampleSession: usage advisory input provenance", () => {
       expect(r.sessionId).toBe(next);
       expect(r.pressure?.usageInput).toEqual({ window: 900_000, source: "project", provenance: "capture" });
     });
+  });
+});
+
+it("keeps handover pressure on the captured 450k window after settings change to 300k", () => {
+  withFixture(f => {
+    bindCaller(f.root, 450_000);
+    writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(0), input: 384014, creation: 0, read: 0 })]);
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 450_000 }));
+    const sample = () => sampleSession({ root: f.root, cwd: f.root, sampledBy: "query", projectsDir: f.projects, userSettingsPath: f.userSettings, now: T0 });
+    const before = sample();
+    writeFileSync(f.userSettings, JSON.stringify({ autoCompactWindow: 300_000 }));
+    const after = sample();
+    expect(after.pressure?.ceiling.ceiling).toBe(416250);
+    expect(after.pressure?.pct).toBeCloseTo(384014 / 416250);
+    expect(after.pressure?.state).toBe(before.pressure?.state);
+    expect(after.pressure?.ceiling).toEqual(before.pressure?.ceiling);
   });
 });

@@ -248,7 +248,7 @@ describe("handleStopHookSample", () => {
       expect(r.result?.transcriptPath).toBe(path);
       expect(r.result?.presence).toBe("persisted");
       expect(r.result?.pressure?.sampledBy).toBe("stop-hook");
-      expect(r.result?.pressure?.ceiling).toMatchObject({ source: "setting", confidence: "medium" });
+      expect(r.result?.pressure?.ceiling).toMatchObject({ source: "unknown", confidence: null, ceiling: null });
       expect(intelOf(f.root).lastSample?.contextTokens).toBe(contextOf({ read: 100_000 }));
       expect(intelOf(f.root).transcriptPath).toBe(path);
       expect(readLedger(f.root)).toHaveLength(1);
@@ -256,6 +256,17 @@ describe("handleStopHookSample", () => {
       const bad = writeTranscript(f.projects, "elsewhere", SID2, [assistantRecord({ ts: at(3), read: 10 })]);
       const r2 = handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, transcriptPath: bad, now: T0 + 6 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(r2.result?.transcriptPath).toBe(path); // the record's hint
+    });
+  });
+
+  it("a late capture without a current setting cannot establish the startup limit", () => {
+    withFixture((f) => {
+      writeFileSync(f.userSettings, "{}");
+      const path = writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: 384_014 })]);
+      const r = handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, transcriptPath: path, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(r.capture).toMatchObject({ captureKind: "late" });
+      expect(r.result?.usable).toBe(false);
+      expect(r.result?.pressure?.ceiling).toMatchObject({ source: "unknown", ceiling: null });
     });
   });
 
@@ -378,7 +389,7 @@ describe("status.json projection", () => {
     });
   });
 
-  it("the era-less late capture answers the query at medium confidence and projects nothing bound: no ledger attribution, sample persisted read-only never", () => {
+  it("the era-less late capture leaves pressure unknown and projects nothing bound: no ledger attribution, sample persisted read-only never", () => {
     withFixture((f) => {
       delete process.env.CLAUDE_PID;
       processEra.reset();
@@ -386,7 +397,7 @@ describe("status.json projection", () => {
       const r = handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: T0 + 5 * 60_000, projectsDir: f.projects, userSettingsPath: f.userSettings });
       expect(r.capture).toEqual({ status: "late-unbound", captureKind: "late" });
       expect(r.result?.binding).toBe("read-only");
-      expect(r.result?.pressure?.ceiling).toMatchObject({ source: "setting", confidence: "medium" });
+      expect(r.result?.pressure?.ceiling).toMatchObject({ source: "unknown", confidence: null, ceiling: null });
       expect(r.result?.presence).toBe("skipped");
       expect(readLedger(f.root)).toEqual([]);
       expect(intelOf(f.root).lastSample).toBeNull();

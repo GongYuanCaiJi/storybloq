@@ -62,19 +62,19 @@ describe("resolveCeiling precedence", () => {
     // Unknown-trigger boundaries never pool.
     expect(resolveCeiling(input({ ledger: others.map((e) => ({ ...e, trigger: "unknown" as const })) })).source).toBe("setting");
     // Absent capture: project path skipped entirely.
-    expect(resolveCeiling(input({ ledger: others, target: { era: "1:2", capture: null } })).source).toBe("model");
+    expect(resolveCeiling(input({ ledger: others, target: { era: "1:2", capture: null } })).source).toBe("unknown");
   });
 
-  it("setting: startup high, late medium, live read medium with its basis", () => {
+  it("only startup settings are evidence; late and live reads cannot change pressure", () => {
     expect(resolveCeiling(input())).toMatchObject({ source: "setting", confidence: "high", autoCompactWindowAtStart: 450_000, captureKind: "startup" });
-    expect(resolveCeiling(input({ target: { era: "1:2", capture: { captureKind: "late", autoCompactWindowAtStart: 450_000, capturedAt: at(0) } } }))).toMatchObject({ confidence: "medium" });
+    expect(resolveCeiling(input({ target: { era: "1:2", capture: { captureKind: "late", autoCompactWindowAtStart: 450_000, capturedAt: at(0) } } }))).toMatchObject({ source: "unknown", ceiling: null });
     const live = resolveCeiling(input({ target: { era: null, capture: null }, liveSetting: { value: 400_000, basis: "live read, no capture" } }));
-    expect(live).toMatchObject({ source: "setting", confidence: "medium", ceiling: 0.925 * 400_000 });
-    expect(live.basis).toMatch(/live read, no capture/);
+    expect(live).toMatchObject({ source: "unknown", confidence: null, ceiling: null });
+    expect(live.basis).toMatch(/session-start.*not captured/);
   });
 
   it("model: 1M flag only from evidence; full medium, tail low, none computes for 200k with a conflict", () => {
-    const noCapture = { era: null, capture: null };
+    const noCapture = { era: null, capture: { captureKind: "absent" as const, autoCompactWindowAtStart: null, capturedAt: at(-10) } };
     expect(resolveCeiling(input({ target: noCapture, oneMillionFlag: true, modelEvidence: "full" }))).toMatchObject({ source: "model", nativeWindow: 1_000_000, confidence: "medium", conflict: null });
     expect(resolveCeiling(input({ target: noCapture, oneMillionFlag: false, modelEvidence: "tail" }))).toMatchObject({ nativeWindow: 200_000, confidence: "low" });
     expect(resolveCeiling(input({ target: noCapture, modelEvidence: "none" }))).toMatchObject({ nativeWindow: 200_000, confidence: "low", conflict: "no model-window evidence", ceiling: 185_000 });
@@ -92,7 +92,7 @@ describe("resolveCeiling precedence", () => {
     expect(r.ceiling).toBeCloseTo(416_250);
     expect(r.conflict).toBe("high-water exceeds forecast");
     expect(r.nativeWindow).toBeNull();
-    const model = resolveCeiling(input({ target: { era: null, capture: null }, modelEvidence: "none", highWaterMark: 250_000 }));
+    const model = resolveCeiling(input({ target: { era: null, capture: { captureKind: "absent", autoCompactWindowAtStart: null, capturedAt: at(-10) } }, modelEvidence: "none", highWaterMark: 250_000 }));
     expect(model.conflict).toBe("no model-window evidence; high-water exceeds forecast");
     expect(model.ceiling).toBe(185_000);
   });
@@ -207,7 +207,7 @@ describe("ISS-1197 commit 3: the raise is scoped to the window it was measured u
     input({ target: { era: "2:2", capture: { captureKind: "startup", autoCompactWindowAtStart: 200_000, capturedAt: at(-10) } }, ...over });
   /** No capture and no live setting: the resolver falls to the model path. */
   const modelPath = (over: Partial<ResolveCeilingInput> = {}) =>
-    input({ target: { era: null, capture: null }, oneMillionFlag: false, modelEvidence: "full", ...over });
+    input({ target: { era: null, capture: { captureKind: "absent", autoCompactWindowAtStart: null, capturedAt: at(-10) } }, oneMillionFlag: false, modelEvidence: "full", ...over });
 
   it("a 450k-window boundary never raises a session that restarted at 200k", () => {
     const r = resolveCeiling(shrunk({ ledger: [entry(ME, 1, 416_642, { era: "9:9", autoCompactWindowAtStart: 450_000 })] }));
@@ -256,28 +256,15 @@ describe("ISS-1197 commit 3: the raise is scoped to the window it was measured u
     expect(resolveCeiling(input({ target, ledger: [...pool, orphan(190_000)] })).ceiling).toBe(190_000);
   });
 
-  it("the live-setting path is scoped to the live setting's own window", () => {
-    const r = resolveCeiling(
-      input({
+  it("a live setting and old boundary cannot supply a missing process-start window", () => {
+    for (const window of [200_000, 300_000, 450_000]) {
+      const r = resolveCeiling(input({
         target: { era: null, capture: null },
-        liveSetting: { value: 200_000, basis: "live read, unbound" },
+        liveSetting: { value: window, basis: "live read, unbound" },
         ledger: [entry(ME, 1, 416_642, { era: "9:9", autoCompactWindowAtStart: 450_000 })],
-      }),
-    );
-    expect(r.source).toBe("setting");
-    expect(r.ceiling).toBeCloseTo(185_000);
-    expect(r.basis).not.toMatch(/raised to observed boundary/);
-    // null-window orphan: bounded by the live setting. The entry-side gate
-    // cannot help here (its window is unknown), so only the bound refuses it.
-    expect(
-      resolveCeiling(
-        input({
-          target: { era: null, capture: null },
-          liveSetting: { value: 200_000, basis: "live read, unbound" },
-          ledger: [entry(ME, 1, 416_642, { era: null, autoCompactWindowAtStart: null })],
-        }),
-      ).ceiling,
-    ).toBeCloseTo(185_000);
+      }));
+      expect(r).toMatchObject({ source: "unknown", ceiling: null });
+    }
   });
 
   it("the bound is inclusive: a boundary exactly at the native window raises", () => {

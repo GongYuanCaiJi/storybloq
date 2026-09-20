@@ -40,47 +40,16 @@ describe("dashboard event animations", () => {
     expect(motion.card("ticket:T-002").ready).toBe(true);
     motion.observe(project(), "/repo");
     expect(motion.card("ticket:T-002").ready).toBe(false);
-    expect(motion.phaseMarker("p1", "◎")).toBe("◎");
     motion.observe(project("complete", "complete"), "/repo");
     expect(motion.card("ticket:T-002").ready).toBe(false);
   });
 
-  it("fills the completed marker, advances its line, settles the next marker, then sends one dot wave", () => {
+  it("does not redraw for phase-only changes", () => {
     const motion = new DashboardMotion();
-    motion.observe(project(), "/repo");
-    motion.observe(project("complete", "inprogress"), "/repo");
-    expect(motion.phaseMarker("p1", "✓")).toBe("◔");
-    expect(motion.connection("p1", "p2")).toBe(0);
-    motion.advance(270);
-    expect(motion.phaseMarker("p1", "✓")).toBe("●");
-    motion.advance(300);
-    expect(motion.phaseMarker("p1", "✓")).toBe("✓");
-    expect(motion.connection("p1", "p2")).toBeGreaterThan(0);
-    expect(motion.connection("p1", "p2")).toBeLessThan(1);
-    expect(motion.phaseMarker("p2", "◎")).toBe("○");
-    motion.advance(300);
-    expect(motion.connection("p1", "p2")).toBe(1);
-    expect(motion.phaseMarker("p2", "◎")).toBe("◉");
-    motion.advance(730);
-    expect(motion.phaseMarker("p2", "◎")).toBe("◎");
-    expect(motion.wave(.5)).toBe("•");
-    motion.advance(600);
-    expect(motion.wave(.5)).toBe("");
-    expect(motion.advance(25)).toBe(false);
-    motion.observe(project("complete", "inprogress"), "/repo");
-    expect(motion.advance(25)).toBe(false);
-  });
-
-  it("does not celebrate a newly discovered or reordered completed phase, or another project's baseline", () => {
-    const motion = new DashboardMotion();
-    motion.observe(project("complete"), "/repo");
-    const next = project("complete");
-    motion.observe({ ...next, phases: [...next.phases].reverse() }, "/repo");
-    expect(motion.advance(25)).toBe(false);
-    motion.observe(project(), "/other");
-    expect(motion.card("ticket:T-001").progress).toBeNull();
-    motion.observe({ ...project(), phases: [{ id: "new", name: "New", leafCount: 1, status: "complete" }] }, "/other");
-    expect(motion.phaseMarker("new", "✓")).toBe("✓");
+    const baseline = project();
+    motion.observe(baseline, "/repo");
+    motion.observe({ ...baseline, phases: baseline.phases.map(p => ({ ...p, status: "complete" })) }, "/repo");
+    expect(motion.advance(50)).toBe(false);
   });
 
   it("retargets the context meter smoothly and animates one measured drop after compaction", () => {
@@ -128,7 +97,6 @@ describe("dashboard event animations", () => {
     motion.setWorking(true, "main");
     expect(motion.meterValue()).toBe(90);
     expect(motion.activity().glyph).toBe("●");
-    expect(motion.phaseMarker("p1", "✓")).toBe("✓");
     expect(motion.card("ticket:T-002").ready).toBe(false);
     expect(motion.advance(2000)).toBe(false);
   });

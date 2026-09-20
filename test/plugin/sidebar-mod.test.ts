@@ -16,7 +16,7 @@
  * pinned its root does not notice the move at all.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION, contextLabel, phaseTimelineLayout, phaseTimelineTitle } from "../../plugins/storybloq/hooks/sidebar.js";
+import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION, contextLabel } from "../../plugins/storybloq/hooks/sidebar.js";
 
 const PANE_ID = "storybloq";
 
@@ -314,6 +314,21 @@ describe("ISS-1239: the ledger root is pinned at session.start", () => {
     await h.settle();
 
     expect(h.render()).toContain("T-001");
+  });
+
+  it.each(["EACCES", "EIO"])("preserves a cached story on %s and refreshes after recovery", async (code) => {
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    h.fs.failures.set("/repo/.story/tickets/T-001.json", code);
+    await h.fire("turn.complete", {}); await h.settle();
+    expect(h.render()).toContain("T-001");
+    h.fs.failures.delete("/repo/.story/tickets/T-001.json");
+    await h.fire("turn.complete", {}); await h.settle();
+    expect(JSON.stringify(findUi(JSON.parse(h.render()), "board-done"))).toContain("T-001");
+    h.fs.files.delete("/repo/.story/tickets/T-001.json");
+    await h.fire("turn.complete", {}); await h.settle();
+    expect(h.render()).not.toContain("T-001");
   });
 
   it("4b. a DELETED tickets directory still clears the board", async () => {
@@ -863,7 +878,7 @@ describe("context pressure at every width", () => {
       props: { bodyColumns: width, placement, scroll: { bodyRows: 30 } }, viewport: { columns: width + 4, rows: 40 },
     }, () => null);
     for (const usage of [null, 0, 88, 100, null]) {
-      h.$.session.usage = async () => usage === null ? { context: { window: 200_000 } } : { context: { percent: usage } };
+      h.$.session.usage = async () => usage === null ? { context: { window: 200_000 } } : { context: { tokens: usage, breakdown: { autoCompactThreshold: 100 } } };
       await h.fire("turn.complete"); await h.settle();
       for (const placement of ["inline", "dock"]) {
         for (const width of [4, 8, 12, 20, 32, 45, 56, 100, 160]) {
@@ -885,7 +900,7 @@ describe("context pressure at every width", () => {
     h.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: [{ id: "p1", name: "A very long phase title ".repeat(10) }] }));
     await h.start("/repo"); await h.settle();
     for (const usage of [null, 88, 100]) {
-      h.$.session.usage = async () => usage === null ? {} : { context: { percent: usage } };
+      h.$.session.usage = async () => usage === null ? {} : { context: { tokens: usage, breakdown: { autoCompactThreshold: 100 } } };
       await h.fire("turn.complete"); await h.settle();
       for (const width of [4, 8, 20, 45, 80, 120]) {
         const band = h.handlers.get("ui.render")!(h.$, {
@@ -923,15 +938,15 @@ describe("live animation hooks", () => {
 
   it("shows the actual context percentage immediately while the meter catches up", async () => {
     const h = new Harness(); seedLedger(h.fs, "/repo");
-    h.$.session.usage = async () => ({ context: { percent: 20 } });
+    h.$.session.usage = async () => ({ context: { tokens: 20, breakdown: { autoCompactThreshold: 100 } } });
     await h.start("/repo"); await h.settle();
-    h.$.session.usage = async () => ({ context: { percent: 90 } });
+    h.$.session.usage = async () => ({ context: { tokens: 90, breakdown: { autoCompactThreshold: 100 } } });
     await h.fire("turn.complete");
     const context = () => findUi(JSON.parse(h.render()), "context");
     expect(context()).toMatchObject({ children: "context [━━······] 90%", bold: true });
     await h.settle(28);
     expect(context().children).toBe("context [━━━━━━━·] 90%");
-    h.$.session.usage = async () => ({ context: { percent: 10 } });
+    h.$.session.usage = async () => ({ context: { tokens: 10, breakdown: { autoCompactThreshold: 100 } } });
     await h.fire("session.compact");
     expect(context().children).toBe("context [━━━━━━━·] 10%");
     await h.settle(28);
@@ -980,38 +995,6 @@ const roadmapPhases = Array.from({ length: 20 }, (_, index) => ({
 }));
 
 describe("inline phase overview", () => {
-  it("shows only in a wide inline pane with room for the board", () => {
-    for (const [width, rows, placement] of [[99, 40, "inline"], [180, 12, "inline"], [180, 40, "dock"], [180, 40, null]] as const) {
-      expect(phaseTimelineLayout(roadmapPhases, width, rows, placement)).toBeNull();
-    }
-    expect(phaseTimelineLayout(roadmapPhases, 180, undefined, "inline")).toBeNull();
-    expect(phaseTimelineLayout([], 180, 40, "inline")).toBeNull();
-    expect(phaseTimelineLayout(roadmapPhases, 100, 13, "inline")).not.toBeNull();
-  });
-
-  it("keeps the primary active phase visible with honest overflow counts", () => {
-    for (const width of [100, 120, 156, 189, 300]) {
-      const window = phaseTimelineLayout(roadmapPhases, width, 30, "inline")!;
-      expect(window.current).toBe(9);
-      expect(window.start).toBe(8);
-      expect(window.count).toBe(3);
-      expect(window.before + window.count + window.after).toBe(20);
-      expect(window.slot * window.count + 8 + 2 * window.inset).toBeLessThanOrEqual(width);
-    }
-    const allDone = roadmapPhases.map(phase => ({ ...phase, status: "complete" as const }));
-    for (const focus of [0, 1, 18, 19]) {
-      const phases = allDone.map((phase, index) => ({ ...phase, status: index === focus ? "inprogress" as const : phase.status }));
-      const window = phaseTimelineLayout(phases, 189, 30, "inline")!;
-      expect(window.start).toBe(Math.max(0, focus - 1));
-      expect(window.start + window.count).toBe(Math.min(phases.length, focus + 2));
-      expect(window.before + window.count + window.after).toBe(phases.length);
-    }
-    const complete = phaseTimelineLayout(allDone, 140, 30, "inline")!;
-    expect(complete.current).toBe(-1);
-    expect(complete.after).toBe(0);
-    expect(complete.count).toBe(2);
-  });
-
   it("keeps the phase strip hidden across pane sizes and placements", async () => {
     const h = new Harness(); seedLedger(h.fs, "/repo");
     h.fs.files.delete("/repo/.story/tickets/T-001.json");
@@ -1048,10 +1031,62 @@ describe("inline phase overview", () => {
   });
 });
 
+it("isolates registrations and their delayed callbacks", async () => {
+  const first = new Harness(); seedLedger(first.fs, "/first", "T-111");
+  await first.start("/first"); await first.settle();
+  const before = first.render();
+  const second = new Harness(); seedLedger(second.fs, "/second", "T-222");
+  await second.start("/second"); await second.settle();
+  await first.fire("turn.complete"); await first.settle();
+  expect(first.render()).toBe(before);
+  expect(second.render()).toContain("T-222");
+  expect(second.render()).not.toContain("T-111");
+});
 
-it("shortens phase names at word boundaries while leaving roadmap names intact", () => {
-  expect(phaseTimelineTitle("CLI + MCP Server")).toBe("CLI + MCP...");
-  expect(phaseTimelineTitle("  Mac App  ")).toBe("Mac App");
-  expect(phaseTimelineTitle("This phase has a very long name").length).toBeLessThanOrEqual(14);
-  expect(phaseTimelineTitle("abcdefghijklmno")).toBe("abcdefghijk...");
+it("retains the last valid record when stat succeeds but the changed file cannot be read", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  await h.start("/repo"); await h.settle();
+  h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+  const read = h.$.fs.read;
+  h.$.fs.read = async (path: string) => {
+    if (path.endsWith("T-001.json")) throw Object.assign(new Error("read refused"), { code: "EIO" });
+    return read(path);
+  };
+  await h.fire("turn.complete"); await h.settle();
+  expect(JSON.stringify(findUi(JSON.parse(h.render()), "board-inprogress"))).toContain("T-001");
+  h.$.fs.read = read;
+  await h.fire("turn.complete"); await h.settle();
+  expect(JSON.stringify(findUi(JSON.parse(h.render()), "board-done"))).toContain("T-001");
+});
+
+it("uses the running session threshold after settings changes and reload", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  let setting = 450_000;
+  h.$.settings.read = async () => ({ autoCompactWindow: setting });
+  h.$.session.usage = async (args: unknown) => {
+    expect(args).toEqual({ breakdown: "summary" });
+    return { context: { tokens: 384014, window: 1_000_000, percent: 38,
+      breakdown: { autoCompactThreshold: 416250 } } };
+  };
+  await h.start("/repo"); await h.settle();
+  expect(findUi(JSON.parse(h.render()), "context").children).toContain("92%");
+  setting = 300_000;
+  await h.fire("turn.complete"); await h.settle();
+  expect(findUi(JSON.parse(h.render()), "context").children).toContain("92%");
+  const reloaded = new Harness(); seedLedger(reloaded.fs, "/repo");
+  reloaded.$.session.usage = h.$.session.usage;
+  reloaded.$.settings.read = h.$.settings.read;
+  await reloaded.start("/repo"); await reloaded.settle();
+  expect(findUi(JSON.parse(reloaded.render()), "context").children).toContain("92%");
+  const fresh = new Harness(); seedLedger(fresh.fs, "/repo");
+  fresh.$.session.usage = async () => ({ context: { tokens: 100000, breakdown: { autoCompactThreshold: 277500 } } });
+  await fresh.start("/repo"); await fresh.settle();
+  expect(findUi(JSON.parse(fresh.render()), "context").children).toContain("36%");
+});
+
+it("shows unknown pressure when only native window percent is available", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  h.$.session.usage = async () => ({ context: { tokens: 384014, percent: 38, window: 1_000_000 } });
+  await h.start("/repo"); await h.settle();
+  expect(findUi(JSON.parse(h.render()), "context").children).toContain("--");
 });

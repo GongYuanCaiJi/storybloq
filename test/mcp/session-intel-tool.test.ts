@@ -87,7 +87,7 @@ describe("storybloq_session_intel registration", () => {
       const out = await registry.tools.get("storybloq_session_intel")!.handler({ format: "json" });
       expect(out.isError).toBeUndefined();
       const parsed = JSON.parse(out.content[0]!.text) as { ok: boolean; data: { client: string; usable: boolean; presence: string; binding: string; pressure: { contextTokens: number } | null } };
-      expect(parsed.data).toMatchObject({ client: "claude", binding: "read-only", presence: "no-project", usable: true });
+      expect(parsed.data).toMatchObject({ client: "claude", binding: "read-only", presence: "no-project", usable: false });
       expect(parsed.data.pressure?.contextTokens).toBe(266_711);
       process.env.CLAUDE_CODE_SESSION_ID = "no-such-session-0000";
       const missing = await registry.tools.get("storybloq_session_intel")!.handler({ format: "json" });

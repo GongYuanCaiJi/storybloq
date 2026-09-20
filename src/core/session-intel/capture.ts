@@ -63,19 +63,19 @@ export function ensureCapture(input: CaptureInput): CaptureOutcome {
   if (era === null) {
     // No CLAUDE_PID (older client, unusual launcher) or ps failed at startup.
     // The record gets a late, era-less capture so `session intel` can still
-    // answer at reduced confidence; nothing is attributed anywhere.
-    let kind = "absent";
+    // report usage without guessing a pressure ceiling; nothing is attributed.
+    let kind = "late";
     const outcome = applyPresenceEnrichment(root, sessionId, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base) => {
       const intel = base.sessionIntel;
       if (intel && intel.capturedAt !== null) { kind = intel.captureKind; return base; }
       const reading = readAutoCompactWindow(root, input.userSettingsPath);
-      kind = reading ? "late" : "absent";
+      kind = "late";
       return {
         ...base,
         sessionIntel: {
           ...(intel ?? emptySessionIntel()),
           era: null,
-          captureKind: reading ? "late" : "absent",
+          captureKind: "late",
           autoCompactWindowAtStart: reading?.value ?? null,
           autoCompactWindowSource: reading?.source ?? null,
           capturedAt: nowIso,
@@ -97,7 +97,7 @@ export function ensureCapture(input: CaptureInput): CaptureOutcome {
       era: era.id,
       pid: era.pid,
       startedAt: era.startedAt,
-      captureKind: reading ? kind : "absent",
+      captureKind: kind === "late" ? "late" : reading ? kind : "absent",
       autoCompactWindowAtStart: reading?.value ?? null,
       autoCompactWindowSource: reading?.source ?? null,
       capturedAt: nowIso,

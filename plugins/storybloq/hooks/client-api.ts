@@ -73,8 +73,6 @@ export const CALLS = {
     "$.fs.read",
     "$.fs.stat",
     "$.session.usage",
-    /** The merged settings, for `autoCompactWindow` (ISS-1236). */
-    "$.settings.read",
     "$.store.get",
     "$.store.set",
     "$.ui.invalidate",

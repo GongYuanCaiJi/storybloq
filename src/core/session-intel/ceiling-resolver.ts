@@ -29,7 +29,7 @@ export interface ResolveCeilingInput {
   readonly sessionId: string;
   readonly target: TargetProvenance;
   readonly ledger: readonly LedgerEntry[];
-  /** Transcript-only or unbound mode: a live settings read with no capture. */
+  /** Current settings are retained for API compatibility, never session pressure evidence. */
   readonly liveSetting: { readonly value: number; readonly basis: string } | null;
   readonly lastAssistantModel: string | null;
   readonly oneMillionFlag: boolean | null;
@@ -101,7 +101,7 @@ function withConflict(r: CeilingResolution, hwm: number | null, notes: readonly 
   // the number, not the provenance.
   //
   // The bound is the window this resolution is forecasting from: the target's
-  // captured or live window, or, when there is none, the native window the
+  // startup-captured window, or, when there is none, the native window the
   // model path uses (non-null only there). A floor above it was measured under
   // a different window state, so it is evidence about THAT state and none
   // about this one: the raise has no basis and is refused outright rather than
@@ -126,12 +126,12 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
   const { cfg, target, ledger, sessionId } = input;
   const capture = target.capture;
   const captureKind = capture?.captureKind ?? "absent";
-  const window = capture?.autoCompactWindowAtStart ?? null;
+  const window = capture?.captureKind === "startup" ? capture.autoCompactWindowAtStart : null;
   // ISS-1197 commit 3: computed once, applied by `withConflict` to whichever
   // source wins, so every path gets the same treatment. The window it is
-  // scoped to is the captured one, or the live setting when there is no
-  // capture; the model path has none and is bounded by `nativeWindow` instead.
-  const targetWindow = window ?? input.liveSetting?.value ?? null;
+  // scoped to is the startup-captured one; the model path has none and is
+  // bounded by `nativeWindow` instead.
+  const targetWindow = window;
   const floor = observedAutoFloor(ledger, sessionId, targetWindow);
   const base = {
     sampleCount: 0,
@@ -199,15 +199,14 @@ export function resolveCeiling(input: ResolveCeilingInput): CeilingResolution {
       basis: `${cfg.ceilingFraction} x autoCompactWindow ${window} captured ${captureKind === "startup" ? "at process start" : "late"}`,
     }, input.highWaterMark, cfg.notes, floor, targetWindow);
   }
-  if (input.liveSetting) {
-    return withConflict({
-      ...base,
-      ceiling: cfg.ceilingFraction * input.liveSetting.value,
-      source: "setting",
-      confidence: "medium",
-      autoCompactWindowAtStart: null,
-      basis: `${cfg.ceilingFraction} x autoCompactWindow ${input.liveSetting.value} (${input.liveSetting.basis})`,
-    }, input.highWaterMark, cfg.notes, floor, targetWindow);
+  // Live settings and late captures cannot prove what this process started
+  // with. They remain available for configuration advice, never pressure.
+
+  if (!capture || capture.captureKind === "late") {
+    return {
+      ...base, ceiling: null, source: "unknown", confidence: null,
+      basis: "session-start compaction window was not captured; current settings are not session evidence",
+    };
   }
 
   // 4. model

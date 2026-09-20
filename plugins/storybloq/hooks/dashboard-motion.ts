@@ -3,24 +3,20 @@ import type { SidebarProjection } from "./sidebar-projection.js";
 const CARD_MS = 1400;
 const READY_MS = 1800;
 const COUNT_MS = 1000;
-const PHASE_MS = 2100;
 const CONTEXT_MS = 650;
 const MAX_CARD_EFFECTS = 128;
 
 type CardState = { column: string; blocked: boolean };
 type CardEffect = { age: number; ready: boolean };
-type PhaseEffect = { age: number; completed: Set<string>; from: string | null; to: string | null };
 const clamp = (n: number): number => Math.max(0, Math.min(1, n));
 const ease = (n: number): number => 1 - (1 - clamp(n)) ** 3;
 
 /** Presentation only. Actual statuses, counts, and percentages always come from the ledger/client. */
 export class DashboardMotion {
   private cards: Map<string, CardState> | null = null;
-  private phases: SidebarProjection["phases"] = [];
   private root: string | null = null;
   private cardEffects = new Map<string, CardEffect>();
   private counts = new Map<string, number>();
-  private phase: PhaseEffect | null = null;
   private working = false;
   private activityMs = 0;
   private turnId: string | null = null;
@@ -40,8 +36,6 @@ export class DashboardMotion {
       this.cards = null;
       this.cardEffects.clear();
       this.counts.clear();
-      this.phase = null;
-      this.phases = [];
     }
     if (this.enabled && this.cards !== null) {
       if (this.highlights) {
@@ -58,25 +52,11 @@ export class DashboardMotion {
           }
         }
       }
-      const beforePhases = new Map(this.phases.map(phase => [phase.id, phase.status]));
-      const completed = projection.phases.filter(phase => phase.leafCount > 0 && phase.status === "complete"
-        && beforePhases.has(phase.id) && beforePhases.get(phase.id) !== "complete");
-      if (completed.length) {
-        const previousCurrent = this.phases.find(phase => phase.status === "inprogress");
-        const from = completed.find(phase => phase.id === previousCurrent?.id)?.id ?? completed[0]!.id;
-        const fromIndex = projection.phases.findIndex(phase => phase.id === from);
-        this.phase = {
-          age: 0, completed: new Set(completed.map(phase => phase.id)), from,
-          to: projection.phases[fromIndex + 1]?.id ?? null,
-        };
-      }
+
     }
     for (const key of this.cardEffects.keys()) if (!current.has(key)) this.cardEffects.delete(key);
     while (this.cardEffects.size > MAX_CARD_EFFECTS) this.cardEffects.delete(this.cardEffects.keys().next().value!);
-    // Reopening/removing a phase cancels stale celebration immediately.
-    if (this.phase && [...this.phase.completed].some(id => !projection.phases.some(p => p.id === id && p.status === "complete"))) this.phase = null;
     this.cards = current;
-    this.phases = projection.phases;
     this.root = root;
   }
 
@@ -126,30 +106,9 @@ export class DashboardMotion {
 
   count(column: string): boolean { return this.counts.has(column); }
 
-  phaseMarker(id: string, settled: string): string {
-    const effect = this.phase;
-    if (!effect) return settled;
-    if (effect.completed.has(id) && effect.age < 360) return ["◔", "◑", "◕", "●"][Math.floor(effect.age / 90)]!;
-    if (id === effect.to && settled === "◎" && effect.age < 1000) return effect.age < 800 ? "○" : "◉";
-    return settled;
-  }
-
-  connection(from: string, to: string): number | null {
-    const effect = this.phase;
-    return effect?.from === from && effect.to === to && effect.age < 1100 ? clamp((effect.age - 360) / 440) : null;
-  }
-
-  /** A single dot crest travels across the existing connector cells, after the handoff. */
-  wave(position: number): "" | "·" | "•" {
-    if (!this.phase || this.phase.age < 1100) return "";
-    const progress = (this.phase.age - 1100) / (PHASE_MS - 1100);
-    const distance = Math.abs(position - (progress * 1.3 - .15));
-    return distance < .025 ? "•" : distance < .065 ? "·" : "";
-  }
-
   /** One shared clock; at most 20 redraws/sec while effects run, 5/sec for activity alone. */
   advance(ms: number): boolean {
-    const hadEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.phase !== null || this.contextTween !== null;
+    const hadEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.contextTween !== null;
     const beforeActivity = this.activity();
     if (this.working && this.enabled) this.activityMs = (this.activityMs + ms) % 1440;
     for (const [key, effect] of this.cardEffects) {
@@ -160,11 +119,10 @@ export class DashboardMotion {
       if (age + ms >= COUNT_MS) this.counts.delete(key);
       else this.counts.set(key, age + ms);
     }
-    if (this.phase) { this.phase.age += ms; if (this.phase.age >= PHASE_MS) this.phase = null; }
     if (this.contextTween) { this.contextTween.age += ms; if (this.contextTween.age >= CONTEXT_MS) this.contextTween = null; }
     const activity = this.activity();
     this.frameMs = Math.min(50, this.frameMs + ms);
-    const hasEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.phase !== null || this.contextTween !== null;
+    const hasEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.contextTween !== null;
     if (hadEffects && (this.frameMs >= 50 || !hasEffects)) { this.frameMs = 0; return true; }
     return beforeActivity.glyph !== activity.glyph || beforeActivity.bright !== activity.bright;
   }
