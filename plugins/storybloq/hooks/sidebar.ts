@@ -581,8 +581,16 @@ function summaryLine(withContext: boolean): string {
       ? `Storybloq: reading the ledger, ${queue.length} files left`
       : "Storybloq: no ledger read yet";
   }
+  // The phase in hand; failing that, why there is none: a project whose
+  // every phase is complete is finished, not phaseless (ISS-1257, the
+  // `complete` sample), and only a roadmap with no phases says "no phase".
+  const phase = projection.currentPhase
+    ? projection.currentPhase.name
+    : projection.phases.length > 0
+      ? "all phases complete"
+      : "no phase";
   const parts = [
-    `${projection.currentPhase ? projection.currentPhase.name : "no phase"}`,
+    phase,
     `${projection.openTickets} open`,
     `${projection.inProgressTickets.length} in progress`,
     `${projection.blockedTickets} blocked`,
@@ -805,8 +813,13 @@ type RootResolution =
  * failure. "unresolved" is the host refusing the question, which is a failure
  * and must never be mistaken for the second.
  *
- * The directory itself is what counts, not `tickets/`: a fresh `storybloq
- * init` leaves `.story/` with empty subdirectories, and that IS a ledger.
+ * A ledger is `.story/config.json`, the CLI's own rule (`checkRoot` in
+ * src/core/project-root-shared.ts), not the bare directory (ISS-1256). A
+ * fresh `storybloq init` writes the config, so it still counts; a `.story/`
+ * with no config is a miss and the walk goes on past it. The owner's home
+ * directory holds one such stray (`~/.story/sessions/` from May, nothing
+ * else), and the bare-directory test pinned every ledgerless project under
+ * the home directory to it and drew an all-zero board there.
  *
  * The walk stops when a directory is its own parent, so a filesystem root
  * cannot loop, and is bounded anyway: a bound that is never reached costs
@@ -821,7 +834,7 @@ async function resolveLedgerRoot($: any, start: string): Promise<RootResolution>
   let dir = start.length > 1 && !bareDriveRoot ? start.replace(/[/\\]+$/, "") : start;
   for (let step = 0; step < MAX_ROOT_WALK; step += 1) {
     try {
-      if ((await $.fs.exists(joinRoot(dir, LEDGER_DIR))) !== false) {
+      if ((await $.fs.exists(joinRoot(dir, CONFIG_PATH))) !== false) {
         return { kind: "pinned", root: dir };
       }
     } catch (error) {

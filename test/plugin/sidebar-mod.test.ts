@@ -346,8 +346,8 @@ describe("ISS-1239: the ledger root is pinned at session.start", () => {
 
   it("5b. a REFUSED walk hides the pane and RECOVERS once the refusal lifts", async () => {
     seedLedger(h.fs, "/repo");
-    // The host refuses the one question the walk asks.
-    h.fs.failures.set("/repo/.story", "EACCES");
+    // The host refuses the one question the walk asks (ISS-1256: the config).
+    h.fs.failures.set("/repo/.story/config.json", "EACCES");
     await h.start("/repo");
     await h.settle();
 
@@ -359,7 +359,7 @@ describe("ISS-1239: the ledger root is pinned at session.start", () => {
     expect(h.fs.relativeLedgerCalls()).toEqual([]);
 
     // The refusal lifts. The retry loop re-walks from the ORIGIN and pins.
-    h.fs.failures.delete("/repo/.story");
+    h.fs.failures.delete("/repo/.story/config.json");
     await h.fire("turn.complete", {});
     await h.settle();
 
@@ -432,6 +432,68 @@ describe("ISS-1239: the ledger root is pinned at session.start", () => {
  * sidebar.test.ts` carries the same cases for `claude plugin test`, but that
  * runner opens no pane at all on 2.1.278 (ISS-1253), so the gate is here.
  */
+describe("ISS-1256: a ledger is .story/config.json, the CLI's rule, not a bare .story directory", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  it("walks past a bare .story in the start directory and pins the real ledger above it", async () => {
+    // A bare .story (like the owner's ~/.story/sessions/) sits where the
+    // walk starts; the ledger with a config is one level up. The old rule
+    // pinned the bare one and drew an all-zero board.
+    // addDir registers the one path, so the bare directory itself is added:
+    // that is the path the old rule tested and pinned.
+    h.fs.addDir("/home/work/repo/src/.story");
+    h.fs.addDir("/home/work/repo/src/.story/sessions");
+    seedLedger(h.fs, "/home/work/repo");
+    await h.start("/home/work/repo/src");
+    await h.settle();
+    expect(h.render()).toContain("T-001");
+  });
+
+  it("a bare .story with no config is no ledger: nothing drawn, said once, no pane", async () => {
+    h.fs.addDir("/home/.story");
+    h.fs.addDir("/home/.story/sessions");
+    h.fs.addDir("/home/work/plain");
+    await h.start("/home/work/plain");
+    await h.settle();
+    expect(h.render()).not.toContain("Storybloq");
+    expect(h.logs.filter((line) => line.includes("no .story directory here"))).toHaveLength(1);
+  });
+});
+
+describe("ISS-1257: the band names the finished project, not a missing phase", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  function band(): string {
+    const handler = h.handlers.get("ui.render")!;
+    const node = handler(h.$, { component: "AbovePrompt", requestId: "above-prompt", viewport: { columns: 120, rows: 30 }, props: {} }, () => null);
+    return JSON.stringify(node);
+  }
+
+  it("says all phases complete when every phase is, and no phase only when the roadmap has none", async () => {
+    seedLedger(h.fs, "/repo");
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    h.fs.addFile("/repo/.story/tickets/T-002.json", ticket("T-002", "complete"));
+    await h.start("/repo");
+    await h.settle();
+    expect(band()).toContain("all phases complete");
+    expect(band()).not.toContain("no phase");
+
+    const bare = new Harness();
+    seedLedger(bare.fs, "/repo");
+    bare.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: [] }));
+    await bare.start("/repo");
+    await bare.settle();
+    const drawn = JSON.stringify(bare.handlers.get("ui.render")!(bare.$, { component: "AbovePrompt", requestId: "above-prompt", viewport: { columns: 120, rows: 30 }, props: {} }, () => null));
+    expect(drawn).toContain("no phase");
+  });
+});
+
 describe("ISS-1251: the person's prompt re-opens a pane parked by a narrow start", () => {
   let h: Harness;
   let opened: unknown[];
