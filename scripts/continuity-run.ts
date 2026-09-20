@@ -15,7 +15,7 @@ import { tmpdir, homedir, userInfo } from "node:os";
 import { dirname, join, resolve, basename } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertSubscriptionAuthOnly, assertValidTimerMs, writeAtomic, SessionKilledError, ALTERNATE_AUTH_ENV_VARS } from "./headless-common.js";
-import {
+import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
   validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
@@ -538,7 +538,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     try { worktreeStatus = gitLocal(workdir, ["status", "--porcelain"]); } catch { /* none */ }
 
     // Sanitised publication: one checked writer for every byte that lands under pubDir.
-    const sctx = { workdir, home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT };
+    const sctx = { workdir, home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist };
     const redactionFull: Record<string, unknown> = { rawTranscriptSha256: sha256(rawText), rawTranscriptBytes: Buffer.byteLength(rawText), substitutions: {}, fixtureDerived: {}, blocked: {} };
     const redactionPublic: Record<string, unknown> = { rawTranscriptSha256: sha256(rawText), rawTranscriptBytes: Buffer.byteLength(rawText), substitutions: {}, fixtureDerived: {}, blockedLabels: {} };
     const published: Record<string, boolean> = {};
@@ -549,10 +549,13 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
       (redactionPublic.substitutions as Record<string, unknown>)[name] = s.substitutions;
       (redactionFull.fixtureDerived as Record<string, unknown>)[name] = verdict.fixtureDerived;
       (redactionPublic.fixtureDerived as Record<string, unknown>)[name] = verdict.fixtureDerived;
-      if (!verdict.ok) {
-        (redactionFull.blocked as Record<string, unknown>)[name] = verdict.blocked;
+      // A document that parsed before must parse after, or a corrupted artefact publishes as clean.
+      const shapeBroken = !jsonShapePreserved(text, s.text);
+      if (!verdict.ok || shapeBroken) {
+        (redactionFull.blocked as Record<string, unknown>)[name] = shapeBroken ? [...verdict.blocked, { label: "json-shape", sample: "sanitisation broke a document that parsed before" }] : verdict.blocked;
         const labels: Record<string, number> = {};
         for (const b of verdict.blocked) labels[b.label] = (labels[b.label] ?? 0) + 1;
+        if (shapeBroken) labels["json-shape"] = 1;
         (redactionPublic.blockedLabels as Record<string, unknown>)[name] = labels;
         writeFileSync(join(rawDir, `unpublished.${name}`), text);
         published[name] = false;
@@ -673,7 +676,7 @@ function writeExperiment(o: RunOptions, pf: Preflight, cells: CellRow[], summary
   const q = interruption ? { qualifying: false, shortCells: [], unpublishedCells: [], reason: interruption } : qualifies({ cells, isolation: o.isolation, ownerException: pf.ownerException?.id ?? null });
   const expDir = join(o.out, pf.experiment.slice(0, 12));
   mkdirSync(expDir, { recursive: true });
-  const text = sanitize(JSON.stringify({ experimentHash: pf.experiment, arm: o.arm, model: o.model, effort: o.effort, isolation: o.isolation, ownerException: pf.ownerException, inputTreeHash: pf.inputTreeHash, buildManifestHash: pf.buildManifestHash, configHash: pf.configHash, build: pf.build, cells, qualification: q, writtenAt: new Date().toISOString() }, null, 2), { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT }).text;
+  const text = sanitize(JSON.stringify({ experimentHash: pf.experiment, arm: o.arm, model: o.model, effort: o.effort, isolation: o.isolation, ownerException: pf.ownerException, inputTreeHash: pf.inputTreeHash, buildManifestHash: pf.buildManifestHash, configHash: pf.configHash, build: pf.build, cells, qualification: q, writtenAt: new Date().toISOString() }, null, 2), { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist }).text;
   const verdict = publicationCheck(text, pf.allowlist);
   if (!verdict.ok) throw new Error(`experiment.json would publish blocked content (${verdict.blocked.map((b) => b.label).join(",")}); runner bug`);
   writeFileSync(join(expDir, "experiment.json"), text);

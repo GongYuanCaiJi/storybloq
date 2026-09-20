@@ -14,7 +14,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, basename, dirname, resolve } from "node:path";
 import { homedir, userInfo } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { TASKS, sanitize, publicationCheck, fixtureCredentialAllowlist, verifyAttemptDir, expectedCellKeys, qualifies, type VerifiedRecord } from "./continuity-lib.js";
+import { TASKS, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, verifyAttemptDir, expectedCellKeys, qualifies, type VerifiedRecord } from "./continuity-lib.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(SCRIPT_DIR, "..");
@@ -61,9 +61,11 @@ export function readRecord(attemptDir: string): (AttemptRecord & { readonly veri
 
 /** One sanitising, publication-checked writer for every file the scorer puts under the public baseline. */
 export function publishText(target: string, text: string, allowlist: readonly string[]): void {
-  const s = sanitize(text, { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT }).text;
+  const s = sanitize(text, { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist }).text;
   const verdict = publicationCheck(s, allowlist);
   if (!verdict.ok) throw new Error(`${basename(target)} would publish blocked content (${verdict.blocked.map((b) => `${b.label}: ${b.sample}`).join("; ")}); refusing the write`);
+  // A document that parsed before must parse after: publicationCheck reads a corrupted artefact as clean.
+  if (!jsonShapePreserved(text, s)) throw new Error(`${basename(target)}: sanitisation broke a document that parsed before; refusing the write`);
   writeFileSync(target, s);
 }
 

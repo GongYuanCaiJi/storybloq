@@ -479,6 +479,8 @@ export interface SanitizeContext {
   readonly user: string;
   /** The storybloq package checkout, whose absolute path is itself identifying. */
   readonly pkgRoot?: string;
+  /** The fixture's own synthetic credentials, which must survive sanitisation so the scorer can see them. */
+  readonly allowlist?: readonly string[];
 }
 
 export interface Substitution {
@@ -490,21 +492,134 @@ export interface Substitution {
 export function sanitize(text: string, ctx: SanitizeContext): { readonly text: string; readonly substitutions: Substitution[] } {
   const subs: Substitution[] = [];
   let out = text;
-  const apply = (pattern: string | RegExp, replacement: string, label: string): void => {
-    const re = typeof pattern === "string" ? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g") : pattern;
-    const count = (out.match(re) ?? []).length;
-    if (count > 0) {
-      out = out.replace(re, replacement);
-      subs.push({ pattern: label, replacement, count });
+  const allowed = new Set(ctx.allowlist ?? []);
+  /**
+   * Replaces exactly the spans a detector found, and nothing else. Detection runs on a decoded copy
+   * (so `\/`, `\uXXXX` in any hex case, and surrogate pairs are all seen through), each match maps
+   * back to the source bytes it came from, and the splice runs right to left. Replacing SPANS rather
+   * than candidate strings is what stops one harmless match from erasing bytes inside another: a
+   * span carrying a credential is skipped, and stays intact for publicationCheck to refuse.
+   */
+  const replaceSpans = (find: (decoded: string) => readonly { readonly start: number; readonly end: number; readonly value: string }[], token: string, label: string): number => {
+    const dec = decodeWithMap(out);
+    // Credentials are located across the WHOLE text, not inside each candidate: `Bearer /tmp/secret`
+    // is one credential match that starts outside the path it swallows, so judging the path alone
+    // would erase the secret's only alarm. Any overlap at all, partial included, protects the span.
+    const guarded = credentialSpans(dec.text, allowed);
+    const found = [...find(dec.text)]
+      .filter((r) => !guarded.some((g) => r.start < g.end && g.start < r.end))
+      .sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+    const kept: { start: number; end: number }[] = [];
+    for (const r of found) if (r.start >= (kept[kept.length - 1]?.end ?? -1)) kept.push({ start: r.start, end: r.end });
+    for (let i = kept.length - 1; i >= 0; i--) {
+      const r = kept[i]!;
+      const from = dec.spans[r.start]!.start;
+      const to = dec.spans[r.end - 1]!.end;
+      out = `${out.slice(0, from)}${token}${out.slice(to)}`;
     }
+    if (kept.length > 0) subs.push({ pattern: label, replacement: token, count: kept.length });
+    return kept.length;
+  };
+  /** Every match of a plain matcher, as spans in the decoded text. */
+  const matchSpans = (re: RegExp) => (decoded: string): { start: number; end: number; value: string }[] =>
+    [...decoded.matchAll(new RegExp(re.source, re.flags))].map((m) => ({ start: m.index, end: m.index + m[0].length, value: m[0] }));
+  /** Every occurrence of a root or its macOS /private twin, longest form first so neither eats the other. */
+  const rootSpans = (root: string) => (decoded: string): { start: number; end: number; value: string }[] => {
+    const twin = root.startsWith("/private/") ? root.slice("/private".length) : `/private${root}`;
+    const hits: { start: number; end: number; value: string }[] = [];
+    for (const form of [root, twin].sort((a, b) => b.length - a.length)) {
+      for (let i = decoded.indexOf(form); i !== -1; i = decoded.indexOf(form, i + 1)) hits.push({ start: i, end: i + form.length, value: form });
+    }
+    return hits;
   };
   // Order matters: the workdir may live under the home directory.
-  apply(ctx.workdir, "<WORKDIR>", "workdir");
-  apply(/\/tmp\/cc-socks\/[^\s"']+/g, "<SOCK>", "cc-socks");
-  if (ctx.pkgRoot) apply(ctx.pkgRoot, "<PKG>", "pkg");
-  apply(ctx.home, "<HOME>", "home");
-  if (ctx.user.length >= 3) apply(new RegExp(`(?<![A-Za-z0-9])${ctx.user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "g"), "<USER>", "user");
+  replaceSpans(rootSpans(ctx.workdir), "<WORKDIR>", "workdir");
+  replaceSpans(matchSpans(/\/tmp\/cc-socks\/[^\s"']+/g), "<SOCK>", "cc-socks");
+  if (ctx.pkgRoot) replaceSpans(rootSpans(ctx.pkgRoot), "<PKG>", "pkg");
+  replaceSpans(rootSpans(ctx.home), "<HOME>", "home");
+  // An address is identity, so it is substituted here, before <USER> can split one in half. Every
+  // OTHER credential pattern is deliberately left for publicationCheck to REFUSE: a real secret in a
+  // benchmark artefact is a surprise that must stop the pipeline, not something to quietly rewrite.
+  const emailPattern = CREDENTIAL_PATTERNS.find((p) => p.label === "email");
+  if (emailPattern) {
+    replaceSpans((decoded) => [...decoded.matchAll(new RegExp(emailPattern.re.source, emailPattern.re.flags))]
+      .filter((m) => !allowed.has(m[0]))
+      .map((m) => ({ start: m.index, end: m.index + m[0].length, value: m[0] })), "<EMAIL>", "email");
+  }
+  // Through the same guard as everything else: replacing a bare username inside `Bearer someone@host`
+  // would break the credential match and publish the artefact clean.
+  if (ctx.user.length >= 3) replaceSpans(matchSpans(new RegExp(`(?<![A-Za-z0-9])${ctx.user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9])`, "g")), "<USER>", "user");
+  // Whatever absolute path is left is one no root could predict: a scratch file the session invented,
+  // or another machine path. Found with the publication check's own detector, so the two agree by
+  // construction. Repeated because replacing a root can expose a shorter path around it; it settles
+  // in one or two rounds and the bound only stops a pathological input from looping.
+  for (let round = 0; round < 4; round++) {
+    const n = replaceSpans((decoded) => absolutePathMatches(decoded)
+      .filter((m) => !isPublicPath(m.value))
+      .map((m) => ({ start: m.index, end: m.index + m.length, value: m.value })), "<ABS>", "absolute-path");
+    if (n === 0) break;
+  }
   return { text: out, substitutions: subs };
+}
+
+interface DecodedText {
+  readonly text: string;
+  /** One entry per decoded UTF-16 code unit: the source span it was written as. */
+  readonly spans: readonly { readonly start: number; readonly end: number }[];
+}
+
+const SHORT_ESCAPES: Readonly<Record<string, string>> = { "\\": "\\", "/": "/", '"': '"', b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+
+/**
+ * Decodes JSON string escapes, keeping every decoded character's source span. Every escape form is
+ * decoded, not only the slash ones: an escaped QUOTE has to become a real quote here, or the quoted-path
+ * detector would read the closing `\"` as part of the path and a replacement would delete its backslash,
+ * leaving evidence.jsonl unparseable. `\\` is consumed as one unit so it cannot be misread as escaping
+ * the quote that follows it.
+ */
+function decodeWithMap(src: string): DecodedText {
+  const chars: string[] = [];
+  const spans: { start: number; end: number }[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const next = src[i + 1];
+    if (src[i] === "\\" && next === "u" && /^[0-9a-fA-F]{4}$/.test(src.slice(i + 2, i + 6))) {
+      chars.push(String.fromCharCode(parseInt(src.slice(i + 2, i + 6), 16)));
+      spans.push({ start: i, end: i + 6 }); i += 6; continue;
+    }
+    if (src[i] === "\\" && next !== undefined && next in SHORT_ESCAPES) {
+      chars.push(SHORT_ESCAPES[next]!); spans.push({ start: i, end: i + 2 }); i += 2; continue;
+    }
+    chars.push(src[i]!); spans.push({ start: i, end: i + 1 }); i += 1;
+  }
+  return { text: chars.join(""), spans };
+}
+
+/** Where the real credentials are (never an address): spans that must reach publicationCheck intact. */
+function credentialSpans(decoded: string, allowed: ReadonlySet<string>): { start: number; end: number }[] {
+  const out: { start: number; end: number }[] = [];
+  for (const p of CREDENTIAL_PATTERNS) {
+    if (p.label === "email") continue;
+    for (const m of decoded.matchAll(new RegExp(p.re.source, p.re.flags))) {
+      if (!allowed.has(m[0])) out.push({ start: m.index, end: m.index + m[0].length });
+    }
+  }
+  return out;
+}
+
+/** True when a document that parsed before still parses after: a replacement must never break evidence. */
+export function jsonShapePreserved(before: string, after: string): boolean {
+  const parses = (t: string): boolean => { try { JSON.parse(t); return true; } catch { return false; } };
+  if (parses(before)) return parses(after);
+  const lines = before.split("\n").filter((l) => l.trim());
+  if (lines.length === 0 || !lines.every(parses)) return true;
+  const outLines = after.split("\n").filter((l) => l.trim());
+  return outLines.length === lines.length && outLines.every(parses);
+}
+
+/** True when a path identifies nothing about the machine, by the publication check's own list. */
+function isPublicPath(p: string): boolean {
+  return PUBLIC_ABSOLUTE_PREFIXES.some((prefix) => withinPrefix(posix.normalize(p), prefix));
 }
 
 const CREDENTIAL_PATTERNS: readonly { readonly label: string; readonly re: RegExp }[] = [
@@ -536,7 +651,7 @@ export interface PublicationVerdict {
 /** Absolute prefixes that identify nothing about the machine and appear in ordinary shell commands. */
 export const PUBLIC_ABSOLUTE_PREFIXES = ["/dev/", "/usr/bin/", "/bin/", "/usr/local/bin/", "/opt/homebrew/bin/"] as const;
 
-const SANITIZED_TOKEN = /<(?:WORKDIR|HOME|PKG|SOCK|USER)>[^\s"'`)\]]*/g;
+const SANITIZED_TOKEN = /<(?:WORKDIR|HOME|PKG|SOCK|USER|ABS|EMAIL)>[^\s"'`)\]]*/g;
 /** Any absolute filesystem path (two or more segments), independent of root name, Unicode segments included; JSON-escaped slashes are unescaped first. */
 const ABSOLUTE_PATH = /(?<![\p{L}\p{N}_.:<>/\\-])\/(?:[\p{L}\p{N}_.@+~-]+\/)+[\p{L}\p{N}_.@+~-]*/gu;
 /** file:// URLs carry a path too; percent-encoding is decoded before the check. */
@@ -544,14 +659,30 @@ const FILE_URL = /file:\/\/(\/[^\s"'`)\]<>]+)/g;
 /** A quoted path may contain spaces, which the bare matcher stops at. */
 const QUOTED_PATH = /["'`](\/[^"'`\n]*?)["'`]/g;
 
-/** Every absolute-path candidate in a text: bare paths, file URLs, and quoted paths with spaces. */
-export function absolutePathCandidates(t: string): string[] {
-  const out: string[] = [];
-  for (const m of t.match(ABSOLUTE_PATH) ?? []) out.push(m);
-  for (const m of t.matchAll(FILE_URL)) { const raw = m[1] ?? ""; let decoded = raw; try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ } out.push(decoded); }
+/**
+ * Every absolute-path candidate with the span it occupies: bare paths, file URLs, and quoted paths
+ * with spaces. A file URL reports its WHOLE span, because its path may be percent-encoded and only
+ * the whole token can be replaced safely.
+ */
+export function absolutePathMatches(t: string): { readonly value: string; readonly index: number; readonly length: number }[] {
+  const out: { value: string; index: number; length: number }[] = [];
+  for (const m of t.matchAll(new RegExp(ABSOLUTE_PATH.source, ABSOLUTE_PATH.flags))) out.push({ value: m[0], index: m.index, length: m[0].length });
+  for (const m of t.matchAll(new RegExp(FILE_URL.source, FILE_URL.flags))) {
+    const raw = m[1] ?? ""; let decoded = raw;
+    try { decoded = decodeURIComponent(raw); } catch { /* keep raw */ }
+    out.push({ value: decoded, index: m.index, length: m[0].length });
+  }
   // A quoted path needs whitespace (else the bare matcher saw it) and a second segment: `/story auto T-2` is a command, not a path.
-  for (const m of t.matchAll(QUOTED_PATH)) { const q = m[1] ?? ""; if (/\s/.test(q) && q.indexOf("/", 1) > 0) out.push(q); }
+  for (const m of t.matchAll(new RegExp(QUOTED_PATH.source, QUOTED_PATH.flags))) {
+    const q = m[1] ?? "";
+    if (/\s/.test(q) && q.indexOf("/", 1) > 0) out.push({ value: q, index: m.index + 1, length: q.length });
+  }
   return out;
+}
+
+/** The same candidates as values only, for callers that judge rather than replace. */
+export function absolutePathCandidates(t: string): string[] {
+  return absolutePathMatches(t).map((m) => m.value);
 }
 
 function withinPrefix(path: string, prefix: string): boolean {

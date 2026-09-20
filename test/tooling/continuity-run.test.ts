@@ -7,7 +7,7 @@ import { join, resolve, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import {
-  parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist,
+  parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist,
   diffLedger, decideCell, qualifies, expectedCellKeys, experimentHash, materialize, variantDiscoveryViolations, skillPayloadDiff, hashInputs, hashTree, sha256,
   verifyAttemptDir, isWellFormedEvent, TASKS, REPEATS, MAX_INVALID_RETRIES, type ValidityInputs,
 } from "../../scripts/continuity-lib.js";
@@ -248,6 +248,134 @@ describe("sanitiser and publication", () => {
     expect(publicationCheck('{"Bearer\\u0020private-token":1}', allow).blocked[0]!.label).toBe("bearer");
     expect(publicationCheck('{"\\/Users\\/x\\/secret":1}', allow).blocked[0]!.label).toBe("absolute-path");
     expect(publicationCheck(`${JSON.stringify({ ok: 1 })}\n${JSON.stringify({ "/Volumes/private/k": 1 })}`, allow).ok).toBe(false);
+  });
+  // ISS: the 2026-09-20 arm-1 smoke cell was valid and completed but withheld evidence.jsonl
+  // (2 emails, 30 absolute paths) and ledger.changes.json (1 absolute path), so it could not be
+  // scored. The sanitiser knew only workdir/pkg/home/user; a live session also emits the
+  // /private twin of its workdir, JSON-escaped paths, scratch files it invents, and third-party
+  // addresses. The invariant below is the fix: whatever a session emits, the sanitised artefact
+  // passes the publication check.
+  describe("the sanitiser closes the publication check", () => {
+    const allow = fixtureCredentialAllowlist(join(FIXTURE, "core"));
+    const twinCtx = { workdir: "/var/folders/1l/xx/T/continuity-work-abc", home: "/Users/someone", user: "someone", pkgRoot: "/Users/someone/Developer/CPM/storybloq" };
+    it("substitutes the /private twin of the workdir that macOS reports", () => {
+      const s = sanitize("wrote /private/var/folders/1l/xx/T/continuity-work-abc/src/x.ts", twinCtx);
+      expect(s.text).toBe("wrote <WORKDIR>/src/x.ts");
+    });
+    it("substitutes the twin in the other direction too", () => {
+      const s = sanitize("wrote /var/folders/1l/xx/T/w/src/x.ts", { ...twinCtx, workdir: "/private/var/folders/1l/xx/T/w" });
+      expect(s.text).toBe("wrote <WORKDIR>/src/x.ts");
+    });
+    it("substitutes escaped forms of the same roots (JSON.stringify does not escape a slash; some producers do)", () => {
+      const escaped = String.raw`{"p":"\/Users\/someone\/.claude\/settings.json"}`;
+      const s = sanitize(escaped, twinCtx);
+      // Only the ROOT is substituted; the tail keeps the exact bytes it arrived with, escapes included.
+      expect(s.text).toBe(String.raw`{"p":"<HOME>\/.claude\/settings.json"}`);
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+      const unicodeRoot = String.raw`{"p":"\u002fUsers\u002fsomeone\u002fx"}`;
+      expect(publicationCheck(sanitize(unicodeRoot, twinCtx).text, allow).ok).toBe(true);
+    });
+    it("a credential inside a path is NOT erased: the path stays and the check refuses it", () => {
+      const s = sanitize("wrote /tmp/sk-ant-secret123", twinCtx);
+      expect(s.text).toBe("wrote /tmp/sk-ant-secret123");
+      expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
+    });
+    it("a credential shaped as an address is NOT erased either", () => {
+      const s = sanitize("mail sk-ant-secret123@example.com", twinCtx);
+      expect(s.text).toBe("mail sk-ant-secret123@example.com");
+      expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
+    });
+    it("replaces a percent-encoded file URL, whose decoded path matches nothing literal", () => {
+      const s = sanitize("see file:///Users/other/My%20Folder/x.ts", twinCtx);
+      expect(s.text).toBe("see <ABS>");
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("replaces a path hidden behind unicode escapes, which the check decodes and would have flagged", () => {
+      const s = sanitize(String.raw`{"p":"\u002ftmp\u002fprivate.txt"}`, twinCtx);
+      expect(s.text).toBe('{"p":"<ABS>"}');
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("replaces a scratch path the session invented, which no root can predict", () => {
+      const s = sanitize("ran tsc > /tmp/tsc.out and diffed /tmp/t2.diff", twinCtx);
+      expect(s.text).toBe("ran tsc > <ABS> and diffed <ABS>");
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("replaces a file URL", () => {
+      expect(publicationCheck(sanitize("see file:///Users/other/x/y.ts", twinCtx).text, allow).ok).toBe(true);
+    });
+    it("leaves genuinely public prefixes alone", () => {
+      const s = sanitize("cat < /dev/null; /usr/bin/env node", twinCtx);
+      expect(s.text).toBe("cat < /dev/null; /usr/bin/env node");
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("replaces a third-party address but keeps the fixture's own synthetic credentials", () => {
+      const s = sanitize("mail noreply@anthropic.com; the test uses Bearer abc", { ...twinCtx, allowlist: allow });
+      expect(s.text).toBe("mail <EMAIL>; the test uses Bearer abc");
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    // Round 2: replacing candidate STRINGS let a harmless match erase bytes inside another match.
+    // These four pin the span-based replacement that fixed it.
+    it("a harmless path next to a credential-bearing one does not erase its neighbour's secret", () => {
+      const s = sanitize("/tmp/sk-ant /tmp/sk-ant-secret123", twinCtx);
+      expect(s.text).toBe("<ABS> /tmp/sk-ant-secret123");
+      expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
+    });
+    it("matches a path written with a surrogate-pair escape", () => {
+      const s = sanitize(String.raw`{"p":"/tmp/\ud801\udc00/file"}`, twinCtx);
+      expect(s.text).toBe('{"p":"<ABS>"}');
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("matches a path written with mixed-case hex in the escape, which JSON permits", () => {
+      const s = sanitize(String.raw`{"p":"/tmp/\u00eD/file"}`, twinCtx);
+      expect(s.text).toBe('{"p":"<ABS>"}');
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+    });
+    it("matches a file URL that is both slash-escaped and percent-encoded", () => {
+      const s = sanitize(String.raw`{"p":"file:\/\/\/Users\/other\/My%20Folder\/x.ts"}`, twinCtx);
+      expect(s.text).toBe('{"p":"<ABS>"}');
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+      expect(() => JSON.parse(s.text)).not.toThrow();
+    });
+    // Round 3: a credential can START outside the span being replaced, and a replacement must never
+    // break a document that parsed before.
+    it("a credential that swallows a path keeps its alarm", () => {
+      const s = sanitize("Bearer /tmp/secret123", twinCtx);
+      expect(s.text).toBe("Bearer /tmp/secret123");
+      expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("bearer");
+    });
+    it("a credential that swallows an address keeps its alarm, even through the username pass", () => {
+      const s = sanitize("Bearer someone@example.com", twinCtx);
+      expect(s.text).toBe("Bearer someone@example.com");
+      expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("bearer");
+    });
+    it("a nested tool result stays parseable: an escaped quote is never eaten by a span", () => {
+      const nested = JSON.stringify({ result: JSON.stringify({ p: "/tmp/foo bar" }) });
+      const s = sanitize(nested, twinCtx);
+      expect(publicationCheck(s.text, allow).ok).toBe(true);
+      expect(jsonShapePreserved(nested, s.text)).toBe(true);
+      expect(JSON.parse(JSON.parse(s.text).result as string)).toEqual({ p: "<ABS>" });
+    });
+    it("the shape guard catches a replacement that would break a document", () => {
+      expect(jsonShapePreserved('{"a":1}', '{"a":1')).toBe(false);
+      expect(jsonShapePreserved('{"a":1}\n{"b":2}', '{"a":1}\n{"b":2}')).toBe(true);
+      expect(jsonShapePreserved("plain text", "plain <ABS>")).toBe(true);
+    });
+    it("a blob carrying every shape the smoke cell hit publishes cleanly", () => {
+      const raw = JSON.stringify({
+        cwd: "/private/var/folders/1l/xx/T/continuity-work-abc",
+        cmd: "node /Users/someone/Developer/CPM/storybloq/dist/mcp.js",
+        scratch: ["/tmp/t2.diff", "/tmp/JobQueue.orig.ts", "file:///var/folders/1l/xx/T/other"],
+        who: "someone <noreply@anthropic.com>",
+        fixture: "Bearer abc and sk-abcdefghijk stay",
+        relative: "src/platform/logging/AppLogger.ts",
+      });
+      const s = sanitize(raw, { ...twinCtx, allowlist: allow });
+      const v = publicationCheck(s.text, allow);
+      expect(v.blocked).toEqual([]);
+      expect(s.text).toContain("Bearer abc");
+      expect(s.text).toContain("sk-abcdefghijk");
+      expect(s.text).toContain("src/platform/logging/AppLogger.ts");
+    });
   });
   it("the checked-in rubric and a generated scoring request publish cleanly (backticked /story auto is a command, not a path)", () => {
     const allow = fixtureCredentialAllowlist(join(FIXTURE, "core"));
@@ -681,7 +809,8 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     const record = JSON.parse(readFileSync(join(pub, "record.json"), "utf-8")) as { validity: string; completion: string; evidenceComplete: boolean };
     expect(record).toMatchObject({ validity: "valid", completion: "completed", evidenceComplete: false });
     const redaction = JSON.parse(readFileSync(join(pub, "redaction.json"), "utf-8")) as { blockedLabels: Record<string, Record<string, number>>; blocked?: unknown };
-    expect(redaction.blockedLabels["handover.md"]).toEqual({ "sk-ant": 1, "sk-key": 1, "absolute-path": 1 });
+    // The path is now substituted to <ABS> by the sanitiser; the credential is still REFUSED, which is what withholds the artefact.
+    expect(redaction.blockedLabels["handover.md"]).toEqual({ "sk-ant": 1, "sk-key": 1 });
     expect(redaction.blocked).toBeUndefined();
     expect(readFileSync(join(pub, "redaction.json"), "utf-8")).not.toContain("verysecret");
     const exp = JSON.parse(readFileSync(join(o.out, pf.experiment.slice(0, 12), "experiment.json"), "utf-8")) as { cells: { evidenceComplete: boolean; satisfied: boolean }[] };
@@ -888,8 +1017,9 @@ describe("scoring", () => {
   it("every scorer output goes through the publication-checked writer, which refuses blocked content", () => {
     const d = tmp("cont-pub-");
     expect(() => publishText(join(d, "a.md"), "fine text with Bearer abc", ["Bearer abc"])).not.toThrow();
-    expect(() => publishText(join(d, "b.md"), "rubric now mentions /Users/someone/private.md", [])).toThrow(/absolute-path/);
-    expect(existsSync(join(d, "b.md"))).toBe(false);
+    // An unknown absolute path is identity, not a secret: the sanitiser substitutes it and the write succeeds.
+    expect(() => publishText(join(d, "b.md"), "rubric now mentions /Users/someone/private.md", [])).not.toThrow();
+    expect(readFileSync(join(d, "b.md"), "utf-8")).toBe("rubric now mentions <ABS>");
     expect(() => publishText(join(d, "c.json"), JSON.stringify({ evidence: "saw sk-ant-api03-xyz" }), [])).toThrow(/sk-ant/);
   });
   it("the report counts exactly the verified attempt per preregistered cell, names verification failures, and withholds citability", () => {
