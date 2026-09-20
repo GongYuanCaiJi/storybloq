@@ -494,6 +494,23 @@ describe("ISS-1257: the band names the finished project, not a missing phase", (
   });
 });
 
+describe("ISS-1266: the header names the project folder after the wordmark", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = new Harness();
+  });
+
+  it("draws 'Storybloq - <folder>' with the folder dim, from the pinned root and not the cwd", async () => {
+    seedLedger(h.fs, "/home/work/CPM");
+    h.fs.addDir("/home/work/CPM/storybloq");
+    await h.start("/home/work/CPM/storybloq");
+    await h.settle();
+    const drawn = h.render();
+    expect(drawn).toContain('"key":"project","dimColor":true,"children":" - CPM"');
+    expect(drawn).toContain('"key":"wordmark","bold":true,"children":"Storybloq"');
+  });
+});
+
 describe("ISS-1251: the person's prompt re-opens a pane parked by a narrow start", () => {
   let h: Harness;
   let opened: unknown[];

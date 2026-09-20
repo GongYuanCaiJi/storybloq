@@ -1977,13 +1977,33 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
  * left is the brand and one row of height.
  */
 function headerNode(elements: any): unknown {
+  // The wordmark, then the project (ISS-1266): the folder the ledger sits
+  // in, dim like a ticket id, so two checkouts of one project read apart.
+  // "Storybloq - CPM" was the owner's example; the config's `project` name
+  // would say "storybloq" here, which is why the folder is used.
+  const name = projectFolderName();
   return elements.Box({
     key: "header",
     flexDirection: "row",
     alignItems: "center",
     marginRight: PANE_EDGE_CLEARANCE,
-    children: [paneText(elements.Text, { bold: true, children: "Storybloq" })],
+    children: [
+      paneText(elements.Text, {
+        wrap: "truncate",
+        children: [
+          paneText(elements.Text, { key: "wordmark", bold: true, children: "Storybloq" }),
+          ...(name === "" ? [] : [paneText(elements.Text, { key: "project", dimColor: true, children: ` - ${name}` })]),
+        ],
+      }),
+    ],
   });
+}
+
+/** The last segment of the pinned ledger root, or nothing before one is pinned. */
+function projectFolderName(): string {
+  if (ledgerRoot === null) return "";
+  const segments = ledgerRoot.replace(/[/\\]+$/, "").split(/[/\\]/);
+  return segments[segments.length - 1] ?? "";
 }
 
 /**

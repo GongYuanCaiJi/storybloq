@@ -1170,7 +1170,7 @@ test("keeps a four digit count whole as well", async () => {
   expect(heading.endsWith(" 1000")).toBe(true);
 });
 
-test("heads the pane with the wordmark alone", async () => {
+test("heads the pane with the wordmark and the project folder, dim like a ticket id (ISS-1266)", async () => {
   const h = harness(newFixture());
   await started(h);
   await h.fire("turn.complete", {});
@@ -1178,6 +1178,10 @@ test("heads the pane with the wordmark alone", async () => {
   const header = textOf(nodeByKey(tree, "header"));
 
   expect(header).toContain("Storybloq");
+  // The folder the ledger sits in, after the wordmark, in the id tone.
+  expect(header).toMatch(/^Storybloq - \S+/);
+  expect(nodeByKey(tree, "project").props.dimColor).toBe(true);
+  expect(nodeByKey(tree, "wordmark").props.bold).toBe(true);
   // The owner took the rasterized mark out; the wordmark is the brand. The
   // phase went with it once the board stopped being one phase's, and the
   // context fill went to the foot of the pane. M-CONTEXT-TOP draws it here
