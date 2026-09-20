@@ -23,10 +23,11 @@ import { MOD_VERSION } from "../../plugins/storybloq/hooks/sidebar.js";
 
 const PLUGIN_DIR = join(__dirname, "..", "..", "plugins", "storybloq");
 
-/** The eight events the Mod hooks, from the pinned names in client-api.ts. */
+/** The events the Mod hooks, from the pinned names in client-api.ts. */
 const EXPECTED_HOOKS = [
   EVENTS.uiRender,
   EVENTS.sessionStart,
+  EVENTS.turnStart,
   EVENTS.turnComplete,
   EVENTS.toolCall,
   EVENTS.sessionCompact,
@@ -174,7 +175,7 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
     expect(output).toContain("Validation passed");
   });
 
-  it("hooks exactly the eight events the design names", () => {
+  it("hooks exactly the events the design names", () => {
     expect(listAfter(output, "mod.ts hooks")).toEqual(EXPECTED_HOOKS);
   });
 

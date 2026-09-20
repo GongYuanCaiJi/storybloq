@@ -30,7 +30,19 @@
       "title": "Storyfield startup logo",
       "type": "boolean",
       "default": true,
-      "description": "Show a brief copper dot-wave logo before the dashboard. Turn off for an immediate, motion-free dashboard."
+      "description": "Show a brief copper dot-wave logo before the dashboard. Turn off to show the board immediately."
+    },
+    "motion": {
+      "title": "Dashboard motion",
+      "type": "boolean",
+      "default": true,
+      "description": "Animate startup, phase progress, story updates, activity, and the context meter. Turn off for a static dashboard that still shows current status and activity."
+    },
+    "changeHighlights": {
+      "title": "Story status highlights",
+      "type": "boolean",
+      "default": true,
+      "description": "Briefly highlight changed stories and destination counts, and show Ready when a blocker clears. Requires Dashboard motion."
     }
   },
   "metadata": {

@@ -70,6 +70,7 @@ export interface SidebarIssue {
 export type SidebarRecord = SidebarTicket | SidebarIssue;
 
 export interface SidebarPhase {
+  readonly label?: string;
   readonly id: string;
   readonly name: string;
   readonly status: PhaseStatus;
@@ -78,9 +79,11 @@ export interface SidebarPhase {
 
 /** One ledger item as a board row: what the column shows and how it is marked. */
 export interface SidebarBoardCard {
+  /** Stable identity, independent of reconciled display IDs. */
+  readonly key: string;
   readonly id: string;
   readonly title: string;
-  /** An open ticket whose blockedBy still points at something unfinished. */
+  /** An unfinished ticket whose blockedBy still points at something unfinished. */
   readonly blocked: boolean;
   /** Which side of the ledger the row came from. */
   readonly kind: LedgerKind;
@@ -88,37 +91,11 @@ export interface SidebarBoardCard {
   readonly severity: string | null;
 }
 
-/**
- * The PROJECT's leaves and its issues, split by status: every active leaf of
- * every phase and every active issue, not just the current phase's, by the
- * owner's ruling.
- *
- * A partition, deliberately: every leaf and every issue appears in exactly
- * one column, so the four lengths add up to the tickets plus the issues and
- * the board cannot quietly lose either. It holds against the CLI too, on the
- * ticket side of the cards: blocked + open + inProgress TICKETS is
- * `storybloq status`'s openTickets, and done tickets its completeTickets.
- *
- * Issues take three of the four columns and never Blocked: the CLI gives an
- * issue open, inprogress or resolved and no blockedBy at all, so there is
- * nothing for a Blocked column to mean. inprogress goes to In progress,
- * resolved to Done, where the cap and the ordering keep nine hundred resolved
- * issues down to a row or two, and everything else to Open, which is the
- * remainder on this side of the ledger as it is on the other: a hand-edited
- * "closed" or "wontfix" is still counted in openIssues, so a column set built
- * from status equality would leave it off a board that claims to partition.
- *
- * Blocked is a column and not a mark on an Open row. The question the board
- * answers is what can be picked up now, and a blocked ticket cannot be,
- * whatever its stored status says; keeping it in Open and decorating it makes
- * the reader do the filtering. So Blocked takes every non-complete leaf whose
- * blockedBy still points at something unfinished, In progress takes what is
- * left of that status, and OPEN IS THE REMAINDER: whatever is neither
- * complete, in progress nor waiting, whether or not its status is the word
- * "open". That last part is what makes this a partition of a raw ledger.
+/** Every active leaf and issue appears once, in its recorded status column.
+ * Blocking is a card attribute, so a blocked in-progress story stays there.
+ * Unknown unfinished statuses belong to Open; completed records belong to Done.
  */
 export interface SidebarBoard {
-  readonly blocked: readonly SidebarBoardCard[];
   readonly open: readonly SidebarBoardCard[];
   readonly inProgress: readonly SidebarBoardCard[];
   readonly done: readonly SidebarBoardCard[];
@@ -132,7 +109,7 @@ export interface SidebarTicketRef {
 
 export interface SidebarInput {
   readonly project: string;
-  readonly phases: readonly { readonly id: string; readonly name: string }[];
+  readonly phases: readonly { readonly id: string; readonly name: string; readonly label?: string }[];
   readonly tickets: readonly SidebarTicket[];
   readonly issues: readonly SidebarIssue[];
   readonly handoverFilenames: readonly string[];
@@ -373,7 +350,7 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
 
   const phases: SidebarPhase[] = input.phases.map((p) => {
     const ofPhase = leaves.filter((t) => t.phase === p.id);
-    return { id: p.id, name: p.name, status: aggregateStatus(ofPhase), leafCount: ofPhase.length };
+    return { id: p.id, name: p.name, label: p.label, status: aggregateStatus(ofPhase), leafCount: ofPhase.length };
   });
 
   const issuesBySeverity: Record<string, number> = {};
@@ -401,6 +378,7 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
   // a filter that changes what the numbers mean.
   const boardLeaves = leaves;
   const card = (t: SidebarTicket): SidebarBoardCard => ({
+    key: `ticket:${t.id}`,
     id: t.displayId ?? t.id,
     title: t.title,
     blocked: t.status !== "complete" && isBlocked(t),
@@ -408,6 +386,7 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     severity: null,
   });
   const issueCard = (i: SidebarIssue): SidebarBoardCard => ({
+    key: `issue:${i.id}`,
     id: i.displayId ?? i.id,
     title: i.title,
     // An issue is never blocked: it carries no blockedBy for anything to
@@ -429,7 +408,6 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     // a display id (`storybloq reconcile` exists for exactly that), and
     // without this they still compare equal and swap on read order.
     || a.id.localeCompare(b.id);
-  const waiting = (t: SidebarTicket): boolean => t.status !== "complete" && isBlocked(t);
   // Issues sort by how much they matter and then by id, in every column: an
   // issue has no order field to sort on, and severity is the only ranking the
   // ledger gives. The id is the tie-break for the same reason it is on a
@@ -448,9 +426,6 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     ...activeIssues.filter(belongs).slice().sort(bySeverityThenId).map(issueCard),
   ];
   const board: SidebarBoard = {
-    // No issues here: an issue carries no blockedBy, so nothing of it could
-    // ever be waiting on anything.
-    blocked: boardLeaves.filter(waiting).sort(byOrderAscending).map(card),
     // Open is the REMAINDER, not a status match, on both sides of the ledger.
     // It is hand-editable JSON and this reads it raw, so a leaf can carry a
     // status the CLI's enum does not have ("blocked" and "deferred" both
@@ -459,13 +434,13 @@ export function projectSidebar(input: SidebarInput): SidebarProjection {
     // leafCount and openIssues, and the board then does not add up.
     open: withIssues(
       boardLeaves
-        .filter((t) => t.status !== "complete" && t.status !== "inprogress" && !waiting(t))
+        .filter((t) => t.status !== "complete" && t.status !== "inprogress")
         .sort(byOrderAscending)
         .map(card),
       (i) => i.status !== "inprogress" && i.status !== "resolved",
     ),
     inProgress: withIssues(
-      boardLeaves.filter((t) => t.status === "inprogress" && !waiting(t)).sort(byOrderAscending).map(card),
+      boardLeaves.filter((t) => t.status === "inprogress").sort(byOrderAscending).map(card),
       (i) => i.status === "inprogress",
     ),
     // Newest first: the last thing finished is the useful one to see, and the

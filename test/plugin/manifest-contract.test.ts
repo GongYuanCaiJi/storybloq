@@ -106,7 +106,7 @@ describe("the Claude plugin manifest stays in lockstep and names one hooks modul
 
   it("every Mod option is a boolean, and the dashboard defaults to on (T-516)", () => {
     const userConfig = claudeManifest().userConfig as Record<string, { type?: unknown; default?: unknown; title?: unknown }>;
-    expect(Object.keys(userConfig).sort()).toEqual(["sidebar", "startupLogo"]);
+    expect(Object.keys(userConfig).sort()).toEqual(["changeHighlights", "motion", "sidebar", "startupLogo"]);
     for (const [name, option] of Object.entries(userConfig)) {
       expect(option.type, name).toBe("boolean");
       expect(typeof option.default, name).toBe("boolean");

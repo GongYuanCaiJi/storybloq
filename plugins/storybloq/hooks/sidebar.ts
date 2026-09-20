@@ -41,10 +41,10 @@
  * re-opens the pane (`prompt.submit`), which the client then places.
  *
  * LAYOUT FOLLOWS PLACEMENT (ISS-1254). A docked pane is a sidebar: tall and
- * never wider than 90 columns, so its four columns always stack one under
+ * never wider than 90 columns, so its three columns always stack one under
  * another, whatever its width (the 1.15.4 sidebar the owner asked back after
  * 1.15.5 squeezed four frames side by side at 150 columns and drew only the
- * narrow board at 132). An inline pane is a strip above the prompt: the four
+ * narrow board at 132). An inline pane is a strip above the prompt: the three
  * columns side by side from BOARD_MIN_COLUMNS up, the narrow board below.
  * A client that reports no placement gets the width rule alone, as 1.15.4
  * did. Colour follows placement too (ISS-1255): the client paints a docked
@@ -59,6 +59,7 @@
  */
 
 import { logoFrame, logoLayout, LOGO_DURATION_MS } from "./storyfield-logo.js";
+import { DashboardMotion } from "./dashboard-motion.js";
 import type { On } from "./mod.js";
 import {
   extractRecord,
@@ -122,9 +123,14 @@ export const IDLE_POLL_TICKS = 80;
  */
 const COLUMN_CARD_CAP = 6;
 const COLUMN_TAIL = "...";
-const BOARD_COLUMNS = 4;
+const BOARD_COLUMNS = 3;
 /** What a column with nothing in it says, rather than drawing a blank frame. */
-const EMPTY_COLUMN = "none";
+const EMPTY_COLUMNS = {
+  "board-open": { symbol: "◇", title: "Queue clear", short: "Queue clear", hint: "Add your next story." },
+  "board-inprogress": { symbol: "○", title: "Ready to begin", short: "Ready to start", hint: "Start a story from Open." },
+  "board-done": { symbol: "·", title: "Progress starts here", short: "Room to grow", hint: "Completed work gathers here." },
+} as const;
+type BoardColumnKey = keyof typeof EMPTY_COLUMNS;
 
 /**
  * The rows the pane spends on everything that is not a card: the header, the
@@ -141,10 +147,10 @@ const COLUMN_FRAME_ROWS = 4;
 /** Each column is a bordered card, and the border costs a column each side. */
 const COLUMN_BORDER = "round";
 const BORDER_COLUMNS = 2;
-/** The rule under a heading, and the gaps between the four columns. */
+/** The rule under a heading, and the gaps between the three columns. */
 const HEADING_RULE = "\u2500";
 const COLUMN_GAP = 1;
-const GAP_TOTAL = 3;
+const GAP_TOTAL = COLUMN_GAP * (BOARD_COLUMNS - 1);
 /**
  * From this width, In progress is widened and Done narrowed by about a
  * twentieth of the pane: at that size there is room to weight the board
@@ -181,14 +187,11 @@ const SEVERITY_TONES: Readonly<Record<string, string>> = { critical: "red", high
  * How each column's heading is drawn.
  *
  * One column is emphasised and it is the one that says what is happening
- * now: In progress, bold and cyan. Blocked keeps a colour because it is a
- * warning, but not the weight; Open is plain, being the resting state and the
+ * now: In progress, bold and cyan. Open is plain, being the resting state and the
  * column a reader lands on most; Done recedes, since finished work is
- * reference rather than news. The count rides in the heading text and is
- * never coloured apart from it.
+ * reference rather than news. Counts use a quieter weight inside each heading.
  */
 const COLUMN_STYLES = {
-  blocked: { color: "yellow" },
   open: {},
   inProgress: { color: "cyan", bold: true },
   done: { dimColor: true },
@@ -206,7 +209,7 @@ const COLUMN_STYLES = {
 const PANE_EDGE_CLEARANCE = 3;
 
 /**
- * Narrower than this and four columns are shredded rather than laid out, so
+ * Narrower than this and three columns are shredded rather than laid out, so
  * the pane draws the narrow board instead (ISS-1252): the work in hand and
  * the footer, nothing else. A placed pane keeps its seat when the window
  * shrinks (inline on the main screen, docked in fullscreen), so this is the
@@ -313,7 +316,7 @@ let cache: Record<string, CachedRecord> = {};
 let cacheLoaded = false;
 let projection: SidebarProjection | null = null;
 let project = "";
-let phases: { readonly id: string; readonly name: string }[] = [];
+let phases: { readonly id: string; readonly name: string; readonly label?: string }[] = [];
 let handoverFilenames: string[] = [];
 let queue: ScanItem[] = [];
 /** Ticks since the last idle poll, and the mtimes that poll compares against. */
@@ -331,6 +334,8 @@ let logoElapsed = 0;
 let logoStarted = false;
 let logoFinished = false;
 let logoTicks = 0;
+let motion = new DashboardMotion();
+let bandDrawn = false;
 /** The Mod is on and something is drawn: not the same as the pane existing. */
 let sidebarEnabled = false;
 let paneOpen = false;
@@ -424,6 +429,8 @@ function forgetEverything(): void {
   logoStarted = false;
   logoFinished = false;
   logoTicks = 0;
+  motion = new DashboardMotion();
+  bandDrawn = false;
   sidebarEnabled = false;
   paneOpen = false;
   paneDrawn = false;
@@ -453,7 +460,7 @@ function isIssueRecord(record: SidebarRecord): record is SidebarIssue {
 }
 
 /** Rebuilds the projection from whatever the cache holds right now. */
-function reproject(): void {
+function reproject(completedScan = false): void {
   const tickets: SidebarTicket[] = [];
   const issues: SidebarIssue[] = [];
   for (const entry of Object.values(cache)) {
@@ -461,6 +468,7 @@ function reproject(): void {
     else if (isIssueRecord(entry.record)) issues.push(entry.record);
   }
   projection = projectSidebar({ project, phases, tickets, issues, handoverFilenames });
+  if (completedScan) motion.observe(projection, ledgerRoot);
 }
 
 /**
@@ -580,7 +588,7 @@ function truncate(text: string, cells: number): string {
 }
 
 /** The one line the narrow fallback draws, and the pane's own summary row. */
-function summaryLine(withContext: boolean): string {
+function summaryLine(): string {
   // Until one scan has finished (or a warm cache came out of the store) the
   // numbers are a partial read, and drawing them would be a figure that
   // changes a second later for no reason the reader can see.
@@ -605,19 +613,21 @@ function summaryLine(withContext: boolean): string {
     `${projection.blockedTickets} blocked`,
     `${projection.openIssues} issues`,
   ];
-  if (withContext && contextPercent !== null) parts.push(`context ${contextPercent}%`);
   if (busy) parts.push(`reading ${queue.length}`);
   return `Storybloq: ${parts.join(", ")}`;
 }
 
 /**
  * The band, cut to the terminal. Below the dock width it ends with what width
- * the board needs, since that is the moment the question comes up, but only
- * when the whole summary fits beside it: the numbers are the band's job and
- * the hint never costs one of them (80 columns keeps the issues count).
+ * the board needs, but only when the whole summary fits beside it. Reserve
+ * context pressure first so a long phase name cannot push it out of view.
  */
 function bandText(columns: number, narrow: boolean): string {
-  const line = summaryLine(true);
+  const context = contextLabel(contextPercent, Math.min(columns, 20));
+  const room = columns - cellWidth(context) - 2;
+  if (room <= 0) return context;
+  const summary = summaryLine().replace("Storybloq:", `Storybloq: ${motion.activity().glyph}`);
+  const line = `${truncate(summary, room)}  ${context}`;
   const hint = narrow && cellWidth(line) + cellWidth(BAND_HINT) <= columns ? BAND_HINT : "";
   return truncate(`${line}${hint}`, columns);
 }
@@ -633,11 +643,11 @@ async function readHeader($: any): Promise<void> {
   }
   try {
     const roadmapText = await $.fs.read(p(ROADMAP_PATH));
-    const parsed = JSON.parse(roadmapText) as { phases?: readonly { id?: unknown; name?: unknown }[] };
-    const found: { id: string; name: string }[] = [];
+    const parsed = JSON.parse(roadmapText) as { phases?: readonly { id?: unknown; name?: unknown; label?: unknown }[] };
+    const found: { id: string; name: string; label?: string }[] = [];
     for (const phase of parsed.phases ?? []) {
       if (typeof phase.id === "string") {
-        found.push({ id: phase.id, name: typeof phase.name === "string" ? phase.name : phase.id });
+        found.push({ id: phase.id, name: typeof phase.name === "string" ? phase.name : phase.id, label: typeof phase.label === "string" ? phase.label : undefined });
       }
     }
     phases = found;
@@ -882,6 +892,7 @@ async function attach($: any): Promise<void> {
   // response. Reading them only on `turn.complete` is why the owner's header
   // was blank after a reload, with the fill only appearing a turn later.
   contextPercent = await readContextFill($);
+  motion.setContext(contextPercent, true);
   themeLight = await readThemeLight($);
   await readHeader($);
   await loadCache($);
@@ -994,7 +1005,7 @@ async function beginScan($: any): Promise<void> {
  */
 async function tick($: any): Promise<void> {
   // Share the existing clock. Redraw only during the short, visible intro,
-  // at 20 fps, then stop all animation work for the rest of the session.
+  // at 20 fps. Later effects use this same timer and stop redrawing when idle.
   if (logoStarted && !logoFinished) {
     if (!paneOpen || !sidebarEnabled) logoFinished = true;
     else {
@@ -1004,6 +1015,7 @@ async function tick($: any): Promise<void> {
       if (logoTicks % 2 === 0 || logoFinished) $.ui.invalidate("ui.render");
     }
   }
+  if (motion.advance(SCAN_TICK_MS) && sidebarEnabled && ((paneOpen && paneDrawn) || bandDrawn)) $.ui.invalidate("ui.render");
   await drainChunk($);
   idleTicks += 1;
   if (idleTicks < IDLE_POLL_TICKS) return;
@@ -1112,7 +1124,7 @@ async function drainChunk($: any): Promise<void> {
     }
     if (queue.length === 0) {
       warm = true;
-      reproject();
+      reproject(true);
       await saveCache($);
       $.ui.invalidate("ui.render");
       outcome = "done";
@@ -1137,7 +1149,7 @@ async function drainChunk($: any): Promise<void> {
  * just compacted has neither until its next response. Live, the owner's
  * header stayed empty because this read `percent` alone, so the percent is
  * computed from `tokens` whenever they exist, the engine's `percent` stands
- * in only when they do not, and null (draw nothing) only when there is no
+ * in only when they do not, and null (show an unknown reading) when there is no
  * reading at all. `compactWindow` is the settings' auto-compact window, or
  * null for the model's own.
  */
@@ -1678,8 +1690,8 @@ function panePlacement(e: any): PanePlacement | null {
 }
 
 /**
- * The board's shape (ISS-1254): `stacked` is the four framed columns one
- * under another, the sidebar; `columns` is the four side by side; `narrow`
+ * The board's shape (ISS-1254): `stacked` is the three framed columns one
+ * under another, the sidebar; `columns` is the three side by side; `narrow`
  * is the In progress strip. Docked, always stacked. Inline, side by side
  * from BOARD_MIN_COLUMNS up and the strip below it. No placement reported,
  * the width alone decides between stacked and side by side, as 1.15.4 did.
@@ -1690,6 +1702,93 @@ function boardLayout(placement: PanePlacement | null, width: number): BoardLayou
   if (placement === "dock") return "stacked";
   if (width >= BOARD_MIN_COLUMNS) return "columns";
   return placement === "inline" ? "narrow" : "stacked";
+}
+
+const PHASE_STRIP_ROWS = 2;
+const PHASE_STRIP_MIN_COLUMNS = 100;
+const PHASE_GUTTER = 4;
+
+/** A bounded window over the roadmap, centered on its first active phase.
+ * Status is always derived per phase, including out-of-order completion.
+ */
+export function phaseTimelineLayout(
+  items: SidebarProjection["phases"], width: number, bodyRows: number | undefined, placement: PanePlacement | null,
+): { start: number; count: number; slot: number; current: number; before: number; after: number; inset: number } | null {
+  if (placement !== "inline" || !Number.isFinite(width) || width < PHASE_STRIP_MIN_COLUMNS || !items.length) return null;
+  // 4 chrome + 4 frame + 2 timeline + at least 3 item rows. Unknown pane
+  // height waits for a measured render rather than guessing from the screen.
+  if (typeof bodyRows !== "number" || !Number.isFinite(bodyRows) || bodyRows < 13) return null;
+  const current = items.findIndex(item => item.status === "inprogress");
+  const next = items.findIndex(item => item.status === "notstarted");
+  const focus = current >= 0 ? current : next >= 0 ? next : items.length - 1;
+  // Keep at most one neighbor on each side, even at the roadmap's ends.
+  const start = Math.max(0, focus - 1);
+  const count = Math.min(items.length, focus + 2) - start;
+  const slot = Math.min(16, Math.floor((width - 2 * PHASE_GUTTER) / count));
+  const inset = Math.floor((width - slot * count - 2 * PHASE_GUTTER) / 2);
+  return { start, count, slot, current, before: start, after: items.length - start - count, inset };
+}
+
+/** Short display titles only; the roadmap keeps its full names unchanged. */
+export function phaseTimelineTitle(name: string, width = 14): string {
+  const title = name.replace(/\s+/g, " ").trim();
+  if (cellWidth(title) <= width) return title;
+  if (width < 5) return truncate(title, width);
+  let head = truncate(title, width - 2).slice(0, -1).trimEnd();
+  const boundary = head.lastIndexOf(" ");
+  if (boundary >= head.length * .55) head = head.slice(0, boundary);
+  return `${head}...`;
+}
+
+function phaseTimelineNode(elements: any, items: SidebarProjection["phases"], window: NonNullable<ReturnType<typeof phaseTimelineLayout>>): unknown {
+  const centered = (text: string, width: number): string => {
+    const clipped = truncate(text.replace(/\s+/g, " "), width);
+    const left = Math.max(0, Math.floor((width - cellWidth(clipped)) / 2));
+    return " ".repeat(left) + clipped + " ".repeat(Math.max(0, width - left - cellWidth(clipped)));
+  };
+  const gutter = (key: string, count: number, before: boolean) => elements.Box({
+    key, width: PHASE_GUTTER, flexDirection: "column", children: [
+      paneText(elements.Text, { dimColor: true, children: centered(count ? (before ? `‹ ${count}` : `${count} ›`) : "", PHASE_GUTTER) }),
+      paneText(elements.Text, { children: " " }),
+    ],
+  });
+  return elements.Box({ key: "phase-timeline", flexDirection: "row", marginLeft: window.inset, children: [
+    gutter("phases-before", window.before, true),
+    ...items.slice(window.start, window.start + window.count).map((phase, local) => {
+      const index = window.start + local;
+      const current = index === window.current;
+      const future = phase.status === "notstarted";
+      const left = Math.floor((window.slot - 3) / 2), right = window.slot - left - 3;
+      const connector = (length: number, neighbor: number) => {
+        const pending = future || items[neighbor]?.status === "notstarted" || current || neighbor === window.current;
+        const other = items[neighbor];
+        const incoming = neighbor < index;
+        const progress = other ? motion.connection(incoming ? other.id : phase.id, incoming ? phase.id : other.id) : null;
+        const fill = progress === null ? null : Math.max(0, Math.min(1, progress * 2 - (incoming ? 1 : 0)));
+        const offset = local * window.slot + (incoming ? 0 : left + 3);
+        const cells = Array.from({ length }, (_, cell) => {
+          const wave = motion.wave((offset + cell) / Math.max(1, window.count * window.slot - 1));
+          const filled = fill !== null && cell < Math.round(fill * length);
+          return { glyph: wave || (!other ? " " : filled || (fill === null && !pending) ? "━" : "─"), bright: !!wave || filled };
+        });
+        return paneText(elements.Text, {
+          dimColor: pending,
+          children: cells.map((cell, i) => paneText(elements.Text, {
+            key: `${i}`, dimColor: cell.bright ? false : pending, bold: cell.bright, children: cell.glyph,
+          })),
+        });
+      };
+      return elements.Box({ key: `phase-${phase.id}`, width: window.slot, flexDirection: "column", children: [
+        paneText(elements.Text, { wrap: "truncate", children: [
+          connector(left, index - 1),
+          paneText(elements.Text, { bold: current, dimColor: future, children: ` ${motion.phaseMarker(phase.id, current ? "◎" : phase.status === "complete" ? "✓" : future ? "○" : "●")} ` }),
+          connector(right, index + 1),
+        ] }),
+        paneText(elements.Text, { dimColor: !current, bold: current, wrap: "truncate", children: centered(phaseTimelineTitle(phase.name), window.slot) }),
+      ] });
+    }),
+    gutter("phases-after", window.after, false),
+  ] });
 }
 
 /**
@@ -1703,11 +1802,11 @@ function boardLayout(placement: PanePlacement | null, width: number): BoardLayou
  *   the card's border, above and below              = 2
  *   its heading row and the rule under it           = 2
  *
- * Side by side the four columns are parallel, so one column's four frame rows
+ * Side by side the three columns are parallel, so one column's four frame rows
  * are the board's; stacked they run one after another, so the frames cost
- * four times that and the rows left over are shared between them. The blank
+ * three times that and the rows left over are shared between them. The blank
  * rows go before the cards do, because a board with one card in it still says
- * something and a gap says nothing. When even four framed headings will not
+ * something and a gap says nothing. When even three framed headings will not
  * fit, the board falls back to one plain counted row per column, which is the
  * smallest thing that is still the board.
  *
@@ -1734,19 +1833,19 @@ function boardLayout(placement: PanePlacement | null, width: number): BoardLayou
  * board needs neither matters and the layout is the one the owner had before
  * any budget existed: the capped cards, a tail, and the blank rows.
  */
-function rowBudget(e: any, stacked: boolean): { body: number; gaps: boolean; compact: boolean } {
+function rowBudget(e: any, stacked: boolean, extraRows = 0): { body: number; gaps: boolean; compact: boolean } {
   const frames = stacked ? COLUMN_FRAME_ROWS * BOARD_COLUMNS : COLUMN_FRAME_ROWS;
   const share = stacked ? BOARD_COLUMNS : 1;
-  const whole = CHROME_ROWS + frames + share * (COLUMN_CARD_CAP + 1);
+  const whole = CHROME_ROWS + extraRows + frames + share * (COLUMN_CARD_CAP + 1);
   const drawn: number = typeof e.props?.scroll?.bodyRows === "number" ? e.props.scroll.bodyRows : 0;
   const screen: number = typeof e.viewport?.rows === "number" ? e.viewport.rows : 0;
-  const room = Math.max(drawn, screen);
+  const room = extraRows > 0 ? drawn : Math.max(drawn, screen);
   if (room <= 0 || room >= whole) return { body: COLUMN_CARD_CAP + 1, gaps: true, compact: false };
   // With the blank rows first, but only while they are affordable: below
   // GAPS_MIN_BODY rows of cards per column the gaps are costing more than
   // they are worth, and a board with cards in it beats a tidy empty one.
   for (const [gaps, floor] of [[true, GAPS_MIN_BODY], [false, 1]] as const) {
-    const chrome = CHROME_ROWS - (gaps ? 0 : GAP_ROWS);
+    const chrome = CHROME_ROWS + extraRows - (gaps ? 0 : GAP_ROWS);
     const left = room - chrome - frames;
     if (left >= share * floor) {
       return { body: Math.min(COLUMN_CARD_CAP + 1, Math.floor(left / share)), gaps, compact: false };
@@ -1762,40 +1861,59 @@ function rowBudget(e: any, stacked: boolean): { body: number; gaps: boolean; com
  * "In progress 100" at fourteen cells is "In progr… 100", never
  * "In progress 1…", which would quietly report a different number.
  */
-function headingText(label: string, count: number, width: number): string {
+function headingContent(elements: any, label: string, count: number, width: number): unknown[] {
   const tail = ` ${count}`;
-  return `${truncate(label, Math.max(1, width - tail.length))}${tail}`;
+  const emphasis = motion.count(label === "In progress" ? "inProgress" : label === "Done" ? "done" : "open");
+  return [
+    paneText(elements.Text, { children: truncate(label, Math.max(1, width - tail.length)) }),
+    paneText(elements.Text, { dimColor: !emphasis, bold: emphasis, children: tail }),
+  ];
 }
 
-/** One card row: the id whole and dim, the title cut to what is left. */
-function cardRow(elements: any, card: SidebarBoardCard, width: number): unknown {
-  const room = width - cellWidth(card.id) - 1;
-  const title = room > 0 ? truncate(card.title, room) : "";
-  // The id is dim on every row, ticket or issue, so the eye runs down the
-  // titles; a severe issue colours ITS ID and nothing else, which marks the
-  // row without turning the column into a traffic light. Only the two that
-  // mean act on this are coloured: medium and low read as any other row.
-  const idProps: Record<string, unknown> = { dimColor: true, children: truncate(card.id, width) };
+/** IDs lead in muted text; titles carry emphasis and blockers stay visible. */
+function cardRow(elements: any, card: SidebarBoardCard, width: number, done = false): unknown {
+  const effect = motion.card(card.key);
+  const ready = effect.ready && !card.blocked && !done;
+  const blocked = card.blocked ? (width >= 32 ? "[Blocked] " : "[!] ") : ready ? (width >= 32 ? "✓ Ready " : "✓ ") : "";
+  const id = truncate(card.id, Math.max(1, width - cellWidth(blocked) - 3));
+  const room = Math.max(1, width - cellWidth(id) - cellWidth(blocked) - 1);
   const tone = card.kind === "issue" && card.severity !== null ? SEVERITY_TONES[card.severity] : undefined;
-  if (tone !== undefined) idProps["color"] = tone;
   return paneText(elements.Text, {
+    key: card.key,
     wrap: "truncate",
     children: [
-      // The id whole, never cut: a half id is worse than no id. The title
-      // takes what is left, and the eye runs down the titles.
-      paneText(elements.Text, idProps),
-      paneText(elements.Text, { children: title === "" ? "" : ` ${title}` }),
+      paneText(elements.Text, { dimColor: true, ...(tone ? { color: tone } : {}), children: `${id} ` }),
+      paneText(elements.Text, { ...(card.blocked ? { color: "yellow" } : { dimColor: effect.fading }), children: blocked }),
+      paneText(elements.Text, { bold: !done, dimColor: done, children: shimmerTitle(elements, truncate(card.title, room), effect.progress) }),
     ],
   });
+}
+
+/** Preserve graphemes and cell widths while a narrow highlight crosses the text. */
+function shimmerTitle(elements: any, title: string, progress: number | null): unknown {
+  if (progress === null) return title;
+  const start = Math.round(progress * (cellWidth(title) + 6)) - 6;
+  const runs: { text: string; highlight: boolean }[] = [];
+  let position = 0;
+  for (const { cluster, cells } of graphemes(title)) {
+    const highlight = position >= start && position < start + 6;
+    const last = runs[runs.length - 1];
+    if (last?.highlight === highlight) last.text += cluster;
+    else runs.push({ text: cluster, highlight });
+    position += cells;
+  }
+  return runs.map((run, index) => paneText(elements.Text, {
+    key: `shimmer-${index}`, ...(run.highlight ? { dimColor: false, bold: true, underline: true } : {}), children: run.text,
+  }));
 }
 
 /**
  * The rows of one column's body, every body the same height.
  *
- * The four bodies draw the same number of rows, so the cards end level
+ * The three bodies draw the same number of rows, so the cards end level
  * instead of leaving a ragged edge: a column with fewer cards is padded with
- * blanks, and a column with nothing in it says so in a dim word rather than
- * showing an empty frame. The tail row is part of that common height, held
+ * blanks. Empty columns use that same height for a quiet, centered invitation.
+ * The tail row is part of that common height, held
  * back by the budget, so a capped column can say it was capped without
  * standing a row taller than the rest.
  */
@@ -1805,16 +1923,32 @@ function bodyRowsOf(
   width: number,
   shown: number,
   height: number,
+  column: BoardColumnKey,
 ): unknown[] {
   const rows: unknown[] = [];
   if (cards.length === 0) {
-    rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
+    return emptyColumnRows(elements, column, width, height);
   } else {
-    for (const card of cards.slice(0, shown)) rows.push(cardRow(elements, card, width));
+    for (const card of cards.slice(0, shown)) rows.push(cardRow(elements, card, width, column === "board-done"));
     if (cards.length > shown) rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
   }
   while (rows.length < height) rows.push(paneText(elements.Text, { children: " " }));
   return rows;
+}
+
+function emptyColumnRows(elements: any, column: BoardColumnKey, width: number, height: number, centered = true): unknown[] {
+  const state = EMPTY_COLUMNS[column];
+  const title = cellWidth(`${state.symbol} ${state.title}`) <= width ? state.title : state.short;
+  const lines = [`${state.symbol} ${title}`];
+  if (height >= 3 && cellWidth(state.hint) <= width) lines.push(state.hint);
+  const top = centered ? Math.floor((height - lines.length) / 2) : 0;
+  return Array.from({ length: height }, (_, index) => {
+    const line = truncate(lines[index - top] ?? " ", width);
+    const inset = centered ? Math.max(0, Math.floor((width - cellWidth(line)) / 2)) : 0;
+    return paneText(elements.Text, {
+      key: `${column}-empty-${index}`, dimColor: true, wrap: "truncate", children: " ".repeat(inset) + line,
+    });
+  });
 }
 
 /**
@@ -1837,7 +1971,7 @@ function bodyRowsOf(
  */
 function boardColumn(
   elements: any,
-  key: string,
+  key: BoardColumnKey,
   heading: string,
   style: Readonly<Record<string, unknown>>,
   cards: readonly SidebarBoardCard[],
@@ -1859,15 +1993,15 @@ function boardColumn(
         key: `${key}-heading`,
         ...style,
         wrap: "truncate",
-        children: headingText(heading, cards.length, textWidth),
+        children: headingContent(elements, heading, cards.length, textWidth),
       }),
       paneText(elements.Text, { key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
-      ...bodyRowsOf(elements, cards, textWidth, shown, height),
+      ...bodyRowsOf(elements, cards, textWidth, shown, height, key),
     ],
   });
 }
 
-/** The board reduced to four counted rows, when no frame will fit. */
+/** The board reduced to three counted rows, when no frame will fit. */
 function compactBoard(elements: any, board: any, width: number): unknown {
   const line = (
     key: string,
@@ -1875,12 +2009,11 @@ function compactBoard(elements: any, board: any, width: number): unknown {
     style: Readonly<Record<string, unknown>>,
     cards: readonly SidebarBoardCard[],
   ): unknown =>
-    paneText(elements.Text, { key, ...style, wrap: "truncate", children: headingText(label, cards.length, width) });
+    paneText(elements.Text, { key, ...style, wrap: "truncate", children: headingContent(elements, label, cards.length, width) });
   return elements.Box({
     key: "board",
     flexDirection: "column",
     children: [
-      line("board-blocked", "Blocked", COLUMN_STYLES.blocked, board.blocked),
       line("board-open", "Open", COLUMN_STYLES.open, board.open),
       line("board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress),
       line("board-done", "Done", COLUMN_STYLES.done, board.done),
@@ -1889,12 +2022,12 @@ function compactBoard(elements: any, board: any, width: number): unknown {
 }
 
 /**
- * The narrow board (ISS-1252): below BOARD_MIN_COLUMNS the four framed
+ * The narrow board (ISS-1252): below BOARD_MIN_COLUMNS the three framed
  * columns stacked into a strip the person had to scroll, past a cut-off Open
  * card and an empty In progress frame. Owner: "in that view we can just show
  * top 3 in progress and context pressure." So this draws the work in hand
  * only: the In progress heading with its count, up to NARROW_BOARD_CARDS
- * cards, a tail when more exist. Blocked, Open and Done keep their counts in
+ * cards, a tail when more exist. Open and Done keep their counts in
  * the band's summary line under the pane. At most five rows, so the client's
  * inline block shows it whole, without a budget.
  *
@@ -1912,11 +2045,11 @@ function narrowBoard(elements: any, board: any, width: number): unknown {
       key: "narrow-heading",
       ...(fallback ? COLUMN_STYLES.open : COLUMN_STYLES.inProgress),
       wrap: "truncate",
-      children: headingText(fallback ? "Open" : "In progress", cards.length, width),
+      children: headingContent(elements, fallback ? "Open" : "In progress", cards.length, width),
     }),
   ];
   if (cards.length === 0) {
-    rows.push(paneText(elements.Text, { key: "narrow-none", dimColor: true, wrap: "truncate", children: truncate(EMPTY_COLUMN, width) }));
+    rows.push(...emptyColumnRows(elements, fallback ? "board-open" : "board-inprogress", width, 1, false));
   } else {
     cards.slice(0, NARROW_BOARD_CARDS).forEach((card, index) => {
       rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(elements, card, width)] }));
@@ -1936,24 +2069,24 @@ function narrowBoard(elements: any, board: any, width: number): unknown {
 }
 
 /**
- * The four column widths.
+ * The three column widths.
  *
- * Stacked, every card takes the pane. Side by side, the width less the three
- * gaps splits four ways, the leftover cells going to Open; from WIDE_COLUMNS
+ * Stacked, every card takes the pane. Side by side, the width less the two
+ * gaps splits three ways, the leftover cells going to Open; from WIDE_COLUMNS
  * up, a twentieth of the pane moves from Done to In progress, so the board
- * leans toward the work in hand. The four widths and the gaps always sum to
+ * leans toward the work in hand. The three widths and the gaps always sum to
  * the pane's width, whatever the arithmetic above did.
  */
 function columnWidths(width: number, stacked: boolean): number[] {
   if (stacked) return [width, width, width, width];
   const base = Math.max(MIN_COLUMN_WIDTH, Math.floor((width - GAP_TOTAL) / BOARD_COLUMNS));
-  const widths = [base, base, base, base];
-  widths[1] = (widths[1] ?? base) + Math.max(0, width - GAP_TOTAL - base * BOARD_COLUMNS);
+  const widths = [base, base, base];
+  widths[0] = (widths[0] ?? base) + Math.max(0, width - GAP_TOTAL - base * BOARD_COLUMNS);
   if (width >= WIDE_COLUMNS) {
-    const shift = Math.min(Math.round(width * WIDE_SHIFT), (widths[3] ?? base) - MIN_COLUMN_WIDTH);
+    const shift = Math.min(Math.round(width * WIDE_SHIFT), (widths[2] ?? base) - MIN_COLUMN_WIDTH);
     if (shift > 0) {
-      widths[2] = (widths[2] ?? base) + shift;
-      widths[3] = (widths[3] ?? base) - shift;
+      widths[1] = (widths[1] ?? base) + shift;
+      widths[2] = (widths[2] ?? base) - shift;
     }
   }
   return widths;
@@ -1965,7 +2098,7 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
   // rows as the fullest column can show, one of them given up to the tail
   // when anything was left out, so a capped column says so without standing a
   // row taller than the rest.
-  const columns = [board.blocked, board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
+  const columns = [board.open, board.inProgress, board.done] as readonly SidebarBoardCard[][];
   const longest = Math.max(...columns.map((column) => column.length));
   // Never more than the cap, whatever the budget allows: a body of seven rows
   // is six cards and a tail, not seven cards.
@@ -1973,28 +2106,23 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
   if (columns.some((column) => column.length > shown)) shown = Math.max(0, Math.min(shown, body - 1));
   const omitted = columns.some((column) => column.length > shown);
   const height = Math.max(1, Math.min(body, shown + (omitted ? 1 : 0)));
-  // Left to right in the order the work moves: what is stuck, what can be
+  // Left to right in the order the work moves: what can be
   // picked up, what is being done, what is finished.
   return elements.Box({
     key: "board",
     flexDirection: stacked ? "column" : "row",
     gap: stacked ? 0 : COLUMN_GAP,
     children: [
-      boardColumn(elements, "board-blocked", "Blocked", COLUMN_STYLES.blocked, board.blocked, widths[0]!, shown, height),
-      boardColumn(elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[1]!, shown, height),
-      boardColumn(elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[2]!, shown, height),
-      boardColumn(elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[3]!, shown, height),
+      boardColumn(elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[0]!, shown, height),
+      boardColumn(elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height),
+      boardColumn(elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[2]!, shown, height),
     ],
   });
 }
 
 /**
- * The header row: the wordmark, and nothing else.
- *
- * No mark, no phase, and no longer the context fill. The owner had the
- * rasterized S here and took it out, the phase went when the board stopped
- * being one phase's, and the fill moved to the foot of the pane, so what is
- * left is the brand and one row of height.
+ * The header keeps identity and a one-cell activity indicator on one row.
+ * Context pressure stays in the footer; the phase timeline has its own rows.
  */
 /**
  * The Mod's own version, drawn in the header (ISS-1266). The Mod cannot
@@ -2010,6 +2138,7 @@ function headerNode(elements: any): unknown {
   // the ledger sits in, so two checkouts of one project read apart; the
   // config's `project` name would say "storybloq" for CPM.
   const name = projectFolderName();
+  const activity = motion.activity();
   return elements.Box({
     key: "header",
     flexDirection: "row",
@@ -2020,6 +2149,7 @@ function headerNode(elements: any): unknown {
         wrap: "truncate",
         children: [
           paneText(elements.Text, { key: "wordmark", bold: true, children: "Storybloq" }),
+          paneText(elements.Text, { key: "activity", dimColor: !activity.bright, bold: activity.bright, children: ` ${activity.glyph}` }),
           paneText(elements.Text, { key: "version", dimColor: true, children: ` (${MOD_VERSION})` }),
           ...(name === "" ? [] : [paneText(elements.Text, { key: "project", bold: true, children: ` - ${name}` })]),
         ],
@@ -2050,14 +2180,36 @@ function projectFolderName(): string {
  * No right margin here: the engine's close mark is a top-right thing, and the
  * header is what keeps clear of it.
  */
+export function contextLabel(context: number | null, width: number, meterValue = context): string {
+  if (width <= 0) return "";
+  if (context === null || !Number.isFinite(context)) return truncate(width < 6 ? "--" : width < 14 ? "-- ctx" : "context --", width);
+  const value = Math.max(0, Math.min(100, Math.round(context)));
+  if (width < 14) {
+    const compact = `${value}% ctx`;
+    return truncate(cellWidth(compact) <= width ? compact : `${value}%`, width);
+  }
+  const cells = width >= 48 ? 8 : width >= 32 ? 4 : 0;
+  const meterPercent = meterValue !== null && Number.isFinite(meterValue) ? Math.max(0, Math.min(100, meterValue)) : value;
+  const filled = Math.round(meterPercent / 100 * cells);
+  const meter = cells ? ` [${"━".repeat(filled)}${"·".repeat(cells - filled)}]` : "";
+  return `context${meter} ${value}%`;
+}
+
+function contextNode(elements: any, context: number | null, width: number): unknown {
+  const high = context !== null && Number.isFinite(context) && context >= 80;
+  return paneText(elements.Text, {
+    key: "context", dimColor: !high, bold: high, wrap: "truncate", children: contextLabel(context, width, motion.meterValue()),
+  });
+}
+
 function footerNode(
   elements: any,
   bySeverity: Readonly<Record<string, number>>,
   context: number | null,
   width: number,
 ): unknown {
-  const contextText = context === null ? "" : `context ${context}%`;
-  const room = Math.max(1, width - cellWidth(contextText) - 1);
+  const contextText = contextLabel(context, width);
+  const room = Math.max(0, width - cellWidth(contextText) - 1);
   const counts = SEVERITY_ORDER.map((severity) => bySeverity[severity.key] ?? 0);
   // A ledger with nothing open says so in a word. Four zeros is four numbers
   // to read before finding out there is nothing to read, and it looks like a
@@ -2077,7 +2229,7 @@ function footerNode(
           overflow: "hidden",
           children: [paneText(elements.Text, { dimColor: true, wrap: "truncate", children: NO_ISSUES })],
         }),
-        paneText(elements.Text, { key: "context", wrap: "truncate", children: contextText }),
+        contextNode(elements, context, width),
       ],
     });
   }
@@ -2119,13 +2271,14 @@ function footerNode(
         overflow: "hidden",
         children: [paneText(elements.Text, { wrap: "truncate", children: parts })],
       }),
-      paneText(elements.Text, { key: "context", wrap: "truncate", children: contextText }),
+      contextNode(elements, context, width),
     ],
   });
 }
 
 export function registerSidebar(on: On, _options: Options): void {
   forgetEverything();
+  motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
 
   // The pane. `ui.render` fires once per input value and again on
   // `$.ui.invalidate("ui.render")`, so this hook only draws what the refresh
@@ -2157,11 +2310,14 @@ export function registerSidebar(on: On, _options: Options): void {
       // The narrow board is at most five rows and skips the blank rows, so it
       // needs no budget: it is the inline strip on a small window, where
       // every row is paid for.
-      const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked);
+      const phaseWindow = warm && projection ? phaseTimelineLayout(projection.phases, width, e.props?.scroll?.bodyRows, placement) : null;
+      const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked, phaseWindow ? PHASE_STRIP_ROWS : 0);
       // Use the actual pane window: viewport.rows includes the transcript
       // and prompt and is never the available height of an inline pane.
-      const intro = logoLayout(width, e.props?.scroll?.bodyRows, placement);
-      if (_options["startupLogo"] !== false && !logoFinished && intro) {
+      const bodyRows = e.props?.scroll?.bodyRows;
+      const intro = typeof bodyRows === "number" && bodyRows <= 1 ? null
+        : logoLayout(width, typeof bodyRows === "number" ? bodyRows - 1 : undefined, placement);
+      if (motion.enabled && _options["startupLogo"] !== false && !logoFinished && intro) {
         logoStarted = true;
         const art = logoFrame(intro.columns, logoElapsed);
         return Box({ flexDirection: "column", children: [
@@ -2171,16 +2327,19 @@ export function registerSidebar(on: On, _options: Options): void {
             Text({ key: "inset", children: " ".repeat(intro.left) }),
             ...cells.map((cell, x) => Text({ key: `dot-${x}`, color: cell.color, children: cell.glyph })),
           ] })),
+          contextNode(elements, contextPercent, width),
         ] });
       }
       const rows: unknown[] = [headerNode(elements)];
+      if (phaseWindow && projection) rows.push(phaseTimelineNode(elements, projection.phases, phaseWindow));
       if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
         // Nothing to draw a board from yet: the one line that says why.
-        rows.push(paneText(Text, { children: truncate(summaryLine(false), width) }));
+        rows.push(paneText(Text, { children: truncate(summaryLine(), width) }));
+        rows.push(contextNode(elements, contextPercent, width));
       } else if (layout === "narrow") {
         rows.push(narrowBoard(elements, projection.board, width));
-        rows.push(footerNode(elements, projection.issuesBySeverity, contextPercent, width));
+        rows.push(Box({ key: "footer", flexDirection: "row", justifyContent: "flex-end", children: [contextNode(elements, contextPercent, width)] }));
         if (sessionActive) {
           rows.push(paneText(elements.Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
         }
@@ -2207,6 +2366,9 @@ export function registerSidebar(on: On, _options: Options): void {
     // been DRAWN: a pane opened narrow stays parked after a resize (ISS-1235),
     // and a wide terminal with a parked pane still has to show the numbers.
     if (e.component === "AbovePrompt" && sidebarEnabled) {
+      // Also catches a Mod reloaded during an already-running main turn.
+      if (!e.props?.view?.agentId && typeof e.props?.isWorking === "boolean") motion.setWorking(e.props.isWorking);
+      bandDrawn = false;
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       const narrow = columns < DOCK_COLUMNS;
       if (narrow) {
@@ -2231,6 +2393,7 @@ export function registerSidebar(on: On, _options: Options): void {
           });
       }
       if (columns > 0 && (narrow || !paneDrawn)) {
+        bandDrawn = true;
         const { Text } = $.ui.resolve(e);
         // The hint only while there is no board on screen: a placed pane keeps
         // its seat when the window shrinks (inline, ISS-1247), and the band
@@ -2261,6 +2424,7 @@ export function registerSidebar(on: On, _options: Options): void {
     // On, whatever happens next: the refresh hooks stay armed so the pane can
     // appear the moment a ledger does.
     sidebarEnabled = true;
+    motion = new DashboardMotion(_options["motion"] !== false, _options["changeHighlights"] !== false);
     // ISS-1239: pin the root for the session, here and nowhere else. A reload
     // fires this event again and re-pins against the new directory, which is
     // wanted; `turn.complete` and `tool.call` must never re-resolve, which is
@@ -2322,15 +2486,26 @@ export function registerSidebar(on: On, _options: Options): void {
     return next(e);
   });
 
+  on("turn.start", ($: any, e: any, next: (e: any) => unknown) => {
+    if (uiAvailable && sidebarEnabled && !noLedger) {
+      motion.setWorking(true, e.turnId);
+      $.ui.invalidate("ui.render");
+    }
+    return next(e);
+  });
+
   // A turn is the unit the acceptance names: a `.story/` write during it shows
   // up by the next prompt.
   on("turn.complete", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled) return next(e);
+    motion.finishTurn(e.turnId, e.agentId);
+    $.ui.invalidate("ui.render");
     if (noLedger) {
       await attachIfLedgerArrived($);
       return next(e);
     }
     contextPercent = await readContextFill($);
+    motion.setContext(contextPercent);
     await readHeader($);
     requestScan($);
     return next(e);
@@ -2362,6 +2537,7 @@ export function registerSidebar(on: On, _options: Options): void {
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!uiAvailable || !sidebarEnabled || noLedger) return next(e);
     contextPercent = await readContextFill($);
+    motion.setContext(contextPercent);
     $.ui.invalidate("ui.render");
     return next(e);
   });

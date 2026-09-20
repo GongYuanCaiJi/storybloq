@@ -255,7 +255,7 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.totalTickets).toBe(11);
   });
 
-  it("splits the whole project's leaves into four columns that partition them", async () => {
+  it("splits the whole project's leaves into three columns that partition them", async () => {
     root = await writeFixture();
     const { state } = await loadProject(root);
     const compact = buildCompactStatusData(state, [], [], undefined, [], undefined, [], {
@@ -263,7 +263,7 @@ describe("sidebar projection (T-508)", () => {
       warnings: [],
     });
     const mine = projectSidebar(await readAsTheModDoes(root));
-    const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
+    const columns = [...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
     // T-513 put issues on the board, and the CLI's compact payload carries no
     // issue identity at all, so the equalities below are restated rather than
     // extended: the TICKET cards are what the CLI's ticket figures answer to,
@@ -277,17 +277,17 @@ describe("sidebar projection (T-508)", () => {
     const ids = ticketsOf(columns).sort();
 
     // The board is the project's, so its ticket columns are the CLI's own
-    // figures: the three unfinished ones add up to openTickets, Done is
-    // completeTickets and the four together are every leaf, once each.
+    // figures: the two unfinished ones add up to openTickets, Done is
+    // completeTickets and the three together are every leaf, once each.
     expect(
-      ticketsOf(mine.board.blocked).length + ticketsOf(mine.board.open).length + ticketsOf(mine.board.inProgress).length,
+      ticketsOf(mine.board.open).length + ticketsOf(mine.board.inProgress).length,
     ).toBe(compact.openTickets);
     expect(ticketsOf(mine.board.done).length).toBe(compact.completeTickets);
     expect(ids.length).toBe(compact.totalTickets);
-    expect(ticketsOf(mine.board.blocked).length).toBe(compact.blockedTickets);
+    expect(ticketsOf([...mine.board.open, ...mine.board.inProgress].filter(c => c.blocked)).length).toBe(compact.blockedTickets);
     // No issue is ever blocked: one carries no blockedBy for anything to
     // point at. M-ISSUE-IN-BLOCKED files one there and this fails.
-    expect(issuesOf(mine.board.blocked)).toEqual([]);
+    expect(issuesOf([...mine.board.open, ...mine.board.inProgress].filter(c => c.blocked))).toEqual([]);
 
     // The other side of the partition, read from the CLI: every active leaf
     // of the project, once each. A multiset and not a set, because this
@@ -337,10 +337,13 @@ describe("sidebar projection (T-508)", () => {
     // ticket order, Done in reverse: the last thing finished reads first.
     // Tickets first in every column, then the issues, worst severity first.
     expect(mine.board.open.map((c) => c.id)).toEqual([
+      "T-005",
+      "T-006",
       "T-010",
       "T-010",
       "T-013",
       "T-020",
+      "T-021",
       "ISS-001",
       "ISS-003",
       "ISS-000",
@@ -349,14 +352,12 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.board.done.map((c) => c.id)).toEqual(["T-022", "T-004", "T-002", "ISS-004"]);
   });
 
-  it("gives a blocked ticket its own column rather than leaving it among the open", async () => {
+  it("marks blocked tickets inside their underlying status column", async () => {
     root = await writeFixture();
     const mine = projectSidebar(await readAsTheModDoes(root));
-    // T-021 is open and waits on T-003, which is in progress. Blocked and Open
-    // are disjoint: M-BLOCKED-UNMARKED drops the split and T-021 turns up in
-    // Open, where nothing says it cannot be started.
-    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-005", "T-006", "T-021"]);
-    expect(mine.board.open.map((c) => c.id)).not.toContain("T-021");
+    // T-021 stays Open with a blocked attribute, and appears only once.
+    expect([...mine.board.open, ...mine.board.inProgress].filter(c => c.blocked).map((c) => c.id)).toEqual(["T-005", "T-006", "T-021"]);
+    expect(mine.board.open.map((c) => c.id)).toContain("T-021");
   });
 
   it("keeps a record whose status is none of the ledger's in a column", async () => {
@@ -405,7 +406,7 @@ describe("sidebar projection (T-508)", () => {
       handoverFilenames: [],
     };
     const mine = projectSidebar(input);
-    const columns = [...mine.board.blocked, ...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
+    const columns = [...mine.board.open, ...mine.board.inProgress, ...mine.board.done];
 
     // The partition: five leaves and three issues in, eight cards out, once
     // each.
@@ -425,9 +426,9 @@ describe("sidebar projection (T-508)", () => {
     expect(mine.openIssues).toBe(2);
     // No blocker at all, and a blocker that is already complete: both are
     // pickable, so both are Open whatever their stored status says.
-    expect(mine.board.open.map((c) => c.id)).toEqual(["T-100", "T-101", "ISS-100", "ISS-101"]);
-    // An unmet blocker still wins over the odd status.
-    expect(mine.board.blocked.map((c) => c.id)).toEqual(["T-102"]);
+    expect(mine.board.open.map((c) => c.id)).toEqual(["T-100", "T-101", "T-102", "ISS-100", "ISS-101"]);
+    // An unmet blocker is marked without changing the stored status grouping.
+    expect([...mine.board.open, ...mine.board.inProgress].filter(c => c.blocked).map((c) => c.id)).toEqual(["T-102"]);
   });
 
   it("orders every column the same way whatever order the files were read in", async () => {
@@ -479,15 +480,15 @@ describe("sidebar projection (T-508)", () => {
     const forwards = projectSidebar(input);
     const backwards = projectSidebar({ ...input, tickets: [...tickets].reverse() });
 
-    expect(forwards.board.blocked.map((c) => c.id)).toEqual(["T-001", "T-002", "T-003"]);
+    expect(forwards.board.open.filter(c => c.blocked).map((c) => c.id)).toEqual(["T-001", "T-002", "T-003"]);
     expect(forwards.board.inProgress.map((c) => c.id)).toEqual(["T-004", "T-005", "T-006"]);
-    expect(forwards.board.open.map((c) => c.id)).toEqual(["T-007", "T-009", "T-500", "T-500"]);
+    expect(forwards.board.open.map((c) => c.id)).toEqual(["T-001", "T-002", "T-003", "T-007", "T-009", "T-500", "T-500"]);
     // The pair is ordered by canonical id, so the aa11 one comes first, and
     // the titles say which is which.
-    expect(forwards.board.open.slice(2).map((c) => c.title)).toEqual(["first", "second"]);
-    expect(backwards.board.open.slice(2).map((c) => c.title)).toEqual(["first", "second"]);
+    expect(forwards.board.open.slice(-2).map((c) => c.title)).toEqual(["first", "second"]);
+    expect(backwards.board.open.slice(-2).map((c) => c.title)).toEqual(["first", "second"]);
     // Same ledger, opposite read order, same board.
-    expect(backwards.board.blocked.map((c) => c.id)).toEqual(forwards.board.blocked.map((c) => c.id));
+    expect(backwards.board.open.filter(c => c.blocked).map((c) => c.id)).toEqual(forwards.board.open.filter(c => c.blocked).map((c) => c.id));
     expect(backwards.board.inProgress.map((c) => c.id)).toEqual(forwards.board.inProgress.map((c) => c.id));
     expect(backwards.board.open.map((c) => c.id)).toEqual(forwards.board.open.map((c) => c.id));
 

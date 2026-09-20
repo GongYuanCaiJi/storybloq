@@ -16,7 +16,7 @@
  * pinned its root does not notice the move at all.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION } from "../../plugins/storybloq/hooks/sidebar.js";
+import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION, contextLabel, phaseTimelineLayout, phaseTimelineTitle } from "../../plugins/storybloq/hooks/sidebar.js";
 
 const PANE_ID = "storybloq";
 
@@ -31,6 +31,7 @@ interface FsCall {
 class FakeFs {
   cwd = "/repo";
   readonly files = new Map<string, string>();
+  private revisions = new Map<string, number>();
   readonly dirs = new Set<string>();
   readonly calls: FsCall[] = [];
   /** path (as resolved) -> errno to throw instead of answering. */
@@ -63,6 +64,7 @@ class FakeFs {
 
   addFile(path: string, content: string): void {
     this.files.set(path, content);
+    this.revisions.set(path, (this.revisions.get(path) ?? 0) + 1);
     let dir = path.slice(0, path.lastIndexOf("/"));
     while (dir.length > 0) {
       this.dirs.add(dir);
@@ -122,7 +124,7 @@ class FakeFs {
       error.code = "ENOENT";
       throw error;
     }
-    return { mtimeMs: 1 };
+    return { mtimeMs: this.revisions.get(resolved) ?? 1 };
   }
 
   /** Every ledger path the Mod asked for that was not absolute. */
@@ -169,7 +171,7 @@ class Harness {
   private timers: (() => void)[] = [];
   readonly $: any;
 
-  constructor(startupLogo = false) {
+  constructor(startupLogo = false, changeHighlights = true, motion = true) {
     const fs = this.fs;
     this.$ = {
       fs: {
@@ -206,7 +208,7 @@ class Harness {
       this.handlers.set(event, hook);
       return { catch: () => undefined };
     }) as any;
-    registerSidebar(on, { startupLogo });
+    registerSidebar(on, { startupLogo, changeHighlights, motion });
   }
 
   async fire(event: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -598,7 +600,7 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     return JSON.stringify(node);
   }
 
-  it("shows In progress with three cards and a tail, the footer, and nothing of the four columns", async () => {
+  it("shows In progress with three cards and a tail, the footer, and nothing of the three columns", async () => {
     seedLedger(h.fs, "/repo");
     for (const id of ["T-003", "T-004", "T-005", "T-006", "T-007"]) {
       h.fs.addFile(`/repo/.story/tickets/${id}.json`, ticket(id, "inprogress"));
@@ -606,7 +608,8 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     await h.start("/repo");
     await h.settle();
     const drawn = pane(45);
-    expect(drawn).toContain('"In progress 6"');
+    expect(drawn).toContain('"In progress"');
+    expect(drawn).toContain('"children":" 6"');
     expect(drawn).toContain('"narrow-card-0"');
     expect(drawn).toContain('"narrow-card-2"');
     expect(drawn).not.toContain('"narrow-card-3"');
@@ -625,13 +628,14 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     await h.start("/repo");
     await h.settle();
     const drawn = pane(45);
-    expect(drawn).toContain('"Open 3"');
+    expect(drawn).toContain('"Open"');
+    expect(drawn).toContain('"children":" 3"');
     expect(drawn).toContain('"narrow-card-0"');
     expect(drawn).not.toContain('"narrow-none"');
     expect(drawn).not.toContain('"narrow-tail"');
   });
 
-  it("keeps the four-column board from 60 body columns up", async () => {
+  it("keeps the three-column board from 60 body columns up", async () => {
     seedLedger(h.fs, "/repo");
     await h.start("/repo");
     await h.settle();
@@ -641,7 +645,7 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
   });
 });
 
-describe("ISS-1254: a docked pane stacks the four columns at any width", () => {
+describe("ISS-1254: a docked pane stacks the three columns at any width", () => {
   let h: Harness;
   beforeEach(() => {
     h = new Harness();
@@ -671,7 +675,7 @@ describe("ISS-1254: a docked pane stacks the four columns at any width", () => {
     return board(node.children ?? null);
   }
 
-  it("docked: the sidebar, four framed columns one under another, at 40, 60 and 156 body columns", async () => {
+  it("docked: the sidebar, three framed columns one under another, at 40, 60 and 156 body columns", async () => {
     seedLedger(h.fs, "/repo");
     await h.start("/repo");
     await h.settle();
@@ -679,7 +683,7 @@ describe("ISS-1254: a docked pane stacks the four columns at any width", () => {
       const node = board(pane(width, "dock"));
       expect(node?.flexDirection, String(width)).toBe("column");
       const drawn = JSON.stringify(node);
-      expect(drawn).toContain('"board-blocked"');
+      expect(drawn).not.toContain('"board-blocked"');
       expect(drawn).toContain('"board-done"');
       expect(drawn).not.toContain('"narrow-heading"');
     }
@@ -748,6 +752,7 @@ describe("Storyfield startup", () => {
     await h.start("/repo");
     await h.settle();
     expect(h.render()).toContain("storyfield-0");
+    expect(findUi(JSON.parse(h.render()), "context").children).toBe("context --");
     await h.settle(100);
     expect(h.render()).toContain("T-001");
     expect(h.render()).not.toContain("storyfield-0");
@@ -782,4 +787,305 @@ it("resizes the active intro between inline and dock without restarting its cloc
   draw(156, 8, "inline");
   await h.settle(40);
   expect(JSON.stringify(draw(40, 30, "dock"))).not.toContain("storyfield-0");
+});
+
+function findUi(node: any, key: string): any {
+  if (!node || typeof node !== "object") return undefined;
+  if (node.key === key) return node;
+  for (const child of Array.isArray(node) ? node : [node.children]) {
+    const found = findUi(child, key);
+    if (found) return found;
+  }
+}
+
+describe("dashboard hierarchy and state feedback", () => {
+  it("keeps blocked work in progress and marks it, with a quiet leading ID and emphasized title", async () => {
+    const h = new Harness();
+    seedLedger(h.fs, "/repo");
+    const record = JSON.parse(ticket("T-001", "inprogress"));
+    record.blockedBy = ["T-002"];
+    h.fs.addFile("/repo/.story/tickets/T-001.json", JSON.stringify(record));
+    await h.start("/repo"); await h.settle();
+    const tree = JSON.parse(h.render());
+    expect(findUi(tree, "board-blocked")).toBeUndefined();
+    const active = findUi(tree, "board-inprogress");
+    const row = findUi(active, "ticket:T-001");
+    expect(row.children[2]).toMatchObject({ children: "Ticket T-001", bold: true });
+    expect(JSON.stringify(row)).not.toContain('"underline":true');
+    expect(row.children[1]).toMatchObject({ children: "[Blocked] ", color: "yellow" });
+    expect(row.children[0]).toMatchObject({ children: "T-001 ", dimColor: true });
+    expect(findUi(active, "board-inprogress-heading").color).toBe("cyan");
+  });
+
+  it("highlights a status change once, then settles without rearranging the board", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    expect(h.render()).not.toContain('"underline":true');
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    await h.fire("turn.complete"); await h.settle(8);
+    const tree = JSON.parse(h.render());
+    const done = findUi(tree, "board-done");
+    expect(findUi(done, "ticket:T-001").children[2].dimColor).toBe(true);
+    expect(JSON.stringify(findUi(done, "ticket:T-001"))).toContain('"underline":true');
+    expect(findUi(done, "board-done-heading").children[1].bold).toBe(true);
+    await h.settle(70);
+    expect(h.render()).not.toContain('"underline":true');
+    await h.fire("turn.complete"); await h.settle(8);
+    expect(h.render()).not.toContain('"underline":true');
+  });
+
+  it("can disable change highlights", async () => {
+    const h = new Harness(false, false); seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    await h.fire("turn.complete"); await h.settle(8);
+    expect(h.render()).not.toContain('"underline":true');
+  });
+
+  it("fits context meters to the available width and keeps numeric usage", () => {
+    expect(contextLabel(null, 80)).toBe("context --");
+    expect(contextLabel(NaN, 80)).toBe("context --");
+    expect(contextLabel(null, 8)).toBe("-- ctx");
+    expect(contextLabel(0, 80)).toBe("context [········] 0%");
+    expect(contextLabel(100, 80)).toBe("context [━━━━━━━━] 100%");
+    expect(contextLabel(50, 40)).toBe("context [━━··] 50%");
+    expect(contextLabel(88, 20)).toBe("context 88%");
+    expect(contextLabel(88, 10)).toBe("88% ctx");
+  });
+});
+
+describe("context pressure at every width", () => {
+  it("keeps an honest reading in narrow and docked footers, including before usage arrives", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    const draw = (width: number, placement: string) => h.handlers.get("ui.render")!(h.$, {
+      component: "Pane", requestId: PANE_ID,
+      props: { bodyColumns: width, placement, scroll: { bodyRows: 30 } }, viewport: { columns: width + 4, rows: 40 },
+    }, () => null);
+    for (const usage of [null, 0, 88, 100, null]) {
+      h.$.session.usage = async () => usage === null ? { context: { window: 200_000 } } : { context: { percent: usage } };
+      await h.fire("turn.complete"); await h.settle();
+      for (const placement of ["inline", "dock"]) {
+        for (const width of [4, 8, 12, 20, 32, 45, 56, 100, 160]) {
+          const tree = draw(width, placement);
+          const context = findUi(tree, "context");
+          expect(context.children).toContain(usage === null ? "--" : `${usage}%`);
+          expect(context.bold).toBe(usage !== null && usage >= 80);
+          const issues = findUi(findUi(tree, "footer"), "issues");
+          if (placement === "inline" && width < 60) expect(issues).toBeUndefined();
+          else expect(issues).toBeDefined();
+          expect((issues?.width ?? 0) + context.children.length).toBeLessThanOrEqual(width);
+        }
+      }
+    }
+  });
+
+  it("reserves context in the fallback band even with a long phase name", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    h.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: [{ id: "p1", name: "A very long phase title ".repeat(10) }] }));
+    await h.start("/repo"); await h.settle();
+    for (const usage of [null, 88, 100]) {
+      h.$.session.usage = async () => usage === null ? {} : { context: { percent: usage } };
+      await h.fire("turn.complete"); await h.settle();
+      for (const width of [4, 8, 20, 45, 80, 120]) {
+        const band = h.handlers.get("ui.render")!(h.$, {
+          component: "AbovePrompt", viewport: { columns: width, rows: 30 }, props: {},
+        }, () => null) as any;
+        expect(band.children.length).toBeLessThanOrEqual(width);
+        expect(band.children).toContain(usage === null ? "--" : `${usage}%`);
+      }
+    }
+  });
+});
+
+describe("live animation hooks", () => {
+  it("uses real turn lifecycle, preserves activity across worker completions, and handles reload state", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    const activity = () => findUi(JSON.parse(h.render()), "activity");
+    await h.fire("prompt.submit", { text: "not a started turn" });
+    expect(activity().children).toBe(" ·");
+    await h.fire("turn.start", { turnId: "main", text: "build" });
+    await h.settle(20);
+    expect(activity().children).toBe(" ●");
+    await h.fire("turn.complete", { turnId: "child", agentId: "worker" });
+    expect(activity().children).toBe(" ●");
+    await h.fire("turn.complete", { turnId: "main", reason: "aborted" });
+    expect(activity().children).toBe(" ·");
+    const above = (isWorking: boolean) => h.handlers.get("ui.render")!(h.$, {
+      component: "AbovePrompt", viewport: { columns: 160 }, props: { isWorking, view: {} },
+    }, () => null);
+    above(true); await h.settle(20);
+    expect(activity().children).toBe(" ●");
+    above(false);
+    expect(activity().children).toBe(" ·");
+  });
+
+  it("shows the actual context percentage immediately while the meter catches up", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    h.$.session.usage = async () => ({ context: { percent: 20 } });
+    await h.start("/repo"); await h.settle();
+    h.$.session.usage = async () => ({ context: { percent: 90 } });
+    await h.fire("turn.complete");
+    const context = () => findUi(JSON.parse(h.render()), "context");
+    expect(context()).toMatchObject({ children: "context [━━······] 90%", bold: true });
+    await h.settle(28);
+    expect(context().children).toBe("context [━━━━━━━·] 90%");
+    h.$.session.usage = async () => ({ context: { percent: 10 } });
+    await h.fire("session.compact");
+    expect(context().children).toBe("context [━━━━━━━·] 10%");
+    await h.settle(28);
+    expect(context().children).toBe("context [━·······] 10%");
+  });
+
+  it("animates a phase handoff at a fixed size and leaves the final statuses intact", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    h.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: [{ id: "p1", name: "Foundation" }, { id: "p2", name: "Build" }] }));
+    h.fs.addFile("/repo/.story/tickets/T-002.json", JSON.stringify({ ...JSON.parse(ticket("T-002", "open")), phase: "p2" }));
+    await h.start("/repo"); await h.settle();
+    const draw = () => h.handlers.get("ui.render")!(h.$, {
+      component: "Pane", requestId: PANE_ID, props: { bodyColumns: 156, placement: "inline", scroll: { bodyRows: 18 } },
+      viewport: { columns: 160, rows: 40 },
+    }, () => null) as any;
+    const baseline = draw();
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    h.fs.addFile("/repo/.story/tickets/T-002.json", JSON.stringify({ ...JSON.parse(ticket("T-002", "inprogress")), phase: "p2" }));
+    await h.fire("turn.complete"); await h.settle(8);
+    expect(JSON.stringify(findUi(draw(), "phase-p1"))).toMatch(/◔|◑|◕|●/);
+    await h.settle(60);
+    expect(JSON.stringify(findUi(draw(), "phase-timeline"))).toContain("•");
+    expect(draw().children.length).toBe(baseline.children.length);
+    await h.settle(30);
+    const settled = JSON.stringify(findUi(draw(), "phase-timeline"));
+    expect(settled).toContain("✓"); expect(settled).toContain("◎");
+    expect(settled).not.toContain("•");
+    await h.fire("turn.complete"); await h.settle(8);
+    expect(JSON.stringify(findUi(draw(), "phase-timeline"))).toBe(settled);
+  });
+
+  it("disables startup and ongoing animation with one switch while retaining live state", async () => {
+    const h = new Harness(true, true, false); seedLedger(h.fs, "/repo");
+    await h.start("/repo"); await h.settle();
+    await h.fire("turn.start", { turnId: "main" });
+    expect(findUi(JSON.parse(h.render()), "activity").children).toBe(" ●");
+    expect(h.render()).not.toContain("storyfield-0");
+    h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
+    await h.fire("turn.complete", { turnId: "main" }); await h.settle(8);
+    expect(findUi(JSON.parse(h.render()), "ticket:T-001").children[2].children).toBe("Ticket T-001");
+    let invalidations = 0;
+    h.$.ui.invalidate = () => { invalidations++; };
+    await h.fire("turn.start", { turnId: "next" });
+    invalidations = 0;
+    const before = h.render(); await h.settle(80);
+    expect(h.render()).toBe(before);
+    expect(invalidations).toBe(0);
+  });
+});
+
+it("highlights dependency resolution without moving the blocked story out of its status", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  const blocked = JSON.parse(ticket("T-001", "inprogress"));
+  blocked.blockedBy = ["T-002"];
+  h.fs.addFile("/repo/.story/tickets/T-001.json", JSON.stringify(blocked));
+  await h.start("/repo"); await h.settle();
+  h.fs.addFile("/repo/.story/tickets/T-002.json", ticket("T-002", "complete"));
+  await h.fire("turn.complete"); await h.settle(8);
+  const active = findUi(JSON.parse(h.render()), "board-inprogress");
+  const row = findUi(active, "ticket:T-001");
+  expect(JSON.stringify(row.children[2])).toContain('"underline":true');
+  expect(row.children[1].children).toBe("✓ Ready ");
+  await h.settle(80);
+  expect(findUi(JSON.parse(h.render()), "ticket:T-001").children[1].children).toBe("");
+});
+
+const roadmapPhases = Array.from({ length: 20 }, (_, index) => ({
+  id: `p${index}`, name: `Phase name ${index}`, label: `PHASE ${index}`,
+  status: (index === 9 || index === 10 ? "inprogress" : index === 4 || index > 12 ? "notstarted" : "complete") as "inprogress" | "notstarted" | "complete",
+  leafCount: 1,
+}));
+
+describe("inline phase overview", () => {
+  it("shows only in a wide inline pane with room for the board", () => {
+    for (const [width, rows, placement] of [[99, 40, "inline"], [180, 12, "inline"], [180, 40, "dock"], [180, 40, null]] as const) {
+      expect(phaseTimelineLayout(roadmapPhases, width, rows, placement)).toBeNull();
+    }
+    expect(phaseTimelineLayout(roadmapPhases, 180, undefined, "inline")).toBeNull();
+    expect(phaseTimelineLayout([], 180, 40, "inline")).toBeNull();
+    expect(phaseTimelineLayout(roadmapPhases, 100, 13, "inline")).not.toBeNull();
+  });
+
+  it("keeps the primary active phase visible with honest overflow counts", () => {
+    for (const width of [100, 120, 156, 189, 300]) {
+      const window = phaseTimelineLayout(roadmapPhases, width, 30, "inline")!;
+      expect(window.current).toBe(9);
+      expect(window.start).toBe(8);
+      expect(window.count).toBe(3);
+      expect(window.before + window.count + window.after).toBe(20);
+      expect(window.slot * window.count + 8 + 2 * window.inset).toBeLessThanOrEqual(width);
+    }
+    const allDone = roadmapPhases.map(phase => ({ ...phase, status: "complete" as const }));
+    for (const focus of [0, 1, 18, 19]) {
+      const phases = allDone.map((phase, index) => ({ ...phase, status: index === focus ? "inprogress" as const : phase.status }));
+      const window = phaseTimelineLayout(phases, 189, 30, "inline")!;
+      expect(window.start).toBe(Math.max(0, focus - 1));
+      expect(window.start + window.count).toBe(Math.min(phases.length, focus + 2));
+      expect(window.before + window.count + window.after).toBe(phases.length);
+    }
+    const complete = phaseTimelineLayout(allDone, 140, 30, "inline")!;
+    expect(complete.current).toBe(-1);
+    expect(complete.after).toBe(0);
+    expect(complete.count).toBe(2);
+  });
+
+  it("renders actual out-of-order statuses and removes the strip when docking", async () => {
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    h.fs.files.delete("/repo/.story/tickets/T-001.json");
+    h.fs.files.delete("/repo/.story/tickets/T-002.json");
+    h.fs.addFile("/repo/.story/roadmap.json", JSON.stringify({ phases: roadmapPhases }));
+    for (let i = 0; i < 20; i++) {
+      h.fs.addFile(`/repo/.story/tickets/phase-${i}.json`, JSON.stringify({
+        id: `TP-${i}`, title: `Story ${i}`, phase: `p${i}`, order: i,
+        status: roadmapPhases[i]!.status === "complete" ? "complete" : roadmapPhases[i]!.status === "inprogress" ? "inprogress" : "open",
+      }));
+    }
+    await h.start("/repo"); await h.settle();
+    const draw = (width: number, rows: number, placement: string) => h.handlers.get("ui.render")!(h.$, {
+      component: "Pane", requestId: PANE_ID, props: { bodyColumns: width, placement, scroll: { bodyRows: rows } },
+      viewport: { columns: width + 4, rows: 60 },
+    }, (e: any) => e);
+    const inline = draw(189, 18, "inline");
+    const timeline = findUi(inline, "phase-timeline");
+    expect(timeline).toBeDefined();
+    expect(findUi(inline, "header")).toBeDefined();
+    expect(JSON.stringify(findUi(timeline, "phase-p9"))).toContain("◎");
+    expect(JSON.stringify(findUi(timeline, "phase-p10"))).toContain("●");
+    expect(findUi(timeline, "phase-p7")).toBeUndefined();
+    expect(findUi(timeline, "phase-p11")).toBeUndefined();
+    expect(JSON.stringify(findUi(timeline, "phase-p8"))).toContain("✓");
+    expect(JSON.stringify(timeline)).not.toContain("PHASE 9");
+    expect(JSON.stringify(timeline)).not.toContain("current");
+    expect(JSON.stringify(timeline)).not.toContain("earlier");
+    expect(findUi(timeline, "phase-p9").children).toHaveLength(2);
+    expect(findUi(timeline, "phase-p9").children[1].bold).toBe(true);
+    expect(findUi(draw(189, 18, "dock"), "phase-timeline")).toBeUndefined();
+    expect(findUi(draw(189, 18, "dock"), "header")).toBeDefined();
+    expect(findUi(draw(90, 18, "inline"), "phase-timeline")).toBeUndefined();
+    expect(findUi(draw(90, 18, "inline"), "header")).toBeDefined();
+    expect(findUi(draw(189, 10, "inline"), "phase-timeline")).toBeUndefined();
+    expect(findUi(draw(189, 18, "inline"), "phase-timeline")).toBeDefined();
+    const height = (node: any): number => {
+      if (node.node === "Text") return 1;
+      const children = node.children || [];
+      return (node.flexDirection === "row" ? Math.max(0, ...children.map(height)) : children.reduce((n: number, child: any) => n + height(child), 0)) + (node.borderStyle ? 2 : 0);
+    };
+    for (const rows of [13, 14, 15, 18, 30]) expect(height(draw(189, rows, "inline"))).toBeLessThanOrEqual(rows);
+  });
+});
+
+
+it("shortens phase names at word boundaries while leaving roadmap names intact", () => {
+  expect(phaseTimelineTitle("CLI + MCP Server")).toBe("CLI + MCP...");
+  expect(phaseTimelineTitle("  Mac App  ")).toBe("Mac App");
+  expect(phaseTimelineTitle("This phase has a very long name").length).toBeLessThanOrEqual(14);
+  expect(phaseTimelineTitle("abcdefghijklmno")).toBe("abcdefghijk...");
 });

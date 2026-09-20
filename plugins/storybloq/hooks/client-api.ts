@@ -27,6 +27,8 @@ export const EVENTS = {
   sessionCompact: "session.compact",
   sessionDetach: "session.detach",
   agentSpawn: "agent.spawn",
+  /** Main-loop lifecycle, verified against the 2.1.277 declarations. */
+  turnStart: "turn.start",
   turnComplete: "turn.complete",
   toolCall: "tool.call",
   uiRender: "ui.render",
