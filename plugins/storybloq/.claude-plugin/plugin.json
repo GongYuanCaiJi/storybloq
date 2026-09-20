@@ -25,6 +25,12 @@
       "type": "boolean",
       "default": true,
       "description": "Draw the .story/ ledger in a pane beside the transcript. On by default; turn it off with /plugin configure storybloq. Projects with no .story/ directory show nothing either way (T-508, T-516)."
+    },
+    "startupLogo": {
+      "title": "Storyfield startup logo",
+      "type": "boolean",
+      "default": true,
+      "description": "Show a brief copper dot-wave logo before the dashboard. Turn off for an immediate, motion-free dashboard."
     }
   },
   "metadata": {

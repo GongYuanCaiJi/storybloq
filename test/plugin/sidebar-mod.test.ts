@@ -169,7 +169,7 @@ class Harness {
   private timers: (() => void)[] = [];
   readonly $: any;
 
-  constructor() {
+  constructor(startupLogo = false) {
     const fs = this.fs;
     this.$ = {
       fs: {
@@ -206,7 +206,7 @@ class Harness {
       this.handlers.set(event, hook);
       return { catch: () => undefined };
     }) as any;
-    registerSidebar(on, {});
+    registerSidebar(on, { startupLogo });
   }
 
   async fire(event: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -738,4 +738,48 @@ describe("ISS-1255: inline text takes the terminal's foreground, docked text the
     expect(contextColor("inline")).toBeUndefined();
     expect(contextColor("dock")).toBe("white");
   });
+});
+
+
+describe("Storyfield startup", () => {
+  it("shows once, yields to the board, and never restarts on redraw", async () => {
+    const h = new Harness(true);
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(h.render()).toContain("storyfield-0");
+    await h.settle(100);
+    expect(h.render()).toContain("T-001");
+    expect(h.render()).not.toContain("storyfield-0");
+    await h.fire("turn.complete", {});
+    expect(h.render()).not.toContain("storyfield-0");
+  });
+  it("opt-out draws the board immediately", async () => {
+    const h = new Harness(false);
+    seedLedger(h.fs, "/repo");
+    await h.start("/repo");
+    await h.settle();
+    expect(h.render()).toContain("T-001");
+    expect(h.render()).not.toContain("storyfield-0");
+  });
+});
+
+it("resizes the active intro between inline and dock without restarting its clock", async () => {
+  const h = new Harness(true);
+  seedLedger(h.fs, "/repo");
+  await h.start("/repo");
+  await h.settle();
+  const draw = (bodyColumns: number, bodyRows: number, placement: string) => h.handlers.get("ui.render")!(h.$, {
+    component: "Pane", requestId: PANE_ID,
+    props: { bodyColumns, placement, scroll: { bodyRows, offset: 0 } },
+    viewport: { columns: 160, rows: 43 },
+  }, (e: any) => e) as any;
+  const inline = draw(156, 10, "inline");
+  const dock = draw(40, 30, "dock");
+  expect(inline.children.length).toBeLessThanOrEqual(10);
+  expect(dock.children.length).toBeGreaterThan(inline.children.length);
+  await h.settle(60);
+  draw(156, 8, "inline");
+  await h.settle(40);
+  expect(JSON.stringify(draw(40, 30, "dock"))).not.toContain("storyfield-0");
 });

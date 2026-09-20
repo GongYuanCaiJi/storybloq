@@ -137,7 +137,7 @@ export interface InstallModsResult {
  * sidebar.ts, sidebar.ts imports sidebar-projection.ts, and client-api.ts is
  * the pin they are checked against. install.ts is generated.
  */
-export const REQUIRED_HOOK_FILES = ["hooks.json", "mod.ts", "client-api.ts", "sidebar.ts", "sidebar-projection.ts"] as const;
+export const REQUIRED_HOOK_FILES = ["hooks.json", "mod.ts", "client-api.ts", "sidebar.ts", "sidebar-projection.ts", "storyfield-logo.ts"] as const;
 
 /** How long a second installer waits for the first's lock before giving up. */
 export const MODS_LOCK_WAIT_MS = 10_000;

@@ -58,6 +58,7 @@
  * the documentary pin the tests compare that reading against.
  */
 
+import { logoFrame, logoLayout, LOGO_DURATION_MS } from "./storyfield-logo.js";
 import type { On } from "./mod.js";
 import {
   extractRecord,
@@ -326,6 +327,10 @@ let pendingRefresh = false;
 let ticking = false;
 /** One timer for the module's life, not one per scan. */
 let timerStarted = false;
+let logoElapsed = 0;
+let logoStarted = false;
+let logoFinished = false;
+let logoTicks = 0;
 /** The Mod is on and something is drawn: not the same as the pane existing. */
 let sidebarEnabled = false;
 let paneOpen = false;
@@ -415,6 +420,10 @@ function forgetEverything(): void {
   pendingRefresh = false;
   ticking = false;
   timerStarted = false;
+  logoElapsed = 0;
+  logoStarted = false;
+  logoFinished = false;
+  logoTicks = 0;
   sidebarEnabled = false;
   paneOpen = false;
   paneDrawn = false;
@@ -984,6 +993,17 @@ async function beginScan($: any): Promise<void> {
  * the session, and the poll is a two-second thing.
  */
 async function tick($: any): Promise<void> {
+  // Share the existing clock. Redraw only during the short, visible intro,
+  // at 20 fps, then stop all animation work for the rest of the session.
+  if (logoStarted && !logoFinished) {
+    if (!paneOpen || !sidebarEnabled) logoFinished = true;
+    else {
+      logoElapsed += SCAN_TICK_MS;
+      logoTicks += 1;
+      if (logoElapsed >= LOGO_DURATION_MS) logoFinished = true;
+      if (logoTicks % 2 === 0 || logoFinished) $.ui.invalidate("ui.render");
+    }
+  }
   await drainChunk($);
   idleTicks += 1;
   if (idleTicks < IDLE_POLL_TICKS) return;
@@ -2138,6 +2158,21 @@ export function registerSidebar(on: On, _options: Options): void {
       // needs no budget: it is the inline strip on a small window, where
       // every row is paid for.
       const budget = layout === "narrow" ? { body: 0, gaps: false, compact: false } : rowBudget(e, stacked);
+      // Use the actual pane window: viewport.rows includes the transcript
+      // and prompt and is never the available height of an inline pane.
+      const intro = logoLayout(width, e.props?.scroll?.bodyRows, placement);
+      if (_options["startupLogo"] !== false && !logoFinished && intro) {
+        logoStarted = true;
+        const art = logoFrame(intro.columns, logoElapsed);
+        return Box({ flexDirection: "column", children: [
+          headerNode(elements),
+          ...Array.from({ length: intro.top }, (_, index) => Text({ key: `logo-space-${index}`, children: " " })),
+          ...art.map((cells, index) => Text({ key: `storyfield-${index}`, wrap: "truncate", children: [
+            Text({ key: "inset", children: " ".repeat(intro.left) }),
+            ...cells.map((cell, x) => Text({ key: `dot-${x}`, color: cell.color, children: cell.glyph })),
+          ] })),
+        ] });
+      }
       const rows: unknown[] = [headerNode(elements)];
       if (budget.gaps) rows.push(paneText(Text, { key: "header-gap", children: " " }));
       if (projection === null) {
