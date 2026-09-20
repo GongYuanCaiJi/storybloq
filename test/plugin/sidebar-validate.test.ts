@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { CALLS, EVENTS, CLIENT_API_VERSION } from "../../plugins/storybloq/hooks/client-api.js";
+import { MOD_VERSION } from "../../plugins/storybloq/hooks/sidebar.js";
 
 /**
  * T-508: what the ledger sidebar Mod hooks and calls, read from the client
@@ -210,6 +211,14 @@ describe("sidebar Mod contract, as the client scans it (T-508)", () => {
       verdict,
       `client-api.ts pins ${CLIENT_API_VERSION} but this machine runs ${version}; re-read the API and update the pin`,
     ).toBe("ok");
+  });
+
+  it("draws the package version in the header: MOD_VERSION equals package.json (ISS-1266)", () => {
+    // The Mod cannot read package.json through the client, so the version it
+    // draws is a literal; a release that bumps the manifests and not this
+    // fails here, before publish, like a forgotten manifest bump does.
+    const pkg = JSON.parse(readFileSync(join(PLUGIN_DIR, "..", "..", "package.json"), "utf8")) as { version: string };
+    expect(MOD_VERSION).toBe(pkg.version);
   });
 
   it("declares the Mod on by default (T-516)", () => {

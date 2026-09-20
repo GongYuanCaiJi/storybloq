@@ -1179,8 +1179,9 @@ test("heads the pane with the wordmark and the project folder, dim like a ticket
 
   expect(header).toContain("Storybloq");
   // The folder the ledger sits in, after the wordmark, in the id tone.
-  expect(header).toMatch(/^Storybloq - \S+/);
-  expect(nodeByKey(tree, "project").props.dimColor).toBe(true);
+  expect(header).toMatch(/^Storybloq \(\d+\.\d+\.\d+\) - \S+/);
+  expect(nodeByKey(tree, "version").props.dimColor).toBe(true);
+  expect(nodeByKey(tree, "project").props.bold).toBe(true);
   expect(nodeByKey(tree, "wordmark").props.bold).toBe(true);
   // The owner took the rasterized mark out; the wordmark is the brand. The
   // phase went with it once the board stopped being one phase's, and the

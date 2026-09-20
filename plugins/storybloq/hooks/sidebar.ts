@@ -1976,11 +1976,19 @@ function boardNode(elements: any, board: any, width: number, stacked: boolean, b
  * being one phase's, and the fill moved to the foot of the pane, so what is
  * left is the brand and one row of height.
  */
+/**
+ * The Mod's own version, drawn in the header (ISS-1266). The Mod cannot
+ * read package.json through the client, so this is a literal, bumped with
+ * the two plugin manifests on every release; test/plugin/sidebar-validate
+ * holds it equal to package.json so a forgotten bump fails before publish.
+ */
+export const MOD_VERSION = "1.15.9";
+
 function headerNode(elements: any): unknown {
-  // The wordmark, then the project (ISS-1266): the folder the ledger sits
-  // in, dim like a ticket id, so two checkouts of one project read apart.
-  // "Storybloq - CPM" was the owner's example; the config's `project` name
-  // would say "storybloq" here, which is why the folder is used.
+  // "Storybloq (1.15.8) - CPM" (ISS-1266): the wordmark, the version faint,
+  // then the project in the wordmark's own weight. The project is the folder
+  // the ledger sits in, so two checkouts of one project read apart; the
+  // config's `project` name would say "storybloq" for CPM.
   const name = projectFolderName();
   return elements.Box({
     key: "header",
@@ -1992,7 +2000,8 @@ function headerNode(elements: any): unknown {
         wrap: "truncate",
         children: [
           paneText(elements.Text, { key: "wordmark", bold: true, children: "Storybloq" }),
-          ...(name === "" ? [] : [paneText(elements.Text, { key: "project", dimColor: true, children: ` - ${name}` })]),
+          paneText(elements.Text, { key: "version", dimColor: true, children: ` (${MOD_VERSION})` }),
+          ...(name === "" ? [] : [paneText(elements.Text, { key: "project", bold: true, children: ` - ${name}` })]),
         ],
       }),
     ],

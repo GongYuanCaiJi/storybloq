@@ -16,7 +16,7 @@
  * pinned its root does not notice the move at all.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { registerSidebar, IDLE_POLL_TICKS } from "../../plugins/storybloq/hooks/sidebar.js";
+import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION } from "../../plugins/storybloq/hooks/sidebar.js";
 
 const PANE_ID = "storybloq";
 
@@ -506,8 +506,11 @@ describe("ISS-1266: the header names the project folder after the wordmark", () 
     await h.start("/home/work/CPM/storybloq");
     await h.settle();
     const drawn = h.render();
-    expect(drawn).toContain('"key":"project","dimColor":true,"children":" - CPM"');
+    // "Storybloq (x.y.z) - CPM": the version faint, the project in the
+    // wordmark's own weight.
     expect(drawn).toContain('"key":"wordmark","bold":true,"children":"Storybloq"');
+    expect(drawn).toContain(`"key":"version","dimColor":true,"children":" (${MOD_VERSION})"`);
+    expect(drawn).toContain('"key":"project","bold":true,"children":" - CPM"');
   });
 });
 
