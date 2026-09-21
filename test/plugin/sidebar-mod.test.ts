@@ -609,7 +609,7 @@ describe("ISS-1252: below 60 body columns the pane draws the narrow board", () =
     const handler = h.handlers.get("ui.render")!;
     const node = handler(
       h.$,
-      { component: "Pane", requestId: PANE_ID, viewport: { columns: bodyColumns + 4, rows: 20 }, props: { bodyColumns, placement: "inline", scroll: { offset: 0, bodyRows: 20 } } },
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: bodyColumns + 4, rows: 40 }, props: { bodyColumns, placement: "inline", scroll: { offset: 0, bodyRows: 20 } } },
       (e: any) => e,
     );
     return JSON.stringify(node);
@@ -917,23 +917,28 @@ describe("live animation hooks", () => {
   it("uses real turn lifecycle, preserves activity across worker completions, and handles reload state", async () => {
     const h = new Harness(); seedLedger(h.fs, "/repo");
     await h.start("/repo"); await h.settle();
-    const activity = () => findUi(JSON.parse(h.render()), "activity");
+    const activity = () => findUi(JSON.parse(h.render()), "wordmark");
     await h.fire("prompt.submit", { text: "not a started turn" });
-    expect(activity().children).toBe(" ·");
+    expect(activity().children).toBe("Storybloq");
     await h.fire("turn.start", { turnId: "main", text: "build" });
     await h.settle(20);
-    expect(activity().children).toBe(" ●");
+    expect(activity().children.map((letter: any) => letter.children).join("")).toBe("Storybloq");
+    const firstFrame = JSON.stringify(activity());
+    await h.settle(6);
+    expect(JSON.stringify(activity())).not.toBe(firstFrame);
+    expect(activity().children).toHaveLength(9);
+    expect(h.render()).not.toContain('"key":"activity"');
     await h.fire("turn.complete", { turnId: "child", agentId: "worker" });
-    expect(activity().children).toBe(" ●");
+    expect(activity().children.map((letter: any) => letter.children).join("")).toBe("Storybloq");
     await h.fire("turn.complete", { turnId: "main", reason: "aborted" });
-    expect(activity().children).toBe(" ·");
+    expect(activity().children).toBe("Storybloq");
     const above = (isWorking: boolean) => h.handlers.get("ui.render")!(h.$, {
       component: "AbovePrompt", viewport: { columns: 160 }, props: { isWorking, view: {} },
     }, () => null);
     above(true); await h.settle(20);
-    expect(activity().children).toBe(" ●");
+    expect(activity().children.map((letter: any) => letter.children).join("")).toBe("Storybloq");
     above(false);
-    expect(activity().children).toBe(" ·");
+    expect(activity().children).toBe("Storybloq");
   });
 
   it("shows the actual context percentage immediately while the meter catches up", async () => {
@@ -957,7 +962,7 @@ describe("live animation hooks", () => {
     const h = new Harness(true, true, false); seedLedger(h.fs, "/repo");
     await h.start("/repo"); await h.settle();
     await h.fire("turn.start", { turnId: "main" });
-    expect(findUi(JSON.parse(h.render()), "activity").children).toBe(" ●");
+    expect(findUi(JSON.parse(h.render()), "wordmark").children).toBe("Storybloq");
     expect(h.render()).not.toContain("storyfield-0");
     h.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "complete"));
     await h.fire("turn.complete", { turnId: "main" }); await h.settle(8);
@@ -1089,4 +1094,44 @@ it("shows unknown pressure when only native window percent is available", async 
   h.$.session.usage = async () => ({ context: { tokens: 384014, percent: 38, window: 1_000_000 } });
   await h.start("/repo"); await h.settle();
   expect(findUi(JSON.parse(h.render()), "context").children).toContain("--");
+});
+
+it("collapses short terminals to one line and restores the board on resize", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  h.$.session.usage = async () => ({ context: { tokens: 42, breakdown: { autoCompactThreshold: 100 } } });
+  await h.start("/repo"); await h.settle();
+  const render = (rows: number, columns = 100) => h.handlers.get("ui.render")!(h.$, {
+    component: "Pane", requestId: PANE_ID, viewport: { rows, columns }, props: { bodyColumns: columns },
+  }, () => null);
+  const small = render(20) as { key: string; height: number; children: any };
+  expect(small.key).toBe("compact-line");
+  const content = (node: any): string => typeof node === "string" ? node
+    : Array.isArray(node) ? node.map(content).join("") : content(node.children);
+  expect(content(small)).toContain("Storybloq  │  In progress  T-001");
+  expect(content(small)).toMatch(/42%$/);
+  expect(content(small).length).toBe(97);
+  expect(findUi(small, "wordmark").bold).toBe(true);
+  expect(small.children.some((node: any) => node.color === "cyan")).toBe(true);
+  expect(content(render(20, 12))).toContain("42%");
+  expect(JSON.stringify(render(40))).toContain("board-inprogress");
+});
+
+it("keeps a short dock as an In progress sidebar with a bottom footer", async () => {
+  const h = new Harness(); seedLedger(h.fs, "/repo");
+  await h.start("/repo"); await h.settle();
+  const render = (rows: number) => h.handlers.get("ui.render")!(h.$, {
+    component: "Pane", requestId: PANE_ID, viewport: { rows, columns: 160 },
+    props: { bodyColumns: 70, placement: "dock", scroll: { bodyRows: rows - 6 } },
+  }, () => null);
+  const small = render(20) as { key: string; height: number; children: any };
+  expect(small.height).toBe(14);
+  expect(JSON.stringify(small)).toContain("board-inprogress");
+  expect(JSON.stringify(small)).not.toContain("board-open");
+  expect(JSON.stringify(small)).not.toContain("board-done");
+  expect(findUi(small, "footer-space").flexGrow).toBe(1);
+  expect(findUi(small, "footer")).toBeTruthy();
+  const tall = render(60) as { height: number; children: any };
+  expect(tall.height).toBe(54);
+  expect(JSON.stringify(tall)).toContain("board-open");
+  expect(findUi(tall, "footer-space").flexGrow).toBe(1);
 });

@@ -1,5 +1,5 @@
 import { createDashboardState, type DashboardState, type ScanItem, type CachedRecord } from "./dashboard-state.js";
-import { paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel } from "./dashboard-view.js";
+import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel } from "./dashboard-view.js";
 export { contextLabel, MOD_VERSION } from "./dashboard-view.js";
 import { wroteLedger } from "./ledger-write-detection.js";
 import { cellWidth, truncate } from "./terminal-text.js";
@@ -211,12 +211,28 @@ function summaryLine(dashboard: DashboardState): string {
 * the board needs, but only when the whole summary fits beside it. Reserve
 * context pressure first so a long phase name cannot push it out of view.
 */
+const SHORT_TERMINAL_ROWS = 24;
+// The scroll host lays out the plugin tree without a bounded parent height,
+// so percentage heights cannot make a flex spacer consume the dock's room.
+function dockHeight(event: any): number {
+  const rows = event.viewport?.rows;
+  const scroll = event.props?.scroll;
+  if (typeof scroll?.bodyRows === "number" && scroll.bodyRows > 0
+    && scroll.contentRows > scroll.bodyRows) return scroll.bodyRows;
+  return Math.max(1, (typeof rows === "number" ? rows : 40) - 6);
+}
+
+function shortTerminal(event: any): boolean {
+  return typeof event.viewport?.rows === "number"
+    && event.viewport.rows > 0 && event.viewport.rows <= SHORT_TERMINAL_ROWS;
+}
+
 function bandText(dashboard: DashboardState, columns: number, narrow: boolean): string {
   const context = contextLabel(dashboard.contextPercent, Math.min(columns, 20));
   const room = columns - cellWidth(context) - 2;
   if (room <= 0)
     return context;
-  const summary = summaryLine(dashboard).replace("Storybloq:", `Storybloq: ${dashboard.motion.activity().glyph}`);
+  const summary = summaryLine(dashboard);
   const line = `${truncate(summary, room)}  ${context}`;
   const hint = narrow && cellWidth(line) + cellWidth(BAND_HINT) <= columns ? BAND_HINT : "";
   return truncate(`${line}${hint}`, columns);
@@ -864,6 +880,10 @@ export function registerSidebar(on: On, _options: Options): void {
       // wordmark does not read as part of the first column heading. A single
       // space and not an empty string, because an empty Text collapses to no
       // row at all in this client and the break simply did not draw.
+      if (shortTerminal(e) && panePlacement(e) !== "dock") {
+        dashboard.logoFinished = true;
+        return compactLineNode(dashboard, elements, width);
+      }
       const placement = panePlacement(e);
       dashboard.paneInline = placement === "inline";
       const layout = boardLayout(placement, width);
@@ -877,7 +897,7 @@ export function registerSidebar(on: On, _options: Options): void {
       const bodyRows = e.props?.scroll?.bodyRows;
       const intro = typeof bodyRows === "number" && bodyRows <= 1 ? null
         : logoLayout(width, typeof bodyRows === "number" ? bodyRows - 1 : undefined, placement);
-      if (dashboard.motion.enabled && _options["startupLogo"] !== false && !dashboard.logoFinished && intro) {
+      if (!shortTerminal(e) && dashboard.motion.enabled && _options["startupLogo"] !== false && !dashboard.logoFinished && intro) {
         dashboard.logoStarted = true;
         const art = logoFrame(intro.columns, dashboard.logoElapsed);
         return Box({ flexDirection: "column", children: [
@@ -889,6 +909,16 @@ export function registerSidebar(on: On, _options: Options): void {
               ] })),
             contextNode(dashboard, elements, dashboard.contextPercent, width),
           ] });
+      }
+      if (placement === "dock" && shortTerminal(e)) {
+        const body = Math.max(1, Math.min(7, dockHeight(e) - 7));
+        return Box({ key: "short-sidebar", height: dockHeight(e), flexDirection: "column", children: [
+          headerNode(dashboard, elements),
+          Text({ children: " " }),
+          inProgressBoard(dashboard, elements, width, body),
+          Box({ key: "footer-space", flexGrow: 1 }),
+          footerNode(dashboard, elements, dashboard.projection?.issuesBySeverity ?? { critical: 0, high: 0, medium: 0, low: 0 }, dashboard.contextPercent, width),
+        ] });
       }
       const rows: unknown[] = [headerNode(dashboard, elements)];
       if (budget.gaps)
@@ -911,12 +941,13 @@ export function registerSidebar(on: On, _options: Options): void {
           : boardNode(dashboard, elements, dashboard.projection.board, width, stacked, budget.body));
         if (budget.gaps)
           rows.push(paneText(dashboard, Text, { key: "issues-gap", children: " " }));
+        if (placement === "dock") rows.push(Box({ key: "footer-space", flexGrow: 1 }));
         rows.push(footerNode(dashboard, elements, dashboard.projection.issuesBySeverity, dashboard.contextPercent, width));
         if (dashboard.sessionActive) {
           rows.push(paneText(dashboard, Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
         }
       }
-      return Box({ flexDirection: "column", children: rows });
+      return Box({ flexDirection: "column", ...(placement === "dock" ? { height: dockHeight(e) } : {}), children: rows });
     }
     // The narrow fallback: the client leaves a plugin's pane undrawn on a
     // small terminal, so the same numbers go out as one line above the prompt.
@@ -933,6 +964,12 @@ export function registerSidebar(on: On, _options: Options): void {
       dashboard.bandDrawn = false;
       const columns: number = typeof e.viewport?.columns === "number" ? e.viewport.columns : 0;
       const narrow = columns < DOCK_COLUMNS;
+      if (shortTerminal(e)) {
+        if (dashboard.paneDrawn) return next(e);
+        dashboard.bandDrawn = true;
+        const elements = $.ui.resolve(e);
+        return compactLineNode(dashboard, elements, columns);
+      }
       if (narrow) {
         dashboard.reopenAsked = false;
       }

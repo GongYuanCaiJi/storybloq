@@ -72,11 +72,11 @@ export class DashboardMotion {
     this.setWorking(false);
   }
 
-  activity(): { glyph: string; bright: boolean; working: boolean } {
-    if (!this.working) return { glyph: "·", bright: false, working: false };
-    if (!this.enabled) return { glyph: "●", bright: true, working: true };
-    const beat = Math.floor(this.activityMs / 240) % 6;
-    return { glyph: ["·", "•", "●", "●", "•", "·"][beat]!, bright: beat === 2 || beat === 3, working: true };
+  activity(): { working: boolean; sweep: number | null } {
+    return {
+      working: this.working,
+      sweep: this.working && this.enabled ? Math.floor(this.activityMs / 50) * (50 / 120) : null,
+    };
   }
 
   setContext(value: number | null, immediate = false): void {
@@ -106,11 +106,11 @@ export class DashboardMotion {
 
   count(column: string): boolean { return this.counts.has(column); }
 
-  /** One shared clock; at most 20 redraws/sec while effects run, 5/sec for activity alone. */
+  /** One shared clock; at most 20 redraws/sec while effects run, 20/sec for the smooth lettering gradient. */
   advance(ms: number): boolean {
     const hadEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.contextTween !== null;
     const beforeActivity = this.activity();
-    if (this.working && this.enabled) this.activityMs = (this.activityMs + ms) % 1440;
+    if (this.working && this.enabled) this.activityMs = (this.activityMs + ms) % 2400;
     for (const [key, effect] of this.cardEffects) {
       effect.age += ms;
       if (effect.age >= (effect.ready ? READY_MS : CARD_MS)) this.cardEffects.delete(key);
@@ -124,6 +124,6 @@ export class DashboardMotion {
     this.frameMs = Math.min(50, this.frameMs + ms);
     const hasEffects = this.cardEffects.size > 0 || this.counts.size > 0 || this.contextTween !== null;
     if (hadEffects && (this.frameMs >= 50 || !hasEffects)) { this.frameMs = 0; return true; }
-    return beforeActivity.glyph !== activity.glyph || beforeActivity.bright !== activity.bright;
+    return beforeActivity.sweep !== activity.sweep;
   }
 }

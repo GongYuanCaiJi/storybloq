@@ -299,6 +299,13 @@ function emptyColumnRows(dashboard: DashboardState, elements: any, column: Board
 * Takes the resolved element table rather than `$`: these are plain
 * constructors, and the client's scan is strict about where `$` may travel.
 */
+export function inProgressBoard(dashboard: DashboardState, elements: any, width: number, body: number): unknown {
+  const cards = dashboard.projection?.board.inProgress ?? [];
+  const shown = Math.min(COLUMN_CARD_CAP, Math.max(0, body - (cards.length > body ? 1 : 0)));
+  return boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress,
+    cards, width, shown, Math.max(1, Math.min(body, cards.length || 2)));
+}
+
 function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnKey, heading: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number): unknown {
   // The border takes a column on each side, so the text inside has that much
   // less. Getting this wrong wraps every row and the board falls apart.
@@ -432,7 +439,7 @@ export function boardNode(dashboard: DashboardState, elements: any, board: Sideb
   });
 }
 /**
-* The header keeps identity and a one-cell activity indicator on one row.
+* The header keeps identity and an animated wordmark on one row.
 * Context pressure stays in the footer.
 */
 /**
@@ -442,13 +449,69 @@ export function boardNode(dashboard: DashboardState, elements: any, board: Sideb
 * holds it equal to package.json so a forgotten bump fails before publish.
 */
 export const MOD_VERSION = "1.15.9";
+function wordmarkNode(dashboard: DashboardState, elements: any): unknown {
+  const sweep = dashboard.motion.activity().sweep;
+  return paneText(dashboard, elements.Text, { key: "wordmark", bold: true,
+            children: sweep === null ? "Storybloq" : [..."Storybloq"].map((letter, index) => {
+              // A soft Gaussian crest blends ivory, champagne, and copper without
+              // toggling font weight or terminal dimness at band edges.
+              const distance = index - (sweep - 3);
+              const blend = Math.exp(-(distance * distance) / 8);
+              // Darker warm equivalents keep the light theme readable.
+              const base = dashboard.themeLight ? [91, 77, 65] : [224, 216, 202];
+              const middle = dashboard.themeLight ? [119, 91, 63] : [219, 198, 165];
+              const crest = dashboard.themeLight ? [139, 91, 63] : [203, 165, 137];
+              const from = blend < 0.75 ? base : middle;
+              const to = blend < 0.75 ? middle : crest;
+              const mix = blend < 0.75 ? blend / 0.75 : (blend - 0.75) / 0.25;
+              const color = "#" + from.map((value, channel) =>
+                Math.round(value + (to[channel]! - value) * mix).toString(16).padStart(2, "0")
+              ).join("");
+              return paneText(dashboard, elements.Text, {
+                key: `wordmark-${index}`, bold: true, color, children: letter,
+              });
+            }),
+          });
+}
+
+export function compactLineNode(dashboard: DashboardState, elements: any, columns: number): unknown {
+  const width = Math.max(1, Math.floor(columns) - PANE_EDGE_CLEARANCE);
+  const contextWidth = Math.min(width, 24);
+  const context = contextLabel(dashboard.contextPercent, contextWidth);
+  const room = width - cellWidth(context) - 3;
+  const text = (props: Record<string, unknown>) => paneText(dashboard, elements.Text, props);
+  if (room < 12) return contextNode(dashboard, elements, dashboard.contextPercent, width);
+  const item = dashboard.projection?.board.inProgress[0];
+  const runs: unknown[] = [wordmarkNode(dashboard, elements)];
+  let used = 9;
+  if (room >= 30) {
+    const status = item ? "In progress" : "Ready";
+    runs.push(text({ dimColor: true, children: "  │  " }));
+    runs.push(text({ color: item ? "cyan" : undefined, children: status }));
+    used += 5 + status.length;
+    if (item && room - used >= cellWidth(item.id) + 8) {
+      runs.push(text({ dimColor: true, children: `  ${item.id}  ` }));
+      used += cellWidth(item.id) + 4;
+      if (item.blocked && room - used >= 15) {
+        runs.push(text({ color: "yellow", children: "[Blocked] " }));
+        used += 10;
+      }
+      const title = truncate(item.title, Math.min(58, room - used));
+      runs.push(text({ bold: true, children: title }));
+      used += cellWidth(title);
+    }
+  }
+  runs.push(text({ children: " ".repeat(width - used - cellWidth(context)) }));
+  runs.push(contextNode(dashboard, elements, dashboard.contextPercent, contextWidth));
+  return text({ key: "compact-line", wrap: "truncate", children: runs });
+}
+
 export function headerNode(dashboard: DashboardState, elements: any): unknown {
   // "Storybloq (1.15.8) - CPM" (ISS-1266): the wordmark, the version faint,
   // then the project in the wordmark's own weight. The project is the folder
   // the ledger sits in, so two checkouts of one project read apart; the
   // config's `project` name would say "storybloq" for CPM.
   const name = projectFolderName(dashboard);
-  const activity = dashboard.motion.activity();
   return elements.Box({
     key: "header",
     flexDirection: "row",
@@ -458,8 +521,7 @@ export function headerNode(dashboard: DashboardState, elements: any): unknown {
       paneText(dashboard, elements.Text, {
         wrap: "truncate",
         children: [
-          paneText(dashboard, elements.Text, { key: "wordmark", bold: true, children: "Storybloq" }),
-          paneText(dashboard, elements.Text, { key: "activity", dimColor: !activity.bright, bold: activity.bright, children: ` ${activity.glyph}` }),
+          wordmarkNode(dashboard, elements),
           paneText(dashboard, elements.Text, { key: "version", dimColor: true, children: ` (${MOD_VERSION})` }),
           ...(name === "" ? [] : [paneText(dashboard, elements.Text, { key: "project", bold: true, children: ` - ${name}` })]),
         ],

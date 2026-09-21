@@ -80,12 +80,12 @@ describe("dashboard event animations", () => {
     expect(motion.activity().working).toBe(false);
     motion.setWorking(true, "main");
     motion.advance(500);
-    expect(motion.activity()).toMatchObject({ working: true, glyph: "●" });
+    expect(motion.activity()).toMatchObject({ working: true, sweep: 10 * (50 / 120) });
     motion.finishTurn("worker", "agent-1");
     motion.finishTurn("older");
     expect(motion.activity().working).toBe(true);
     motion.finishTurn("main");
-    expect(motion.activity()).toMatchObject({ working: false, glyph: "·" });
+    expect(motion.activity()).toMatchObject({ working: false, sweep: null });
     expect(motion.advance(1000)).toBe(false);
   });
 
@@ -96,7 +96,7 @@ describe("dashboard event animations", () => {
     motion.setContext(20); motion.setContext(90);
     motion.setWorking(true, "main");
     expect(motion.meterValue()).toBe(90);
-    expect(motion.activity().glyph).toBe("●");
+    expect(motion.activity()).toEqual({ working: true, sweep: null });
     expect(motion.card("ticket:T-002").ready).toBe(false);
     expect(motion.advance(2000)).toBe(false);
   });
@@ -115,6 +115,6 @@ describe("dashboard event animations", () => {
     motion.setWorking(true);
     redraws = 0;
     for (let i = 0; i < 40; i++) if (motion.advance(25)) redraws++;
-    expect(redraws).toBeLessThanOrEqual(5);
+    expect(redraws).toBeLessThanOrEqual(20);
   });
 });
