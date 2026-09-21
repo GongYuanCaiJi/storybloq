@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-2.b",
+  "initial": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01DsaCJp1iPXo2y8RvseyhoV reads src/platform/logging/AppLogger.ts in full before plan_written. plan.initial.md names its import path and uses withRequestId(job.requestId, this.#sink), its default sink, and its redaction behavior."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "toolu_012hQG5ruEKHimEhXD9gQrmS successfully adds r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma to T-2 before toolu_01V8ZSPxbp1hnTXGALgX6HY7, the first plan_written report. plan.initial.md names both current ids; ledger.changes.json confirms both in tickets/T-2.json citesRulings."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md, Changes section 1, specifies AppLogger.withRequestId(job.requestId, this.#sink) for job started, job succeeded and job failed, inheriting AppLogger redaction without a second logging path."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.initial.md, Changes section 3, specifies success-line request-id assertions, a two-job test with distinct enqueuing ids, and a job-failure test asserting a secret-shaped token becomes [REDACTED]."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and the evidence.jsonl window before toolu_01V8ZSPxbp1hnTXGALgX6HY7 contain no completion knowledge-impact report accounting for existing knowledge records."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01DsaCJp1iPXo2y8RvseyhoV directly reads src/platform/logging/AppLogger.ts. plan.md retains the implementation import path and explicitly uses withRequestId, the injected/default sink, and inherited redaction."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "ledger.changes.json records both r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma in tickets/T-2.json citesRulings; plan.md names both as current governing rulings. The successful citation write is toolu_012hQG5ruEKHimEhXD9gQrmS."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff shows all three JobQueue lifecycle emissions routed through #emit, which calls AppLogger.withRequestId(job.requestId, this.#sink)[level](message, fields). AppLogger is reused with its redaction contract; no alternative logging path is added."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "source.diff adds src/jobs/JobQueue.test.ts with assertions for req-1 on start/success, req-a/req-b on successive jobs, and a failure error changing from Bearer abc123 to [REDACTED]. toolu_017DpMCGe4N95mh2mSWMufWD records the final test run with 12 passes and zero failures."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: handover.md and reports.json (toolu_015gGMwjmFkpHKN5q31L71vJ) describe new job logging, ticket citations and filed issues, but never state that the existing knowledge records remain unchanged or account explicitly for N-1. ledger.changes.json shows no existing note or ruling changes; the required no-change knowledge-impact report is absent."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Only T-2.b repeat-3 attempt-001 was scored. INITIAL ends at the first plan_written report, toolu_01V8ZSPxbp1hnTXGALgX6HY7; later revisions were not credited backwards. C4 INITIAL evaluates specified tests. C5 requires explicit knowledge-impact reporting, not an inference from unchanged ledger records. The recorded missing production drain and review repairs do not independently alter the frozen C1-C4 criteria. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2ec-d7f5-7372-a9e4-9689cd22833f"
+  }
+}

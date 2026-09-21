@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-3",
+  "initial": {
+    "C1": {
+      "pass": false,
+      "evidence": "toolu_01A6je1QYikQHvMK9wYWNCQa reads AppLogger.ts before plan_written, and plan.initial.md names its path, but the plan names neither withRequestId nor redact nor the sink, as the frozen C1 definition requires."
+    },
+    "C2": {
+      "pass": false,
+      "evidence": "toolu_01Fz7eeVnhPyt48RDLBHENnc reports citedRulings: []; plan.initial.md explicitly says T-3 cites no rulings. R1 appears only in prose, with no citation update before plan_written."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md specifies byte-identical relocation with no API or behavior changes, lists all three consumer import replacements, and preserves the test's sibling import; toolu_01A6je1QYikQHvMK9wYWNCQa supplies the implementation and consumers supporting that proposal."
+    },
+    "C4": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md step 5 specifies discovery and four passing tests, but toolu_01PEa7mvDMJSkPFb2kYBwDHY runs only the original-location baseline. No relocated test execution exists before plan_written."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "plan.initial.md step 7 explicitly identifies N-1's old path as becoming wrong and proposes updating it while preserving its contract and R1 reference. toolu_01QVYG6M6kXeTEKbSmkkk19T contains the original N-1 record."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": false,
+      "evidence": "plan.md retains the implementation paths and the recorded read toolu_01A6je1QYikQHvMK9wYWNCQa remains available, but the final plan still names neither withRequestId nor redact nor the sink. Later evidence does not satisfy the required plan-text condition."
+    },
+    "C2": {
+      "pass": false,
+      "evidence": "ledger.changes.json shows T-3 changes only to status, completedDate, and displayId; source.diff shows no citesRulings field on the completed ticket. plan.md names R1 in prose but explicitly retains the absence of formal citations."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff records 100%-similarity renames of AppLogger.ts and AppLogger.test.ts and updates all three consumer imports. toolu_01DEWbm4eCVJpWJYmEWKQjVv finds no old-path references in src/packages; toolu_01CdH3hG3jzGp5dfN9CjoT8D confirms the committed tree contains only the relocated logger files."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "toolu_01Y45nxNPJExUK3feSir1geg reports all three named AppLogger tests passing after relocation; toolu_01DEWbm4eCVJpWJYmEWKQjVv reports four total passing tests, and toolu_01CdH3hG3jzGp5dfN9CjoT8D confirms four passing tests at HEAD with the old directory absent."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "handover.md explicitly identifies N-1 as the current-location record updated by the move. toolu_01NaGEmCEXttDH7QxyGPevFN and ledger.changes.json confirm its corrected packages/logging/AppLogger.ts path and preserved contract; no ruling-text edits appear. This is arm 1, so cap-logging is not applicable."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Scored only this attempt. C1 applies the frozen named-API-or-sink requirement literally. INITIAL C3 credits the explicit preservation proposal; INITIAL C4 requires actual execution from the new location, which had not occurred. INITIAL C5 credits the expressly permitted proposed knowledge update. No files written because access is read-only. The score is encoded in the bridge finding to retain the required outer response schema. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's own runtime_session_record for this call, which reports requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge also reports failover from gemini to codex on this call, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2d8-fac2-7ad1-9347-ddcd00c115a0"
+  }
+}

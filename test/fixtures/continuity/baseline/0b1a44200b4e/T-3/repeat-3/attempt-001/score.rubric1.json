@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-3",
+  "initial": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_0158QJRFTANsXQ1t6Ng3GXUA reads src/platform/logging/AppLogger.ts itself before plan_written, including redact, withRequestId and Sink. plan.initial.md names that implementation, its redaction exports and sink types, and proposes preserving its behavior byte-for-byte."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "toolu_01Pk7hZv4pn7DE2kdNQTHtwm successfully adds r-eftp2zdb6as643np to T-3 through ticket_update before toolu_01SZnh6PnMph48YiMPGMkgFc reports plan_written. plan.initial.md names this current R1 id; ledger.changes.json confirms it in tickets/T-3.json.citesRulings. The plan's statement that the citation is still pending predates the successful update."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md proposes moving AppLogger.ts and its sibling tests unchanged, explicitly preserving redaction and request-id behavior without signature changes. It identifies all three HTTP importers and specifies ../../packages/logging/AppLogger.ts for each while retaining the tests' sibling-relative import. toolu_0158QJRFTANsXQ1t6Ng3GXUA supplies the underlying implementation and sink contract supporting this preservation proposal."
+    },
+    "C4": {
+      "pass": false,
+      "evidence": "missing-evidence: No execution of the three AppLogger tests from packages/logging is recorded before plan_written. toolu_01MpNaWJA31mKKRMPdWcokWe runs only the pre-move baseline. plan.initial.md specifies running all four tests after relocation, but this future verification does not establish the frozen T-3 requirement that the tests run from the new location and pass."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and the tool calls before toolu_01SZnh6PnMph48YiMPGMkgFc contain no report identifying N-1's path as becoming stale or proposing its update. The initial verification searches only TypeScript files. No qualifying knowledge-impact report exists in the INITIAL window."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_0158QJRFTANsXQ1t6Ng3GXUA reads the full original AppLogger implementation. plan.md names src/platform/logging/AppLogger.ts, redact, redactMessage and Sink, then specifies moving the module to packages/logging without changing its behavior."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "ledger.changes.json records tickets/T-3.json.citesRulings containing r-eftp2zdb6as643np, matching the successful citation operation toolu_01Pk7hZv4pn7DE2kdNQTHtwm. plan.md identifies this current R1 id and acknowledges the completed citation."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff records AppLogger.ts and AppLogger.test.ts as 100% similarity renames into packages/logging and updates all three HTTP importers. Combined with the original implementation read in toolu_0158QJRFTANsXQ1t6Ng3GXUA, this establishes unchanged redact, withRequestId and sink behavior. toolu_016BqAnySS7YtW8S7Ch2NFtD lists the corrected imports; toolu_01GT1aKFiQ7EnjRt4ypb8xJw finds only historical ledger prose referencing the old path."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "After toolu_013J4fKqr83X5Tai695tGW1f moves both files, toolu_01C8guUxyJM82ZY6nCDWaVxV runs npm test and records four passes, zero failures and zero skips. toolu_015HyJrtiL2DD8ERu7ohe5B8 explicitly lists passing tests for key redaction, secret-shaped values and message redaction, and request ids, plus the router test. source.diff confirms the three AppLogger tests now reside in packages/logging/AppLogger.test.ts; the recorded package.json script is node --test."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "plan.md identifies N-1's stale location and prescribes updating it. toolu_01VkJrK6M3A6JtQtRs6mRhr5 performs the update, and ledger.changes.json confirms the location changes to packages/logging/AppLogger.ts while the contract and ruling paragraphs remain unchanged. handover.md and toolu_01548J66WJN2Z3ybYRuDVsnA explicitly report that update and explain the historical references retained in the T-1 handover and ticket descriptions. No ruling text changes appear in ledger.changes.json. This is arm 1, so cap-logging is not an applicable record."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Only baseline/0b1a44200b4e/T-3/repeat-3/attempt-001 was scored. INITIAL ends at the first plan_written report. C3 INITIAL credits the documented preservation proposal; C4 INITIAL applies the task-specific requirement for an observed passing run from the relocated directory, rather than treating a planned run as executed. N-1 was first identified as stale by the post-checkpoint plan reviewer in toolu_01JPecoLt7nPG23nR8qyQQ4C and subsequently repaired; that repair is credited only at FINAL. The recorded correction of the incomplete old-path grep disclosure is reflected in the final handover. The outer revise verdict is solely the requested score transport. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2df-cc6b-7171-811c-0ae533a124fe"
+  }
+}

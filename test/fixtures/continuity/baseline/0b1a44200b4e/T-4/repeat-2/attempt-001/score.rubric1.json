@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-4",
+  "initial": {
+    "C1": {
+      "pass": false,
+      "evidence": "missing-evidence: toolu_01UgmtLW1WbBs72gy1VGHDNT reads src/http/handler.ts, router.ts and router.test.ts before plan_written, but plan.initial.md:41 only labels RateLimiter.ts as New; it never states the required inspection conclusion that no rate limiter exists in the project."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "plan.initial.md:12 states T-4 cites no rulings; lines 14-24 identify r-eftp2zdb6as643np as binding the rejection log through AppLogger.withRequestId, not governing rate limiting. task.json and the pre-checkpoint ticket read toolu_011pRso8yjLuuuGhJSdKsDrv contain no ruling citations."
+    },
+    "C3": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md:20 specifies AppLogger.withRequestId for rejection logging and line 41 proposes a new limiter without fabricating an existing one, but the plan omits the inspection result required by C3."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.initial.md:135 specifies a second request returning 429 without enqueueing; line 138 specifies asserting the rejection log carries the handler-assigned requestId through the injected sink. These tests were specified before toolu_01MhwMvbuQcYkLu1Mk34k3jG reported plan_written."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and evidence.jsonl entries before toolu_01MhwMvbuQcYkLu1Mk34k3jG contain no completion knowledge-impact report for T-4. The earlier T-1 handover read by toolu_011uS8Jh11dMtzHTBst5KTVo is not a completion report for this attempt."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": false,
+      "evidence": "missing-evidence: the HTTP reads in toolu_01UgmtLW1WbBs72gy1VGHDNT establish inspection, but plan.md:42 still only labels src/http/RateLimiter.ts as New. The final plan does not state that inspection found no existing rate limiter in the project."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "plan.md:12-24 retains the distinction between no ticket ruling citations and R1 binding rejection logging through AppLogger.withRequestId. ledger.changes.json changes only status, completedDate and displayId on tickets/T-4.json, with no citesRulings addition and no ruling-text edits."
+    },
+    "C3": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.md omits the required stated inspection result. Its proposed new limiter is not fabricated reuse, and source.diff shows the handler rejection line emitted through AppLogger.withRequestId(requestId, sink), but correct logging does not satisfy the separate inspection-result requirement."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "source.diff adds src/http/handler.test.ts:14-29 asserting the 429 response and unchanged queue size, and lines 31-49 asserting the rate-limited warning carries req-limited. toolu_01YSE26JfEr7M7ifufryNAaV records 19 passing tests with no failures after confirming the tree matches the reviewed diff."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "handover.md:8 names the new src/http/RateLimiter.ts and its integration in src/http/handler.ts; the same completion content appears in reports.json at toolu_01W86eTzMpXwdtyhL5pBNSJC. ledger.changes.json records no changes to existing notes or rulings, consistent with the T-4 knowledge-impact expectation."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Only T-4 repeat-2 attempt-001 was scored. INITIAL ends at the first plan_written report; later implementation and completion evidence was not credited backwards. The New module heading was not treated as an explicit statement of the project-wide inspection result required by the frozen C1 and C3 definitions. C4 INITIAL credits specified tests; C5 INITIAL lacks a completion report. This is continuity scoring, not an independent code review. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2f7-472f-7271-b488-21203e8a1434"
+  }
+}

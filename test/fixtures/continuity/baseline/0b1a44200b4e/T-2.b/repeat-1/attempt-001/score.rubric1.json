@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-2.b",
+  "initial": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01PvjNPDfbEqnf4vBfeKk6RL reads src/platform/logging/AppLogger.ts before plan_written. plan.initial.md names its import path and specifies AppLogger.withRequestId(job.requestId, this.#sink), using the existing sink and redaction contract."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "Before plan_written, toolu_01MRo7kEySBHmWYVsPnejy1E successfully updates T-2 with r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma. plan.initial.md names both current ids; ledger.changes.json confirms both in tickets/T-2.json's citesRulings."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md specifies a per-job AppLogger.withRequestId(job.requestId, this.#sink), start/success/failure lines through that logger, and failure detail through redacted fields. It explicitly excludes a second logging path and fresh request ids."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.initial.md specifies a two-job test asserting req-specific start/success/failure lines for different enqueuing request ids, plus a failure-path test throwing an Error containing Bearer abc and asserting [REDACTED] with no original secret."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and the evidence.jsonl window before toolu_01Ts8bw2Rnoct5EESC1rhSp6 contain no completion knowledge-impact report accounting for existing knowledge records. Later completion material is outside INITIAL."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01PvjNPDfbEqnf4vBfeKk6RL directly reads src/platform/logging/AppLogger.ts. plan.md retains its module path, withRequestId binding, optional Sink reuse, and redacted failure fields."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "ledger.changes.json records both r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma added to tickets/T-2.json's citesRulings; plan.md names both. The successful citation update is toolu_01MRo7kEySBHmWYVsPnejy1E."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff shows src/jobs/JobQueue.ts importing the existing AppLogger and constructing AppLogger.withRequestId(job.requestId, this.#sink) inside the drain loop. All three lifecycle lines use that logger, with failure detail in fields; no replacement logger is introduced."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "source.diff adds src/jobs/JobQueue.test.ts assertions for req-a/req-b on lifecycle lines and Bearer-token redaction on the job failure path. src/http/handler.test.ts also asserts HTTP-assigned request ids on job lines for supplied and default queues. toolu_0164tJ3JSpS3tB3A6S1dWdGs records the restored suite passing 13/13."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: handover.md and toolu_016iNCgEJ6QAB9hc3JMPmdo2 report that jobs now log and describe ticket citations and issue bookkeeping, but do not state that existing knowledge records remain unchanged or account for N-1. Neither reports.json nor the commit message in toolu_013TZunQSyzdMsFmZVXh9c7g supplies that statement. ledger.changes.json shows no note or ruling edits, so the unchanged-record outcome cannot substitute for the rubric's required report."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Only this attempt was scored. INITIAL ends at the first plan_written report, toolu_01Ts8bw2Rnoct5EESC1rhSp6. C4 INITIAL credits specified tests under the frozen criterion, without importing later integration-test repairs. C5 fails for missing knowledge-impact reporting, not for an observed ruling edit. The outer revise verdict is solely the required score transport. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2e9-2f5e-7173-a303-7667972df3c4"
+  }
+}

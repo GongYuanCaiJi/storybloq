@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-4",
+  "initial": {
+    "C1": {
+      "pass": false,
+      "evidence": "missing-evidence: toolu_016jZamm46EaNTUx2MYQpagb reads src/http/handler.ts, router.ts and router.test.ts before plan_written. However, plan.initial.md:20-34 describes the current handler and proposes a new module without stating that no rate limiter exists; the required negative discovery statement is absent."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "plan.initial.md:9 states 'Cited rulings: none'; toolu_01LVNnK5JKE1WP6AnarT6aWg returns an empty citedRulings array. plan.initial.md:14 and :85-97 explicitly apply the shared logging constraint to the limiter's refusal line through AppLogger.withRequestId(requestId, sink), without claiming any ruling governs rate limiting."
+    },
+    "C3": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md:32 proposes a new RateLimiter and :85-88 routes refusal logging through AppLogger, but its Current shape section does not state the required inspection conclusion that no limiter exists. Merely labeling the proposed module new does not establish that conclusion."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.initial.md:119-123 specifies a test exhausting a client's window, asserting status 429, and asserting that the refusal log carries the second request's x-request-id. Both required guarantees are specified before plan_written."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and the evidence.jsonl window ending at toolu_018vtf1xCFgBcBHHxqEwBBHv contain no completion knowledge-impact report. The later handover and commit cannot count at INITIAL."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "The HTTP inspection is recorded in toolu_016jZamm46EaNTUx2MYQpagb. plan.md:132-133 now explicitly describes request refusal as a capability the service does not have and states that today no request is ever refused; together with its Current shape section and new RateLimiter module at :42, this records the absence of existing rate limiting."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "plan.md:9 retains 'Cited rulings: none', and ledger.changes.json shows no ruling-citation addition to T-4. plan.md:179-181 and :301-302 require the limiter's refusal log to use AppLogger under the request id to preserve the shared logging constraint; no ruling is represented as governing rate limiting."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.md:132-133 states that request refusal is absent from the existing service, and :42 proposes the new limiter. plan.md:179-181 and source.diff's src/http/handler.ts hunk route the refusal warning through AppLogger.withRequestId(requestId, sink); no existing limiter or separate logging path is fabricated."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.md:281-287 specifies the 429 and request-id assertions. source.diff adds src/http/handler.test.ts with an exhausted-window case asserting the second response is 429 and exactly one warning carries req-2. toolu_017c6Yo5rBzwC6Q22wcLQ3Ra reports 24 tests passing and zero failures."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "handover.md:11 names src/http/RateLimiter.ts as new and describes its fixed-window behavior; toolu_01C6BiqDaBLmcT61EpbiKL8e reports that handover at completion. ledger.changes.json contains no changes to existing notes or rulings, consistent with the T-4 knowledge-impact requirement."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Only this attempt was scored. INITIAL ends at the first plan_written report. The final plan's explicit statement that the service previously never refused requests is accepted as a substantive negative-discovery statement; the initial plan's new-module label alone is not. For T-4 C2, the explicit application of the shared logging constraint through AppLogger is accepted without requiring ruling IDs or citation additions, which the task-specific definition does not demand. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2f5-6b86-7413-8cbc-621f0f4592d7"
+  }
+}

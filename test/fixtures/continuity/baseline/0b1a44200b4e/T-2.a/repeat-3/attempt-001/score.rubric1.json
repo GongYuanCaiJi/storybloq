@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-2.a",
+  "initial": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01U5UhhSeqVTojKWzcwsc9T4 reads src/platform/logging/AppLogger.ts in full before plan_written. plan.initial.md names its location and proposes AppLogger.withRequestId(job.requestId, this.#sink), explicitly using its redaction and sink contract."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "Before plan_written, toolu_01VQFVJD3DvXWccg8CsPqqDV successfully updates T-2 with both r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma. plan.initial.md names both current ids; ledger.changes.json confirms both in tickets/T-2.json.citesRulings."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md, Changes section 1, specifies start/success/failure lines through AppLogger.withRequestId(job.requestId, this.#sink), routes error text through AppLogger redaction, and excludes a second logger or console path."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "plan.initial.md, Changes section 3, specifies assertions that start and success lines carry req-enqueued-1, failure retains the enqueuing id, separate jobs retain distinct ids, and an error containing Bearer abc becomes upstream refused [REDACTED]."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: plan.initial.md and the pre-plan_written calls in evidence.jsonl contain no completion knowledge-impact report accounting for existing knowledge records. reports.json records only ticket selection and plan_written by this checkpoint."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01U5UhhSeqVTojKWzcwsc9T4 supplies the implementation read; plan.md retains the AppLogger location, withRequestId(job.requestId, this.#sink), and the redaction/sink behavior derived from that read."
+    },
+    "C2": {
+      "pass": true,
+      "evidence": "ledger.changes.json records both r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma in completed T-2's citesRulings. plan.md names both current ids, and the guide result for toolu_01BQLuEFkt1N4qJ3TqKLrJow delivers both as cited rulings."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff adds the existing AppLogger import to src/jobs/JobQueue.ts and binds the per-job logger to job.requestId for all three lifecycle messages. Error text is supplied as a field to that logger; no replacement or second logging path is added."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "source.diff adds src/jobs/JobQueue.test.ts assertions for req-enqueued-1 on emitted lines, distinct req-a/req-b job ids, and redaction of both failure error text and secret-shaped kind. toolu_018QAJR93UcEz9ppqnFkDLje records a 13/13 passing baseline; reports.json also records request-id mutation failures in the final review."
+    },
+    "C5": {
+      "pass": false,
+      "evidence": "missing-evidence: handover.md and toolu_0199JSz3A7EezT8GoMrjL9x5 name the new job logging, ticket citations and ISS-001, but neither they nor the commit message in toolu_01PYgvD3xgNKRq3ojyVRw9bZ state that existing knowledge records remain unchanged. ledger.changes.json shows no existing note or ruling edit, so the required unchanged-record report is absent. It also records added lessons/L-001.json, created after the handover, without a subsequent guide completion report naming it."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "Scored only the supplied repeat-3/attempt-001 against rubricVersion 1. INITIAL ends at the first plan_written report, toolu_01BQLuEFkt1N4qJ3TqKLrJow; later review repairs were not credited backwards. INITIAL C4 credits explicitly specified tests, while FINAL C4 credits the delivered assertions. C5 fails for absent knowledge-impact reporting, not for a ruling-text modification. The outer revise verdict is a transport requirement, not a code-review verdict. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's runtime_session_record for this call: requested gpt-6-astra, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report. The bridge reports failover from gemini to codex, caused by gemini not recognising the requested model id rather than by a rate limit.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c2e5-4e5c-7d62-9035-315181c90cb5"
+  }
+}
