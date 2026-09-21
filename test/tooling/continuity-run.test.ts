@@ -7,7 +7,7 @@ import { join, resolve, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import {
-  parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, environmentSecrets,
+  parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, environmentSecrets, ambiguousEnvironmentSecrets,
   diffLedger, decideCell, qualifies, expectedCellKeys, experimentHash, materialize, variantDiscoveryViolations, skillPayloadDiff, hashInputs, hashTree, sha256,
   verifyAttemptDir, isWellFormedEvent, TASKS, REPEATS, MAX_INVALID_RETRIES, type ValidityInputs,
 } from "../../scripts/continuity-lib.js";
@@ -211,15 +211,32 @@ describe("sanitiser and publication", () => {
   it("allowlists exactly the fixture's synthetic credentials and blocks anything else", () => {
     const allow = fixtureCredentialAllowlist(join(FIXTURE, "core"));
     expect(allow).toContain("sk-abcdefghijk");
-    // The fixture's `Bearer abc` is a literal in a redaction test, not a credential, so it needs no entry.
-    expect(allow.some((a) => a.startsWith("Bearer"))).toBe(false);
     const ok = publicationCheck("saw Bearer abc and Bearer ... and sk-abcdefghijk in N-1", allow);
     expect(ok.ok).toBe(true);
-    expect(ok.fixtureDerived.map((d) => d.value).sort()).toEqual(["sk-abcdefghijk"]);
-    expect(publicationCheck(`token Bearer ${"x".repeat(24)}`, allow).blocked[0]!.label).toBe("bearer");
-    expect(publicationCheck("sk-ant-api03-secret", allow).ok).toBe(false);
-    expect(publicationCheck("ANTHROPIC_API_KEY=1", allow).ok).toBe(false);
-    expect(publicationCheck("oauthAccount", allow).ok).toBe(false);
+    // None of those three is long enough to be a credential, so none is blocked and none needs the allowlist:
+    // a session implementing the fixture's redactor invents variants of them, and no allowlist can enumerate those.
+    expect(publicationCheck("saw Bearer abc and sk-abcdefgh12345 and sk-abcdefghijk", []).ok).toBe(true);
+    // At credential length they all refuse, allowlist or not.
+    expect(publicationCheck(`token Bearer ${"x".repeat(40)}`, allow).blocked[0]!.label).toBe("bearer");
+    expect(publicationCheck(`sk-ant-oat01-${"y".repeat(40)}`, allow).ok).toBe(false);
+    expect(publicationCheck(`ANTHROPIC_API_KEY=${"z".repeat(40)}`, allow).ok).toBe(false);
+    // A name is not a secret, and a word is not a token: both appear in prose about redaction. The floor is on
+    // the VALUE, so a long variable name cannot push a short placeholder over it.
+    expect(publicationCheck("redact ANTHROPIC_API_KEY and oauth tokens", allow).ok).toBe(true);
+    expect(publicationCheck("ANTHROPIC_API_KEY=placeholder-token", allow).ok).toBe(true);
+    expect(publicationCheck("Bearer short-placeholder-abc", allow).ok).toBe(true);
+    // oauth keeps a positive case of its own: disabling the detector must not leave this suite green.
+    expect(publicationCheck(`oauth-${"0123456789".repeat(4)}`, allow).blocked.map((b) => b.label)).toContain("oauth");
+    // Allowlisting still works at credential length, and a derived hit is still accounted.
+    const synthetic = `sk-ant-api03-${"synthetic".repeat(3)}`;
+    expect(publicationCheck(`saw ${synthetic}`, []).ok).toBe(false);
+    const derived = publicationCheck(`saw ${synthetic} twice: ${synthetic}`, [synthetic]);
+    expect(derived.ok).toBe(true);
+    // Two occurrences, each matched by both sk-ant and sk-key: the accounting counts pattern hits, not strings.
+    expect(derived.fixtureDerived).toEqual([{ value: synthetic, count: 4 }]);
+    // An explicitly known secret outranks both the allowlist and the floor, at any length.
+    expect(publicationCheck("sk-ant-secret123", ["sk-ant-secret123"], { secrets: ["sk-ant-secret123"] }).blocked.map((b) => b.label)).toEqual(["known-secret"]);
+    // An address identifies a person at any length, so the credential floor never applies to it.
     expect(publicationCheck("mail me at a@b.co", allow).ok).toBe(false);
   });
   it("blocks any absolute path regardless of root, honours directory boundaries on allowed prefixes, and admits public system prefixes", () => {
@@ -239,14 +256,43 @@ describe("sanitiser and publication", () => {
   });
   it("scans JSON and JSONL artefacts by their decoded string values, so escapes cannot hide a credential or a path", () => {
     const allow: string[] = [];
-    expect(publicationCheck(JSON.stringify({ content: "Bearer\nprivate-token-0123456789" }), allow).blocked[0]!.label).toBe("bearer");
-    expect(publicationCheck('{"k":"\\u0042earer secret1-0123456789abcdef"}', allow).ok).toBe(false);
+    expect(publicationCheck(JSON.stringify({ content: "Bearer\nprivate-token-0123456789abcdef0123" }), allow).blocked[0]!.label).toBe("bearer");
+    expect(publicationCheck('{"k":"\\u0042earer secret1-0123456789abcdef0123456789"}', allow).ok).toBe(false);
     expect(publicationCheck('{"p":"\\/Users\\/x\\/y"}', allow).ok).toBe(false);
-    expect(publicationCheck([JSON.stringify({ a: "fine" }), JSON.stringify({ b: "sk-ant-api03-zz" })].join("\n"), allow).ok).toBe(false);
+    expect(publicationCheck([JSON.stringify({ a: "fine" }), JSON.stringify({ b: "sk-ant-api03-secret0123456789abcdef" })].join("\n"), allow).ok).toBe(false);
     expect(publicationCheck(JSON.stringify({ a: "<WORKDIR>/src/x.ts", b: "Bearer abc" }), ["Bearer abc"]).ok).toBe(true);
     // Keys are scanned too.
-    expect(publicationCheck('{"Bearer\\u0020private-token-0123456789":1}', allow).blocked[0]!.label).toBe("bearer");
+    expect(publicationCheck('{"Bearer\\u0020private-token-0123456789abcdef0123":1}', allow).blocked[0]!.label).toBe("bearer");
     expect(publicationCheck('{"\\/Users\\/x\\/secret":1}', allow).blocked[0]!.label).toBe("absolute-path");
+    // An environment credential is the same credential whether it is written bare, shell-quoted or as JSON.
+    const envValue = "0123456789abcdef0123456789abcdef";
+    expect(publicationCheck(`ANTHROPIC_AUTH_TOKEN=${envValue}`, allow).blocked[0]!.label).toBe("anthropic-env");
+    expect(publicationCheck(`export ANTHROPIC_AUTH_TOKEN="${envValue}"`, allow).blocked[0]!.label).toBe("anthropic-env");
+    expect(publicationCheck(JSON.stringify({ ANTHROPIC_AUTH_TOKEN: envValue }), allow).blocked[0]!.label).toBe("anthropic-env");
+    // An escaped key is the same assignment: the raw matcher cannot see it and decodedStrings hands the key and
+    // the value over separately, so the pairs are rebuilt from the parsed form and scanned as assignments.
+    expect(publicationCheck(`{"ANTHROPIC_AUTH_TO\\u004bEN":"${envValue}"}`, allow).blocked[0]!.label).toBe("anthropic-env");
+    expect(publicationCheck(`{"nested":{"ANTHROPIC_API_KEY":"${envValue}"}}`, allow).blocked[0]!.label).toBe("anthropic-env");
+    // The allowlist has to carry BOTH spellings the check scans, or a fixture's own assignment is matched in the
+    // raw form (`NAME":"value`) and refused in the rebuilt one (`NAME=value`), which is unallowlistable content.
+    const fx = tmp("cont-fxalw-");
+    const doc = JSON.stringify({ ANTHROPIC_AUTH_TOKEN: envValue });
+    writeFileSync(join(fx, "f.json"), doc);
+    const fxAllow = fixtureCredentialAllowlist(fx);
+    expect(publicationCheck(doc, fxAllow).ok).toBe(true);
+    expect(publicationCheck(`{"ANTHROPIC_AUTH_TO\\u004bEN":"${envValue}"}`, fxAllow).ok).toBe(true);
+    expect(publicationCheck(JSON.stringify({ ANTHROPIC_AUTH_TOKEN: "f".repeat(32) }), fxAllow).ok).toBe(false);
+    // An escaped credential inside an array, and a standalone JSON string, exist in NEITHER the raw text nor an
+    // assignment: only the decoded value carries them. Both consumers read one enumeration, so both see them.
+    const esc = tmp("cont-fxesc-");
+    const inArray = `["\\u0042earer ${"x".repeat(32)}"]`;
+    const standalone = `"\\u0042earer ${"y".repeat(32)}"`;
+    writeFileSync(join(esc, "a.json"), inArray);
+    writeFileSync(join(esc, "b.json"), standalone);
+    const escAllow = fixtureCredentialAllowlist(esc);
+    expect(publicationCheck(inArray, escAllow).ok).toBe(true);
+    expect(publicationCheck(standalone, escAllow).ok).toBe(true);
+    expect(publicationCheck(`["Bearer ${"z".repeat(32)}"]`, escAllow).blocked.map((b) => b.label)).toContain("bearer");
     expect(publicationCheck(`${JSON.stringify({ ok: 1 })}\n${JSON.stringify({ "/Volumes/private/k": 1 })}`, allow).ok).toBe(false);
   });
   // ISS: the 2026-09-20 arm-1 smoke cell was valid and completed but withheld evidence.jsonl
@@ -276,13 +322,13 @@ describe("sanitiser and publication", () => {
       expect(publicationCheck(sanitize(unicodeRoot, twinCtx).text, allow).ok).toBe(true);
     });
     it("a credential inside a path is NOT erased: the path stays and the check refuses it", () => {
-      const s = sanitize("wrote /tmp/sk-ant-secret123", twinCtx);
-      expect(s.text).toBe("wrote /tmp/sk-ant-secret123");
+      const s = sanitize("wrote /tmp/sk-ant-api03-secret0123456789abcdef", twinCtx);
+      expect(s.text).toBe("wrote /tmp/sk-ant-api03-secret0123456789abcdef");
       expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
     });
     it("a credential shaped as an address is NOT erased either", () => {
-      const s = sanitize("mail sk-ant-secret123@example.com", twinCtx);
-      expect(s.text).toBe("mail sk-ant-secret123@example.com");
+      const s = sanitize("mail sk-ant-api03-secret0123456789abcdef@example.com", twinCtx);
+      expect(s.text).toBe("mail sk-ant-api03-secret0123456789abcdef@example.com");
       expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
     });
     it("replaces a percent-encoded file URL, whose decoded path matches nothing literal", () => {
@@ -316,8 +362,8 @@ describe("sanitiser and publication", () => {
     // Round 2: replacing candidate STRINGS let a harmless match erase bytes inside another match.
     // These four pin the span-based replacement that fixed it.
     it("a harmless path next to a credential-bearing one does not erase its neighbour's secret", () => {
-      const s = sanitize("/tmp/sk-ant /tmp/sk-ant-secret123", twinCtx);
-      expect(s.text).toBe("<ABS> /tmp/sk-ant-secret123");
+      const s = sanitize("/tmp/sk-ant /tmp/sk-ant-api03-secret0123456789abcdef", twinCtx);
+      expect(s.text).toBe("<ABS> /tmp/sk-ant-api03-secret0123456789abcdef");
       expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("sk-ant");
     });
     it("matches a path written with a surrogate-pair escape", () => {
@@ -339,13 +385,13 @@ describe("sanitiser and publication", () => {
     // Round 3: a credential can START outside the span being replaced, and a replacement must never
     // break a document that parsed before.
     it("a credential that swallows a path keeps its alarm", () => {
-      const s = sanitize("Bearer /tmp/secret123-0123456789abcdef", twinCtx);
-      expect(s.text).toBe("Bearer /tmp/secret123-0123456789abcdef");
+      const s = sanitize("Bearer /tmp/secret123-0123456789abcdef0123", twinCtx);
+      expect(s.text).toBe("Bearer /tmp/secret123-0123456789abcdef0123");
       expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("bearer");
     });
     it("a credential that swallows an address keeps its alarm, even through the username pass", () => {
-      const s = sanitize("Bearer someone-0123456789abcdef@example.com", twinCtx);
-      expect(s.text).toBe("Bearer someone-0123456789abcdef@example.com");
+      const s = sanitize("Bearer someone-0123456789abcdef0123456789@example.com", twinCtx);
+      expect(s.text).toBe("Bearer someone-0123456789abcdef0123456789@example.com");
       expect(publicationCheck(s.text, []).blocked.map((b) => b.label)).toContain("bearer");
     });
     // Round 5: the arm-1 matrix lost T-2.a#1 and T-2.a#2 to two false refusals. Both are below, verbatim.
@@ -383,18 +429,21 @@ describe("sanitiser and publication", () => {
     it("a short bearer literal the agent wrote while implementing a redactor is content", () => {
       const code = JSON.stringify({ code: 'assert(redact({ Authorization: "Bearer abc123" })); // a Bearer token is replaced' });
       expect(publicationCheck(sanitize(code, twinCtx).text, allow).ok).toBe(true);
-      // A credential-length token is still refused, and so is every key shape, at any length.
-      expect(publicationCheck(`Bearer ${"a".repeat(20)}`, []).blocked.map((b) => b.label)).toContain("bearer");
-      expect(publicationCheck("sk-ant-oat01-short", []).ok).toBe(false);
+      // The literal that disqualified the SECOND capture: the same class, in a pattern nobody had watched.
+      expect(publicationCheck(JSON.stringify({ code: 'redact({ token: "sk-abcdefgh12345" })' }), []).ok).toBe(true);
+      // At credential length both refuse.
+      expect(publicationCheck(`Bearer ${"a".repeat(32)}`, []).blocked.map((b) => b.label)).toContain("bearer");
+      expect(publicationCheck(`sk-ant-oat01-${"b".repeat(40)}`, []).ok).toBe(false);
     });
     it("a value from the runner environment is refused by value, allowlist or not, and never printed", () => {
       const secret = `oat01-${"Z".repeat(40)}`;
       const v = publicationCheck(JSON.stringify({ log: `sent with ${secret}` }), [secret], { secrets: [secret] });
       expect(v.blocked.map((b) => b.label)).toContain("known-secret");
       expect(v.blocked.every((b) => !b.sample.includes("Z"))).toBe(true);
-      // Escapes do not hide it either, and a value too short to be a credential is not treated as one.
+      // Escapes do not hide it either. A caller's own statement that a value is secret outranks the credential
+      // floor entirely: the floor is a guess about unknown strings, and this is not a guess.
       expect(publicationCheck(`{"k":"${secret.slice(0, 6)}\\u005a${secret.slice(7)}"}`, [], { secrets: [secret] }).ok).toBe(false);
-      expect(publicationCheck("short-value", [], { secrets: ["short-value"] }).ok).toBe(true);
+      expect(publicationCheck("short-value", [], { secrets: ["short-value"] }).blocked.map((b) => b.label)).toEqual(["known-secret"]);
       // Round 5 review: a known secret that ALSO matches a shape pattern must not be reported by that pattern,
       // whose sample carries the value's first 24 characters into thrown errors and redaction ledgers.
       const shaped = "sk-ant-123456789012345";
@@ -404,8 +453,16 @@ describe("sanitiser and publication", () => {
       // And allowlisting it does not put it in fixtureDerived: `secrets` outranks `allowlist`.
       expect(publicationCheck(`log ${shaped}`, [shaped], { secrets: [shaped] }).fixtureDerived).toEqual([]);
     });
-    it("environment secrets are selected by name suffix and credential length", () => {
-      expect(environmentSecrets({ CLAUDE_CODE_OAUTH_TOKEN: "x".repeat(30), FOO_KEY: "short", PATH: "y".repeat(50) })).toEqual(["x".repeat(30)]);
+    it("environment secrets are selected by name suffix, at any length, and short ones are the operator's call", () => {
+      expect(environmentSecrets({ CLAUDE_CODE_OAUTH_TOKEN: "x".repeat(30), PATH: "y".repeat(50) })).toEqual(["x".repeat(30)]);
+      // A short password is still a password: collected, and refused end to end by the value the collector found.
+      const env = { SERVICE_PASSWORD: "hunter2-abcdefgh", PATH: "y".repeat(50) };
+      expect(environmentSecrets(env)).toEqual(["hunter2-abcdefgh"]);
+      expect(publicationCheck("log hunter2-abcdefgh here", [], { secrets: environmentSecrets(env) }).blocked.map((b) => b.label)).toEqual(["known-secret"]);
+      // It is also ambiguous, so it is reported BY NAME for the operator to settle before a cell is spent.
+      expect(ambiguousEnvironmentSecrets(env)).toEqual(["SERVICE_PASSWORD"]);
+      expect(JSON.stringify(ambiguousEnvironmentSecrets(env))).not.toContain("hunter2");
+      expect(ambiguousEnvironmentSecrets({ CLAUDE_CODE_OAUTH_TOKEN: "x".repeat(30) })).toEqual([]);
     });
     it("a nested tool result stays parseable: an escaped quote is never eaten by a span", () => {
       const nested = JSON.stringify({ result: JSON.stringify({ p: "/tmp/foo bar" }) });
@@ -843,25 +900,31 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     for (const s of seen) for (const k of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]) expect(s.env[k]).toBeUndefined();
   });
 
-  it("the full 15-cell matrix with complete evidence QUALIFIES; one blocked artefact keeps its observation but is the sole disqualifier", async () => {
+  it("the full 15-cell matrix with complete evidence QUALIFIES; one blocked artefact stops the matrix where it happens", async () => {
     const full = options({ tasks: [...TASKS], repeats: 3 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     const ok = await runMatrix(full, pf, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
     expect(seen).toHaveLength(15);
     expect(ok.qualifying).toBe(true);
     expect(existsSync(join(full.out, pf.experiment.slice(0, 12), "QUALIFYING"))).toBe(true);
+    // An observation that cannot publish its evidence disqualifies the whole experiment, so the matrix stops at
+    // it rather than spending the remaining cells on a result that can never be cited. Two live captures were
+    // lost that way, one running 4 cells past the point of no return and the next 6.
     const o2 = options({ tasks: [...TASKS], repeats: 3 }); const seen2: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
-    const leak = (t: string): string | undefined => (t === "T-3" ? "# handover\n\nleaked sk-ant-api03-verysecret and /Volumes/private/x.csv\n" : undefined);
-    const bad = await runMatrix(o2, pf, deps({ spawnFn: fakeSpawn({ complete: true, handoverText: leak }, seen2) }));
-    expect(seen2).toHaveLength(15);
-    expect(bad.qualifying).toBe(false);
-    expect(bad.reason).toBe("3 observation(s) with incomplete published evidence: T-3#1, T-3#2, T-3#3");
+    const leak = (t: string): string | undefined => (t === "T-3" ? "# handover\n\nleaked sk-ant-api03-verysecret0123456789 and /Volumes/private/x.csv\n" : undefined);
+    await expect(runMatrix(o2, pf, deps({ spawnFn: fakeSpawn({ complete: true, handoverText: leak }, seen2) }))).rejects.toThrow(/incomplete evidence/);
+    expect(seen2).toHaveLength(10); // T-2.a, T-2.b and T-2.c complete (9), then T-3#1 stops it
+    const exp = JSON.parse(readFileSync(join(o2.out, pf.experiment.slice(0, 12), "experiment.json"), "utf-8")) as { qualification: { qualifying: boolean; reason: string } };
+    expect(exp.qualification.qualifying).toBe(false);
+    expect(exp.qualification.reason).toContain("T-3#1 published incomplete evidence");
     expect(existsSync(join(o2.out, pf.experiment.slice(0, 12), "QUALIFYING"))).toBe(false);
+    // The rule the stop enforces, pinned directly: one unpublished observation is enough to disqualify.
+    const cells = [...TASKS].flatMap((task) => [1, 2, 3].map((repeat) => ({ task, repeat, satisfied: true, evidenceComplete: !(task === "T-3" && repeat === 1) })));
+    expect(qualifies({ cells, isolation: "fresh", ownerException: null })).toMatchObject({ qualifying: false, unpublishedCells: ["T-3#1"] });
   }, 120_000);
 
   it("a blocked artefact stays private, the observation stands, and evidence completeness is recorded on the cell", async () => {
     const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
-    const r = await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true, handoverText: "# handover\n\nleaked sk-ant-api03-verysecret and /Volumes/private/x.csv\n" }, seen) }));
-    expect(r.qualifying).toBe(false);
+    await expect(runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true, handoverText: "# handover\n\nleaked sk-ant-api03-verysecret0123456789 and /Volumes/private/x.csv\n" }, seen) }))).rejects.toThrow(/incomplete evidence/);
     const pub = pubDirOf(o, pf); const raw = rawDirOf(o, pf);
     expect(existsSync(join(pub, "handover.md"))).toBe(false);
     expect(existsSync(join(raw, "unpublished.handover.md"))).toBe(true);
@@ -1079,7 +1142,7 @@ describe("scoring", () => {
     // An unknown absolute path is identity, not a secret: the sanitiser substitutes it and the write succeeds.
     expect(() => publishText(join(d, "b.md"), "rubric now mentions /Users/someone/private.md", [])).not.toThrow();
     expect(readFileSync(join(d, "b.md"), "utf-8")).toBe("rubric now mentions <ABS>");
-    expect(() => publishText(join(d, "c.json"), JSON.stringify({ evidence: "saw sk-ant-api03-xyz" }), [])).toThrow(/sk-ant/);
+    expect(() => publishText(join(d, "c.json"), JSON.stringify({ evidence: "saw sk-ant-api03-secret0123456789abcdef" }), [])).toThrow(/sk-ant/);
   });
   it("the report counts exactly the verified attempt per preregistered cell, names verification failures, and withholds citability", () => {
     const expDir = tmp("cont-report-");

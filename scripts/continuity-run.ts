@@ -19,7 +19,7 @@ import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
   validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
-  environmentSecrets,
+  environmentSecrets, ambiguousEnvironmentSecrets,
 } from "./continuity-lib.js";
 import { killSidecar } from "../src/autonomous/liveness.js";
 import { loadRulingsSafe } from "../src/core/ruling-loader.js";
@@ -36,6 +36,20 @@ export const DEFAULT_OUT = join(FIXTURE_ROOT, "baseline");
 export const DEFAULT_RAW_OUT = join(WORKSPACE_ROOT, "eval-runs", "continuity");
 /** Read once, at process start, so every publication in this run is checked against the same set of real values. */
 const RUNNER_SECRETS = environmentSecrets(process.env);
+/**
+ * A value short enough to be an identifier rather than a credential is not silently dropped from the secret
+ * list, because a short password is still a password; it is also not accepted blindly, because refusing every
+ * artefact that contains it would make the capture impossible. The operator decides, before a cell is spent.
+ * Names only: a refusal never prints a value.
+ */
+function refuseAmbiguousSecrets(env: NodeJS.ProcessEnv): void {
+  const names = ambiguousEnvironmentSecrets(env);
+  if (names.length === 0) return;
+  throw new Error(
+    `continuity-run: ${names.join(", ")} hold values short enough that refusing every artefact containing them would fail the capture, ` +
+    "and short enough that they may not be credentials at all. Unset them for the run if they are placeholders, or lengthen them if they are real.",
+  );
+}
 export const DIST_FILES = ["dist/mcp.js", "dist/cli.js", "dist/index.js", "dist/presence.js"] as const;
 /** The executable and fixture inputs whose hash is the experiment's identity; output directories are exempt. */
 export const INPUT_PATHS = [
@@ -259,6 +273,7 @@ export interface Preflight {
 }
 
 export function preflight(o: RunOptions): Preflight {
+  refuseAmbiguousSecrets(process.env);
   assertSubscriptionAuthOnly(process.env, "continuity-run");
   for (const proc of ["vitest", "jest"]) {
     const found = pgrep(["-fl", proc], PKG_ROOT);
@@ -625,6 +640,11 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
   }
 }
 
+/** Raised when a cell publishes without its evidence: the experiment cannot qualify, so the matrix stops. */
+export class EvidenceIncompleteError extends Error {
+  constructor(message: string) { super(message); this.name = "EvidenceIncompleteError"; }
+}
+
 // --- matrix -------------------------------------------------------------------
 
 export interface AttemptEntry {
@@ -661,7 +681,20 @@ export async function runMatrix(o: RunOptions, pf: Preflight, deps: AttemptDeps 
       for (;;) {
         const decision = decideCell(readAttempts(cellDir), pf.experiment, { task, repeat });
         if (decision.kind !== "satisfied" && decision.mismatched.length) summary.push(`${task}#${repeat}: ignored foreign records: ${decision.mismatched.join("; ")}`);
-        if (decision.kind === "satisfied") { cells.push({ task, repeat, satisfied: true, evidenceComplete: decision.evidenceComplete, attempt: decision.attempt }); summary.push(`${task}#${repeat}: satisfied by ${decision.attempt}${decision.evidenceComplete ? "" : " (evidence incomplete)"}`); break; }
+        if (decision.kind === "satisfied") {
+          cells.push({ task, repeat, satisfied: true, evidenceComplete: decision.evidenceComplete, attempt: decision.attempt });
+          summary.push(`${task}#${repeat}: satisfied by ${decision.attempt}${decision.evidenceComplete ? "" : " (evidence incomplete)"}`);
+          // An observation that cannot publish its evidence cannot be scored, and qualifies() refuses the whole
+          // experiment for one of them. Continuing spends every remaining cell on a result that can never be
+          // cited. Two captures were lost this way before the runner stopped saying nothing about it: the first
+          // ran 4 cells past the point of no return, the second 6. This is a tooling defect, not a behavioural
+          // failure, so it stops the matrix for repair rather than counting against the arm.
+          if (!decision.evidenceComplete) {
+            writeExperiment(o, pf, cells, summary, `${task}#${repeat} published incomplete evidence (${decision.attempt}); the experiment can no longer qualify`);
+            throw new EvidenceIncompleteError(`continuity-run: ${task}#${repeat} published incomplete evidence via ${decision.attempt}; see its redaction.json blockedLabels. No further attempts started.`);
+          }
+          break;
+        }
         if (decision.kind === "exhausted") { cells.push({ task, repeat, satisfied: false, evidenceComplete: false, attempt: null }); summary.push(`${task}#${repeat}: EXHAUSTED (only invalid attempts)`); break; }
         const r = await runAttempt(o, pf, task, repeat, decision.nextAttempt, deps);
         summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}`);
@@ -701,6 +734,6 @@ async function main(): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     process.stderr.write(`${err instanceof SessionKilledError ? `[${err.kind}] ` : ""}${(err as Error).stack ?? String(err)}\n`);
-    process.exit(err instanceof SessionKilledError ? 130 : 1);
+    process.exit(err instanceof SessionKilledError ? 130 : err instanceof EvidenceIncompleteError ? 4 : 1);
   });
 }

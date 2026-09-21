@@ -599,9 +599,10 @@ function decodeWithMap(src: string): DecodedText {
 function credentialSpans(decoded: string, allowed: ReadonlySet<string>): { start: number; end: number }[] {
   const out: { start: number; end: number }[] = [];
   for (const p of CREDENTIAL_PATTERNS) {
-    if (p.label === "email") continue;
+    if (p.identity) continue;
     for (const m of decoded.matchAll(new RegExp(p.re.source, p.re.flags))) {
-      if (!allowed.has(m[0])) out.push({ start: m.index, end: m.index + m[0].length });
+      // Same line as the check: a literal too short to be a credential must not guard the text around it.
+      if (meetsCredentialFloor(p, m) && !allowed.has(m[0])) out.push({ start: m.index, end: m.index + m[0].length });
     }
   }
   return out;
@@ -663,17 +664,59 @@ function isPublicPath(p: string): boolean {
   return PUBLIC_ABSOLUTE_PREFIXES.some((prefix) => withinPrefix(posix.normalize(p), prefix));
 }
 
-const CREDENTIAL_PATTERNS: readonly { readonly label: string; readonly re: RegExp }[] = [
+/**
+ * The line between a credential that exists and a literal somebody invented for a test.
+ *
+ * It has to exist because the fixture task IS a redaction task: T-2 asks the session to implement a redactor for
+ * `Bearer ...` and `sk-...`, so every session writes credential-shaped literals of its own, and an allowlist
+ * derived from the fixture's bytes can only ever cover the ones the fixture already contains. Two live captures
+ * were disqualified by exactly this: `Bearer abc123` and `Bearer token` in one, `sk-abcdefgh12345` in the next,
+ * each a variant of a fixture literal, none of them a secret, each costing a whole observation.
+ *
+ * 32 sits between two measured populations and touches neither. Invented: `Bearer abc` (10), `Bearer abc123` (13),
+ * `sk-abcdefghijk` (14), `sk-abcdefgh12345` (16). Real: an npm token 36, a GitHub PAT 36 to 40, an OpenAI key 51,
+ * `sk-ant-oat01-...` over 100, a JWT over 100. The unconditional net under it is the known-secret check, which
+ * compares against the values this machine actually holds, by value and at any length.
+ *
+ * The rule is uniform on purpose. The first fix gated only `bearer`, the pattern that had been seen to fail, and
+ * the very next capture died on `sk-key`, which is the same hole in a pattern nobody had watched yet.
+ */
+const CREDENTIAL_MIN_LENGTH = 32;
+
+interface CredentialPattern {
+  readonly label: string;
+  readonly re: RegExp;
+  /** Identity rather than a credential: the length floor never applies. */
+  readonly identity?: true;
+  /** The group holding the credential itself, when the match also spans a label, separator or prefix. */
+  readonly valueGroup?: number;
+}
+
+const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
   { label: "sk-ant", re: /sk-ant-[A-Za-z0-9_-]+/g },
   { label: "sk-key", re: /\bsk-[A-Za-z0-9_-]{8,}/g },
-  { label: "anthropic-env", re: /ANTHROPIC_[A-Z_]+/g },
-  { label: "oauth", re: /oauth[A-Za-z0-9_-]*/gi },
-  // A bearer credential is long (an OAuth token, a PAT, a JWT). `Bearer abc123` in a test the agent wrote while
-  // implementing a redactor is content, and refusing it costs a whole observation. Shorter matches are left to the
-  // sk- patterns above, which stay unconditional, and to the known-secret check below, which compares by value.
-  { label: "bearer", re: /Bearer\s+[A-Za-z0-9._~+/=-]{20,}/g },
-  { label: "email", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g },
+  // A variable NAME is not a secret, and a session writing about redaction will name one. Its assigned VALUE is.
+  // Quotes are optional on both sides so the JSON form `{"ANTHROPIC_AUTH_TOKEN":"..."}` is read like the shell one.
+  { label: "anthropic-env", re: /ANTHROPIC_[A-Z_]+["']?\s*[=:]\s*["']?([^\s"',}]+)/g, valueGroup: 1 },
+  { label: "oauth", re: /oauth[A-Za-z0-9._~+/=-]*/gi },
+  { label: "bearer", re: /Bearer\s+([A-Za-z0-9._~+/=-]+)/g, valueGroup: 1 },
+  // Identity, not a credential: an address identifies a person at any length, so the floor never applies to it.
+  { label: "email", re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, identity: true },
 ];
+
+/**
+ * The credential inside a match. The floor is a statement about the SECRET, so a long variable name or a
+ * `Bearer ` prefix must not push a short placeholder over it: `ANTHROPIC_API_KEY=placeholder-token` is 35
+ * characters of which 17 are the value, and refusing it would be the same false refusal this floor prevents.
+ */
+function credentialValue(p: CredentialPattern, m: RegExpMatchArray): string {
+  return (p.valueGroup === undefined ? m[0] : m[p.valueGroup]) ?? m[0];
+}
+
+/** True when a match is long enough, where it counts, to be a credential that exists. */
+function meetsCredentialFloor(p: CredentialPattern, m: RegExpMatchArray): boolean {
+  return p.identity === true || credentialValue(p, m).length >= CREDENTIAL_MIN_LENGTH;
+}
 
 /**
  * The values this machine actually holds secret, read from the runner's own environment: any variable whose name
@@ -684,10 +727,25 @@ const CREDENTIAL_PATTERNS: readonly { readonly label: string; readonly re: RegEx
 export function environmentSecrets(env: NodeJS.ProcessEnv): string[] {
   const out = new Set<string>();
   for (const [k, v] of Object.entries(env)) {
-    if (!v || v.length < 20) continue;
-    if (/(TOKEN|KEY|SECRET|PASSWORD)$/.test(k)) out.add(v);
+    if (!v) continue;
+    if (SECRET_VARIABLE_NAME.test(k)) out.add(v);
   }
   return [...out];
+}
+
+const SECRET_VARIABLE_NAME = /(TOKEN|KEY|SECRET|PASSWORD)$/;
+
+/**
+ * Length is not a safe way to decide a collected value is NOT a credential: a short password is still a
+ * password. But a short value is also what a flag or an identifier looks like, and refusing every artefact that
+ * contains the word `test` because `API_KEY=test` is exported would make every capture impossible. So nothing is
+ * dropped: the ambiguous NAMES are reported, preflight refuses, and the operator decides. Values never leave here.
+ */
+export function ambiguousEnvironmentSecrets(env: NodeJS.ProcessEnv, floor = 20): string[] {
+  return Object.entries(env)
+    .filter(([k, v]) => v !== undefined && v.length > 0 && v.length < floor && SECRET_VARIABLE_NAME.test(k))
+    .map(([k]) => k)
+    .sort();
 }
 
 /** Every credential-looking string the fixture itself contains, so a read of N-1 or the test file can be published. */
@@ -696,7 +754,10 @@ export function fixtureCredentialAllowlist(fixtureDir: string): string[] {
   const found = new Set<string>();
   for (const f of files) {
     const text = readFileSync(join(fixtureDir, f), "utf-8");
-    for (const p of CREDENTIAL_PATTERNS) for (const m of text.match(p.re) ?? []) found.add(m);
+    // Every representation the check will scan. A fixture matched in only one of them refuses in another: the
+    // raw form spells a JSON assignment `NAME":"value`, the rebuilt form spells it `NAME=value`, and an escaped
+    // credential inside an array exists in neither until its string value is decoded.
+    for (const p of CREDENTIAL_PATTERNS) for (const one of credentialScanViews(text)) for (const m of one.match(p.re) ?? []) found.add(m);
   }
   return [...found].sort();
 }
@@ -748,6 +809,40 @@ function withinPrefix(path: string, prefix: string): boolean {
   return path === prefix || path.startsWith(p);
 }
 
+/**
+ * Every `key=value` an object in the document states, rebuilt from the PARSED form so an escaped key reads the
+ * same as a bare one: `{"ANTHROPIC_AUTH_TO\u004bEN":"..."}` is the same assignment as `ANTHROPIC_AUTH_TOKEN=...`,
+ * and decodedStrings alone hands the key and the value over separately, losing what joins them.
+ */
+export function decodedAssignments(text: string): string[] {
+  const out: string[] = [];
+  const collect = (v: unknown): void => {
+    if (Array.isArray(v)) v.forEach(collect);
+    else if (v && typeof v === "object") {
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        if (typeof val === "string") out.push(`${k}=${val}`);
+        else collect(val);
+      }
+    }
+  };
+  try { collect(JSON.parse(text)); return out; } catch { /* not one document */ }
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try { collect(JSON.parse(line)); } catch { /* plain line */ }
+  }
+  return out;
+}
+
+/**
+ * Every representation of a document that a credential scan reads: the bytes as written, each decoded string
+ * value, and each rebuilt `key=value`. Both consumers go through this one list. Three defects in this file came
+ * from two readers disagreeing about how content is spelled, and the last of them made a fixture's OWN
+ * credential unallowlistable, because the allowlist read one spelling and the check refused another.
+ */
+export function credentialScanViews(text: string): string[] {
+  return [text, ...decodedStrings(text), ...decodedAssignments(text)];
+}
+
 /** Every string value inside a JSON document, or inside each JSON line of a JSONL document; empty for plain text. */
 export function decodedStrings(text: string): string[] {
   const out: string[] = [];
@@ -777,7 +872,7 @@ export function publicationCheck(text: string, allowlist: readonly string[], opt
   const blocked: { label: string; sample: string }[] = [];
   const derived = new Map<string, number>();
   const prefixes = [...PUBLIC_ABSOLUTE_PREFIXES, ...(opts.allowedAbsolutePrefixes ?? [])];
-  const secrets = (opts.secrets ?? []).filter((v) => v.length >= 20);
+  const secrets = (opts.secrets ?? []).filter((v) => v.length > 0);
   const decoded = decodedStrings(text);
   // A known secret is refused by value, before any shape rule, and it is the ONLY thing the verdict then carries.
   // A shape pattern matching the same value would put its first 24 characters into a sample, and from there into
@@ -785,25 +880,34 @@ export function publicationCheck(text: string, allowlist: readonly string[], opt
   // happen if the shape scans never run. Refusing is not allowlistable: `secrets` outranks `allowlist`.
   const hits = secrets.filter((v) => text.includes(v) || decoded.some((d) => d.includes(v)));
   if (hits.length > 0) return { ok: false, blocked: hits.map(() => ({ label: "known-secret", sample: "a value from the runner environment" })), fixtureDerived: [] };
-  const scan = (t: string, countDerived: boolean, decodeEscapes: boolean): void => {
+  const scanCredentials = (t: string, countDerived = false): void => {
     for (const p of CREDENTIAL_PATTERNS) {
-      for (const m of t.match(p.re) ?? []) {
-        if (allow.has(m)) { if (countDerived) derived.set(m, (derived.get(m) ?? 0) + 1); }
-        else blocked.push({ label: p.label, sample: m.slice(0, 24) });
+      for (const m of t.matchAll(new RegExp(p.re.source, p.re.flags))) {
+        if (!meetsCredentialFloor(p, m)) continue;
+        if (allow.has(m[0])) { if (countDerived) derived.set(m[0], (derived.get(m[0]) ?? 0) + 1); }
+        else blocked.push({ label: p.label, sample: m[0].slice(0, 24) });
       }
     }
-    // Decoded with the sanitiser's own decoder, and only where JSON escapes mean anything, so both sides
-    // judge the same text: a `\n` that is two characters in a JSON artefact is a real newline in the decoded
-    // form the sanitiser saw, and a quoted candidate cannot run past a line break on one side and stop at it
-    // on the other. Values from decodedStrings are already decoded, so they are not decoded twice.
-    const stripped = (decodeEscapes ? decodeForSpans(t).text : t).replace(SANITIZED_TOKEN, "");
+  };
+  // The caller decodes before calling: the bytes as written are passed through decodeForSpans, which is the
+  // sanitiser's own decoder and only decodes where JSON escapes mean anything, so both sides judge the same
+  // text. A `\n` that is two characters in a JSON artefact is a real newline in the form the sanitiser saw, and
+  // a quoted candidate cannot run past a line break on one side and stop at it on the other. Values from
+  // decodedStrings arrive already decoded and are not decoded twice.
+  const scanPaths = (t: string): void => {
+    const stripped = t.replace(SANITIZED_TOKEN, "");
     for (const m of absolutePathCandidates(stripped)) {
       const norm = posix.normalize(m);
       if (!prefixes.some((p) => withinPrefix(norm, p))) blocked.push({ label: "absolute-path", sample: norm.slice(0, 48) });
     }
   };
-  scan(text, true, true);
-  for (const s of decoded) scan(s, false, false);
+  // Credentials: every representation, through the shared enumeration. Only the bytes as written account for
+  // fixture-derived hits, so one occurrence is not counted again in each view.
+  credentialScanViews(text).forEach((view, i) => scanCredentials(view, i === 0));
+  // Paths: the bytes as written, decoded, and each decoded string value. A rebuilt assignment is skipped here
+  // because its `=` is synthetic and every value in it is scanned on its own above.
+  scanPaths(decodeForSpans(text).text);
+  for (const s of decoded) scanPaths(s);
   return { ok: blocked.length === 0, blocked, fixtureDerived: [...derived].map(([value, count]) => ({ value, count })) };
 }
 
