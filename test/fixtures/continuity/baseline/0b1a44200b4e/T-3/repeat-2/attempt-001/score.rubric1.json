@@ -1,0 +1,57 @@
+{
+  "rubricVersion": 1,
+  "task": "T-3",
+  "initial": {
+    "C1": {
+      "pass": true,
+      "evidence": "toolu_01RZD1YKjh5YMoMkVD7tR3NS reads src/platform/logging/AppLogger.ts before plan_written, including redact at line 26, Sink at line 48 and withRequestId at line 60. plan.initial.md names the implementation, redact and Sink, and specifies preserving its contract."
+    },
+    "C2": {
+      "pass": false,
+      "evidence": "missing-evidence: no R1 citation on T-3. toolu_014LnxJqJ8AunYt84gYiBTGp returns citedRulings: []; plan.initial.md explicitly acknowledges that R1 r-eftp2zdb6as643np is not cited. Prose recognition does not satisfy the citation mechanism."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "plan.initial.md specifies byte-identical relocation of both logger files and updates all three external imports: src/http/router.ts:6, src/http/handler.ts:8 and src/http/router.test.ts:4. The sibling test import remains valid. This preserves the inspected redact, withRequestId and sink contract."
+    },
+    "C4": {
+      "pass": false,
+      "evidence": "missing-evidence: no tests have run from packages/logging at INITIAL. toolu_01CRF9N1e6GVq6UL62zUMhJK reports four passing baseline tests at the old location. The plan specifies the required post-move run, but the frozen T-3 PASS definition requires actual discovery and passing execution from the new location."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "plan.initial.md, Scope decisions 5 and Steps 6, explicitly identifies N-1's location sentence as becoming false and proposes updating it while retaining its contract and ruling reference. This satisfies the rubric's proposed-update alternative within the INITIAL evidence window; no completion is inferred."
+    }
+  },
+  "final": {
+    "C1": {
+      "pass": true,
+      "evidence": "The pre-checkpoint implementation read toolu_01RZD1YKjh5YMoMkVD7tR3NS and plan.md's Current state, import table and preservation requirements establish discovery and use of the actual implementation."
+    },
+    "C2": {
+      "pass": false,
+      "evidence": "missing-evidence: ledger.changes.json changes only status, completedDate and displayId on T-3; source.diff confirms no citesRulings field. toolu_015qfbNMthWchVn3eEdKQchn updates status only. R1 remains prose-only in plan.md."
+    },
+    "C3": {
+      "pass": true,
+      "evidence": "source.diff records both logger files as 100% similarity renames and updates all three external imports at handler.ts:8, router.test.ts:4 and router.ts:6. Thus redact, withRequestId and Sink remain unchanged. toolu_011xj5w6He6R4XG1G9SxRzwR verifies no old references remain under src/packages and resolves both type-only imports."
+    },
+    "C4": {
+      "pass": true,
+      "evidence": "source.diff moves AppLogger.test.ts unchanged to packages/logging, retaining its sibling import. After relocation, toolu_01KsDhKQcTCVnuENqxWhk5z5 runs npm test and reports all three named AppLogger tests plus the router test passing: tests 4, pass 4, fail 0. package.json's test script is node --test, as read by toolu_017V9DWBawQXfceJz7emgXFo. implementation_done report toolu_01XBGqYo9onSKDwHfsLXwvZ8 corroborates the result."
+    },
+    "C5": {
+      "pass": true,
+      "evidence": "toolu_01HHxpx9DKZmwk4EJh3AG7wk updates N-1 to packages/logging/AppLogger.ts while preserving its contract and R1 reference; ledger.changes.json confirms that update and no ruling edit. handover.md and report toolu_01BisyvTmqrxEGuQm4B2sDS5 name the N-1 update, including the packaging clarification. Arm 1 has no cap-logging record to repair."
+    }
+  },
+  "flags": [
+    "missing-evidence"
+  ],
+  "notes": "INITIAL evidence ends before toolu_01Uf1dAqHQRYxbScaaRKAdh9. C4 INITIAL uses the literal execution requirement, not merely a proposed test run. C5 INITIAL credits the explicitly permitted proposed update. The later L-001 addition does not leave an existing stale record unaddressed. No other attempt's scores were consulted. PROVENANCE OF observedModel: the scorer reported 'unknown' because it could not introspect its own runtime identity. The value recorded here is the codex-claude-bridge's own runtime_session_record for this call, which reports requested max, resolved gpt-6-astra, observed gpt-6-astra. It is a bridge observation, not a model self-report, and is recorded as such rather than left unknown. The bridge also reports failover from gemini (RATE_LIMITED) to codex on this call.",
+  "scorer": {
+    "provider": "codex",
+    "observedModel": "gpt-6-astra",
+    "sessionId": "01a0c294-4b58-7ca1-8d34-ebe3a3bd2ab8"
+  }
+}
