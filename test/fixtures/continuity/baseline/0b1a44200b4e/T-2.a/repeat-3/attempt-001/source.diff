@@ -1,0 +1,308 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..c1f6e45
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,23 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "plan-review agent (T-2 session 092139c0)",
++  "dedupeKey": "t-2-plan-review-round-1:handler-default-queue-sink",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "createApp(queue: JobQueue = new JobQueue(), sink?: Sink) cannot hand `sink` to its own default queue: a default-parameter expression may only reference parameters declared before it, and `sink` is declared after `queue`. Once JobQueue logs (T-2), a caller that relies on the default queue gets routes logging to the injected sink while its background jobs log to AppLogger's stdout sink. No observable effect today -- createApp never exposes the queue it creates, so nothing outside can call run() on it -- which is why T-2 left it alone rather than shipping an untested signature change. Fix when something needs the app's own queue to run jobs: make the parameter optional, resolve it in the body (`const jobQueue = queue ?? new JobQueue(sink)`), repoint the route closure at handler.ts:24 from `queue` to `jobQueue`, and add src/http/handler.test.ts covering it (RULES.md rule 3).",
++  "location": [
++    "src/http/handler.ts:17",
++    "src/http/handler.ts:24"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "createApp cannot pass its log sink to the default JobQueue it constructs"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index 8c531c0..3df52f5 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Add logging for background jobs",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-eftp2zdb6as643np",
++    "r-p19bbvh0jhj8xgma"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Background jobs run without any log output today. Add logging for background jobs in src/jobs/ so that a job's start, success and failure are visible in the logs.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add logging for background jobs",
++  "type": "task"
+ }
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..3ff3939
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,169 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a job logs start and success under the request id that enqueued it", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  const id = queue.enqueue({ kind: "report", payload: { n: 1 } }, { requestId: "req-enqueued-1" });
++
++  const result = await queue.run(() => {});
++
++  assert.deepEqual(result, { ran: 1, failed: 0 });
++  assert.equal(lines.length, 2);
++  assert.deepEqual(
++    lines.map((l) => [l.level, l.message]),
++    [
++      ["info", "job started"],
++      ["info", "job succeeded"],
++    ],
++  );
++  for (const line of lines) {
++    assert.equal(line.requestId, "req-enqueued-1");
++    assert.deepEqual(line.fields, { jobId: id, kind: "report" });
++  }
++});
++
++test("a failing job logs an error and the rest of the batch still runs", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "first", payload: null }, { requestId: "req-batch" });
++  queue.enqueue({ kind: "boom", payload: null }, { requestId: "req-batch" });
++  queue.enqueue({ kind: "third", payload: null }, { requestId: "req-batch" });
++
++  const ranKinds: string[] = [];
++  const result = await queue.run((job) => {
++    ranKinds.push(job.kind);
++    if (job.kind === "boom") throw new Error("runner exploded");
++  });
++
++  assert.deepEqual(ranKinds, ["first", "boom", "third"]);
++  assert.deepEqual(result, { ran: 2, failed: 1 });
++
++  const failure = lines.find((l) => l.level === "error");
++  assert.ok(failure, "expected a failure line");
++  assert.equal(failure.message, "job failed");
++  assert.equal(failure.requestId, "req-batch");
++  assert.deepEqual(failure.fields, { jobId: "job-2", kind: "boom", error: "runner exploded" });
++  for (const line of lines) assert.equal(line.requestId, "req-batch");
++});
++
++test("each job logs under its own enqueuing request id", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "a", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "b", payload: null }, { requestId: "req-b" });
++
++  await queue.run(() => {});
++
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.fields.kind]),
++    [
++      ["req-a", "a"],
++      ["req-a", "a"],
++      ["req-b", "b"],
++      ["req-b", "b"],
++    ],
++  );
++});
++
++test("a secret in a failing job's error message or kind is redacted before the line is written", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  // `kind` is caller-supplied and rides on all three lines, so it is checked alongside the error text.
++  queue.enqueue({ kind: "Bearer abc", payload: null }, { requestId: "req-secret" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc");
++  });
++
++  const failure = lines.find((l) => l.level === "error")!;
++  assert.equal(failure.fields.error, "upstream refused [REDACTED]");
++  assert.equal(failure.requestId, "req-secret");
++  for (const line of lines) assert.equal(line.fields.kind, "[REDACTED]");
++  // A failing job still gets a start line, and gets no success line.
++  assert.deepEqual(
++    lines.map((l) => [l.level, l.message]),
++    [
++      ["info", "job started"],
++      ["error", "job failed"],
++    ],
++  );
++});
++
++test("an async runner is awaited: the start line precedes it and the success line follows it", async () => {
++  // Recorded from inside the sink, so this is the real interleaving of log lines and job body --
++  // not the order they happen to be in once run() has already resolved.
++  const order: string[] = [];
++  const queue = new JobQueue((l) => order.push(`log:${l.message}`));
++  queue.enqueue({ kind: "slow", payload: null }, { requestId: "req-async" });
++
++  const result = await queue.run(async () => {
++    await new Promise((resolve) => setTimeout(resolve, 5));
++    order.push("job finished");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 0 });
++  // Pins all three: the start line is emitted before the job body, the success line after it, and
++  // run() awaits the runner rather than logging success while the job is still in flight.
++  assert.deepEqual(order, ["log:job started", "job finished", "log:job succeeded"]);
++});
++
++test("a rejected runner promise is logged as a failure, not left unhandled", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "async-boom", payload: null }, { requestId: "req-async-fail" });
++  queue.enqueue({ kind: "after", payload: null }, { requestId: "req-async-fail" });
++
++  const result = await queue.run(async (job) => {
++    await new Promise((resolve) => setTimeout(resolve, 1));
++    if (job.kind === "async-boom") throw new Error("rejected later");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  const failure = lines.find((l) => l.level === "error")!;
++  assert.equal(failure.message, "job failed");
++  assert.equal(failure.requestId, "req-async-fail");
++  assert.deepEqual(failure.fields, { jobId: "job-1", kind: "async-boom", error: "rejected later" });
++  assert.ok(lines.some((l) => l.message === "job succeeded" && l.fields.kind === "after"));
++});
++
++test("enqueue refuses a blank request id and queues nothing", () => {
++  const queue = new JobQueue();
++  assert.throws(() => queue.enqueue({ kind: "orphan", payload: null }, { requestId: "  " }), /non-empty request id/);
++  assert.throws(() => queue.enqueue({ kind: "orphan", payload: null }, { requestId: "" }), /non-empty request id/);
++  assert.equal(queue.size, 0);
++});
++
++test("a non-Error throw is logged rather than propagated out of run", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "hostile", payload: null }, { requestId: "req-hostile" });
++  queue.enqueue({ kind: "after", payload: null }, { requestId: "req-hostile" });
++
++  const result = await queue.run((job) => {
++    if (job.kind === "hostile") throw Object.create(null);
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  const failure = lines.find((l) => l.level === "error")!;
++  assert.equal(failure.fields.error, "unknown error");
++  assert.ok(lines.some((l) => l.message === "job succeeded" && l.fields.kind === "after"));
++});
++
++test("an Error carrying a non-string message still logs a string", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "odd", payload: null }, { requestId: "req-odd" });
++
++  await queue.run(() => {
++    const err = new Error("placeholder");
++    Object.defineProperty(err, "message", { value: { code: 42 } });
++    throw err;
++  });
++
++  const failure = lines.find((l) => l.level === "error")!;
++  assert.equal(typeof failure.fields.error, "string");
++  assert.equal(failure.fields.error, "[object Object]");
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..dfa3288 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,10 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and everything a job logs while it runs goes out under that id -- start,
++ * success and failure -- through AppLogger, the one logger this service has.
+  */
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -17,9 +20,21 @@ export type JobRunner = (job: QueuedJob) => Promise<void> | void;
+ 
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what jobs log; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
++  /**
++   * A job with no request id could never be logged under the request that enqueued it, so it is
++   * refused here rather than at drain time: this throws in the caller's own frame, where nothing has
++   * been queued and nothing can be lost.
++   */
+   enqueue(job: Job, opts: { requestId: string }): string {
++    if (opts.requestId.trim() === "") throw new Error("JobQueue requires a non-empty request id");
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+     return id;
+@@ -35,13 +50,32 @@ export class JobQueue {
+     let failed = 0;
+     while (this.#jobs.length > 0) {
+       const job = this.#jobs.shift()!;
++      // Safe outside the try: #jobs is private and enqueue() is its only writer, so every queued job
++      // has a non-empty request id and withRequestId cannot throw on one.
++      const log = AppLogger.withRequestId(job.requestId, this.#sink);
++      log.info("job started", { jobId: job.id, kind: job.kind });
+       try {
+         await runner(job);
++        log.info("job succeeded", { jobId: job.id, kind: job.kind });
+         ran++;
+-      } catch {
++      } catch (err) {
++        log.error("job failed", { jobId: job.id, kind: job.kind, error: errorMessage(err) });
+         failed++;
+       }
+     }
+     return { ran, failed };
+   }
+ }
++
++/**
++ * Total: this runs inside the catch, so a throw here would escape run() and abort the rest of the
++ * drain. String() is not safe on a null-prototype object or a throwing toString, and `message` may
++ * be neither a string nor readable without throwing.
++ */
++function errorMessage(err: unknown): string {
++  try {
++    return err instanceof Error ? String(err.message) : String(err);
++  } catch {
++    return "unknown error";
++  }
++}

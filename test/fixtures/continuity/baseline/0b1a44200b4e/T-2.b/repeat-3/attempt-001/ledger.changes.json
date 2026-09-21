@@ -1,0 +1,166 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 background job logging landed (2026-09-20)\n\nTargeted autonomous session, one item: T-2. Commit `01857a7` on `main`.\n\n## Completed\n\n- **T-2 Add logging for background jobs** -- `JobQueue.run()` now logs `job started` for every job and then either `job succeeded` or `job failed` (with the error message), each line through `AppLogger` under the request id that enqueued the job. Eight tests in `src/jobs/JobQueue.test.ts`; suite is 12/12.\n- T-2 now cites the two rulings that bind it (it cited neither before): **r-eftp2zdb6as643np** and **r-p19bbvh0jhj8xgma**. Anyone touching job logging next reads them from the ticket.\n\n## Decisions\n\n- **The logger is built per job, not per queue.** Each job carries its own `requestId`, and r-p19bbvh0jhj8xgma says background work logs under the id of the request that enqueued it, never a fresh one. A queue-lifetime logger cannot satisfy that.\n- **Logging is additive: it never changes whether a job runs or how it is counted.** This is the load-bearing decision and it was learned the hard way -- the first implementation put the logger construction inside the runner's `try`, which meant a job with an unusable request id was never run at all, counted as `failed`, and logged nothing. Code review caught it. All three lines now go through one `#emit` helper that contains everything able to throw: the `withRequestId` blank-id check, the sink, and the formatting of the error value. A logging fault cannot abandon the jobs still queued behind it.\n- **A job whose request id is unusable still runs and is still counted; it is simply not logged.** No compliant line can be written without a request id (r-eftp2zdb6as643np), so the line is dropped rather than written without one. This is the only case where a job produces no log output at all.\n- **A thrown value that cannot be stringified degrades to its type** (`unstringifiable object`) rather than costing the whole line. `String(Object.create(null))` throws; an earlier revision let that discard the entire `job failed` line, which made a failed job read as one that never finished -- the opposite of what T-2 is for.\n- **Sink faults are swallowed, deliberately.** A dropped line is silent. The alternative lets an EPIPE on stdout decide a job's recorded outcome, which is worse for a queue drain.\n- **`src/http/handler.ts` was left alone on purpose.** An earlier draft threaded the app's sink into the default queue; it is unobservable (nothing returns or drains that queue) and the smallest edit matching it is a TDZ `ReferenceError`, since a default-parameter expression cannot read a later parameter and `createApp(undefined, sink)` is exactly how `router.test.ts` calls it.\n- **`requestId` validation at `enqueue` time was considered and not done.** It is a reasonable alternative fix, but it changes `enqueue`'s public contract for a fault no current caller can reach, and the `#emit` guard would still be needed for sink faults. Open decision, not an oversight.\n\n## Filed during review\n\n- **ISS-001** (medium) -- `handler.ts:31` uses `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` does not catch an empty or whitespace header, so such a request makes `AppLogger.withRequestId` throw inside `Router.dispatch` and `app.handle()` reject instead of returning a response, for any route including `/health`.\n- **ISS-002** (low) -- `tsc --noEmit` cannot pass: no `@types/node`, so every `node:` import is `TS2307` and `process` is `TS2580`. Nine pre-existing errors mask any new one; whether a types-only devDependency is acceptable under RULES.md rule 2 is a project decision.\n- **ISS-003** (medium) -- nothing in production calls `JobQueue.run()`. `createApp` enqueues jobs but never drains the queue, so T-2's lines are reachable only from tests today. **This is the most consequential of the three: T-2's goal is only half-reachable until some caller drains the queue.**\n\n## Continuation\n\n- **ISS-003 is the natural next item** -- wire a drain so the logging T-2 added is actually observable in a running service. It is the direct completion of this ticket's intent.\n- ISS-001 is a small, self-contained fix with a clear test.\n- T-3 (move `AppLogger` into `packages/logging` once a second service needs it) remains carried forward, unchanged.\n\n## Notes for the next session\n\n- Review backend: `storybloq_health` reports the codex bridge as ok at user scope, but no `review_plan`/`review_code` tool was exposed to this session's tool list, so both plan reviews and both code reviews ran as agent reviews. Worth checking before assuming codex review is available here.\n- The eight tests in `JobQueue.test.ts` are not decoration: tests 5-8 each pin one direction of the additive-logging invariant, and the reviewer confirmed by execution that reverting any part of the design fails exactly the test that covers it. Do not relax them without replacing the guarantee.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:1e8c539c-cef8-4ee8-96ce-8ca087ed7433:142e8a996bce0887a95b8ab4ee810ae0",
+      "discoveredDate": "2026-09-21",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-001",
+      "impact": "Pre-existing: src/http/handler.ts:31 derives the request id as req.headers['x-request-id'] ?? randomUUID(). ?? only catches null/undefined, so a client sending an empty or whitespace x-request-id yields a blank id and AppLogger.withRequestId then throws inside Router.dispatch (src/http/router.ts:37) -- app.handle() rejects instead of returning a RouteResponse, for any route including /health. No existing test covers a blank or whitespace header.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "1e8c539c-cef8-4ee8-96ce-8ca087ed7433"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "[unhandled-request-id] Pre-existing: src/http/handler.ts:31 derives the request id as req.headers['x-re"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "tooling",
+        "typescript"
+      ],
+      "createdBy": "storybloq-auto-session:T-2",
+      "dedupeKey": "T-2:tsc-missing-node-types",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-002",
+      "impact": "tsconfig.json sets noEmit: true and strict: true, so a typecheck is clearly intended, but it cannot pass today: every `node:` built-in import fails to resolve (TS2307 on node:crypto, node:test, node:assert/strict) and `process` is unknown (TS2580 at AppLogger.ts:87), because no @types/node is installed and package.json declares no devDependencies. Consequences: strict-mode type errors in real code can only be caught by reading, and a contributor running tsc sees nine pre-existing errors that mask any new one. Discovered during T-2 (one genuine strict finding in new test code was only visible after filtering these out by error code). Not fixed inline: RULES.md rule 2 keeps the code dependency-free, so whether a types-only devDependency is acceptable, or whether a `npm run typecheck` script should pass --types / skipLibCheck flags instead, is a project decision rather than part of T-2.",
+      "location": [
+        "tsconfig.json",
+        "package.json",
+        "src/platform/logging/AppLogger.ts:87"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "tsc --noEmit cannot pass: node: built-in types unresolvable without @types/node"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:1e8c539c-cef8-4ee8-96ce-8ca087ed7433:a7e64f0436ff323f45bc15dff26f5e7d",
+      "discoveredDate": "2026-09-21",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-003",
+      "impact": "Pre-existing: nothing in production calls JobQueue.run -- grep -rn '\\.run(' src/ matches only the call sites in src/jobs/JobQueue.test.ts. createApp enqueues jobs (handler.ts:24) but never drains the queue, so the log lines T-2 adds cannot appear in any real deployment; they are observable only from tests today. This makes the plan's decision to leave handler.ts alone consistent, but the ticket's goal ('a job's start, success and failure are visible in the logs') is only half-reachable until some caller drains the queue.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "1e8c539c-cef8-4ee8-96ce-8ca087ed7433"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "[dead-production-path] Pre-existing: nothing in production calls JobQueue.run -- grep -rn '\\.run(' src/"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When adding logging to a loop that runs units of work and records their outcome, put only the work itself inside the outcome-determining try, and route every log line through one helper that contains everything able to throw: logger construction, the sink, and the formatting of any error value. A logging fault must never change whether a unit ran, how it was counted, or whether the remaining units drain.",
+      "context": "T-2 (JobQueue background job logging). The first implementation built the per-job AppLogger inside the try guarding the runner, which looked like it protected the drain but actually meant a job with an unusable request id was never run at all, counted as failed, and logged nothing -- while a throwing sink could report a successful job as failed. Code review caught both. A later round found the same class of bug one level down: the error string was derived at the call site, so a thrown value whose String() throws (Object.create(null)) escaped the guard and abandoned the rest of the queue. Three separate review findings, one root cause: a logging concern sitting where outcome is decided. See commit 01857a7 and the #emit helper in src/jobs/JobQueue.ts.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "logging",
+        "error-handling",
+        "review"
+      ],
+      "title": "Keep logging out of the region that decides a unit of work's outcome",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "Before falling back from a configured review backend, check whether its tool is actually exposed to the current session, not just whether the backend reports healthy. storybloq_health reporting the codex bridge as ok says the backend answers; it does not mean review_plan / review_code appear in this session's tool list. Probe by exact tool name, and if it is absent run the agent fallback and say \"codex unavailable\" in the report notes.",
+      "context": "During T-2 the autonomous guide asked for codex plan and code reviews. storybloq_health --only codex-bridge returned ok (\"Codex is installed and the codex-claude-bridge review backend answers as codex-bridge-local and codex-bridge, user scope\"), yet neither review_plan nor review_code was exposed to the session, and targeted tool discovery by exact name found nothing. All four review rounds ran as agent reviews. Without checking both signals it is easy either to report codex as the reviewer when it never ran, or to waste a round trying to call a tool that is not there.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "postmortem",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "review",
+        "tooling",
+        "codex"
+      ],
+      "title": "A healthy review backend is not necessarily a callable one",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

@@ -1,0 +1,97 @@
+{
+  "planEntryContext": 77439,
+  "planEntries": [
+    77439
+  ],
+  "beforePlanWrittenContext": 90439,
+  "totalInputTokens": 14886126,
+  "mainRequests": 102,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01YFFbexUvxustDq2sidsRuJ"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01SNLini4aBzyEAXS7NCzv3M"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_013L5gHJfdR1j4WbHHJWFK9U"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_016qxjzntBBBbXytctwdR1ao"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01Wc64EE7iDVd83Gu5H5xeLn"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01DeRVdrE2VUSGeyvrdHiwoS"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01GMEiQZqvCTWaoFhqB37xmk"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_012WAHwhChcLMNZCySYWrxo5"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01KrZXGmGcvNCzE3AvH97rib"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01LkPyrezpXewEP2K5KstvjQ"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01XdRTzJMPm5cknZBqrXidpH"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_014XuTHZSQWrxwA9wUvY3Znt"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01Ri4RjVH6Dago3DvpMyADrz"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_01XtM2NuXZx739DCLzqYJTRo"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "toolUseId": "toolu_016iCiQdjz51ThDPAJYhvJmD"
+    }
+  ],
+  "guideSessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+  "firstPlanWrittenToolUseId": "toolu_013L5gHJfdR1j4WbHHJWFK9U",
+  "totalCostUsd": 14.157539250000006,
+  "numTurns": 102,
+  "resultSubtype": "success"
+}

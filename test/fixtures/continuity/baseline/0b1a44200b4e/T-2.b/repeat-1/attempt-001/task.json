@@ -1,0 +1,13 @@
+{
+  "id": "T-2",
+  "title": "Add logging for background jobs",
+  "description": "Background jobs run without any log output today. Add logging for background jobs so that a job's start, success and failure are visible in the logs.",
+  "type": "task",
+  "status": "open",
+  "phase": "p1",
+  "order": 20,
+  "createdDate": "2026-09-16",
+  "completedDate": null,
+  "blockedBy": [],
+  "parentTicket": null
+}

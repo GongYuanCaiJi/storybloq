@@ -1,0 +1,226 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-4 per-client rate limiting (2026-09-20)\n\nTargeted autonomous session, one item: T-4. Complete and committed as `f2e27ed` on `main`.\n\n## Completed\n\n- **T-4: per-client rate limiting on the HTTP handler.** New `src/http/RateLimiter.ts` (fixed window per key, `src/http/RateLimiter.test.ts` beside it); `src/http/handler.ts` checks the limit before dispatch and answers 429; new `src/http/handler.test.ts` for the end-to-end behaviour. Suite is 19/19.\n\n## Decisions\n\n- **Key namespacing.** Identified clients are keyed `id:<value>`; requests without a usable `x-client-id` share a separate sentinel bucket. Exempting header-less requests would have been a one-header bypass of the whole feature. Namespacing exists so a caller cannot pick an id that lands in the shared bucket and drain it, which would 429 every unidentified caller -- the starvation the ticket exists to prevent.\n- **The check runs before `router.dispatch`**, so a 404 for an unknown path still costs the caller a slot. The limit protects the routes, not just the known ones.\n- **Live windows are never evicted.** Expired entries are swept at most once per window, guarded by `#lastSweep`. A hard `maxEntries` cap was considered and rejected: capping means evicting a live window, which resets that client's allowance and hands an attacker a way to clear a victim's counter by flooding distinct ids. The accepted bound is therefore the number of distinct client ids seen across two consecutive windows, and it is written down in the module rather than left implicit.\n- **`remaining` is computed post-increment.** Pre-increment would advertise a slot that does not exist. A test pins the countdown, because this is the kind of error that ships silently.\n- **The clock is injectable** (`RateLimitOptions.now`), which is what makes the window tests deterministic without timers.\n- **Header lookup is the lowercase key only**, matching how `handler.ts` already reads `x-request-id`. A caller sending `X-Client-Id` falls into the shared bucket -- a contention cost, not a bypass.\n- **Logging** goes through `AppLogger.withRequestId` under the id the handler already assigned, so ruling `r-eftp2zdb6as643np` holds on this path. The limiter itself writes nothing.\n\n## Review\n\nThe codex bridge was not callable in this session (no `review_plan` tool exposed, though `storybloq_health` reports the backend answers from the CLI side), so plan review and code review both ran on the agent backend. Two plan-review rounds and two code-review rounds.\n\nThe code review earned its keep. Round 1 found two majors, both in the tests, both demonstrated rather than asserted: an exact `retryAfterMs: 60_000` assertion running on the wall clock (reproduced failing ~1 run in 12), and a test named \"a live window is never swept\" that never triggered a sweep -- sabotaging the sweep to delete live windows left every test green. Round 2 re-verified all four round-1 fixes by sabotage, each producing exactly the expected single failing test, and confirmed the working tree was byte-identical to the reviewed diff afterwards.\n\n**Lesson for future sessions here: a test that names a safety property is worth sabotaging once to confirm it can fail.** Both majors were tests that passed for the wrong reason, and neither would have been caught by reading them.\n\n## Filed, not fixed\n\n- **ISS-001** (medium) -- empty `x-request-id` throws out of `handle`: `??` does not fall back for an empty string and `AppLogger.withRequestId` rejects a blank id. Pre-existing, found during plan review.\n- **ISS-003** (low) -- `RateLimiter` assumes a monotonic clock; a backwards `Date.now` step stalls windows and the sweep. Fix named in the issue (`performance.timeOrigin + performance.now()`, still a built-in).\n- **ISS-004** (medium) -- **needs an owner decision before this runs anywhere real.** Limiting is on by default at 60 req/min, and every request without `x-client-id` shares one bucket, so a deployment whose clients omit the header gets an aggregate cap on the whole app including `GET /health`. A load balancer reads sustained 429s on health as instance death. Remedies (default `rateLimit` to null, or exempt `/health`) are both outside T-4's approved scope.\n- **ISS-005** (low) -- `x-client-id` is unauthenticated, so rotating it per request bypasses the limit entirely. This is exactly what the ticket specified; it is a limit of a header-keyed limiter, not a defect in the change. The threat-model owner should decide whether the key needs to be something the caller cannot choose.\n\nISS-002 and ISS-006 were auto-filed by deferred dispositions and duplicate ISS-001 and ISS-004; both are resolved with a resolution pointing at the canonical issue.\n\n## Continuation\n\n**ISS-004 is the one to look at next** -- it is the only filed item that could bite in a real deployment, and it is a decision rather than an implementation. After that, T-3 (move AppLogger into `packages/logging`) is still carried forward from the T-1 session and still waiting on a second service needing it.\n\n## Known gap\n\nThe `#sweep` throttle is what keeps the sweep from being a per-request O(n) scan under a flood of distinct keys, and no test fails if the throttle is removed. Sweep *correctness* is covered; the *amortization* claim rests on the comment. Pinning it needs either a timing assertion (flaky by nature) or a sweep counter on the production class -- a trade-off worth making deliberately rather than inside a review round. Left open on the record rather than quietly closed.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "plan-review-agent (T-4 session 7d487ba8)",
+      "dedupeKey": "t-4-plan-review-r1:empty-request-id",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "src/http/handler.ts:31 resolves the request id with `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only falls back for null/undefined, so a request carrying `x-request-id: \"\"` keeps the empty string. Router.dispatch then calls AppLogger.withRequestId(\"\"), which throws \"AppLogger requires a non-empty request id\" (AppLogger.ts:61). The request fails with an unhandled error instead of being served under a fresh id. A caller can trigger it with one empty header. Fix: treat a blank/whitespace-only header as absent (trim, then fall back to randomUUID).",
+      "location": [
+        "src/http/handler.ts:31",
+        "src/platform/logging/AppLogger.ts:61"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "5916fa02b52317a4182f2b8a052e5017d87f7ec86bb17577899cf52cb51d5370",
+          "endLine": 31,
+          "path": "src/http/handler.ts",
+          "reviewId": "t-4-plan-review-r1",
+          "revision": "e20a30883df670b1617c32fa7dcc906ee710b654",
+          "startLine": 31
+        }
+      ],
+      "status": "open",
+      "title": "Empty x-request-id header throws out of the HTTP handler"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:7d487ba8-0884-4df6-a166-453a7c9d04ee:9c8f7dfedefbab459f632b867d32e438",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "Pre-existing in the existing code, not the plan: handler.ts:31 uses ?? so an empty x-request-id string survives, and AppLogger.withRequestId throws on a blank id, so the request throws out of handle. Filed as ISS-001; out of T-4 scope.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001, which carries the same finding with fuller impact detail, location refs and source refs. ISS-002 was auto-filed by the plan-review round's deferred disposition after ISS-001 had already been filed explicitly for the same defect. Track the empty x-request-id defect on ISS-001.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[empty-request-id] Pre-existing in the existing code, not the plan: handler.ts:31 uses ?? so an emp"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "code-review-agent (T-4 session 7d487ba8)",
+      "dedupeKey": "t-4-code-review-r1:clock-assumption",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "src/http/RateLimiter.ts defaults its clock to Date.now, which is wall time and can step backwards (NTP correction, manual clock change). Consequences: `now - windowStart` goes negative so an expired window reads as live and never rolls over; `retryAfterMs` can exceed windowMs; and `#lastSweep` is left in the future, so the sweep stalls until wall time catches up and expired entries accumulate meanwhile. Impact is bounded (a client is over-limited for the duration of the step, memory grows by distinct keys seen in that period) and needs a clock step to trigger, so it is low rather than a live defect. Fix: default to a monotonic source, `performance.timeOrigin + performance.now()`, which is a Node built-in and keeps the dependency-free rule. The injectable `now` option means tests need no change. Found during T-4 code review; out of scope for T-4, which took Date.now as planned.",
+      "location": [
+        "src/http/RateLimiter.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "RateLimiter assumes a monotonic clock; a backwards Date.now step stalls windows and the sweep"
+    }
+  },
+  {
+    "path": "issues/ISS-004.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "code-review-agent (T-4 session 7d487ba8)",
+      "dedupeKey": "t-4-code-review-r2:default-on-shared-anon-bucket",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-004",
+      "impact": "T-4 turns rate limiting on by default (60 req/min) and puts every request without a usable x-client-id into one shared bucket. Both decisions are deliberate: limiting off by default would ship an inert feature, and exempting header-less requests would be a one-header bypass. The consequence is that a deployment whose clients do not send x-client-id gets a 60 req/min aggregate cap on the whole app, GET /health included -- so ordinary traffic saturates the shared bucket and health checks start returning 429, which a load balancer reads as instance death. Options, none of which were in T-4's approved scope: default rateLimit to null and have production wiring pass an explicit limit; or exempt /health (per-route limits were explicitly out of scope for T-4). Needs an owner decision before this runs anywhere real. Found during T-4 code review round 2.",
+      "location": [
+        "src/http/handler.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "Default rate limit can 429 /health when callers omit x-client-id"
+    }
+  },
+  {
+    "path": "issues/ISS-005.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "code-review-agent (T-4 session 7d487ba8)",
+      "dedupeKey": "t-4-code-review-r2:limit-bypass-by-rotation",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-005",
+      "impact": "The rate limiter keys on the x-client-id header, which is unauthenticated caller-supplied text. An adversary sending a fresh id per request gets unlimited throughput and creates one map entry per id (bounded by the documented two-window bound, so memory is not the main concern). This is exactly what T-4 specified, so it is not a defect in that change -- it is a limit of what a header-keyed limiter can deliver. It matters because T-4's problem statement is \"requests from one client can starve the others\", and against a hostile client the header alone does not deliver that protection; it protects against a noisy well-behaved client only. Whoever owns the threat model should decide whether the key needs to be something the caller cannot choose (authenticated principal, API key, source address, or a combination). Found during T-4 code review round 2.",
+      "location": [
+        "src/http/handler.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "x-client-id is unauthenticated, so rotating it bypasses the rate limit entirely"
+    }
+  },
+  {
+    "path": "issues/ISS-006.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:7d487ba8-0884-4df6-a166-453a7c9d04ee:e4acf56ddfb5440863b8707651f8cfe3",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-006",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-006",
+      "impact": "Limiting is on by default and every request without a usable x-client-id shares one bucket, so createApp() callers that do not set the header get a hard 60 req/min aggregate cap on the whole app, GET /health included. In a deployment where clients omit the header, ordinary traffic saturates the shared bucket and health checks start returning 429, which a load balancer reads as instance death. The alternative (no limit when the header is absent) is a trivial bypass, so the choice is defensible and is pinned by a test, but the blast radius of the default deserves an explicit decision.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-004, which carries the same finding with fuller impact detail and the candidate remedies spelled out. ISS-006 was auto-filed by the code-review round's deferred disposition after ISS-004 had already been filed explicitly for the same finding. Track the default-limit /health blast radius on ISS-004.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[default-on-shared-anon-bucket] Limiting is on by default and every request without a usable x-client-id shares "
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When a test's name claims a safety property (\"never evicts a live window\", \"always redacts\"), break the production code so the property is violated and confirm that exact test fails. If it still passes, the test is decorative. Do this for the one or two tests that carry a real invariant, not for every test.",
+      "context": "T-4 (per-client rate limiting). Code review round 1 found a test named \"a live window is never swept\" that never triggered a sweep at all: the #lastSweep throttle meant the third check was skipped, so replacing the sweep body with an unconditional delete -- evicting live windows, which is the victim-counter-reset bug the test existed to prevent -- left all 7 limiter tests green. The same pass also found an untested .trim() and an unexercised default config, both proved by the same technique. None of the three was visible from reading the tests; all three read as correct. Round 2 re-verified each fix by sabotage and every one produced exactly the expected single failing test.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "testing",
+        "review",
+        "verification"
+      ],
+      "title": "Sabotage a test once before trusting it to guard a safety property",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-4.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "displayId": {
+        "after": "T-4"
+      }
+    }
+  }
+]

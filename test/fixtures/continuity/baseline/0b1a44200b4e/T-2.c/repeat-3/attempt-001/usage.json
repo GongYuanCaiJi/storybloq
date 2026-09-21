@@ -1,0 +1,87 @@
+{
+  "planEntryContext": 77448,
+  "planEntries": [
+    77448
+  ],
+  "beforePlanWrittenContext": 94293,
+  "totalInputTokens": 10213937,
+  "mainRequests": 75,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01PYYyoNfAQvSJ19Vdyhq1ox"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01B1kMF3m34SLqdiXahi9xWi"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01FNQcWhrps2tM24nuCWtKes"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01QFPnCtFc6fPydfWsDTGBLo"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01XQv5vjk3dfUhtzxNY25Zgc"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01PBD1AfVMnquCB8ZfVbBUKA"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01XHt6qbGa4msbF3hsao4fWf"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01FShddxD3J3eR8jPwdWAron"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01GqTq1yEhsBA6MKxE1HxNPX"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_0122hGUxExX9k7XNJ4K4s6Ro"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_0181CEUFbdGBVcnFFkbnfdww"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_01B7fSQHHCgcKkayxBB8D2QV"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "toolUseId": "toolu_019r2xkigjadvmaZrBffdAnp"
+    }
+  ],
+  "guideSessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+  "firstPlanWrittenToolUseId": "toolu_01FNQcWhrps2tM24nuCWtKes",
+  "totalCostUsd": 11.066880999999997,
+  "numTurns": 75,
+  "resultSubtype": "success"
+}

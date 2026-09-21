@@ -1,0 +1,428 @@
+[
+  {
+    "toolUseId": "toolu_01DSg6tG2VYxHKg6g8Napn6P",
+    "input": {
+      "sessionId": null,
+      "action": "start",
+      "targetWork": [
+        "T-4"
+      ],
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f"
+    },
+    "resultHead": "# Targeted Autonomous Session Started\n\nYou are in targeted auto mode. Working on 1 specific item(s) in order, then ending the session. A checkpoint handover will be saved every 3 items.\nDo NOT stop to summarize. Do NOT ask the user. Do NOT cancel for context management; Storybloq rotates at a clean boundary when pressure reaches the configured threshold.\n\n## Targeted Work Items\n\n1. **T-4: Add per-"
+  },
+  {
+    "toolUseId": "toolu_018qzEfVeS7cB8KtW2uq6rgE",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "ticket_picked",
+        "ticketId": "T-4"
+      }
+    },
+    "resultHead": "# Plan for T-4: Add per-client rate limiting to the HTTP handler\n\n## Ticket Description\n\nRequests from one client can starve the others. Add per-client rate limiting to the HTTP handler: a fixed window per client id (the x-client-id header), a 429 response when the window is exhausted, and a test.\n\n\nWrite an implementation plan for this ticket. Save it to `.story/sessions/7d487ba8-0884-4df6-a166-4"
+  },
+  {
+    "toolUseId": "toolu_01MhwMvbuQcYkLu1Mk34k3jG",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "plan_written"
+      }
+    },
+    "resultHead": "# Plan Review -- Round 1 of 1 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_017rSXfVzyewjWoMki8FoK8j",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerSource": "session-default",
+        "reviewerEvidence": "configured",
+        "notes": "codex unavailable: the review_plan MCP tool is not exposed in this session (storybloq_health reports the codex-bridge backend answers from the CLI side, but no review_plan tool is callable here). Fell back to agent review. One pre-existing finding filed as ISS-001.",
+        "findings": [
+          {
+            "severity": "major",
+            "category": "eviction-unbounded",
+            "description": "The plan's 'Unbounded growth' section does not bound growth: the sweep only removes EXPIRED entries, so N distinct x-client-id values inside one window produce N live, unsweepable entries. Past maxEntries every check runs an O(n) sweep that frees nothing, amplifying CPU on the very path the ticket protects. The plan's claim that 'eviction cannot change a verdict' is true only for expired entries. Plan must either accept 'bounded by distinct client ids per window' and sweep at most once per window behind a cheap timestamp guard, or specify a hard cap with deterministic eviction order and state plainly that evicting a live entry resets that client's window.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "major",
+            "category": "untestable-case",
+            "description": "Planned test case 5 (expired entries evicted rather than accumulating) cannot be written against the specified API: RateLimiter exposes only check(clientId), there is no way to observe entry count, and maxEntries is not in RateLimitOptions, so the 10_000 threshold is neither injectable nor reachable in a fast test. Either add an observable size and maxEntries to the options, or drop case 5.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "major",
+            "category": "api-compat",
+            "description": "The proposed signature createApp(queue?: JobQueue, sink?: Sink, opts?) drops the existing default queue: JobQueue = new JobQueue(). The existing call in src/http/router.test.ts is createApp(undefined, (l) => lines.push(l)) and depends on that default; without it POST /reports calls queue.enqueue on undefined, and under strict it is a compile error. Signature must keep the default.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "major",
+            "category": "off-by-one",
+            "description": "The allow branch ('if count < limit, increment and allow, remaining = limit - count') does not pin whether count is the pre- or post-increment value. Pre-increment advertises one slot more than exists. No planned test asserts remaining at all, so the error ships silently. Plan must state increment-then-compute, set remaining = 0 on the reject path, and assert the remaining sequence.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "minor",
+            "category": "key-collision",
+            "description": "The header-less shared bucket uses the literal key 'anonymous' in the same key space as real client ids, so a caller sending x-client-id: anonymous can drain it deliberately and 429 every header-less caller -- the starvation the ticket exists to prevent. Namespace the two key spaces.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "header-handling",
+            "description": "Step 1 says clientId = req.headers['x-client-id'], trimmed, but headers is Record<string, string | undefined>, so .trim() on a missing header throws before the missing-header rule applies. Plan must spell out the coalesce-then-trim order, and decide explicitly whether the lookup is case-normalised (the headers object does no case folding, so X-Client-Id silently falls into the anonymous bucket).",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "test-spec",
+            "description": "Planned case 7 will not hold as stated: with limit 1 the first request returns 202 and already logs 'report queued' to the same injected sink, so the sink holds two lines when the 429 is emitted; assert on the warn/'rate limited' line rather than lines.length === 1. Case 6's 'no job enqueued' is only assertable if the test constructs its own JobQueue and reads queue.size, which the plan does not say to do.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "test-placement",
+            "description": "The behaviour change is in handler.ts but the end-to-end cases are planned for router.test.ts. RULES.md rule 3 asks for <Module>.test.ts in the same directory; router.test.ts already testing createApp is a pre-existing misplacement the plan propagates. Put the new cases in src/http/handler.test.ts.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "suggestion",
+            "category": "underspecified-state",
+            "description": "The check algorithm never states the first-request case (no entry yet for the key), and describes window reset twice in conflicting shapes. Pick one formulation, add the missing branch, and consider rejecting limit < 1 / windowMs < 1 at construction.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "empty-request-id",
+            "description": "Pre-existing in the existing code, not the plan: handler.ts:31 uses ?? so an empty x-request-id string survives, and AppLogger.withRequestId throws on a blank id, so the request throws out of handle. Filed as ISS-001; out of T-4 scope.",
+            "file": "src/http/handler.ts",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred"
+          }
+        ]
+      }
+    },
+    "resultHead": "# Plan Review -- Round 1 requested changes\n\nReview effort: standard (size-mapped).\n\nUpdate the plan to address these findings, then call me with completedAction: \"plan_review_round\" and the new review verdict.\n\n- [major] The plan's 'Unbounded growth' section does not bound growth: the sweep only removes EXPIRED entries, so N distinct x-client-id values inside one window produce N live, unsweepable"
+  },
+  {
+    "toolUseId": "toolu_01VCTiSC3CNjYZHgeG4r7EAC",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerSource": "session-default",
+        "reviewerEvidence": "configured",
+        "notes": "codex unavailable (no review_plan tool callable in this session); agent review, round 2. All four round-1 majors and all four minors verified resolved against the actual code (JobQueue.size exists, router.test.ts two-arg call still type-checks under strict). Round-2 findings were one minor and two suggestions, all three addressed in the plan before this report.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "memory-bound-accuracy",
+            "description": "The accepted memory bound was understated by about a factor of two: the plan said 'distinct client ids seen within one window' while also throttling the sweep to once per windowMs, so an entry expiring just after a sweep survives up to a full window longer. Resident entries are bounded by distinct ids across two consecutive windows. Design unaffected; only the stated figure was wrong.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Bound corrected to two consecutive windows with the throttle named as the reason."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-spec",
+            "description": "Case 6 listed its assertions in an order that only works if reordered: c2's 202 enqueues a second job, so queue.size === 1 holds only if asserted before c2's request is issued.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Assertion order pinned explicitly: queue.size === 1 before issuing c2, then 2 after."
+          },
+          {
+            "severity": "suggestion",
+            "category": "underspecified-state",
+            "description": "The initial value of #lastSweep was not stated. Not blocking (neither choice can change a verdict) but observable in case 5's size assertion if the test clock starts at 0.",
+            "file": ".story/sessions/7d487ba8-0884-4df6-a166-453a7c9d04ee/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Pinned to now() at construction."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-4: Add per-client rate limiting to the HTTP handler\n\n## Approved plan\n\n```markdown\n# Plan — T-4: Add per-client rate limiting to the HTTP handler\n\n## Goal\n\nRequests from one client must not starve the others. Add a fixed-window,\nper-client-id rate limit at the HTTP entry point: the window is keyed on the\n`x-client-id` header, an exhausted window answers `429`, and the behaviour is"
+  },
+  {
+    "toolUseId": "toolu_01WjpSxL8RqdEUJY4bFjum7M",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Created src/http/RateLimiter.ts, src/http/RateLimiter.test.ts, src/http/handler.test.ts; modified src/http/handler.ts. npm test: 17/17 pass (13 new, 4 pre-existing unchanged). Plan followed exactly: post-increment remaining, throttled sweep with #lastSweep initialised to now(), namespaced id:<value> vs ANON_KEY, coalesce-before-trim, createApp queue default preserved, pre-dispatch check, AppLogger warn under the handler's request id. tsc reports only pre-existing missing-@types/node module-resolution errors, which hit untouched files (AppLogger.ts, router.test.ts) equally; no type errors from this change."
+      }
+    },
+    "resultHead": "# Code Review -- Round 1 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01THMaF17frSVvw3B18zpwQ3",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerSource": "session-default",
+        "reviewerEvidence": "configured",
+        "notes": "Agent code review round 1. Reviewer verified findings empirically by sabotage-and-rerun plus a 20k-iteration timing probe; I confirmed the working tree carried no sabotage residue afterwards (grep clean, git diff against staged empty). Production code was found to match the approved plan exactly; all defects were in the tests. All four non-suggestion findings fixed this round; suite now 19/19, five consecutive clean runs. I re-ran the reviewer's sabotage check against the rewritten sweep test: evicting live windows now fails test 6, where before it passed. ISS-003 filed for the clock-monotonicity suggestion.",
+        "findings": [
+          {
+            "severity": "major",
+            "category": "flaky-test",
+            "description": "handler.test.ts asserted the 429 body deep-equals {error, retryAfterMs: 60_000} while the limiter ran on the real Date.now. retryAfterMs is computed from two separate wall-clock reads, so a millisecond boundary between them yields 59999. Reviewer reproduced 21/20000 in a probe loop and a real npm test failure on 1 of 12 full-suite runs.",
+            "file": "src/http/handler.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Every handler test that exercises the limiter now injects a frozen clock (now: () => 0) through the already-injectable RateLimitOptions.now. Five consecutive full-suite runs clean."
+          },
+          {
+            "severity": "major",
+            "category": "vacuous-test",
+            "description": "The test 'a live window is never swept' never triggered a sweep: with #lastSweep advanced to 1500 by the second call, the third call at t=2000 was throttled (500 < 1000), contradicting its own inline comment. Reviewer proved it by replacing the sweep body with an unconditional delete -- evicting live windows, the victim-counter-reset bug the test claimed to guard -- and all 7 RateLimiter tests stayed green.",
+            "file": "src/http/RateLimiter.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Rewritten as 'a sweep deletes expired windows and leaves live ones untouched' with a timeline that actually sweeps with both entries resident (t=1000 sweep+install a, t=1500 throttled install b, t=2000 sweep with a expired and b live), asserting size 2 and that b kept its count. Re-ran the reviewer's sabotage: the test now fails."
+          },
+          {
+            "severity": "minor",
+            "category": "test-coverage",
+            "description": "The .trim() on x-client-id was untested; deleting it left all 17 tests green, though a whitespace-only id would then get a private bucket instead of falling into ANON_KEY.",
+            "file": "src/http/handler.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Added a test asserting a whitespace-only client id shares the unidentified bucket with a header-less request."
+          },
+          {
+            "severity": "minor",
+            "category": "test-coverage",
+            "description": "DEFAULT_RATE_LIMIT was never exercised: every handler test passed an explicit rateLimit, so changing the default to {limit: 1_000_000, windowMs: 1} left all tests green even though that default now silently applies to every existing createApp caller.",
+            "file": "src/http/handler.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Added a test that omits opts entirely and asserts 60 allowed then 429 with a positive retryAfterMs."
+          },
+          {
+            "severity": "suggestion",
+            "category": "plan-deviation",
+            "description": "The rejection log adds fields the plan did not specify (clientId with a '(none)' sentinel, and retryAfterMs). Reviewer traced it as Rule-1-safe: 'clientId' does not match SECRET_KEY, so the value falls to redactValue's string branch where SECRET_VALUE redacts sk-/Bearer shaped ids, and the line goes through AppLogger.withRequestId so it carries the request id. Flagged only because logging attacker-controlled header text was not an approved decision.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Field kept -- it is the diagnostic value of the line -- with a comment recording why it is a field rather than spliced into the message, and that AppLogger redaction is what makes caller-controlled text safe here."
+          },
+          {
+            "severity": "suggestion",
+            "category": "clock-assumption",
+            "description": "The limiter assumes a monotonic clock. With the production default Date.now, a backwards NTP step makes now - windowStart negative so an expired window reads as live, retryAfterMs can exceed windowMs, and #lastSweep is left in the future, stalling the sweep. performance.timeOrigin + performance.now() is a Node built-in and would remove the assumption.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred -- changing the production clock source is beyond the approved plan for T-4, which took Date.now as planned. Filed as ISS-003 with the fix named."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-4: Add per-client rate limiting to the HTTP handler\n\n## Approved plan\n\n```markdown\n# Plan — T-4: Add per-client rate limiting to the HTTP handler\n\n## Goal\n\nRequests from one client must not starve the others. Add a fixed-window,\nper-client-id rate limit at the HTTP entry point: the window is keyed on the\n`x-client-id` header, an exhausted window answers `429`, and the behaviour is"
+  },
+  {
+    "toolUseId": "toolu_01MTQVT9ids1ocLtMHHTLpnN",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Round-1 review fixes were applied before the previous report, so this round is verification rather than new work. Changes: frozen clock injected into every limiter-exercising handler test (flaky retryAfterMs); the sweep test rewritten to an interleaving that actually triggers a sweep with a live and an expired entry both resident, asserting the live one keeps its count; new tests for whitespace-only client id and for DEFAULT_RATE_LIMIT; a comment in handler.ts recording why the caller-controlled client id is logged as a field. No production-logic change other than that comment. npm test 19/19, five consecutive runs clean. Sabotage re-check: evicting live windows in the sweep now fails test 6 (it passed before the rewrite)."
+      }
+    },
+    "resultHead": "# Code Review -- Round 2 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_017UJhfmRgMYGy5qHFk3UiHc",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerSource": "session-default",
+        "reviewerEvidence": "configured",
+        "notes": "Agent code review round 2. All four round-1 findings verified by hand-tracing plus four real sabotage runs, each producing exactly the expected single failing test: sweep-deletes-live -> test 6 fails; .trim() removed -> test 11 fails; default limit 60->61 -> test 14 fails; default windowMs 60_000->1 -> fails all 5 runs. 40 consecutive suite runs clean (round 1's flake reproduced ~1 in 12). Rule 1 and ruling r-eftp2zdb6as643np re-traced through AppLogger.redact and hold. I independently confirmed the tree afterwards: no sabotage markers, staged diff byte-identical to the reviewed diff, 19/19 pass. No critical or major findings. Two findings filed for owner decision: ISS-004 and ISS-005.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "default-on-shared-anon-bucket",
+            "description": "Limiting is on by default and every request without a usable x-client-id shares one bucket, so createApp() callers that do not set the header get a hard 60 req/min aggregate cap on the whole app, GET /health included. In a deployment where clients omit the header, ordinary traffic saturates the shared bucket and health checks start returning 429, which a load balancer reads as instance death. The alternative (no limit when the header is absent) is a trivial bypass, so the choice is defensible and is pinned by a test, but the blast radius of the default deserves an explicit decision.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "unchanged",
+            "sinceRound": 1,
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred -- both the on-by-default limit and the shared anonymous bucket are approved-plan decisions, and the remedies (default to null, or exempt /health) are per-route/config work the plan put out of scope. Filed as ISS-004 for an owner decision before this runs anywhere real."
+          },
+          {
+            "severity": "suggestion",
+            "category": "limit-bypass-by-rotation",
+            "description": "x-client-id is unauthenticated caller-supplied text, so an adversary rotating a fresh id per request gets unlimited throughput. This is exactly what the ticket specified, so it is not a defect in the change, but the header alone cannot deliver the starvation protection the ticket's problem statement describes against a hostile client.",
+            "file": "src/http/handler.ts",
+            "origin": "pre-existing",
+            "originClass": "unchanged",
+            "sinceRound": 1,
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred -- the header is the key the ticket specified. Filed explicitly as ISS-005 for the threat-model owner, since a deferred suggestion would not have filed one."
+          },
+          {
+            "severity": "suggestion",
+            "category": "untested-perf-invariant",
+            "description": "The #sweep throttle is what keeps the sweep from being a per-request O(n) scan under a flood of distinct keys, but no test fails if the throttle is removed -- test 6 still passes under a throttle-free sweep. Sweep correctness is well covered; only the amortization claim rests on the comment.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "dispositionReason": "Acknowledged as a real coverage gap and left open rather than closed: pinning it needs either a timing assertion (flaky by nature) or a sweep counter on the production class, and adding production surface purely to observe an amortization claim is a trade-off worth making deliberately, not inside a review round. Correctness of the sweep is covered; only the cost claim is not."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-seam-in-production-type",
+            "description": "RateLimitOptions.now, added by the round-1 fix, is reachable from production configuration because AppOptions.rateLimit exposes the whole RateLimitOptions type, so a production caller can inject a clock. Splitting the injectable clock into an internal options type would keep the seam test-only.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "contested",
+            "dispositionReason": "The injectable clock was in the approved plan from the start, not added by the round-1 fix -- the fix only started using it from the handler tests. An injectable clock on a time-dependent component is ordinary constructor injection, and the narrowing suggested would add a second options type to hide a field whose worst case is a caller passing a working clock."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Finalize\nCode review passed. Time to commit.\n1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)\n2. Update ticket T-4 status to \"complete\" in .story/\n3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`\n4. Call me with completedAction: \"files_staged\"\n---\n**Session:** 7d487ba8-0884-4df6-a166-453a"
+  },
+  {
+    "toolUseId": "toolu_01EKKyX5FmWgapHq9gNLzRWj",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "Staged: src/http/RateLimiter.ts, src/http/RateLimiter.test.ts, src/http/handler.test.ts (new), src/http/handler.ts (modified), .story/tickets/T-4.json (status complete), .story/issues/ (ISS-001 through ISS-006) and .story/.gitignore. Left unstaged: .continuity-mcp.json, which is untracked environment config unrelated to this ticket. Note on the issues: ISS-002 and ISS-006 were auto-filed by the deferred dispositions and duplicate ISS-001 and ISS-004, which I had already filed explicitly with fuller detail; I resolved both duplicates with a resolution pointing at the canonical issue rather than leaving two open records of one defect."
+      }
+    },
+    "resultHead": "Pre-existing untracked files are staged: .story/.gitignore. Unstage them with `git restore --staged .story/.gitignore`, or report with overrideOverlap: true to proceed.\n---\n**Session:** 7d487ba8-0884-4df6-a166-453a7c9d04ee\n**State:** FINALIZE\n**Ticket:** T-4: Add per-client rate limiting to the HTTP handler\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n**Verification:** 0 "
+  },
+  {
+    "toolUseId": "toolu_013tVpYWsqSshBGVfXdrgr6X",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "Unstaged .story/.gitignore as instructed -- it predates this session and is not part of T-4. Now staged: src/http/RateLimiter.ts, src/http/RateLimiter.test.ts, src/http/handler.test.ts (new), src/http/handler.ts (modified), .story/tickets/T-4.json (status complete), .story/issues/ISS-001 through ISS-006. Left untracked: .continuity-mcp.json and .story/.gitignore, neither related to this ticket. ISS-002 and ISS-006 are auto-filed duplicates of ISS-001 and ISS-004, resolved with a resolution pointing at the canonical issue."
+      }
+    },
+    "resultHead": "Files staged. Now commit.\n\nCommit with message: \"feat: <description> (T-4)\"\n\nCall me with completedAction: \"commit_done\" and include the commitHash.\n---\n**Session:** 7d487ba8-0884-4df6-a166-453a7c9d04ee\n**State:** FINALIZE\n**Ticket:** T-4: Add per-client rate limiting to the HTTP handler\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n**Verification:** 0 proposed, 0 verified"
+  },
+  {
+    "toolUseId": "toolu_01Jt3gMD8p1UHHMnS7KB7gTF",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "commit_done",
+        "commitHash": "f2e27ed1b6c825dabd5cb9b1863bce63bbc66a0e",
+        "notes": "Committed as f2e27ed on main. Message records the binding decisions (key namespacing, pre-dispatch check, live windows never evicted, the two-window memory bound) and names the four issues filed during review but deliberately not fixed here."
+      }
+    },
+    "resultHead": "# Targeted Session Complete -- All 1 target(s) done\n\nWrite a session handover summarizing what was accomplished, decisions made, and what's next.\n\nCall me with completedAction: \"handover_written\" and include the content in handoverContent.\n---\n**Session:** 7d487ba8-0884-4df6-a166-453a7c9d04ee\n**State:** HANDOVER (from COMPLETE)\n**Ticket:** none\n**Risk:** unknown\n**Completed:** T-4\n**Tickets done:*"
+  },
+  {
+    "toolUseId": "toolu_01W86eTzMpXwdtyhL5pBNSJC",
+    "input": {
+      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee",
+      "action": "report",
+      "clientTaskId": "5138faa2-81a9-440d-aeb9-e3f324fdd10f",
+      "report": {
+        "completedAction": "handover_written",
+        "handoverContent": "# Handover: T-4 per-client rate limiting (2026-09-20)\n\nTargeted autonomous session, one item: T-4. Complete and committed as `f2e27ed` on `main`.\n\n## Completed\n\n- **T-4: per-client rate limiting on the HTTP handler.** New `src/http/RateLimiter.ts` (fixed window per key, `src/http/RateLimiter.test.ts` beside it); `src/http/handler.ts` checks the limit before dispatch and answers 429; new `src/http/handler.test.ts` for the end-to-end behaviour. Suite is 19/19.\n\n## Decisions\n\n- **Key namespacing.** Identified clients are keyed `id:<value>`; requests without a usable `x-client-id` share a separate sentinel bucket. Exempting header-less requests would have been a one-header bypass of the whole feature. Namespacing exists so a caller cannot pick an id that lands in the shared bucket and drain it, which would 429 every unidentified caller -- the starvation the ticket exists to prevent.\n- **The check runs before `router.dispatch`**, so a 404 for an unknown path still costs the caller a slot. The limit protects the routes, not just the known ones.\n- **Live windows are never evicted.** Expired entries are swept at most once per window, guarded by `#lastSweep`. A hard `maxEntries` cap was considered and rejected: capping means evicting a live window, which resets that client's allowance and hands an attacker a way to clear a victim's counter by flooding distinct ids. The accepted bound is therefore the number of distinct client ids seen across two consecutive windows, and it is written down in the module rather than left implicit.\n- **`remaining` is computed post-increment.** Pre-increment would advertise a slot that does not exist. A test pins the countdown, because this is the kind of error that ships silently.\n- **The clock is injectable** (`RateLimitOptions.now`), which is what makes the window tests deterministic without timers.\n- **Header lookup is the lowercase key only**, matching how `handler.ts` already reads `x-request-id`. A caller sending `X-Client-Id` falls into the shared bucket -- a contention cost, not a bypass.\n- **Logging** goes through `AppLogger.withRequestId` under the id the handler already assigned, so ruling `r-eftp2zdb6as643np` holds on this path. The limiter itself writes nothing.\n\n## Review\n\nThe codex bridge was not callable in this session (no `review_plan` tool exposed, though `storybloq_health` reports the backend answers from the CLI side), so plan review and code review both ran on the agent backend. Two plan-review rounds and two code-review rounds.\n\nThe code review earned its keep. Round 1 found two majors, both in the tests, both demonstrated rather than asserted: an exact `retryAfterMs: 60_000` assertion running on the wall clock (reproduced failing ~1 run in 12), and a test named \"a live window is never swept\" that never triggered a sweep -- sabotaging the sweep to delete live windows left every test green. Round 2 re-verified all four round-1 fixes by sabotage, each producing exactly the expected single failing test, and confirmed the working tree was byte-identical to the reviewed diff afterwards.\n\n**Lesson for future sessions here: a test that names a safety property is worth sabotaging once to confirm it can fail.** Both majors were tests that passed for the wrong reason, and neither would have been caught by reading them.\n\n## Filed, not fixed\n\n- **ISS-001** (medium) -- empty `x-request-id` throws out of `handle`: `??` does not fall back for an empty string and `AppLogger.withRequestId` rejects a blank id. Pre-existing, found during plan review.\n- **ISS-003** (low) -- `RateLimiter` assumes a monotonic clock; a backwards `Date.now` step stalls windows and the sweep. Fix named in the issue (`performance.timeOrigin + performance.now()`, still a built-in).\n- **ISS-004** (medium) -- **needs an owner decision before this runs anywhere real.** Limiting is on by default at 60 req/min, and every request without `x-client-id` shares one bucket, so a deployment whose clients omit the header gets an aggregate cap on the whole app including `GET /health`. A load balancer reads sustained 429s on health as instance death. Remedies (default `rateLimit` to null, or exempt `/health`) are both outside T-4's approved scope.\n- **ISS-005** (low) -- `x-client-id` is unauthenticated, so rotating it per request bypasses the limit entirely. This is exactly what the ticket specified; it is a limit of a header-keyed limiter, not a defect in the change. The threat-model owner should decide whether the key needs to be something the caller cannot choose.\n\nISS-002 and ISS-006 were auto-filed by deferred dispositions and duplicate ISS-001 and ISS-004; both are resolved with a resolution pointing at the canonical issue.\n\n## Continuation\n\n**ISS-004 is the one to look at next** -- it is the only filed item that could bite in a real deployment, and it is a decision rather than an implementation. After that, T-3 (move AppLogger into `packages/logging`) is still carried forward from the T-1 session and still waiting on a second service needing it.\n\n## Known gap\n\nThe `#sweep` throttle is what keeps the sweep from being a per-request O(n) scan under a flood of distinct keys, and no test fails if the throttle is removed. Sweep *correctness* is covered; the *amortization* claim rests on the comment. Pinning it needs either a timing assertion (flaky by nature) or a sweep counter on the production class -- a trade-off worth making deliberately rather than inside a review round. Left open on the record rather than quietly closed.\n",
+        "notes": "Snapshot taken before writing the handover."
+      }
+    },
+    "resultHead": "# Session Complete\n\n1 ticket(s) and 0 issue(s) completed. Handover written. Session ended.\n\n- T-4: Add per-client rate limiting to the HTTP handler (f2e27ed1b6c825dabd5cb9b1863bce63bbc66a0e)\n\n## Session Report\n\n**Duration:** 22m | **Tickets:** 1 | **Issues:** 0 | **Reviews:** 4 rounds (23 findings) | **Compactions:** 0\n\n### Completed\n| Ticket | Title | Duration |\n|--------|-------|----------|\n| T-"
+  }
+]

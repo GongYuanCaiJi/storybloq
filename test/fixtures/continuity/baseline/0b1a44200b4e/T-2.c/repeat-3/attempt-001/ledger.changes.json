@@ -1,0 +1,186 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 failed jobs are traceable (2026-09-20)\n\nTargeted autonomous session, `/story auto T-2`. One item, done and committed as `122442a` on `main`.\n\n## Completed\n\n- **T-2: Make failed background jobs traceable to the originating request.** `JobQueue` takes an optional `Sink` (same shape `Router` already used) and, per job, builds an `AppLogger` bound to that job's own `requestId`. It logs one `error` line when the job throws, and hands the same logger to the runner. Tests: `src/jobs/JobQueue.test.ts` (7) and `src/http/handler.test.ts` (1, end-to-end). Suite is 13/13.\n\n## Decisions\n\n- **The runner gets the logger, not just the failure path.** r-p19bbvh0jhj8xgma says *anything* a running job logs is under the enqueuing request's id. Logging only the queue's own failure line satisfies half of that: a runner left to build its own logger can reach for `withRequestId(randomUUID(), ...)` just as easily as the correct call. So `JobRunner` widened to `(job, log) => ...`, mirroring how `Router` hands route handlers a pre-bound `log`. Backward compatible -- a one-parameter function stays assignable.\n- **T-2 now cites r-p19bbvh0jhj8xgma and r-eftp2zdb6as643np.** It cited nothing when picked, though the 09-15 jobs ruling was made for exactly this work. Citation added at PLAN so the rulings reach anyone working the item.\n- **Containment in `run()` is the hard part, not the logging.** Two review rounds, each catching a real way one job's failure became the whole queue's failure, both verified by executing the code rather than reading it:\n  1. `String(err)` can itself throw -- `Object.create(null)`, a throwing `toString` -- and it ran inside `run()`'s catch. Now contained in a `describeError` helper.\n  2. The fix contained the *argument* but not the *call*. `log.error` reaches the sink synchronously, so a throwing sink (destroyed stdout, buggy custom `Sink`) escaped the catch the same way. Now `failed++` happens before logging and the log call is itself wrapped.\n  The generalisable lesson: pre-fix the catch was `catch { failed++; }`, incapable of throwing. Every statement added to a catch block that guards a loop invariant is a new way to break it, and the helper that formats the error counts.\n- **`enqueue` refuses an empty or whitespace-only request id**, matching `AppLogger`'s own `trim()` guard, so an untraceable job never enters the queue and `run()` has no reason to throw. Breaks no caller: `Router.dispatch` builds its logger first, so the HTTP path fails earlier.\n\n## Continuation\n\n- **T-3 Move AppLogger into packages/logging** is the next ticket. Note it now has one more importer than it did: `src/jobs/JobQueue.ts` imports `AppLogger` and `Sink`, alongside `src/http/router.ts` and the two test files.\n- **ISS-004 (redaction misses non-Bearer/sk- secret shapes)** is the one worth doing soon, and T-2 is why. `AppLogger`'s key-based rule only fires on a real object key, so a secret inside a flat string is caught only if it matches `sk-...` or `Bearer ...`. T-2 is the first path that funnels arbitrary third-party error text into a log line, so `ghp_`, `xoxb-`, `AKIA`, JWTs and `password=` in a URL now reach a line unredacted -- which is RULES.md #1. Deliberately not fixed here: widening those patterns changes redaction for every existing caller and wants its own review.\n\n## Also filed\n\n- **ISS-001** (medium): an empty `x-request-id` header is accepted as a request id -- `?? randomUUID()` does not substitute for `\"\"` -- so `AppLogger.withRequestId(\"\")` throws out of `app.handle()` and the request logs nothing at all.\n- **ISS-003** (low): `tsconfig.json` declares `strict`/`noEmit` but nothing typechecks -- no `typecheck` script, no `@types/node`. A genuine type error in a new test this session was caught only because `tsc` happened to be installed globally. Adding types is a devDependency decision against RULES.md #2, so it needs an owner's call.\n- **ISS-002**: duplicate of ISS-001, resolved. It was auto-filed by a `deferred` finding disposition after I had already filed ISS-001 by hand.\n\n## Notes for the next session\n\n- The codex review bridge reports healthy via `storybloq_health`, but neither `review_plan` nor `review_code` is callable from a Claude Code session here; both review stages fell back to agent review. Worth checking before assuming codex review is running.\n- Unstaged and unrelated, left alone: `.continuity-mcp.json`, `.story/.gitignore`.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "plan-review (agent fallback, codex unavailable)",
+      "dedupeKey": "T-2-plan-review-r1:empty-x-request-id",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "src/http/handler.ts:31 uses `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only substitutes for null/undefined, so a request that sends `x-request-id: \"\"` yields an empty request id rather than a fresh UUID. That empty id reaches src/http/router.ts:37, where `AppLogger.withRequestId(\"\")` throws (src/platform/logging/AppLogger.ts:61). The caller gets an unhandled promise rejection out of `app.handle()` instead of an HTTP response, and the request produces no log line at all, which is a RULES.md #1 violation (every emitted line carries the request id of the work it belongs to — here nothing is emitted). Fix: treat an empty or whitespace-only header value as absent, e.g. a trim-and-fall-back to randomUUID(). Found during the T-2 plan review; out of scope for T-2, which concerns job traceability rather than request-id assignment.",
+      "location": [
+        "src/http/handler.ts:31"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "5916fa02b52317a4182f2b8a052e5017d87f7ec86bb17577899cf52cb51d5370",
+          "endLine": 31,
+          "path": "src/http/handler.ts",
+          "reviewId": "T-2-plan-review-r1",
+          "revision": "13dc79122d328db2c7b76620da7c63a30e77dc6a",
+          "startLine": 31
+        }
+      ],
+      "status": "open",
+      "title": "Empty x-request-id header is accepted as a request id and crashes dispatch"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:0565780a-8bed-4add-8cfa-85b87c4b593b:11cbc54a5a80eb0e08a1e23194aced49",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "src/http/handler.ts:31 uses req.headers[\"x-request-id\"] ?? randomUUID(); ?? only substitutes for null/undefined, so an empty x-request-id header yields \"\". That reaches src/http/router.ts:37 where AppLogger.withRequestId(\"\") throws (src/platform/logging/AppLogger.ts:61) -- an unhandled rejection out of app.handle() instead of a response, and the request emits no log line at all.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001, which is the record to work. Both describe the same defect (src/http/handler.ts:31 accepting an empty x-request-id header). ISS-001 was filed manually during the T-2 plan review per the guide's file-pre-existing-issues instruction; ISS-002 was then auto-filed by the same finding's `deferred` disposition. ISS-001 is kept because it carries the structured sourceRefs and a readable title. No work is lost by closing this one.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[pre-existing-bug] src/http/handler.ts:31 uses req.headers[\"x-request-id\"] ?? randomUUID(); ?? only"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "tooling"
+      ],
+      "createdBy": "implement (T-2)",
+      "dedupeKey": "T-2-implement:no-typecheck-gate",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "tsconfig.json declares `strict` + `noEmit` over `src`, which only makes sense if something typechecks the project, but nothing does: package.json has no `typecheck` script and no typescript/@types/node devDependency, so `npm test` (Node's runner with type stripping) never checks a type. Running `tsc --noEmit` against the tree today reports TS2307 for every `node:test`, `node:assert/strict` and `node:crypto` import and TS2580 for `process` in src/platform/logging/AppLogger.ts:87 -- all of them purely from the missing node types, none from real defects. The practical cost is that type errors reach review and runtime instead of a gate: during T-2 a genuine TS18048 in a new test was only spotted because tsc happened to be installed globally on the machine, not because the project runs it. Fix is a devDependency on @types/node plus a `typecheck` script; note RULES.md #2 (\"dependency-free: Node built-ins only\") is about runtime code, so a types-only devDependency needs an owner decision before it is added.",
+      "location": [
+        "tsconfig.json",
+        "package.json"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "tsconfig.json cannot actually typecheck: no @types/node and no typecheck script"
+    }
+  },
+  {
+    "path": "issues/ISS-004.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "logging"
+      ],
+      "createdBy": "code-review (agent, T-2 round 1)",
+      "dedupeKey": "T-2-code-review-r1:redaction-text-patterns-narrow",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-004",
+      "impact": "AppLogger's key-based redaction (SECRET_KEY, src/platform/logging/AppLogger.ts:18) only fires on an object KEY, so any secret that arrives inside a flat string is caught only if it matches SECRET_VALUE/SECRET_IN_TEXT (lines 19-20), which recognise exactly two shapes: `sk-...` and `Bearer ...`. Verified by execution during the T-2 code review: a log field whose string value is `{\"token\":\"hunter2secret\",\"api_key\":\"sk_live_abcdefgh\"}` is written verbatim -- the JSON key shape is not a real object key so SECRET_KEY cannot fire, and neither `hunter2secret` nor the `sk_live_` prefix (underscore, not hyphen) matches the value patterns. Other common shapes also pass: `ghp_...`, `xoxb-...`, `AKIA...`, `eyJ...` JWTs, and `password=hunter2` in a query string or connection URL. This is pre-existing and not introduced by T-2, but T-2 widens the exposure: JobQueue's new failure line funnels arbitrary third-party error text (`describeError(err)`) into a log field for the first time, and upstream libraries routinely put request URLs and response bodies into error messages. RULES.md #1 says secrets never reach a log line unredacted, so this is a gap in the rule's enforcement rather than a style question. Fix is to widen the value/text patterns (common token prefixes, `key=value` pairs naming a secret, URL credentials) -- which changes redaction behaviour for every existing caller and so deserves its own ticket and review rather than riding along on a job-traceability change.",
+      "location": [
+        "src/platform/logging/AppLogger.ts:18-20"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "ee995853eb48d281fbc97e94aeaa0eb9303a7d3a9770397dcccbb4b40eda2ae1",
+          "endLine": 20,
+          "path": "src/platform/logging/AppLogger.ts",
+          "reviewId": "T-2-code-review-r1",
+          "revision": "13dc79122d328db2c7b76620da7c63a30e77dc6a",
+          "startLine": 18
+        }
+      ],
+      "status": "open",
+      "title": "Redaction misses secrets in free text that are not Bearer or sk- shaped"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When adding logging or reporting inside a catch block whose whole job is to let a loop continue, treat each added statement as a new throw site and contain it explicitly: the value formatting, the log call, and anything reaching an injected collaborator. Count or record the outcome BEFORE the reporting, so the tally survives a reporting failure. A bare `catch { n++; }` cannot throw; the moment it describes what went wrong, it can.",
+      "context": "T-2 added failure logging to JobQueue.run(), whose contract is \"a failing job is dropped; the rest still run\". Two successive code-review rounds each found a live way that contract had been broken, both demonstrated by executing the code rather than reading it. Round 1: String(err) inside the catch throws for Object.create(null) and for a value with a throwing toString, so run() rejected and abandoned every job still queued. Round 2: the fix contained the ARGUMENT (a describeError helper) but not the CALL -- AppLogger reaches its sink synchronously, so a throwing sink (destroyed stdout, buggy custom Sink) escaped the catch the same way. The tell in both rounds: pre-change the catch was literally `catch { failed++; }`, incapable of throwing, so every throw site in it was introduced by the change. The second defect was classified originClass \"introduced-by-fix\", which is the category worth looking for whenever a review round's fix lands in the same block it was found in.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "error-handling",
+        "code-review",
+        "invariants"
+      ],
+      "title": "Every statement added to a catch block that guards a loop invariant is a new way to break it",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-p19bbvh0jhj8xgma",
+          "r-eftp2zdb6as643np"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

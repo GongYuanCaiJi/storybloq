@@ -1,0 +1,82 @@
+{
+  "planEntryContext": 77432,
+  "planEntries": [
+    77432
+  ],
+  "beforePlanWrittenContext": 92483,
+  "totalInputTokens": 12195633,
+  "mainRequests": 88,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01Fbp61BbV1WwESUAavjdQzX"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01BN26uE4sZ5pkmEyr3mrcdN"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01Ts8bw2Rnoct5EESC1rhSp6"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01CkFd1TN4kMNz9DXjJW4Vut"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01XWnWyu5iq18QSWA48mDYee"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_012opzdAnwRq38C42xeE53pw"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01MgvLk74TcG2NrBZxs4aJAk"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_012D5zmheQMaTacrE5NcCZyz"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01Twv1dQytAbw55p3sz2WNBG"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01SYyyu5jRQnkmxXeFNi49CL"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_01Be42nib9YyJuw9wzL7zZXt"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+      "toolUseId": "toolu_016iNCgEJ6QAB9hc3JMPmdo2"
+    }
+  ],
+  "guideSessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd",
+  "firstPlanWrittenToolUseId": "toolu_01Ts8bw2Rnoct5EESC1rhSp6",
+  "totalCostUsd": 11.358157500000004,
+  "numTurns": 89,
+  "resultSubtype": "success"
+}

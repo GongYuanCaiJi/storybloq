@@ -1,0 +1,37 @@
+<!-- 2026-09-20-01-auto-session.md -->
+# Session handover -- T-4, per-client rate limiting
+
+Targeted autonomous session (`/story auto T-4`). One item, completed and committed as `9b5c4a0`.
+
+## What shipped
+
+**T-4: Add per-client rate limiting to the HTTP handler** -- complete.
+
+- **New `src/http/RateLimiter.ts`**: fixed window per client id, injected clock, and a *hard* cap on tracked clients enforced by O(1) oldest-window eviction. Constructor validates `limit`/`windowMs`/`maxTrackedClients` as positive integers.
+- **`src/http/handler.ts`**: limiter runs in front of routing; 429 with `{ error, retryAfterSeconds }`; headers matched case-insensitively; missing client id shares one `"anonymous"` bucket; refusal logged through `AppLogger` under the request id.
+- **Tests**: `src/http/RateLimiter.test.ts` and `src/http/handler.test.ts` (rule 3 -- the change touches two modules, so it ships two test files). Suite 22/22.
+
+## Decisions worth carrying forward
+
+1. **`GET /health` is exempt from the limiter; unmatched paths are not.** This reversed the approved plan after code review round 1. A probe sends no `x-client-id`, so it lands in the shared `"anonymous"` bucket and its quota is spent by unrelated header-less callers: a burst 429s the probe, the LB pulls the instance from rotation, load shifts to peers that trip the same bucket. A rate limiter must not be able to take the service out of rotation. The exemption is scoped to method *and* path, and `POST /health` is metered like anything else. Cost accepted and recorded in the plan: `/health` is now the one path whose log volume has no ceiling.
+
+2. **The cap is a hard cap, not a sweep of expired entries.** The key is a caller-supplied header, so a client rotating `x-client-id` every request produces only *live* entries; an expiry sweep would reclaim nothing while charging a scan for it, making per-request CPU rise with the flood. Eviction takes the oldest window in O(1) by keeping `Map` insertion order equal to `windowStart` ascending (a reset deletes and re-inserts the entry).
+
+3. **Eviction's cost is real and was taken deliberately.** Under a sustained rotating-id flood the oldest entry is a *legitimate* client, so enforcement is effectively suspended for real clients for the duration. The fix for that is identity the caller cannot mint -- authentication -- not a cleverer eviction order. Explicitly out of scope for T-4.
+
+4. **Options are validated at construction.** `maxTrackedClients: NaN` would make `size >= max` false forever and silently leave the map unbounded -- the exact failure the cap exists to prevent. `Number(process.env.X)` with an unset variable is that case.
+
+5. **The repo has a `tsconfig.json` with `strict: true` but no compiler installed** (no deps/devDeps), and Node strips types without checking them. So `npm test` is the whole in-repo verification story and a type-level mistake is caught by nothing. Pre-existing; this change accepts it. Code review type-checked the new code out-of-band and found it clean.
+
+## Process notes
+
+- **The codex review bridge is not available on this harness** -- no `review_plan` tool is registered, so both plan review and code review ran on the agent fallback per the guide's instruction. Worth knowing before assuming a codex-backed review ran.
+- Review was productive rather than ceremonial: plan review caught an unbounded-memory hole in the first draft's "growth guard", and code review round 1 caught the `/health` availability hazard, which the tests at that point had locked in as intended behaviour. Round 2 mutation-tested each claimed fix (reverting the implementation line and re-running) before approving -- that is what distinguished genuine fixes from restatements, and it also surfaced three tests that passed vacuously.
+
+## Incidental fix
+
+A blank or whitespace-only `x-request-id` previously threw out of `AppLogger.withRequestId` instead of responding. Pre-existing, but this diff rewrote that exact line and added a second call site for it, so it was fixed inline (`?.trim() || randomUUID()`) with a test rather than filed.
+
+## What's next
+
+Nothing is blocked and nothing was left half-done. No issues were filed this session. The backlog is unchanged apart from T-4 moving to complete -- run `/story` for the current ranking.

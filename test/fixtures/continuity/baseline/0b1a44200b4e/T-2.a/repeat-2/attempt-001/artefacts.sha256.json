@@ -1,0 +1,17 @@
+{
+  "variant.json": "2913b62b0af6c6be7de69c47c21902e67b354ab2f00f1f2b1bda91a675ab3efc",
+  "task.json": "e37f59e7db42ddcc05bd7ede8c008e438a5abe4079bb8069954a6b69ff61abdc",
+  "plan-context.md": "63a57760b6b01484bac794aec7ee99d3c76cbfc40f3689903c0d0842440fb80c",
+  "plan.md": "a43918cbb1022df1ad4afd64c18be82b1f032eb9b729027445a11c31f9ae5729",
+  "plan.initial.md": "3e88c59edd4df66fa7c7dfe36ef73f1670d6bf50c89ed248eeca5500b7f77fab",
+  "evidence.jsonl": "79afa312ad8a113e168cb4186c16fd93eeb5ff6114893184f66ddaa9ab0bfbfb",
+  "source.diff": "d3543a099027334dad362bacac284145a9ca9dcd31fae086408b3c773d608a28",
+  "worktree.status": "818a55f7c5ed8e1bcd46a933fa84965968d531d92111f9630895453726475093",
+  "ledger.changes.json": "0d9b8159f7faf318fa0a4f717dd671bd2b8e9047650f1449c31be6f0a80e282e",
+  "reports.json": "d667db65bdb37bbbeba11a270e6ad99c6f65bfd57ab406ad4c674ae21d0a2e3c",
+  "handover.md": "9f012308b44a12682fb301d8d4acd0d8063dec4f0e81c2efc7bc1877c8fd48f4",
+  "usage.json": "d04c0f503b72f94ea95c2acf5026433a23385837fb889641c5c42d904c75f00b",
+  "manifest.json": "2458e79a2e0318ce42cfa85d09e8f22000176820f2cd2b6793a57b9e68ff6f83",
+  "redaction.json": "8eb6839948b04f3e8012a5b66f82e85489a7e6736677fea7c207e3ccb1e91d41",
+  "record.json": "416357b0f1fef553c7e09a2d1cd8a2ff2f495ab4695788344361e1d58d8d70c5"
+}

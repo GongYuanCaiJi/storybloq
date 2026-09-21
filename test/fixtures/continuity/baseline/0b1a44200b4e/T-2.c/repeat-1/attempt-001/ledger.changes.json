@@ -1,0 +1,167 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 failed jobs are traceable (2026-09-20)\n\n## Completed\n- **T-2** — `JobQueue.run()` now emits one `AppLogger` error line per failing job, bound to that job's own enqueuing request id. Commit `17a9306`. 20 tests pass.\n- T-2 now cites **r-eftp2zdb6as643np** and **r-p19bbvh0jhj8xgma**; it cited neither when picked, so neither reached a reviewer until they were added.\n\n## Decisions\n- **The thrown value is normalised before it reaches the logger** (`describeThrown` in `src/jobs/JobQueue.ts`). Both obvious alternatives are wrong and were tried: `String(err)` throws on a null-prototype object and flattens `{ token: … }` into text that key-based redaction can no longer see; passing the raw value lets a `toJSON` survive `redact()` and be invoked by the sink, writing the secret back out (reproduced against the real stdout sink). The normaliser makes functions inert, marks cycles and repeats, caps depth (4) and breadth (24), unwraps boxed primitives, summarises byte views, and keeps an `Error`'s name and message at any depth.\n- **`seen` is never released.** Releasing it per path let a shared, non-circular graph re-expand down every route: 7 small objects produced a 6.6 MB line, a wider case 352 MB. A value is now described once per line; later references render `[seen]`. Repeats are order-dependent as a result — accepted.\n- **Key redaction moved into `AppLogger.redact`, not `JobQueue`.** `redact()` tested key names but only ever replaced values, so a secret in KEY position was written verbatim. The ruling puts redaction in the logger, and every caller logging an outside-controlled key map had the same hole. Two colliding secret-shaped keys now collapse to one `[REDACTED]` entry — diagnostic loss, no leak, and the fix for it would undo the redaction.\n- **`createApp` owns its queue** (`createApp(sink?)`, queue read back from `App.jobs`). The `queue` parameter meant a caller-supplied queue kept its own sink, splitting where job-failure lines landed. No caller passed one.\n- **`enqueue` refuses a blank or non-string request id.** Defence in depth only: `Router.dispatch` throws on a blank id first, so this is unreachable from HTTP today.\n\n## Process note worth keeping\nFour review rounds, and each of the first three found a real defect **introduced by the previous round's fix** — the round-2 fix caused a critical secret leak that round 1 had no way to anticipate. Reviewing the fix, not just the original code, is what caught them. Round 4 was run in-session rather than as an independent agent because the session budget was nearly spent; that round is less independent than the three before it, and the sole finding it raised was a suggestion.\n\n## Next\n- **ISS-001** (medium): a blank `x-request-id` header makes `handle()` throw instead of returning a response — `??` only substitutes for null/undefined. Verified at HEAD. Small fix: `req.headers[\"x-request-id\"]?.trim() || randomUUID()`.\n- **ISS-003** (low): `AppLogger.withRequestId` reports a non-string request id as a `TypeError` rather than its own error. The logger is the choke point, so the guard belongs there.\n- ISS-002 and ISS-004 are resolved duplicates of ISS-001 and ISS-003. Both were auto-filed by reporting a finding with disposition `deferred` after the same finding had already been filed by hand — worth knowing before filing manually during a review round.\n- **T-3** still carried forward: move `AppLogger` into `packages/logging` once a second service needs it. Note that it grew a behaviour this session (key redaction), so its tests moved with it matter.\n- Known limitation, recorded in the session plan: cross-realm values (a `vm` context's `Error`) fail `instanceof` and render as `{}`. This service creates no realms.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "plan-review (T-2, round 1)",
+      "dedupeKey": "t-2-plan-review-1:blank-request-id-header",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "handler.ts assigns `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only substitutes for null/undefined, so a header present but empty (`\"\"`, or whitespace) passes straight through to `router.dispatch`, where `AppLogger.withRequestId` rejects a blank id and throws. Verified at HEAD: `createApp().handle({ method: \"GET\", path: \"/health\", headers: { \"x-request-id\": \"\" } })` rejects with `AppLogger requires a non-empty request id` rather than returning a RouteResponse. A client can therefore turn any request into an unhandled error with one empty header, and the failure carries no request id of its own. Fix is to treat a blank header as absent (trim-and-fallback to randomUUID) at the point the id is born.",
+      "location": [
+        "src/http/handler.ts:33"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "926f7897aa601acfc23342dc28af725ffe434efc0df9aab38ad1b0a3622f8997",
+          "endLine": 35,
+          "path": "src/http/handler.ts",
+          "reviewId": "t-2-plan-review-1",
+          "revision": "392996646fe05ec36355d634b8b7c810c3a9e257",
+          "startLine": 31
+        }
+      ],
+      "status": "open",
+      "title": "A blank x-request-id header makes handle() throw instead of returning a response"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:af81be9f-4012-46be-8229-580b12b0db14:87a09b796265d7ac57343e64dccbc842",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "Pre-existing, not introduced by this plan: `req.headers[\"x-request-id\"] ?? randomUUID()` substitutes only for null/undefined, so a present-but-empty header reaches AppLogger.withRequestId and throws, making handle() reject instead of returning a RouteResponse. Verified by executing the path at HEAD. Out of scope for T-2, which traces job failures rather than minting request ids.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "af81be9f-4012-46be-8229-580b12b0db14"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001, which records the same defect (a present-but-empty x-request-id header reaches AppLogger.withRequestId and makes handle() throw) with the verification and the suggested fix. Filed twice because the plan-review round reported the finding with disposition \"deferred\", which auto-files an issue, after the same finding had already been filed by hand as ISS-001. No code change; track the defect on ISS-001.",
+      "resolvedDate": "2026-09-20",
+      "severity": "high",
+      "status": "resolved",
+      "title": "[correctness] Pre-existing, not introduced by this plan: `req.headers[\"x-request-id\"] ?? rando"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "logging"
+      ],
+      "createdBy": "code-review (T-2, round 2)",
+      "dedupeKey": "t-2-code-review-2:applogger-nonstring-request-id",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "withRequestId guards a blank id with `requestId.trim() === \"\"` but does not check the type first, so a JS caller (or any boundary where the id arrives untyped, e.g. a header value) gets `TypeError: Cannot read properties of undefined (reading 'trim')` for undefined and `TypeError: requestId.trim is not a function` for a number — both verified at HEAD — instead of the intended \"AppLogger requires a non-empty request id\". The logger is the choke point every path funnels through, so the clear message belongs here; T-2 added a `typeof` guard to JobQueue.enqueue, which covers the job path only. Fix: `typeof requestId !== \"string\" || requestId.trim() === \"\"`.",
+      "location": [
+        "src/platform/logging/AppLogger.ts:66"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "sourceRefs": [
+        {
+          "contentHash": "dae5f066aaf0a2b981100800ee72cc71a5082d096bab85d90b37c89a1d6b9b39",
+          "endLine": 68,
+          "path": "src/platform/logging/AppLogger.ts",
+          "reviewId": "t-2-code-review-2",
+          "revision": "392996646fe05ec36355d634b8b7c810c3a9e257",
+          "startLine": 64
+        }
+      ],
+      "status": "open",
+      "title": "AppLogger.withRequestId reports a non-string request id as a TypeError, not as its own error"
+    }
+  },
+  {
+    "path": "issues/ISS-004.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:af81be9f-4012-46be-8229-580b12b0db14:e995dea437c5969fed17283ad4e4db19",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-004",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-004",
+      "impact": "Pre-existing: withRequestId checks requestId.trim() without a type check, so a non-string id surfaces as a TypeError instead of the intended 'requires a non-empty request id'. Verified at HEAD for both undefined and a number. The logger is the choke point every path funnels through, so the guard belongs there rather than only in JobQueue.enqueue, but it is outside T-2's diff.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "af81be9f-4012-46be-8229-580b12b0db14"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-003, which records the same defect (AppLogger.withRequestId calls .trim() without a type check, so a non-string request id surfaces as a TypeError instead of its own error) with the verification and the fix. Filed twice because reporting the finding with disposition \"deferred\" auto-files an issue, after the same finding had already been filed by hand as ISS-003. No code change; track it on ISS-003.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[input-validation] Pre-existing: withRequestId checks requestId.trim() without a type check, so a n"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

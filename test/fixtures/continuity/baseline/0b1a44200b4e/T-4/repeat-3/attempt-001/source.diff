@@ -1,0 +1,508 @@
+diff --git a/.story/tickets/T-4.json b/.story/tickets/T-4.json
+index 6c6ac8c..c0908df 100644
+--- a/.story/tickets/T-4.json
++++ b/.story/tickets/T-4.json
+@@ -1,13 +1,14 @@
+ {
+-  "id": "T-4",
+-  "title": "Add per-client rate limiting to the HTTP handler",
++  "blockedBy": [],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Requests from one client can starve the others. Add per-client rate limiting to the HTTP handler: a fixed window per client id (the x-client-id header), a 429 response when the window is exhausted, and a test.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-4",
++  "id": "T-4",
+   "order": 40,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add per-client rate limiting to the HTTP handler",
++  "type": "task"
+ }
+diff --git a/src/http/RateLimiter.test.ts b/src/http/RateLimiter.test.ts
+new file mode 100644
+index 0000000..5d42b98
+--- /dev/null
++++ b/src/http/RateLimiter.test.ts
+@@ -0,0 +1,143 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { RateLimiter } from "./RateLimiter.ts";
++
++/** A stub clock, so a window can be rolled over without sleeping. */
++function clock(start = 1_000_000) {
++  let now = start;
++  return { now: () => now, advance: (ms: number) => { now += ms; }, at: () => now };
++}
++
++test("a fixed window admits up to the limit, then refuses", () => {
++  const c = clock();
++  const start = c.at();
++  const limiter = new RateLimiter({ limit: 2, windowMs: 60_000, now: c.now });
++  assert.equal(limiter.check("c1").remaining, 1);
++  assert.equal(limiter.check("c1").remaining, 0);
++
++  c.advance(20_000);
++  const denied = limiter.check("c1");
++  assert.equal(denied.allowed, false);
++  assert.equal(denied.remaining, 0);
++  // resetAt is fixed by windowStart, not by now -- if it tracked `now` this
++  // would be start + 80_000 and the window would be sliding, not fixed.
++  assert.equal(denied.resetAt, start + 60_000);
++  assert.equal(denied.retryAfterSeconds, 40);
++});
++
++test("a denial with a millisecond left still reports a whole second", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, now: c.now });
++  limiter.check("c1");
++  c.advance(59_999); // 1ms left: still refused, and still a usable retry hint
++  const denied = limiter.check("c1");
++  assert.equal(denied.allowed, false);
++  assert.equal(denied.retryAfterSeconds, 1);
++});
++
++test("one client exhausting its window does not starve another", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, now: c.now });
++  assert.equal(limiter.check("c1").allowed, true);
++  assert.equal(limiter.check("c1").allowed, false);
++  assert.equal(limiter.check("c2").allowed, true);
++});
++
++test("the window resets once it has elapsed", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 2, windowMs: 60_000, now: c.now });
++  limiter.check("c1");
++  limiter.check("c1");
++  assert.equal(limiter.check("c1").allowed, false);
++
++  c.advance(60_000);
++  const afterReset = limiter.check("c1");
++  assert.equal(afterReset.allowed, true);
++  assert.equal(afterReset.remaining, 1);
++});
++
++test("an allowed request reports the window's own end, not a sliding one", () => {
++  const c = clock();
++  const start = c.at();
++  const limiter = new RateLimiter({ limit: 5, windowMs: 60_000, now: c.now });
++  assert.equal(limiter.check("c1").resetAt, start + 60_000);
++  c.advance(10_000);
++  assert.equal(limiter.check("c1").resetAt, start + 60_000);
++});
++
++test("options that would silently unbound the cap are rejected at construction", () => {
++  // NaN is the live case: `size >= NaN` is false forever, so eviction would
++  // never fire and the map would grow without limit.
++  assert.throws(() => new RateLimiter({ maxTrackedClients: Number.NaN }), /positive integer/);
++  assert.throws(() => new RateLimiter({ maxTrackedClients: 0 }), /positive integer/);
++  assert.throws(() => new RateLimiter({ maxTrackedClients: 2.5 }), /positive integer/);
++  assert.throws(() => new RateLimiter({ limit: -1 }), /positive integer/);
++  assert.throws(() => new RateLimiter({ windowMs: Number.NaN }), /positive integer/);
++});
++
++test("a denied request does not push the window's reset out", () => {
++  const c = clock();
++  const start = c.at();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, now: c.now });
++  assert.equal(limiter.check("c1").allowed, true);
++
++  // The denials happen strictly inside the window. Without this advance the
++  // denials would share an instant with windowStart and the final assertion
++  // would hold whether or not a denial had moved it.
++  c.advance(30_000);
++  assert.equal(limiter.check("c1").allowed, false);
++  assert.equal(limiter.check("c1").allowed, false);
++
++  // Exactly one window after the ORIGINAL start. Had a denial reset
++  // windowStart to start + 30s, this would still be refused.
++  c.advance(30_000);
++  assert.equal(c.at(), start + 60_000);
++  assert.equal(limiter.check("c1").allowed, true);
++});
++
++test("the tracked-client cap is hard and evicts the oldest window", () => {
++  const c = clock();
++  // limit: 1 is what makes this discriminate -- at a higher limit `a` would be
++  // admitted again whether or not it had been evicted.
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, maxTrackedClients: 2, now: c.now });
++
++  assert.equal(limiter.check("a").allowed, true);
++  c.advance(1_000);
++  assert.equal(limiter.check("b").allowed, true);
++  c.advance(1_000);
++  assert.equal(limiter.check("c").allowed, true); // evicts `a`, the oldest window
++  assert.equal(limiter.size, 2);
++
++  // `a` is allowed again only because its counter was evicted; `b` is still
++  // tracked and still denied. Every window here is live -- nothing expired.
++  assert.equal(limiter.check("b").allowed, false);
++  assert.equal(limiter.check("a").allowed, true);
++  assert.equal(limiter.size, 2);
++});
++
++test("a reset moves a client to the back of the eviction order", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, maxTrackedClients: 2, now: c.now });
++
++  limiter.check("a"); // oldest window
++  c.advance(1_000);
++  limiter.check("b");
++
++  // `a`'s window elapses and it comes back. That reset must move it behind `b`,
++  // or the next insert evicts the client that just renewed instead of the stale
++  // one -- the invariant #evictOldest depends on.
++  c.advance(60_000);
++  assert.equal(limiter.check("a").allowed, true);
++
++  limiter.check("c"); // evicts one entry; it must be `b`, not the renewed `a`
++  assert.equal(limiter.size, 2);
++  assert.equal(limiter.check("a").allowed, false); // still tracked, still spent
++  assert.equal(limiter.check("b").allowed, true); // evicted, so its count is gone
++});
++
++test("a client rotating its id cannot grow the map past the cap", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 60_000, maxTrackedClients: 4, now: c.now });
++  for (let i = 0; i < 500; i++) limiter.check(`flood-${i}`);
++  assert.equal(limiter.size, 4);
++});
+diff --git a/src/http/RateLimiter.ts b/src/http/RateLimiter.ts
+new file mode 100644
+index 0000000..3e19f8a
+--- /dev/null
++++ b/src/http/RateLimiter.ts
+@@ -0,0 +1,125 @@
++/**
++ * Fixed-window per-client rate limiting.
++ *
++ * One window per client id: `count` requests are admitted in each `windowMs`
++ * stretch, and the window resets wholesale once it has elapsed. The clock is
++ * injectable so a test can roll a window over without sleeping.
++ *
++ * The client id is a caller-supplied header, so the number of distinct keys is
++ * not something this module can trust. `maxTrackedClients` is therefore a HARD
++ * cap enforced by eviction, not a sweep of expired entries: under a client that
++ * rotates its id every request every entry is live, and a sweep would reclaim
++ * nothing while charging a scan for the privilege. See plan.md for the cost of
++ * that eviction, which is real and deliberate.
++ */
++export interface RateLimitDecision {
++  readonly allowed: boolean;
++  /** The window's limit, so a caller can report it without reaching into config. */
++  readonly limit: number;
++  /** Requests left in the current window after this decision. */
++  readonly remaining: number;
++  /** Epoch ms at which the current window ends. */
++  readonly resetAt: number;
++  /** Seconds until the window resets; 0 when the request was allowed. */
++  readonly retryAfterSeconds: number;
++}
++
++export interface RateLimiterOptions {
++  readonly limit?: number;
++  readonly windowMs?: number;
++  readonly now?: () => number;
++  readonly maxTrackedClients?: number;
++}
++
++interface Window {
++  windowStart: number;
++  count: number;
++}
++
++const DEFAULT_LIMIT = 100;
++const DEFAULT_WINDOW_MS = 60_000;
++const DEFAULT_MAX_TRACKED_CLIENTS = 10_000;
++
++export class RateLimiter {
++  readonly #limit: number;
++  readonly #windowMs: number;
++  readonly #now: () => number;
++  readonly #maxTrackedClients: number;
++
++  /**
++   * Keyed by client id, held in window order: insertion order tracks
++   * `windowStart` ascending, so the first entry is the oldest window and
++   * eviction is a single delete rather than a scan. Every path that can change
++   * a `windowStart` re-inserts the entry to keep that true.
++   */
++  readonly #windows = new Map<string, Window>();
++
++  constructor(options: RateLimiterOptions = {}) {
++    // Validated rather than trusted: the cap is enforced by `size >= max`, and a
++    // NaN there is false forever, which would silently leave the map unbounded --
++    // the exact failure the cap exists to prevent. A misconfiguration should be
++    // loud at construction, not a quiet loss of the bound under load.
++    this.#limit = positiveInteger(options.limit, DEFAULT_LIMIT, "limit");
++    this.#windowMs = positiveInteger(options.windowMs, DEFAULT_WINDOW_MS, "windowMs");
++    this.#maxTrackedClients = positiveInteger(options.maxTrackedClients, DEFAULT_MAX_TRACKED_CLIENTS, "maxTrackedClients");
++    this.#now = options.now ?? Date.now;
++  }
++
++  /** Clients currently tracked. Bounded by `maxTrackedClients` whatever callers send. */
++  get size(): number {
++    return this.#windows.size;
++  }
++
++  check(clientId: string): RateLimitDecision {
++    const now = this.#now();
++    const window = this.#windowFor(clientId, now);
++    const resetAt = window.windowStart + this.#windowMs;
++
++    if (window.count + 1 > this.#limit) {
++      // A denial does not increment the count: the window's end is fixed by
++      // windowStart, so counting denials would only inflate the counter.
++      return {
++        allowed: false,
++        limit: this.#limit,
++        remaining: 0,
++        resetAt,
++        // A denial only happens while now < resetAt, so this is always >= 1.
++        retryAfterSeconds: Math.ceil((resetAt - now) / 1000),
++      };
++    }
++
++    window.count++;
++    return { allowed: true, limit: this.#limit, remaining: this.#limit - window.count, resetAt, retryAfterSeconds: 0 };
++  }
++
++  /** The client's current window, resetting or creating it as needed, keeping window order intact. */
++  #windowFor(clientId: string, now: number): Window {
++    const existing = this.#windows.get(clientId);
++    if (existing) {
++      if (now - existing.windowStart < this.#windowMs) return existing;
++      // Reset: the window start moves, so the entry moves to the tail with it.
++      this.#windows.delete(clientId);
++      const reset: Window = { windowStart: now, count: 0 };
++      this.#windows.set(clientId, reset);
++      return reset;
++    }
++
++    if (this.#windows.size >= this.#maxTrackedClients) this.#evictOldest();
++    const fresh: Window = { windowStart: now, count: 0 };
++    this.#windows.set(clientId, fresh);
++    return fresh;
++  }
++
++  #evictOldest(): void {
++    const oldest = this.#windows.keys().next();
++    if (!oldest.done) this.#windows.delete(oldest.value);
++  }
++}
++
++function positiveInteger(value: number | undefined, fallback: number, name: string): number {
++  if (value === undefined) return fallback;
++  if (!Number.isInteger(value) || value < 1) {
++    throw new Error(`RateLimiter ${name} must be a positive integer, got ${value}`);
++  }
++  return value;
++}
+diff --git a/src/http/handler.test.ts b/src/http/handler.test.ts
+new file mode 100644
+index 0000000..e13aee1
+--- /dev/null
++++ b/src/http/handler.test.ts
+@@ -0,0 +1,109 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { createApp } from "./handler.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++/** A stub clock, so retryAfterSeconds is exact rather than a race with the wall clock. */
++function clock(start = 1_000_000) {
++  let now = start;
++  return { now: () => now, advance: (ms: number) => { now += ms; } };
++}
++
++test("an exhausted client gets a 429, logged under that request's own id", async () => {
++  const lines: LogLine[] = [];
++  const c = clock();
++  const app = createApp(undefined, (l) => lines.push(l), { rateLimit: { limit: 1, windowMs: 60_000, now: c.now } });
++
++  const first = await app.handle({ method: "POST", path: "/reports", headers: { "x-client-id": "c1" }, body: { kind: "daily" } });
++  assert.equal(first.status, 202);
++
++  // Time moves between the two calls, so the exact retryAfterSeconds below is a
++  // real assertion about the arithmetic rather than a same-millisecond accident.
++  c.advance(15_000);
++
++  // The refused request names its own request id, so the assertion below can
++  // check the ruling's guarantee rather than a generated uuid.
++  const refused = await app.handle({
++    method: "POST",
++    path: "/reports",
++    headers: { "x-client-id": "c1", "x-request-id": "req-429" },
++    body: { kind: "daily" },
++  });
++  assert.equal(refused.status, 429);
++  assert.deepEqual(refused.body, { error: "rate limit exceeded", retryAfterSeconds: 45 });
++
++  // The sink holds the 202's "report queued" line too, so select the refusal.
++  const rateLimited = lines.filter((l) => l.message === "rate limited");
++  assert.equal(rateLimited.length, 1);
++  assert.equal(rateLimited[0].level, "warn");
++  assert.equal(rateLimited[0].requestId, "req-429");
++  assert.deepEqual(rateLimited[0].fields, { clientId: "c1", limit: 1, retryAfterSeconds: 45 });
++});
++
++test("requests without an x-client-id share one bucket rather than bypassing the limit", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1 } });
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: {}, body: {} })).status, 202);
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: {}, body: {} })).status, 429);
++});
++
++test("the client id header is matched case-insensitively", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1 } });
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: { "X-Client-Id": "c1" }, body: {} })).status, 202);
++  // A different spelling of the same header must not buy a fresh window.
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: { "x-client-id": "c1" }, body: {} })).status, 429);
++});
++
++test("a header carrying an undefined value does not hide a later spelling of it", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1 } });
++  const headers = { "X-Client-Id": undefined, "x-client-id": "c1" };
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers, body: {} })).status, 202);
++  // Charged to "c1", not to the shared anonymous bucket, so "c1" is now spent.
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: { "x-client-id": "c1" }, body: {} })).status, 429);
++});
++
++test("unrouted paths spend quota but health checks are exempt", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1 } });
++  const headers = { "x-client-id": "c1" };
++
++  // A 404 still costs the handler its work, so it counts.
++  assert.equal((await app.handle({ method: "GET", path: "/nope", headers })).status, 404);
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers, body: {} })).status, 429);
++
++  // The exemption is scoped to the method too: POST /health is not a free
++  // channel, it is a spent client's 429 like any other path.
++  assert.equal((await app.handle({ method: "POST", path: "/health", headers, body: {} })).status, 429);
++
++  // The probe keeps answering even though the client's window is spent -- and
++  // even for a header-less probe whose "anonymous" bucket others have drained.
++  assert.equal((await app.handle({ method: "GET", path: "/health", headers })).status, 200);
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: {}, body: {} })).status, 202);
++  assert.equal((await app.handle({ method: "POST", path: "/reports", headers: {}, body: {} })).status, 429);
++  assert.equal((await app.handle({ method: "GET", path: "/health", headers: {} })).status, 200);
++});
++
++test("the request id header is matched case-insensitively too", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++  await app.handle({ method: "POST", path: "/reports", headers: { "X-Request-Id": "req-cased" }, body: {} });
++  assert.equal(lines.length, 1);
++  assert.equal(lines[0].requestId, "req-cased");
++});
++
++test("a blank request id header is treated as absent rather than rejected", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++  const res = await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "   " }, body: {} });
++  assert.equal(res.status, 202);
++  assert.equal(lines.length, 1);
++  assert.notEqual(lines[0].requestId.trim(), "");
++});
++
++test("an allowed request still routes and logs exactly as before", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++  const res = await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-1", "x-client-id": "c1" }, body: { kind: "daily" } });
++  assert.equal(res.status, 202);
++  assert.equal(lines.length, 1);
++  assert.equal(lines[0].message, "report queued");
++  assert.equal(lines[0].requestId, "req-1");
++});
+diff --git a/src/http/handler.ts b/src/http/handler.ts
+index 4af02c1..953f97d 100644
+--- a/src/http/handler.ts
++++ b/src/http/handler.ts
+@@ -1,11 +1,13 @@
+ /**
+- * HTTP entry: assigns a request id to every incoming request and hands it to
+- * the router. This is where the request id is born.
++ * HTTP entry: assigns a request id to every incoming request, refuses it when
++ * the client has spent its rate-limit window, and otherwise hands it to the
++ * router. This is where the request id is born.
+  */
+ import { randomUUID } from "node:crypto";
+ import { Router, type RouteRequest, type RouteResponse } from "./router.ts";
++import { RateLimiter, type RateLimiterOptions } from "./RateLimiter.ts";
+ import { JobQueue } from "../jobs/JobQueue.ts";
+-import type { Sink } from "../platform/logging/AppLogger.ts";
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
+ 
+ export interface IncomingRequest {
+   readonly method: RouteRequest["method"];
+@@ -14,7 +16,26 @@ export interface IncomingRequest {
+   readonly body?: unknown;
+ }
+ 
+-export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { handle(req: IncomingRequest): Promise<RouteResponse> } {
++export interface AppOptions {
++  readonly rateLimit?: RateLimiterOptions;
++}
++
++/**
++ * Headers arrive unnormalised, so a header is matched on its lowercased name.
++ * A key whose value is `undefined` does not end the scan: the type permits it,
++ * and stopping there would let `{ "X-Client-Id": undefined, "x-client-id": "c1" }`
++ * read as no client id at all.
++ */
++function header(headers: IncomingRequest["headers"], name: string): string | undefined {
++  const wanted = name.toLowerCase();
++  for (const [key, value] of Object.entries(headers)) {
++    if (value !== undefined && key.toLowerCase() === wanted) return value;
++  }
++  return undefined;
++}
++
++export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink, opts: AppOptions = {}): { handle(req: IncomingRequest): Promise<RouteResponse> } {
++  const limiter = new RateLimiter(opts.rateLimit);
+   const router = new Router(sink)
+     .add("GET", "/health", (_req, log) => {
+       log.info("health check");
+@@ -28,7 +49,34 @@ export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { hand
+ 
+   return {
+     async handle(req: IncomingRequest): Promise<RouteResponse> {
+-      const requestId = req.headers["x-request-id"] ?? randomUUID();
++      // The request id is born before the limiter runs, so a refused request is
++      // still traceable under an id of its own. A blank header is treated as
++      // absent: AppLogger rejects an empty id, and a caller sending one should
++      // get a generated id, not a thrown request.
++      const requestId = header(req.headers, "x-request-id")?.trim() || randomUUID();
++
++      // Health checks are exempt. Every other request counts, including ones
++      // that will 404 -- the handler's work is spent before a route is matched,
++      // so unmatched paths must not be a free channel. /health is the exception
++      // because header-less traffic shares one "anonymous" bucket: a probe sends
++      // no client id, so its quota would be spent by unrelated anonymous callers.
++      // A probe refused for someone else's burst takes the instance out of
++      // rotation and turns a quota event into an outage.
++      const exempt = req.method === "GET" && req.path === "/health";
++
++      // A missing id shares one bucket rather than being waved through:
++      // exempting header-less traffic would be a bypass open to everyone.
++      const clientId = header(req.headers, "x-client-id")?.trim() || "anonymous";
++      const decision = exempt ? undefined : limiter.check(clientId);
++      if (decision && !decision.allowed) {
++        AppLogger.withRequestId(requestId, sink).warn("rate limited", {
++          clientId,
++          limit: decision.limit,
++          retryAfterSeconds: decision.retryAfterSeconds,
++        });
++        return { status: 429, body: { error: "rate limit exceeded", retryAfterSeconds: decision.retryAfterSeconds } };
++      }
++
+       return router.dispatch({ method: req.method, path: req.path, requestId, body: req.body });
+     },
+   };

@@ -1,0 +1,492 @@
+[
+  {
+    "toolUseId": "toolu_01YFFbexUvxustDq2sidsRuJ",
+    "input": {
+      "sessionId": null,
+      "action": "start",
+      "targetWork": [
+        "T-2"
+      ],
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Targeted Autonomous Session Started\n\nYou are in targeted auto mode. Working on 1 specific item(s) in order, then ending the session. A checkpoint handover will be saved every 3 items.\nDo NOT stop to summarize. Do NOT ask the user. Do NOT cancel for context management; Storybloq rotates at a clean boundary when pressure reaches the configured threshold.\n\n## Targeted Work Items\n\n1. **T-2: Make fai"
+  },
+  {
+    "toolUseId": "toolu_01SNLini4aBzyEAXS7NCzv3M",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "ticket_picked",
+        "ticketId": "T-2"
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Plan for T-2: Make failed background jobs traceable to the originating request\n\n## Ticket Description\n\nWhen a background job fails there is no way to tell which incoming request caused it. Make failed background jobs traceable to the originating request.\n\n\nWrite an implementation plan for this ticket. Save it to `.story/sessions/af81be9f-4012-46be-8229-580b12b0db14/plan.md`.\n\nWhen done, call `st"
+  },
+  {
+    "toolUseId": "toolu_013L5gHJfdR1j4WbHHJWFK9U",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_written"
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Plan Review -- Round 1 of 1 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_016qxjzntBBBbXytctwdR1ao",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "codex unavailable - no review_plan/codex bridge tool is registered on this harness, so the round ran as an in-session agent review. Pre-existing finding filed as ISS-001 (blank x-request-id header makes handle() throw; verified at HEAD by executing the path).",
+        "findings": [
+          {
+            "id": "pr1-sink-propagation",
+            "severity": "major",
+            "category": "observability",
+            "file": "src/http/handler.ts",
+            "description": "The plan gave JobQueue an optional Sink but left createApp's default `queue: JobQueue = new JobQueue()` untouched, so the job-failure line this ticket adds would bypass a sink supplied to createApp and go to stdout - unobservable through the assembled app, and outside whatever sink production configured. The default parameter cannot reference `sink` because it is declared first. Addressed in this round: the plan now makes `queue` optional and resolves `queue ?? new JobQueue(sink)` in the body, with call-site compatibility spelled out.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Plan amended in this round to propagate the sink and list handler.ts among the changed files."
+          },
+          {
+            "id": "pr1-error-identity",
+            "severity": "suggestion",
+            "category": "diagnostics",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "The logged error field carried only `err.message`, which drops the error type - two different failures can share a message. Addressed: the plan now logs `${err.name}: ${err.message}` for Error instances, still as a field so AppLogger's redaction applies.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Plan amended in this round."
+          },
+          {
+            "id": "pr1-blank-request-id",
+            "severity": "major",
+            "category": "correctness",
+            "file": "src/http/handler.ts",
+            "description": "Pre-existing, not introduced by this plan: `req.headers[\"x-request-id\"] ?? randomUUID()` substitutes only for null/undefined, so a present-but-empty header reaches AppLogger.withRequestId and throws, making handle() reject instead of returning a RouteResponse. Verified by executing the path at HEAD. Out of scope for T-2, which traces job failures rather than minting request ids.",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred"
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan — T-2: Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (`src/jobs/JobQueue.ts:41`) catches a failing job and increments a\ncounter. Nothing is written anywhere, so a failure leaves no trace at all — the\noriginating request id is al"
+  },
+  {
+    "toolUseId": "toolu_01Wc64EE7iDVd83Gu5H5xeLn",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerEvidence": "configured",
+        "implementerSource": "session-default",
+        "notes": "Implemented per plan: JobQueue takes an optional Sink and logs one AppLogger error line per failing job under that job's own requestId (never a fresh id), with the error normalised for non-Error throws and passed as a field so AppLogger redaction applies; enqueue rejects a blank requestId. handler.ts resolves the default queue in the body so it inherits the app's sink. One amendment during IMPLEMENT, recorded in plan.md: writing the wiring test showed createApp returned only { handle }, so an app-created queue was unreachable and the inherited sink could never emit -- createApp now also returns `jobs` (additive; existing callers use .handle). 13 tests pass (7 new in src/jobs/JobQueue.test.ts, 2 new in src/http/router.test.ts, 4 pre-existing unchanged)."
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Code Review -- Round 1 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01DeRVdrE2VUSGeyvrdHiwoS",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "Round 1 run by a code-review subagent against the full diff; it verified each finding by executing probes. Two blocking findings, both fixed in this round, plus three non-blocking ones also fixed. The pre-existing blank-x-request-id finding it raised is NOT reported here because it is already tracked as ISS-001; reporting it as deferred in the plan round auto-filed ISS-002 as a duplicate, which I have resolved against ISS-001. Suite now 14 pass / 0 fail.",
+        "findings": [
+          {
+            "id": "cr1-sink-throw-aborts-drain",
+            "severity": "major",
+            "category": "correctness",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "The new failure logging sat inside run()'s catch, so a throwing sink or an unstringifiable throw propagated out of run(): the drain aborted, the failure line was lost AND every job after it was silently never run - a regression against the bare `catch {}` it replaced, in the exact path this ticket exists to make reliable. Verified by probe: a sink that throws left queue.size === 1 with the following job never run. Fixed by moving the logging into a #logFailure helper wrapped in its own try/catch.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by the new test 'a sink that throws does not abort the drain'."
+          },
+          {
+            "id": "cr1-caller-queue-sink-split",
+            "severity": "major",
+            "category": "observability",
+            "file": "src/http/handler.ts",
+            "description": "A caller-supplied queue kept its own sink, so createApp(new JobQueue(), mySink) routed job-failure lines to stdout while every other line from the same app went to mySink - an observability split in precisely the lines this ticket adds, and the natural call shape under the old signature. Fixed by removing the queue parameter entirely: createApp(sink?) now owns its queue and callers read it back from App.jobs, so one sink is behind every line the app produces. One existing call site updated.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round by narrowing the API rather than documenting the hazard."
+          },
+          {
+            "id": "cr1-nonerror-fidelity",
+            "severity": "minor",
+            "category": "diagnostics",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "String(err) collapsed an object throw to '[object Object]' and, worse, flattened it to text that redact() could no longer see the keys of - a thrown { token: 'sk-...' } would have been stringified past key-based redaction. The test named 'a non-Error throw is still traceable' only threw a string, the one non-Error case that stringifies well, so it did not pin what it claimed. Fixed: a non-Error throw is passed through as a value so redact() walks it, and the test now covers string, object (asserting the secret key inside is redacted), undefined, and a null-prototype object.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; the weak test was replaced rather than renamed."
+          },
+          {
+            "id": "cr1-nonstring-requestid",
+            "severity": "minor",
+            "category": "input-validation",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "The blank-id guard called opts.requestId.trim() unguarded, so a JS caller passing undefined got a confusing TypeError instead of the intended message. Fixed with a typeof check; the test now also asserts a refused enqueue does not burn a job id.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round."
+          },
+          {
+            "id": "cr1-test-placement",
+            "severity": "minor",
+            "category": "test-placement",
+            "file": "src/http/router.test.ts",
+            "description": "RULES.md rule 3 asks for a test named <Module>.test.ts beside the module, but the handler.ts behaviour changes were tested in router.test.ts. Fixed: the new handler-level tests live in src/http/handler.test.ts and router.test.ts is restored to its original content apart from the one-line signature update.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round. The pre-existing misfiling of the original createApp test was left alone as out of scope."
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan — T-2: Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (`src/jobs/JobQueue.ts:41`) catches a failing job and increments a\ncounter. Nothing is written anywhere, so a failure leaves no trace at all — the\noriginating request id is al"
+  },
+  {
+    "toolUseId": "toolu_01GMEiQZqvCTWaoFhqB37xmk",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerEvidence": "configured",
+        "implementerSource": "session-default",
+        "notes": "No new work in this pass: every round-1 finding was fixed inside the review round itself (that is what the 'addressed' dispositions recorded), so this is a verification pass. Current state: #logFailure wraps the logging in its own try/catch so a throwing sink cannot abort the drain; non-Error throws pass through as values so redact() still walks their keys; createApp(sink?) owns its queue and exposes it as App.jobs; enqueue guards non-string ids; handler tests moved to src/http/handler.test.ts per RULES rule 3. 14 tests pass, 0 fail. Changed: src/jobs/JobQueue.ts, src/http/handler.ts, src/http/router.test.ts (one-line signature update); new: src/jobs/JobQueue.test.ts, src/http/handler.test.ts."
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Code Review -- Round 2 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Previous round (round 1), verdict: revise\n\n  - [cr1-sink-throw-aborts-drain] major/correctness: The new failure logging sat inside run()'s catch, so a throwing sink or an unstringifiable throw propagated out of run(): the drain aborted, the failure line was lost AND every job after it was silently never run - a regres"
+  },
+  {
+    "toolUseId": "toolu_012WAHwhChcLMNZCySYWrxo5",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "Round 2 run by a fresh code-review subagent against the full diff, tasked specifically with hunting defects introduced by the round-1 fixes. It confirmed all five round-1 fixes were real, and found that fix #3 (pass the raw thrown value to the logger) had introduced a critical secret leak and a silent loss of the failure line. I reproduced BOTH against the real default sink before changing anything: a toJSON on a thrown object put 'sk-abcdefghijklmnop' on stdout verbatim, and a circular throw logged nothing while run() reported failed:1. Both fixed in this round by normalising the thrown value before it reaches the logger, plus a fallback emit. Re-ran the same two probes after the fix: the token is now inert ('[function toJSON]') and the circular throw emits a line under its request id. Suite 16 pass / 0 fail. S1 (AppLogger's own non-string guard, pre-existing) filed as ISS-003 rather than fixed here.",
+        "findings": [
+          {
+            "id": "cr2-tojson-secret-leak",
+            "severity": "critical",
+            "category": "secret-leak",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "Round 1's fix handed the raw thrown value to AppLogger; redact() copies function values through unchanged, so a toJSON method on a thrown object survived redaction and was then invoked by the sink's JSON.stringify, writing back exactly what redaction had removed. Reproduced against the production default sink: a job throwing { toJSON: () => ({ token: 'sk-abcdefghijklmnop' }) } wrote that token to stdout verbatim, breaking RULES.md rule 1 and ruling r-eftp2zdb6as643np. Fixed by normalising the thrown value to plain bounded data (describeThrown) before it reaches the logger, so no function can survive to run after redaction.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by a test that asserts through a JSON.stringify-ing sink, which is where the leak actually lived."
+          },
+          {
+            "id": "cr2-silent-line-loss",
+            "severity": "major",
+            "category": "observability",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "With the raw value passed through, a circular reference, a bigint, a throwing getter or a deeply nested object made redact() or the sink throw; #logFailure's catch swallowed it and the failure produced NO line at all - the precise outcome this ticket exists to prevent, and silent. Reproduced: a circular throw emitted nothing while run() returned failed:1. Fixed by the same normalisation (cycles, depth, unreadable getters and exotic primitives all degrade to markers) plus a fallback emit of a constant '[unloggable thrown value]' so the request id still reaches the log if the first attempt fails.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by two tests, one for hostile values and one for a sink that rejects the described value."
+          },
+          {
+            "id": "cr2-test-blindspot",
+            "severity": "minor",
+            "category": "test-quality",
+            "file": "src/jobs/JobQueue.test.ts",
+            "description": "The test named 'a non-Error throw is still traceable, whatever shape it has' pinned only four benign shapes and its capture sink never serialised the line, so it structurally could not catch either defect above - no test anywhere exercised a JSON.stringify-ing sink, which is exactly where they lived. Fixed: added tests that assert through a serialising sink, covering toJSON smuggling, circular, bigint, symbol, throwing getter and depth truncation, plus a nested Error cause.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; the blind spot, not just the missing cases, was what needed closing."
+          },
+          {
+            "id": "cr2-nested-error-detail",
+            "severity": "minor",
+            "category": "diagnostics",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "redact() walks own enumerable keys only, so a thrown { cause: new Error('upstream died') } flattened to { cause: {} } - the failure was attributed to the right request id but said nothing about what failed. Fixed: describeThrown renders an Error at any depth as 'name: message', and Map/Set contents are surfaced as data rather than collapsing to {}.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round as part of the same normalisation."
+          },
+          {
+            "id": "cr2-redundant-handler-test",
+            "severity": "suggestion",
+            "category": "test-quality",
+            "file": "src/http/handler.test.ts",
+            "description": "The second handler test asserted only app.jobs.size === 1 and never observed a failure, so it would still pass if job-failure lines went to a different sink - the guarantee it looked like it was protecting is actually pinned by the test above it. Removed as redundant rather than left as false assurance.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round."
+          },
+          {
+            "id": "cr2-applogger-nonstring-id",
+            "severity": "minor",
+            "category": "input-validation",
+            "file": "src/platform/logging/AppLogger.ts",
+            "description": "Pre-existing: withRequestId checks requestId.trim() without a type check, so a non-string id surfaces as a TypeError instead of the intended 'requires a non-empty request id'. Verified at HEAD for both undefined and a number. The logger is the choke point every path funnels through, so the guard belongs there rather than only in JobQueue.enqueue, but it is outside T-2's diff.",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred"
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan — T-2: Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (`src/jobs/JobQueue.ts:41`) catches a failing job and increments a\ncounter. Nothing is written anywhere, so a failure leaves no trace at all — the\noriginating request id is al"
+  },
+  {
+    "toolUseId": "toolu_01KrZXGmGcvNCzE3AvH97rib",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerEvidence": "configured",
+        "implementerSource": "session-default",
+        "notes": "Verification pass: every round-2 finding was fixed inside the review round (the 'addressed' dispositions), so there is no new work here. Current state: describeThrown normalises a thrown value to plain bounded data before it reaches AppLogger (functions inert, cycles/depth/unreadable getters marked, bigint and symbol stringified, Errors at any depth rendered name: message), #logFailure retries once with a constant if the first emit fails, and both original probes now behave correctly. 16 tests pass, 0 fail. Changed: src/jobs/JobQueue.ts, src/http/handler.ts, src/http/router.test.ts (one-line signature update); new: src/jobs/JobQueue.test.ts, src/http/handler.test.ts."
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Code Review -- Round 3 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_01LkPyrezpXewEP2K5KstvjQ",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "codex unavailable - no review_code tool is registered on this harness, so round 3 fell back to an agent review, tasked specifically at describeThrown (round 2's fix was new security-relevant code nobody had reviewed). Three blocking findings, all reproduced against the real stdout sink, all fixed in this round; two minor ones fixed alongside. The key-position leak was fixed in AppLogger.redact rather than JobQueue because the ruling puts redaction in the logger and every caller had the hole; that change carries its own test in AppLogger.test.ts per RULES rule 3. Suite now 20 pass / 0 fail. ISS-003 (AppLogger non-string id) remains outstanding and deliberately unfixed.",
+        "findings": [
+          {
+            "id": "cr3-secret-in-key-position",
+            "severity": "major",
+            "category": "secret-leak",
+            "file": "src/platform/logging/AppLogger.ts",
+            "description": "redact() tests key names but only ever replaces values, and describeThrown copies runtime-controlled keys out of a thrown value into fields - so a secret in KEY position was written verbatim. Reproduced against the real default sink: throw { 'sk-abcdefghijklmnop': 'cache miss' } put the token on stdout, while the identical token in value position was redacted. Fixed in AppLogger.redact (each key now goes through redactMessage), because the ruling puts redaction in the logger and any caller logging an outside-controlled key map shared the hole.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round, in the logger rather than the caller; pinned by tests in both AppLogger.test.ts and JobQueue.test.ts."
+          },
+          {
+            "id": "cr3-boxed-and-byteview-fragmentation",
+            "severity": "major",
+            "category": "secret-leak",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "describeThrown special-cased Error/Map/Set/Array but not boxed primitives or byte views, so Object.keys exploded them into per-index properties after which no redaction pattern could match. Reproduced: throw { cred: new String('sk-abcdefghijklmnop') } wrote the secret one character per key, and a Buffer wrote its bytes. Fixed by unwrapping String/Number/Boolean wrappers through valueOf so the scalar is redacted normally, and summarising any ArrayBuffer view as '[Buffer N bytes]'.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by a test asserting all three shapes through a serialising sink."
+          },
+          {
+            "id": "cr3-dag-amplification",
+            "severity": "major",
+            "category": "availability",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "The caps were per node and `seen` released each value on the way out, so a shared but non-circular object graph was re-expanded down every path to it - up to MAX_ENTRIES^MAX_DEPTH entries from a handful of objects. Measured: 7 small objects produced a single 6.6 MB line; a wider case produced 352 MB and 1.4 GB RSS from ~120 KB of real data. Fixed by never releasing `seen`: a value is described once per line and later references render '[seen]', which bounds the output by the number of distinct objects instead of by paths.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by a DAG test asserting the written line stays under 4 KB while the shared value still appears once."
+          },
+          {
+            "id": "cr3-double-emit",
+            "severity": "minor",
+            "category": "correctness",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "The fallback added in round 2 could not tell 'the description failed, nothing written' from 'the sink threw after writing', so a sink that recorded then threw produced TWO lines for one failure, the second contradicting the first. Fixed: the description is computed in its own try/catch and there is now exactly one log.error call per failure.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; the obsolete test that pinned the retry was replaced by one asserting a single line for a value that defeats inspection entirely."
+          },
+          {
+            "id": "cr3-proto-key-swallows-detail",
+            "severity": "minor",
+            "category": "correctness",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "Building the output with an object literal meant an own '__proto__' key in a thrown value hit Object.prototype's setter instead of creating a property, silently dropping that part of the diagnostic (and the whole error object when it was the only key). No global pollution occurred, but the detail vanished. Fixed by building the output with a null prototype. Also fixed alongside: `throw undefined` now renders '[undefined]' rather than being dropped by JSON.stringify along with its key.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Fixed in this round; pinned by a test that also asserts Object.prototype was untouched."
+          },
+          {
+            "id": "cr3-cross-realm-detail-loss",
+            "severity": "suggestion",
+            "category": "diagnostics",
+            "file": "src/jobs/JobQueue.ts",
+            "description": "instanceof fails across realms, so an Error created in a vm context renders as {} (its name and message are non-enumerable). Accepted as a limitation and recorded in the plan rather than fixed: this service creates no realms, and duck-typing every branch would add surface for a case that cannot currently arise.",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "contested",
+            "dispositionReason": "Not a defect in this codebase's reachable behaviour; recorded as a known limitation instead of parked as an issue."
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan — T-2: Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (`src/jobs/JobQueue.ts:41`) catches a failing job and increments a\ncounter. Nothing is written anywhere, so a failure leaves no trace at all — the\noriginating request id is al"
+  },
+  {
+    "toolUseId": "toolu_01XdRTzJMPm5cknZBqrXidpH",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerEvidence": "configured",
+        "implementerSource": "session-default",
+        "notes": "Verification pass; all round-3 findings were fixed inside that round. 20 tests pass, 0 fail. Files: src/jobs/JobQueue.ts, src/http/handler.ts, src/platform/logging/AppLogger.ts (key redaction), src/http/router.test.ts (call-site update), src/platform/logging/AppLogger.test.ts (+1 test); new: src/jobs/JobQueue.test.ts, src/http/handler.test.ts."
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Code Review -- Round 4 of 4 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (2 of 2 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_01A5wsLK8ZCXvaMBUiioLAyd",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "code_review_round",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "Round 4 was run by me in-session rather than by a subagent: the session USD budget is down to ~$2.4 of $15 (the three prior subagent rounds are most of that spend), and spending the remainder on a fourth fan-out risked surfacing findings I could not afford to fix, leaving the tree mid-round. Stating that plainly because it is a real reduction in independence for this round - rounds 1-3 were independent agents, this one was not. What I did run: a fresh read of the full post-round-3 JobQueue.ts plus an adversarial probe of four shapes that specifically target round 3's fixes (a Buffer with a throwing constructor getter, a Map whose key throws on stringification, a 200,000-element Set, and two colliding secret-shaped keys). All four produced exactly one line under the right request id, bounded, with no secret written; the wide Set cost 15 ms and rendered 24 entries. Full suite 20 pass / 0 fail. Two prior items remain outstanding by design: ISS-003 (AppLogger non-string request id, deferred) and the cross-realm limitation (contested in round 3, recorded in the plan).",
+        "findings": [
+          {
+            "id": "cr4-redacted-key-collision",
+            "severity": "suggestion",
+            "category": "diagnostics",
+            "file": "src/platform/logging/AppLogger.ts",
+            "description": "Round 3's key redaction maps every secret-shaped key to the same '[REDACTED]' string, so two distinct secret-shaped keys in one object collapse to a single entry and the last value wins. Observed: throwing { 'sk-aaaaaaaaaaaa': 1, 'sk-bbbbbbbbbbbb': 2 } writes { '[REDACTED]': 2 } and the first pair is lost. No secret reaches the line, so this is diagnostic loss rather than a leak, and the alternative - making redacted keys distinguishable - would leak information about the secrets it just removed. Left as is deliberately.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "contested",
+            "dispositionReason": "Real behaviour, but the obvious fix would undo the redaction it comes from; recorded rather than changed."
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "MCP error -32602: Input validation error: Invalid arguments for tool storybloq_autonomous_guide: Invalid enum value. Expected 'start' | 'report' | 'resume' | 'pre_compact' | 'cancel', received 'code_review_round' at action"
+  },
+  {
+    "toolUseId": "toolu_014XuTHZSQWrxwA9wUvY3Znt",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "notes": "Round 4 was run by me in-session rather than by a subagent: the session USD budget is down to ~$2.3 of $15 (the three prior subagent rounds are most of that spend), and spending the remainder on a fourth fan-out risked surfacing findings I could not afford to fix, leaving the tree mid-round. Stating that plainly because it is a real reduction in independence for this round - rounds 1-3 were independent agents, this one was not. What I did run: a fresh read of the full post-round-3 JobQueue.ts plus an adversarial probe of four shapes targeting round 3's fixes (a Buffer with a throwing constructor getter, a Map whose key throws on stringification, a 200,000-element Set, and two colliding secret-shaped keys). All four produced exactly one line under the right request id, bounded, with no secret written; the wide Set cost 15 ms and rendered 24 entries. Full suite 20 pass / 0 fail. Two prior items remain outstanding by design: ISS-003 (AppLogger non-string request id, deferred) and the cross-realm limitation (contested in round 3, recorded in the plan).",
+        "findings": [
+          {
+            "id": "cr4-redacted-key-collision",
+            "severity": "suggestion",
+            "category": "diagnostics",
+            "file": "src/platform/logging/AppLogger.ts",
+            "description": "Round 3's key redaction maps every secret-shaped key to the same '[REDACTED]' string, so two distinct secret-shaped keys in one object collapse to a single entry and the last value wins. Observed: throwing { 'sk-aaaaaaaaaaaa': 1, 'sk-bbbbbbbbbbbb': 2 } writes { '[REDACTED]': 2 } and the first pair is lost. No secret reaches the line, so this is diagnostic loss rather than a leak, and the alternative - making redacted keys distinguishable - would leak information about the secrets it just removed. Left as is deliberately.",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "contested",
+            "dispositionReason": "Real behaviour, but the obvious fix would undo the redaction it comes from; recorded rather than changed."
+          }
+        ]
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Finalize\nCode review passed. Time to commit.\n1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)\n2. Update ticket T-2 status to \"complete\" in .story/\n3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`\n4. Call me with completedAction: \"files_staged\"\n---\n**Session:** af81be9f-4012-46be-8229-580b"
+  },
+  {
+    "toolUseId": "toolu_01Ri4RjVH6Dago3DvpMyADrz",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "Staged: src/jobs/JobQueue.ts, src/jobs/JobQueue.test.ts, src/http/handler.ts, src/http/handler.test.ts, src/http/router.test.ts, src/platform/logging/AppLogger.ts, src/platform/logging/AppLogger.test.ts, .story/tickets/T-2.json (now complete), and .story/issues (ISS-001..004). Left unstaged deliberately: .continuity-mcp.json and .story/.gitignore, which are environment files unrelated to this ticket. 20 tests pass."
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "Files staged. Now commit.\n\nCommit with message: \"feat: <description> (T-2)\"\n\nCall me with completedAction: \"commit_done\" and include the commitHash.\n---\n**Session:** af81be9f-4012-46be-8229-580b12b0db14\n**State:** FINALIZE\n**Ticket:** T-2: Make failed background jobs traceable to the originating request\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n**Verification:** 0 prop"
+  },
+  {
+    "toolUseId": "toolu_01XtM2NuXZx739DCLzqYJTRo",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "commit_done",
+        "commitHash": "17a9306"
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Targeted Session Complete -- All 1 target(s) done\n\nWrite a session handover summarizing what was accomplished, decisions made, and what's next.\n\nCall me with completedAction: \"handover_written\" and include the content in handoverContent.\n---\n**Session:** af81be9f-4012-46be-8229-580b12b0db14\n**State:** HANDOVER (from COMPLETE)\n**Ticket:** none\n**Risk:** unknown\n**Completed:** T-2\n**Tickets done:*"
+  },
+  {
+    "toolUseId": "toolu_016iCiQdjz51ThDPAJYhvJmD",
+    "input": {
+      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14",
+      "action": "report",
+      "report": {
+        "completedAction": "handover_written",
+        "handoverContent": "# Handover: T-2 failed jobs are traceable (2026-09-20)\n\n## Completed\n- **T-2** — `JobQueue.run()` now emits one `AppLogger` error line per failing job, bound to that job's own enqueuing request id. Commit `17a9306`. 20 tests pass.\n- T-2 now cites **r-eftp2zdb6as643np** and **r-p19bbvh0jhj8xgma**; it cited neither when picked, so neither reached a reviewer until they were added.\n\n## Decisions\n- **The thrown value is normalised before it reaches the logger** (`describeThrown` in `src/jobs/JobQueue.ts`). Both obvious alternatives are wrong and were tried: `String(err)` throws on a null-prototype object and flattens `{ token: … }` into text that key-based redaction can no longer see; passing the raw value lets a `toJSON` survive `redact()` and be invoked by the sink, writing the secret back out (reproduced against the real stdout sink). The normaliser makes functions inert, marks cycles and repeats, caps depth (4) and breadth (24), unwraps boxed primitives, summarises byte views, and keeps an `Error`'s name and message at any depth.\n- **`seen` is never released.** Releasing it per path let a shared, non-circular graph re-expand down every route: 7 small objects produced a 6.6 MB line, a wider case 352 MB. A value is now described once per line; later references render `[seen]`. Repeats are order-dependent as a result — accepted.\n- **Key redaction moved into `AppLogger.redact`, not `JobQueue`.** `redact()` tested key names but only ever replaced values, so a secret in KEY position was written verbatim. The ruling puts redaction in the logger, and every caller logging an outside-controlled key map had the same hole. Two colliding secret-shaped keys now collapse to one `[REDACTED]` entry — diagnostic loss, no leak, and the fix for it would undo the redaction.\n- **`createApp` owns its queue** (`createApp(sink?)`, queue read back from `App.jobs`). The `queue` parameter meant a caller-supplied queue kept its own sink, splitting where job-failure lines landed. No caller passed one.\n- **`enqueue` refuses a blank or non-string request id.** Defence in depth only: `Router.dispatch` throws on a blank id first, so this is unreachable from HTTP today.\n\n## Process note worth keeping\nFour review rounds, and each of the first three found a real defect **introduced by the previous round's fix** — the round-2 fix caused a critical secret leak that round 1 had no way to anticipate. Reviewing the fix, not just the original code, is what caught them. Round 4 was run in-session rather than as an independent agent because the session budget was nearly spent; that round is less independent than the three before it, and the sole finding it raised was a suggestion.\n\n## Next\n- **ISS-001** (medium): a blank `x-request-id` header makes `handle()` throw instead of returning a response — `??` only substitutes for null/undefined. Verified at HEAD. Small fix: `req.headers[\"x-request-id\"]?.trim() || randomUUID()`.\n- **ISS-003** (low): `AppLogger.withRequestId` reports a non-string request id as a `TypeError` rather than its own error. The logger is the choke point, so the guard belongs there.\n- ISS-002 and ISS-004 are resolved duplicates of ISS-001 and ISS-003. Both were auto-filed by reporting a finding with disposition `deferred` after the same finding had already been filed by hand — worth knowing before filing manually during a review round.\n- **T-3** still carried forward: move `AppLogger` into `packages/logging` once a second service needs it. Note that it grew a behaviour this session (key redaction), so its tests moved with it matter.\n- Known limitation, recorded in the session plan: cross-realm values (a `vm` context's `Error`) fail `instanceof` and render as `{}`. This service creates no realms.\n"
+      },
+      "clientTaskId": "1700ea00-66d7-447c-b58f-310013707521"
+    },
+    "resultHead": "# Session Complete\n\n1 ticket(s) and 0 issue(s) completed. Handover written. Session ended.\n\n- T-2: Make failed background jobs traceable to the originating request (17a93060f07afc6e882e6496ff322af2fc902d25)\n\n## Session Report\n\n**Duration:** 28m | **Tickets:** 1 | **Issues:** 0 | **Reviews:** 5 rounds (21 findings) | **Compactions:** 0\n\n### Completed\n| Ticket | Title | Duration |\n|--------|-------|"
+  }
+]

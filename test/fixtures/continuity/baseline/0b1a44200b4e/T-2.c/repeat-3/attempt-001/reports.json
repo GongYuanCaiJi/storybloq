@@ -1,0 +1,305 @@
+[
+  {
+    "toolUseId": "toolu_01PYYyoNfAQvSJ19Vdyhq1ox",
+    "input": {
+      "sessionId": null,
+      "action": "start",
+      "targetWork": [
+        "T-2"
+      ],
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Targeted Autonomous Session Started\n\nYou are in targeted auto mode. Working on 1 specific item(s) in order, then ending the session. A checkpoint handover will be saved every 3 items.\nDo NOT stop to summarize. Do NOT ask the user. Do NOT cancel for context management; Storybloq rotates at a clean boundary when pressure reaches the configured threshold.\n\n## Targeted Work Items\n\n1. **T-2: Make fai"
+  },
+  {
+    "toolUseId": "toolu_01B1kMF3m34SLqdiXahi9xWi",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "ticket_picked",
+        "ticketId": "T-2"
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Plan for T-2: Make failed background jobs traceable to the originating request\n\n## Ticket Description\n\nWhen a background job fails there is no way to tell which incoming request caused it. Make failed background jobs traceable to the originating request.\n\n\nWrite an implementation plan for this ticket. Save it to `.story/sessions/0565780a-8bed-4add-8cfa-85b87c4b593b/plan.md`.\n\nWhen done, call `st"
+  },
+  {
+    "toolUseId": "toolu_01FNQcWhrps2tM24nuCWtKes",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_written"
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Plan Review -- Round 1 of 1 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01QFPnCtFc6fPydfWsDTGBLo",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "configured",
+        "reviewerSource": "session-default",
+        "notes": "codex unavailable: storybloq_health reports the codex-bridge backend as ok, but no review_plan tool is callable from this session (whole-set tool discovery plus a targeted select: probe for review_plan / mcp__codex-bridge__review_plan both returned nothing). Fell back to agent review per the guide's fallback rule. Reviewer verified every factual claim in the plan against the source before judging. All four in-scope findings were addressed in the plan before this report; the pre-existing one was filed as ISS-001.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "untested-behaviour-change",
+            "description": "The handler.ts sink-wiring change is a behaviour change that no planned test exercises: createApp returns only { handle } (src/http/handler.ts:29-34), never exposes the queue it built, and nothing in src/ calls run(), so the default queue can never be run by any caller. router.test.ts:11 asserts lines.length === 1, which only proves nothing extra is logged on the success path, never that the sink reached the queue. RULES.md #3 then bites: handler.ts gains a behaviour change with no handler.test.ts beside it.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "principle": "a change to behaviour comes with a test under the same directory",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now adds src/http/handler.test.ts with an end-to-end test (POST /reports under x-request-id: req-http-9, then fail that job and assert the failure line carries req-http-9), which is the ticket's actual claim. The wiring is kept rather than dropped because it is what makes the default queue log to a caller-chosen sink; the plan now records explicitly that the default-queue branch itself stays unexercised and why exposing the queue would be a larger API change than this ticket needs."
+          },
+          {
+            "severity": "minor",
+            "category": "incomplete-snippet",
+            "description": "The change-2 snippet stops at `const jobQueue = queue ?? new JobQueue(sink)` but the only use of the parameter is `queue.enqueue(...)` at src/http/handler.ts:24. Implemented literally, `queue` is now JobQueue | undefined and, since npm test runs Node type-stripping with no typecheck, every POST /reports that did not pass a queue would throw TypeError at runtime -- which is exactly the case router.test.ts:8 exercises.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now states the route body must be updated to jobQueue.enqueue(...) in the same edit, and names the runtime TypeError (not compile error) that the type-stripping runner would otherwise produce."
+          },
+          {
+            "severity": "minor",
+            "category": "ruling-partial-coverage",
+            "description": "r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing request's id, but the plan covered only the line JobQueue itself emits on failure. JobRunner is (job: QueuedJob) => Promise<void> | void (src/jobs/JobQueue.ts:16) -- the runner gets no logger, so a runner that logs must build its own, and AppLogger.withRequestId(randomUUID(), ...) is exactly as easy as the correct call. Router avoids this by handing route handlers a pre-bound log (src/http/router.ts:37,43).",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now widens JobRunner to (job, log) => ... and builds the job's logger before invoking the runner, passing it in -- the same shape Router already uses. Backward-compatible, since a one-parameter function stays assignable. A new test asserts the runner-supplied logger emits under the enqueuing request's id."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "Test 1 fails exactly one job, so it proves a failure line is emitted but not one line per failure -- a logger hoisted out of the while loop and bound once would still pass. Test 4 should also cover the whitespace case, since its stated rationale is parity with AppLogger.withRequestId's requestId.trim() === \"\" guard at src/platform/logging/AppLogger.ts:61.",
+            "file": "src/jobs/JobQueue.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Test 1 now enqueues three jobs and fails the first and third, asserting two lines carrying those jobs' own request ids in order, which catches a hoisted logger. The enqueue-validation test now covers whitespace-only as well as empty."
+          },
+          {
+            "severity": "minor",
+            "category": "pre-existing-bug",
+            "description": "src/http/handler.ts:31 uses req.headers[\"x-request-id\"] ?? randomUUID(); ?? only substitutes for null/undefined, so an empty x-request-id header yields \"\". That reaches src/http/router.ts:37 where AppLogger.withRequestId(\"\") throws (src/platform/logging/AppLogger.ts:61) -- an unhandled rejection out of app.handle() instead of a response, and the request emits no log line at all.",
+            "file": "src/http/handler.ts",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred: pre-existing request-id-assignment bug, out of scope for a job-traceability ticket. Already filed manually as ISS-001 (medium, dedupeKey T-2-plan-review-r1:empty-x-request-id) per the guide's file-pre-existing-issues instruction, before this report."
+          }
+        ]
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan: T-2 — Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (src/jobs/JobQueue.ts:41) swallows every failure:\n\n```ts\n} catch {\n  failed++;\n}\n```\n\nThe queue already records the enqueuing request id on each job (`QueuedJob.requestId`,\nse"
+  },
+  {
+    "toolUseId": "toolu_01XQv5vjk3dfUhtzxNY25Zgc",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Implemented the approved plan exactly. Modified: src/jobs/JobQueue.ts (optional Sink ctor, JobRunner widened to (job, log), per-job logger bound to job.requestId and passed to the runner, failure logged as an error line with jobId/kind/error, enqueue refuses an empty or whitespace-only request id); src/http/handler.ts (default queue resolved in the body so it gets the caller's sink, route body updated to jobQueue.enqueue). Added: src/jobs/JobQueue.test.ts (5 tests), src/http/handler.test.ts (1 end-to-end traceability test). npm test: 10/10 pass (4 pre-existing + 6 new). tsc --noEmit happened to be available globally and was run: no errors from the new code after fixing a TS18048 in handler.test.ts (assert.ok cannot narrow without @types/node, so the test now filters instead); the remaining TS2307/TS2580 errors are pre-existing and come only from the missing node types, filed as ISS-003. Also filed ISS-001 (pre-existing empty x-request-id bug) during plan review; resolved ISS-002 as a duplicate of ISS-001, created by the same finding's deferred auto-file."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Code Review -- Round 1 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01PBD1AfVMnquCB8ZfVbBUKA",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerModel": "claude-opus-5",
+        "reviewerEvidence": "configured",
+        "reviewerSource": "session-default",
+        "notes": "Agent review as instructed by the guide. Reviewer verified its central finding by executing the real code rather than reasoning about it, and I reproduced it independently before fixing: a runner throwing Object.create(null) made run() reject with 'Cannot convert object to primitive value', leaving 1 job abandoned in the queue. Both in-scope findings are now fixed; npm test 12/12 (was 10, +2 new tests), tsc clean for changed code, and the reproduction probe now returns {ran:1,failed:1} with the following job having run.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "queue-abandoned-on-non-error-throw",
+            "description": "src/jobs/JobQueue.ts: `error: err instanceof Error ? err.message : String(err)` is evaluated inside run()'s catch, and String(err) can itself throw. Verified by executing the code: a runner that throws Object.create(null) raises TypeError 'Cannot convert object to primitive value', and one that throws an object with a throwing toString raises that error; in both cases run() rejects, the {ran, failed} tally is lost, and every job queued behind the failing one is abandoned. This falsifies the exact invariant the change leaned on: the new enqueue guard's docstring justifies itself with 'a throw inside run() would abandon every job still queued behind it', and run()'s docstring promises 'A failing job is logged and dropped; the rest still run'. The empty-request-id hole was hardened while the sibling hole in the same catch block was left open.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Extracted a describeError(unknown) helper that wraps the stringification in its own try/catch and falls back to '<thrown value could not be described>'. It also coerces err.message via String(), so an Error subclass with a non-string or throwing message getter is contained by the same guard. Reproduced the failure first (run() rejected, 1 job abandoned), then confirmed the fix: the same probe now returns {ran:1,failed:1} with the following job run."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "The tests covered only `throw new Error(...)`. The String(err) branch, added deliberately because a job may throw a non-Error, had no test at all, which is precisely why the crash above went unnoticed.",
+            "file": "src/jobs/JobQueue.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "Added two tests. One covers the ordinary non-Error branch (a thrown string and a thrown plain object, asserting {ran:0,failed:2} and the logged error text). The other is the regression test for the defect above: it throws Object.create(null) and an object with a throwing toString, then asserts the queue still returns {ran:1,failed:2}, drains to size 0, and logs both failures under their own request ids. That second test fails against the pre-fix code."
+          },
+          {
+            "severity": "suggestion",
+            "category": "redaction-scope",
+            "description": "The failure line flattens the thrown value to a single string under the neutral key `error`, so only AppLogger's value/text redaction applies (SECRET_VALUE and SECRET_IN_TEXT at src/platform/logging/AppLogger.ts:19-20); the key-based rule (SECRET_KEY, line 18) can never fire on it. Verified by execution: an error message containing {\"token\":\"hunter2secret\",\"api_key\":\"sk_live_abcdefgh\"} is logged verbatim, because neither the JSON-key shape nor the sk_live_ prefix matches the two text patterns. The Bearer and sk- shapes the new test exercises are redacted correctly. This is a limitation of the pre-existing redaction engine rather than new redaction code, and relying on that engine is what r-eftp2zdb6as643np asks for -- but this change is the first path that funnels arbitrary third-party error text into a log line, so the pre-existing gap now has a much wider mouth, which bears on RULES.md #1.",
+            "file": "src/platform/logging/AppLogger.ts",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "deferred",
+            "dispositionReason": "valid-deferred: the fix belongs in AppLogger's redaction patterns, not in this ticket. Widening those patterns changes redaction behaviour for every existing caller and deserves its own ticket with its own review, rather than riding along on a job-traceability change."
+          }
+        ]
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan: T-2 — Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (src/jobs/JobQueue.ts:41) swallows every failure:\n\n```ts\n} catch {\n  failed++;\n}\n```\n\nThe queue already records the enqueuing request id on each job (`QueuedJob.requestId`,\nse"
+  },
+  {
+    "toolUseId": "toolu_01XHt6qbGa4msbF3hsao4fWf",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Round-1 review fixes were applied before that round was reported, so this IMPLEMENT pass had no remaining work; no further edits were made. State of the fix: src/jobs/JobQueue.ts now routes the thrown value through a describeError(unknown) helper that contains its own stringification failure, replacing the inline `err instanceof Error ? err.message : String(err)` that could throw out of run()'s catch. src/jobs/JobQueue.test.ts gained two tests -- ordinary non-Error throws (string, plain object), and the regression test that throws Object.create(null) and an object with a throwing toString, asserting the queue still returns {ran:1,failed:2} and drains. npm test 12/12 pass; tsc --noEmit reports no errors in changed code; the standalone reproduction probe that previously showed run() rejecting with 1 job abandoned now returns {ran:1,failed:1} with the following job run. The deferred redaction-scope finding was severity `suggestion` and so exempt from the deferred auto-file; filed manually instead as ISS-004 (medium) so it is not lost."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Code Review -- Round 2 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_01FShddxD3J3eR8jPwdWAron",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerModel": "claude-opus-5",
+        "reviewerEvidence": "configured",
+        "reviewerSource": "session-default",
+        "notes": "Round 2 agent review. The reviewer verified round 1's fixes by execution rather than inspection: a 13-case hostile-throw probe (null-prototype object, throwing toString, Symbol, throwing message getter, Symbol message, get-trap and getPrototypeOf-trap Proxies, revoked Proxy, BigInt, undefined, toString returning an object, toString set to null) confirmed describeError contains all of them, run() resolves with correct counts, and every failure is logged under the enqueuing request id. It also confirmed the new tests are genuine regression guards by running them against two scratch copies outside the repo: 7 fail against the merge base, and the Object.create(null) test is the only one that fails against the round-1 pre-describeError code, so it pins that finding exactly. One new introduced-by-fix defect was found and is now fixed; npm test 13/13 (was 12, +1 new test), tsc clean for changed code.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "queue-abandoned-on-sink-throw",
+            "description": "The round-1 fix contained the ARGUMENT (describeError) but not the CALL. log.error(\"job failed\", {...}) sits inside run()'s catch, and AppLogger#emit invokes the sink synchronously, so a throwing sink escapes the catch and rejects run(), abandoning every job still queued. This throw site is new: pre-fix the catch was literally `catch { failed++; }`, incapable of throwing. It violates the invariant the fix's own docstring states -- that an escaping throw there would make one job's failure become the whole queue's failure. Verified by execution: a 3-job queue where job 1 fails and the sink throws on the failure line gave 'run() REJECTED, jobs abandoned: 2'; the innocent jobs never ran, failed++ never executed so the counts were lost, and the caller saw the sink's error rather than the job's. The production sink is process.stdout.write (src/platform/logging/AppLogger.ts:85), which throws synchronously on a destroyed or ended stdout (ERR_STREAM_DESTROYED), and any custom Sink can throw for any reason.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "recommendedNextState": "IMPLEMENT",
+            "disposition": "addressed",
+            "dispositionReason": "run()'s catch now increments `failed` BEFORE logging, so the tally survives regardless, and wraps the log.error call in its own try/catch so a sink failure cannot escape. The empty catch carries a comment explaining why nothing is done there: the logger is the only reporting channel, so a failure to log has nowhere to be reported, but it must not cost the queue. Added a test ('a sink that throws does not abandon the rest of the queue either') that constructs a JobQueue whose sink always throws, fails the first of two jobs, and asserts {ran:1,failed:1}, that the innocent job ran, and that the queue drained. That test rejects against the pre-fix code."
+          }
+        ]
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Implement -- T-2: Make failed background jobs traceable to the originating request\n\n## Approved plan\n\n```markdown\n# Plan: T-2 — Make failed background jobs traceable to the originating request\n\n## Problem\n\n`JobQueue.run()` (src/jobs/JobQueue.ts:41) swallows every failure:\n\n```ts\n} catch {\n  failed++;\n}\n```\n\nThe queue already records the enqueuing request id on each job (`QueuedJob.requestId`,\nse"
+  },
+  {
+    "toolUseId": "toolu_01GqTq1yEhsBA6MKxE1HxNPX",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Round-2 fix was applied before that round was reported, so this IMPLEMENT pass had no remaining work; no further edits were made. Current state of src/jobs/JobQueue.ts run(): `failed++` happens first so the tally survives any logging problem, and the log.error call is wrapped in its own try/catch so a synchronous sink failure cannot escape run() and abandon the queue. Added test 'a sink that throws does not abandon the rest of the queue either'. npm test 13/13 pass; tsc --noEmit reports no errors in changed code. Note for FINALIZE: the approved-plan text echoed back still shows the round-1 inline `err instanceof Error ? err.message : String(err)` snippet in run()'s catch, which two review rounds have since replaced with the contained describeError helper plus the guarded log call. The implementation is deliberately ahead of that snippet as a result of the review, not a deviation from the plan's design."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Code Review -- Round 3 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_0122hGUxExX9k7XNJ4K4s6Ro",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "findings": [],
+        "reviewer": "agent",
+        "reviewerModel": "claude-opus-5",
+        "reviewerEvidence": "configured",
+        "reviewerSource": "session-default",
+        "notes": "codex unavailable: the guide asked for review_code via codex. storybloq_health reports the codex-bridge backend ok, but no review_code tool is callable from this session (targeted select: probe for review_code and mcp__codex-bridge__review_code returned nothing, same as the review_plan probe in PLAN_REVIEW). Fell back to agent review per the guide's fallback rule. Round 3 approve with zero findings, and the reviewer earned it by execution rather than inspection: 11 hostile probes written under /tmp (repo untouched, git status verified identical after) covering a sink that throws only on the Nth call, a sink throwing a non-Error, runner-throws plus sink-throws plus undescribable value simultaneously, an Error subclass with a throwing message getter, a thrown Symbol, an async runner rejecting after an await, and the composition where the sink throws inside the runner's own log.info so the throw lands in run()'s catch which then logs again through the same broken sink (terminates at 4 sink calls for 2 jobs, both counted failed, queue drained). Counting checked with a 200-job randomized mix against a sink failing ~50% of calls: ran+failed===200 and size 0 every time. Tests shown non-vacuous by mutation: six mutants were each caught by the test claiming to cover them, including one confirming the failed++-before-logging ordering is genuinely pinned; one equivalent mutant correctly passes. AppLogger remains the sole writer of log lines, imports are node: built-ins only, tests are co-located with the required names. I independently confirmed the working tree afterwards: only the four intended source files plus the T-2 ledger record are modified, and npm test is 13/13."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Finalize\nCode review passed. Time to commit.\n1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)\n2. Update ticket T-2 status to \"complete\" in .story/\n3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`\n4. Call me with completedAction: \"files_staged\"\n---\n**Session:** 0565780a-8bed-4add-8cfa-85b8"
+  },
+  {
+    "toolUseId": "toolu_0181CEUFbdGBVcnFFkbnfdww",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "git reset first, then staged only this ticket's files: src/jobs/JobQueue.ts, src/jobs/JobQueue.test.ts, src/http/handler.ts, src/http/handler.test.ts, .story/tickets/T-2.json (now complete), and the four issue records filed during this ticket's work (.story/issues/ISS-001..ISS-004.json). Left unstaged as unrelated to T-2: .continuity-mcp.json and .story/.gitignore, both pre-existing untracked files."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "Files staged. Now commit.\n\nCommit with message: \"feat: <description> (T-2)\"\n\nCall me with completedAction: \"commit_done\" and include the commitHash.\n---\n**Session:** 0565780a-8bed-4add-8cfa-85b87c4b593b\n**State:** FINALIZE\n**Ticket:** T-2: Make failed background jobs traceable to the originating request\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n**Verification:** 0 prop"
+  },
+  {
+    "toolUseId": "toolu_01B7fSQHHCgcKkayxBB8D2QV",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "commit_done",
+        "commitHash": "122442a7f26ecc7d3bef89644eb2a22d13a98637",
+        "notes": "Committed on main as 122442a. Message records the design, both rulings, and the two hostile-input fixes the review rounds produced, plus the four issues filed."
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Targeted Session Complete -- All 1 target(s) done\n\nWrite a session handover summarizing what was accomplished, decisions made, and what's next.\n\nCall me with completedAction: \"handover_written\" and include the content in handoverContent.\n---\n**Session:** 0565780a-8bed-4add-8cfa-85b87c4b593b\n**State:** HANDOVER (from COMPLETE)\n**Ticket:** none\n**Risk:** unknown\n**Completed:** T-2\n**Tickets done:*"
+  },
+  {
+    "toolUseId": "toolu_019r2xkigjadvmaZrBffdAnp",
+    "input": {
+      "sessionId": "0565780a-8bed-4add-8cfa-85b87c4b593b",
+      "action": "report",
+      "report": {
+        "completedAction": "handover_written",
+        "handoverContent": "# Handover: T-2 failed jobs are traceable (2026-09-20)\n\nTargeted autonomous session, `/story auto T-2`. One item, done and committed as `122442a` on `main`.\n\n## Completed\n\n- **T-2: Make failed background jobs traceable to the originating request.** `JobQueue` takes an optional `Sink` (same shape `Router` already used) and, per job, builds an `AppLogger` bound to that job's own `requestId`. It logs one `error` line when the job throws, and hands the same logger to the runner. Tests: `src/jobs/JobQueue.test.ts` (7) and `src/http/handler.test.ts` (1, end-to-end). Suite is 13/13.\n\n## Decisions\n\n- **The runner gets the logger, not just the failure path.** r-p19bbvh0jhj8xgma says *anything* a running job logs is under the enqueuing request's id. Logging only the queue's own failure line satisfies half of that: a runner left to build its own logger can reach for `withRequestId(randomUUID(), ...)` just as easily as the correct call. So `JobRunner` widened to `(job, log) => ...`, mirroring how `Router` hands route handlers a pre-bound `log`. Backward compatible -- a one-parameter function stays assignable.\n- **T-2 now cites r-p19bbvh0jhj8xgma and r-eftp2zdb6as643np.** It cited nothing when picked, though the 09-15 jobs ruling was made for exactly this work. Citation added at PLAN so the rulings reach anyone working the item.\n- **Containment in `run()` is the hard part, not the logging.** Two review rounds, each catching a real way one job's failure became the whole queue's failure, both verified by executing the code rather than reading it:\n  1. `String(err)` can itself throw -- `Object.create(null)`, a throwing `toString` -- and it ran inside `run()`'s catch. Now contained in a `describeError` helper.\n  2. The fix contained the *argument* but not the *call*. `log.error` reaches the sink synchronously, so a throwing sink (destroyed stdout, buggy custom `Sink`) escaped the catch the same way. Now `failed++` happens before logging and the log call is itself wrapped.\n  The generalisable lesson: pre-fix the catch was `catch { failed++; }`, incapable of throwing. Every statement added to a catch block that guards a loop invariant is a new way to break it, and the helper that formats the error counts.\n- **`enqueue` refuses an empty or whitespace-only request id**, matching `AppLogger`'s own `trim()` guard, so an untraceable job never enters the queue and `run()` has no reason to throw. Breaks no caller: `Router.dispatch` builds its logger first, so the HTTP path fails earlier.\n\n## Continuation\n\n- **T-3 Move AppLogger into packages/logging** is the next ticket. Note it now has one more importer than it did: `src/jobs/JobQueue.ts` imports `AppLogger` and `Sink`, alongside `src/http/router.ts` and the two test files.\n- **ISS-004 (redaction misses non-Bearer/sk- secret shapes)** is the one worth doing soon, and T-2 is why. `AppLogger`'s key-based rule only fires on a real object key, so a secret inside a flat string is caught only if it matches `sk-...` or `Bearer ...`. T-2 is the first path that funnels arbitrary third-party error text into a log line, so `ghp_`, `xoxb-`, `AKIA`, JWTs and `password=` in a URL now reach a line unredacted -- which is RULES.md #1. Deliberately not fixed here: widening those patterns changes redaction for every existing caller and wants its own review.\n\n## Also filed\n\n- **ISS-001** (medium): an empty `x-request-id` header is accepted as a request id -- `?? randomUUID()` does not substitute for `\"\"` -- so `AppLogger.withRequestId(\"\")` throws out of `app.handle()` and the request logs nothing at all.\n- **ISS-003** (low): `tsconfig.json` declares `strict`/`noEmit` but nothing typechecks -- no `typecheck` script, no `@types/node`. A genuine type error in a new test this session was caught only because `tsc` happened to be installed globally. Adding types is a devDependency decision against RULES.md #2, so it needs an owner's call.\n- **ISS-002**: duplicate of ISS-001, resolved. It was auto-filed by a `deferred` finding disposition after I had already filed ISS-001 by hand.\n\n## Notes for the next session\n\n- The codex review bridge reports healthy via `storybloq_health`, but neither `review_plan` nor `review_code` is callable from a Claude Code session here; both review stages fell back to agent review. Worth checking before assuming codex review is running.\n- Unstaged and unrelated, left alone: `.continuity-mcp.json`, `.story/.gitignore`.\n"
+      },
+      "clientTaskId": "983553fc-71cc-4494-a1fd-771dd192bfa3"
+    },
+    "resultHead": "# Session Complete\n\n1 ticket(s) and 0 issue(s) completed. Handover written. Session ended.\n\n- T-2: Make failed background jobs traceable to the originating request (122442a7f26ecc7d3bef89644eb2a22d13a98637)\n\n## Session Report\n\n**Duration:** 22m | **Tickets:** 1 | **Issues:** 0 | **Reviews:** 4 rounds (9 findings) | **Compactions:** 0\n\n### Completed\n| Ticket | Title | Duration |\n|--------|-------|-"
+  }
+]

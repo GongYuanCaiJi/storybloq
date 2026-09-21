@@ -1,0 +1,66 @@
+{
+  "rawTranscriptSha256": "53993ebd2080c92d4c4276c33f3d2e6c0a33850107359e14e8042c8eafc58248",
+  "rawTranscriptBytes": 1204682,
+  "substitutions": {
+    "task.json": [],
+    "plan-context.md": [],
+    "plan.md": [],
+    "plan.initial.md": [],
+    "evidence.jsonl": [
+      {
+        "pattern": "workdir",
+        "replacement": "<WORKDIR>",
+        "count": 45
+      },
+      {
+        "pattern": "pkg",
+        "replacement": "<PKG>",
+        "count": 1
+      },
+      {
+        "pattern": "email",
+        "replacement": "<EMAIL>",
+        "count": 1
+      },
+      {
+        "pattern": "absolute-path",
+        "replacement": "<ABS>",
+        "count": 17
+      }
+    ],
+    "source.diff": [],
+    "worktree.status": [],
+    "ledger.changes.json": [
+      {
+        "pattern": "absolute-path",
+        "replacement": "<ABS>",
+        "count": 1
+      }
+    ],
+    "reports.json": [],
+    "handover.md": [],
+    "usage.json": [],
+    "manifest.json": [
+      {
+        "pattern": "pkg",
+        "replacement": "<PKG>",
+        "count": 1
+      }
+    ]
+  },
+  "fixtureDerived": {
+    "task.json": [],
+    "plan-context.md": [],
+    "plan.md": [],
+    "plan.initial.md": [],
+    "evidence.jsonl": [],
+    "source.diff": [],
+    "worktree.status": [],
+    "ledger.changes.json": [],
+    "reports.json": [],
+    "handover.md": [],
+    "usage.json": [],
+    "manifest.json": []
+  },
+  "blockedLabels": {}
+}

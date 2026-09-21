@@ -1,0 +1,98 @@
+diff --git a/.story/notes/N-1.json b/.story/notes/N-1.json
+index c18d4e8..95f48d0 100644
+--- a/.story/notes/N-1.json
++++ b/.story/notes/N-1.json
+@@ -1,12 +1,13 @@
+ {
++  "content": "AppLogger is the one logger in this service. It lives at packages/logging/AppLogger.ts with AppLogger.test.ts beside it, moved there from src/platform/logging/ by T-3 so a second service can share it. Code under src/ imports it by relative path (e.g. ../../packages/logging/AppLogger.ts from src/http/); there is no package manifest or workspace entry for it yet.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id.",
++  "createdDate": "2026-09-15",
++  "displayId": "N-1",
+   "id": "N-1",
+-  "title": "AppLogger: where it lives and what it guarantees",
+-  "content": "AppLogger is the one logger in this service. It lives at src/platform/logging/AppLogger.ts with AppLogger.test.ts beside it.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id.",
++  "status": "active",
+   "tags": [
+     "logging",
+     "architecture"
+   ],
+-  "status": "active",
+-  "createdDate": "2026-09-15",
+-  "updatedDate": "2026-09-15"
++  "title": "AppLogger: where it lives and what it guarantees",
++  "updatedDate": "2026-09-20"
+ }
+diff --git a/.story/tickets/T-3.json b/.story/tickets/T-3.json
+index 42c280d..c6b96a0 100644
+--- a/.story/tickets/T-3.json
++++ b/.story/tickets/T-3.json
+@@ -1,13 +1,14 @@
+ {
+-  "id": "T-3",
+-  "title": "Move AppLogger into packages/logging",
++  "blockedBy": [],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "The logger is about to be shared with a second service. Move src/platform/logging/ to packages/logging/ (same file names), update every import, and keep the tests passing from the new location.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-3",
++  "id": "T-3",
+   "order": 30,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Move AppLogger into packages/logging",
++  "type": "task"
+ }
+diff --git a/src/platform/logging/AppLogger.test.ts b/packages/logging/AppLogger.test.ts
+similarity index 100%
+rename from src/platform/logging/AppLogger.test.ts
+rename to packages/logging/AppLogger.test.ts
+diff --git a/src/platform/logging/AppLogger.ts b/packages/logging/AppLogger.ts
+similarity index 100%
+rename from src/platform/logging/AppLogger.ts
+rename to packages/logging/AppLogger.ts
+diff --git a/src/http/handler.ts b/src/http/handler.ts
+index 4af02c1..71abfd7 100644
+--- a/src/http/handler.ts
++++ b/src/http/handler.ts
+@@ -5,7 +5,7 @@
+ import { randomUUID } from "node:crypto";
+ import { Router, type RouteRequest, type RouteResponse } from "./router.ts";
+ import { JobQueue } from "../jobs/JobQueue.ts";
+-import type { Sink } from "../platform/logging/AppLogger.ts";
++import type { Sink } from "../../packages/logging/AppLogger.ts";
+ 
+ export interface IncomingRequest {
+   readonly method: RouteRequest["method"];
+diff --git a/src/http/router.test.ts b/src/http/router.test.ts
+index 6317aab..3ba8653 100644
+--- a/src/http/router.test.ts
++++ b/src/http/router.test.ts
+@@ -1,7 +1,7 @@
+ import test from "node:test";
+ import assert from "node:assert/strict";
+ import { createApp } from "./handler.ts";
+-import type { LogLine } from "../platform/logging/AppLogger.ts";
++import type { LogLine } from "../../packages/logging/AppLogger.ts";
+ 
+ test("a routed request logs under the request id the handler layer assigned", async () => {
+   const lines: LogLine[] = [];
+diff --git a/src/http/router.ts b/src/http/router.ts
+index 1a3c110..8717f6f 100644
+--- a/src/http/router.ts
++++ b/src/http/router.ts
+@@ -3,7 +3,7 @@
+  * the request id the handler layer assigned, so anything a route logs goes
+  * through AppLogger under that id.
+  */
+-import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++import { AppLogger, type Sink } from "../../packages/logging/AppLogger.ts";
+ 
+ export interface RouteRequest {
+   readonly method: "GET" | "POST";

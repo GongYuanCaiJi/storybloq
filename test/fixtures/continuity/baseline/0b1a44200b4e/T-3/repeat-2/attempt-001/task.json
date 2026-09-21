@@ -1,0 +1,13 @@
+{
+  "id": "T-3",
+  "title": "Move AppLogger into packages/logging",
+  "description": "The logger is about to be shared with a second service. Move src/platform/logging/ to packages/logging/ (same file names), update every import, and keep the tests passing from the new location.",
+  "type": "task",
+  "status": "open",
+  "phase": "p1",
+  "order": 30,
+  "createdDate": "2026-09-16",
+  "completedDate": null,
+  "blockedBy": [],
+  "parentTicket": null
+}

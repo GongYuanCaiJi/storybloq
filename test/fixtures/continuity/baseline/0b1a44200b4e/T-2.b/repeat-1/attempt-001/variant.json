@@ -1,0 +1,4 @@
+{
+  "title": "Add logging for background jobs",
+  "description": "Background jobs run without any log output today. Add logging for background jobs so that a job's start, success and failure are visible in the logs."
+}

@@ -1,0 +1,623 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..ff87ef0
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,33 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "plan-review-agent (T-4 session 7d487ba8)",
++  "dedupeKey": "t-4-plan-review-r1:empty-request-id",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "src/http/handler.ts:31 resolves the request id with `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only falls back for null/undefined, so a request carrying `x-request-id: \"\"` keeps the empty string. Router.dispatch then calls AppLogger.withRequestId(\"\"), which throws \"AppLogger requires a non-empty request id\" (AppLogger.ts:61). The request fails with an unhandled error instead of being served under a fresh id. A caller can trigger it with one empty header. Fix: treat a blank/whitespace-only header as absent (trim, then fall back to randomUUID).",
++  "location": [
++    "src/http/handler.ts:31",
++    "src/platform/logging/AppLogger.ts:61"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-4"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "sourceRefs": [
++    {
++      "contentHash": "5916fa02b52317a4182f2b8a052e5017d87f7ec86bb17577899cf52cb51d5370",
++      "endLine": 31,
++      "path": "src/http/handler.ts",
++      "reviewId": "t-4-plan-review-r1",
++      "revision": "e20a30883df670b1617c32fa7dcc906ee710b654",
++      "startLine": 31
++    }
++  ],
++  "status": "open",
++  "title": "Empty x-request-id header throws out of the HTTP handler"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..8259468
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:7d487ba8-0884-4df6-a166-453a7c9d04ee:9c8f7dfedefbab459f632b867d32e438",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-002",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-002",
++  "impact": "Pre-existing in the existing code, not the plan: handler.ts:31 uses ?? so an empty x-request-id string survives, and AppLogger.withRequestId throws on a blank id, so the request throws out of handle. Filed as ISS-001; out of T-4 scope.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-001, which carries the same finding with fuller impact detail, location refs and source refs. ISS-002 was auto-filed by the plan-review round's deferred disposition after ISS-001 had already been filed explicitly for the same defect. Track the empty x-request-id defect on ISS-001.",
++  "resolvedDate": "2026-09-20",
++  "severity": "medium",
++  "status": "resolved",
++  "title": "[empty-request-id] Pre-existing in the existing code, not the plan: handler.ts:31 uses ?? so an emp"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..a0c1982
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,22 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "code-review-agent (T-4 session 7d487ba8)",
++  "dedupeKey": "t-4-code-review-r1:clock-assumption",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-003",
++  "impact": "src/http/RateLimiter.ts defaults its clock to Date.now, which is wall time and can step backwards (NTP correction, manual clock change). Consequences: `now - windowStart` goes negative so an expired window reads as live and never rolls over; `retryAfterMs` can exceed windowMs; and `#lastSweep` is left in the future, so the sweep stalls until wall time catches up and expired entries accumulate meanwhile. Impact is bounded (a client is over-limited for the duration of the step, memory grows by distinct keys seen in that period) and needs a clock step to trigger, so it is low rather than a live defect. Fix: default to a monotonic source, `performance.timeOrigin + performance.now()`, which is a Node built-in and keeps the dependency-free rule. The injectable `now` option means tests need no change. Found during T-4 code review; out of scope for T-4, which took Date.now as planned.",
++  "location": [
++    "src/http/RateLimiter.ts"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-4"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "RateLimiter assumes a monotonic clock; a backwards Date.now step stalls windows and the sweep"
++}
+diff --git a/.story/issues/ISS-004.json b/.story/issues/ISS-004.json
+new file mode 100644
+index 0000000..777e11b
+--- /dev/null
++++ b/.story/issues/ISS-004.json
+@@ -0,0 +1,22 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "code-review-agent (T-4 session 7d487ba8)",
++  "dedupeKey": "t-4-code-review-r2:default-on-shared-anon-bucket",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-004",
++  "impact": "T-4 turns rate limiting on by default (60 req/min) and puts every request without a usable x-client-id into one shared bucket. Both decisions are deliberate: limiting off by default would ship an inert feature, and exempting header-less requests would be a one-header bypass. The consequence is that a deployment whose clients do not send x-client-id gets a 60 req/min aggregate cap on the whole app, GET /health included -- so ordinary traffic saturates the shared bucket and health checks start returning 429, which a load balancer reads as instance death. Options, none of which were in T-4's approved scope: default rateLimit to null and have production wiring pass an explicit limit; or exempt /health (per-route limits were explicitly out of scope for T-4). Needs an owner decision before this runs anywhere real. Found during T-4 code review round 2.",
++  "location": [
++    "src/http/handler.ts"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-4"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "Default rate limit can 429 /health when callers omit x-client-id"
++}
+diff --git a/.story/issues/ISS-005.json b/.story/issues/ISS-005.json
+new file mode 100644
+index 0000000..b59e640
+--- /dev/null
++++ b/.story/issues/ISS-005.json
+@@ -0,0 +1,22 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "code-review-agent (T-4 session 7d487ba8)",
++  "dedupeKey": "t-4-code-review-r2:limit-bypass-by-rotation",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-005",
++  "impact": "The rate limiter keys on the x-client-id header, which is unauthenticated caller-supplied text. An adversary sending a fresh id per request gets unlimited throughput and creates one map entry per id (bounded by the documented two-window bound, so memory is not the main concern). This is exactly what T-4 specified, so it is not a defect in that change -- it is a limit of what a header-keyed limiter can deliver. It matters because T-4's problem statement is \"requests from one client can starve the others\", and against a hostile client the header alone does not deliver that protection; it protects against a noisy well-behaved client only. Whoever owns the threat model should decide whether the key needs to be something the caller cannot choose (authenticated principal, API key, source address, or a combination). Found during T-4 code review round 2.",
++  "location": [
++    "src/http/handler.ts"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-4"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "x-client-id is unauthenticated, so rotating it bypasses the rate limit entirely"
++}
+diff --git a/.story/issues/ISS-006.json b/.story/issues/ISS-006.json
+new file mode 100644
+index 0000000..f4e20e3
+--- /dev/null
++++ b/.story/issues/ISS-006.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:7d487ba8-0884-4df6-a166-453a7c9d04ee:e4acf56ddfb5440863b8707651f8cfe3",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-006",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-006",
++  "impact": "Limiting is on by default and every request without a usable x-client-id shares one bucket, so createApp() callers that do not set the header get a hard 60 req/min aggregate cap on the whole app, GET /health included. In a deployment where clients omit the header, ordinary traffic saturates the shared bucket and health checks start returning 429, which a load balancer reads as instance death. The alternative (no limit when the header is absent) is a trivial bypass, so the choice is defensible and is pinned by a test, but the blast radius of the default deserves an explicit decision.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "7d487ba8-0884-4df6-a166-453a7c9d04ee"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-004, which carries the same finding with fuller impact detail and the candidate remedies spelled out. ISS-006 was auto-filed by the code-review round's deferred disposition after ISS-004 had already been filed explicitly for the same finding. Track the default-limit /health blast radius on ISS-004.",
++  "resolvedDate": "2026-09-20",
++  "severity": "medium",
++  "status": "resolved",
++  "title": "[default-on-shared-anon-bucket] Limiting is on by default and every request without a usable x-client-id shares "
++}
+diff --git a/.story/tickets/T-4.json b/.story/tickets/T-4.json
+index 6c6ac8c..c0908df 100644
+--- a/.story/tickets/T-4.json
++++ b/.story/tickets/T-4.json
+@@ -1,13 +1,14 @@
+ {
+-  "id": "T-4",
+-  "title": "Add per-client rate limiting to the HTTP handler",
++  "blockedBy": [],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Requests from one client can starve the others. Add per-client rate limiting to the HTTP handler: a fixed window per client id (the x-client-id header), a 429 response when the window is exhausted, and a test.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-4",
++  "id": "T-4",
+   "order": 40,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add per-client rate limiting to the HTTP handler",
++  "type": "task"
+ }
+diff --git a/src/http/RateLimiter.test.ts b/src/http/RateLimiter.test.ts
+new file mode 100644
+index 0000000..90dcf9a
+--- /dev/null
++++ b/src/http/RateLimiter.test.ts
+@@ -0,0 +1,102 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { RateLimiter } from "./RateLimiter.ts";
++
++/** A clock a test can move by hand, so window behaviour is deterministic without sleeping. */
++function clock(start = 0): { now: () => number; advance: (ms: number) => void } {
++  let t = start;
++  return { now: () => t, advance: (ms) => { t += ms; } };
++}
++
++test("allows exactly limit requests in a window, then rejects, counting remaining down to zero", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 3, windowMs: 1000, now: c.now });
++
++  assert.deepEqual(limiter.check("a"), { allowed: true, remaining: 2, retryAfterMs: 0 });
++  assert.deepEqual(limiter.check("a"), { allowed: true, remaining: 1, retryAfterMs: 0 });
++  assert.deepEqual(limiter.check("a"), { allowed: true, remaining: 0, retryAfterMs: 0 });
++
++  const rejected = limiter.check("a");
++  assert.equal(rejected.allowed, false);
++});
++
++test("a new window restores the full allowance", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 2, windowMs: 1000, now: c.now });
++
++  limiter.check("a");
++  limiter.check("a");
++  assert.equal(limiter.check("a").allowed, false);
++
++  c.advance(1000);
++  assert.deepEqual(limiter.check("a"), { allowed: true, remaining: 1, retryAfterMs: 0 });
++});
++
++test("one client exhausting its window does not consume another client's allowance", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 1000, now: c.now });
++
++  assert.equal(limiter.check("noisy").allowed, true);
++  assert.equal(limiter.check("noisy").allowed, false);
++  assert.equal(limiter.check("quiet").allowed, true);
++});
++
++test("a rejection reports no remaining and the time left in the window", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 1, windowMs: 1000, now: c.now });
++
++  limiter.check("a"); // window starts at t=0
++  c.advance(400);
++
++  assert.deepEqual(limiter.check("a"), { allowed: false, remaining: 0, retryAfterMs: 600 });
++});
++
++test("expired entries are swept rather than accumulating, without changing any verdict", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 2, windowMs: 1000, now: c.now });
++
++  limiter.check("a");
++  limiter.check("b");
++  limiter.check("c");
++  assert.equal(limiter.size, 3);
++
++  c.advance(1500); // every window above has expired
++  limiter.check("d");
++  assert.equal(limiter.size, 1, "the three expired entries are gone, the live one remains");
++
++  // A swept key gets exactly the verdict an untouched limiter would have given it:
++  // its window had expired, so it starts fresh either way.
++  assert.deepEqual(limiter.check("a"), { allowed: true, remaining: 1, retryAfterMs: 0 });
++});
++
++test("a sweep deletes expired windows and leaves live ones untouched", () => {
++  const c = clock();
++  const limiter = new RateLimiter({ limit: 2, windowMs: 1000, now: c.now });
++
++  // #lastSweep starts at 0, so this call is the first that can sweep. It finds an
++  // empty map, sets #lastSweep to 1000, and installs "a" with a window at t=1000.
++  c.advance(1000);
++  limiter.check("a");
++
++  // Throttled (only 500ms since the last sweep). "b" gets a window at t=1500.
++  c.advance(500);
++  limiter.check("b");
++
++  // 1000ms since the last sweep, so this one runs with both entries in the map:
++  // "a" is 1000ms old and expired, "b" is 500ms old and live.
++  c.advance(500);
++  limiter.check("c");
++
++  assert.equal(limiter.size, 2, "the expired entry is gone; the live one and the new one remain");
++
++  // "b" kept its count through the sweep. Had the sweep evicted it, this would read
++  // as a fresh window (remaining 1) -- which is how a flood of distinct keys would
++  // clear a victim's counter.
++  assert.deepEqual(limiter.check("b"), { allowed: true, remaining: 0, retryAfterMs: 0 });
++  assert.equal(limiter.check("b").allowed, false);
++});
++
++test("a misconfigured limiter fails loudly at construction", () => {
++  assert.throws(() => new RateLimiter({ limit: 0, windowMs: 1000 }), /limit >= 1/);
++  assert.throws(() => new RateLimiter({ limit: 1, windowMs: 0 }), /windowMs >= 1/);
++});
+diff --git a/src/http/RateLimiter.ts b/src/http/RateLimiter.ts
+new file mode 100644
+index 0000000..bb1f68f
+--- /dev/null
++++ b/src/http/RateLimiter.ts
+@@ -0,0 +1,99 @@
++/**
++ * Fixed-window rate limiting, one window per key.
++ *
++ * The limiter is pure bookkeeping: it decides, it does not log. Anything worth
++ * saying about a rejection is said by the caller, through AppLogger, under the
++ * request id that caller already holds.
++ */
++
++export interface RateLimitOptions {
++  /** Requests allowed per window. Must be >= 1. */
++  readonly limit: number;
++  /** Window length in milliseconds. Must be >= 1. */
++  readonly windowMs: number;
++  /** Injectable clock, so a test can move time without sleeping. */
++  readonly now?: () => number;
++}
++
++export interface RateLimitResult {
++  readonly allowed: boolean;
++  /** Requests left in the current window; 0 on a rejection. */
++  readonly remaining: number;
++  /** Time left in the current window; 0 when allowed. */
++  readonly retryAfterMs: number;
++}
++
++interface Window {
++  windowStart: number;
++  count: number;
++}
++
++export class RateLimiter {
++  readonly #limit: number;
++  readonly #windowMs: number;
++  readonly #now: () => number;
++  readonly #windows = new Map<string, Window>();
++  #lastSweep: number;
++
++  constructor(opts: RateLimitOptions) {
++    if (!Number.isFinite(opts.limit) || opts.limit < 1) {
++      throw new Error("RateLimiter requires limit >= 1");
++    }
++    if (!Number.isFinite(opts.windowMs) || opts.windowMs < 1) {
++      throw new Error("RateLimiter requires windowMs >= 1");
++    }
++    this.#limit = opts.limit;
++    this.#windowMs = opts.windowMs;
++    this.#now = opts.now ?? Date.now;
++    this.#lastSweep = this.#now();
++  }
++
++  /** Number of tracked keys. Exists so the sweep is observable from a test. */
++  get size(): number {
++    return this.#windows.size;
++  }
++
++  /**
++   * Records one request against `key` and says whether it is allowed. This is the
++   * only mutation point, so one call consumes exactly one slot.
++   */
++  check(key: string): RateLimitResult {
++    const now = this.#now();
++    this.#sweep(now);
++
++    // A first request and an expired window are the same case: install a fresh window.
++    let window = this.#windows.get(key);
++    if (window === undefined || now - window.windowStart >= this.#windowMs) {
++      window = { windowStart: now, count: 0 };
++      this.#windows.set(key, window);
++    }
++
++    if (window.count < this.#limit) {
++      // Increment first, then compute: the first allowed call of a limit-5 window
++      // reports 4 remaining and the last reports 0. Pre-increment would advertise
++      // a slot that does not exist.
++      window.count++;
++      return { allowed: true, remaining: this.#limit - window.count, retryAfterMs: 0 };
++    }
++
++    return { allowed: false, remaining: 0, retryAfterMs: window.windowStart + this.#windowMs - now };
++  }
++
++  /**
++   * Drops entries that have outlived their window, at most once per window.
++   *
++   * An expired entry is indistinguishable from no entry, so this can never change a
++   * verdict. The throttle is what keeps the walk from becoming a per-request O(n)
++   * scan under a flood of distinct keys -- the case this limiter exists to survive.
++   * Live windows are never evicted: doing so would reset a client's allowance, which
++   * is a way to clear a victim's counter, so the map is bounded by the number of
++   * distinct keys seen across two consecutive windows.
++   */
++  #sweep(now: number): void {
++    if (now - this.#lastSweep < this.#windowMs) return;
++    this.#lastSweep = now;
++    for (const [key, window] of this.#windows) {
++      if (now - window.windowStart >= this.#windowMs) this.#windows.delete(key);
++    }
++  }
++}
+diff --git a/src/http/handler.test.ts b/src/http/handler.test.ts
+new file mode 100644
+index 0000000..2a055ff
+--- /dev/null
++++ b/src/http/handler.test.ts
+@@ -0,0 +1,114 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { createApp } from "./handler.ts";
++import { JobQueue } from "../jobs/JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++/**
++ * A frozen clock. retryAfterMs is derived from two separate clock reads, so asserting
++ * an exact value against the wall clock fails whenever a millisecond boundary falls
++ * between them.
++ */
++const frozen = { now: () => 0 };
++
++test("an exhausted client window answers 429 without enqueueing, and does not starve another client", async () => {
++  const queue = new JobQueue();
++  const app = createApp(queue, () => {}, { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++  const post = (clientId: string) =>
++    app.handle({ method: "POST", path: "/reports", headers: { "x-client-id": clientId }, body: { kind: "daily" } });
++
++  assert.equal((await post("c1")).status, 202);
++
++  const rejected = await post("c1");
++  assert.equal(rejected.status, 429);
++  assert.deepEqual(rejected.body, { error: "rate limited", retryAfterMs: 60_000 });
++  assert.equal(queue.size, 1, "the rejected request enqueued nothing");
++
++  assert.equal((await post("c2")).status, 202, "c1 exhausting its window leaves c2 unaffected");
++  assert.equal(queue.size, 2);
++});
++
++test("a rate-limited request logs under the request id the handler layer assigned", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l), { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++  const post = (requestId: string) =>
++    app.handle({
++      method: "POST",
++      path: "/reports",
++      headers: { "x-request-id": requestId, "x-client-id": "c1" },
++      body: { kind: "daily" },
++    });
++
++  await post("req-allowed");
++  await post("req-limited");
++
++  // The allowed request logged "report queued" to the same sink, so find the warn line.
++  const warned = lines.filter((l) => l.level === "warn" && l.message === "rate limited");
++  assert.equal(warned.length, 1);
++  assert.equal(warned[0].requestId, "req-limited");
++  assert.equal(warned[0].fields.clientId, "c1");
++});
++
++test("requests without an x-client-id share one bucket rather than bypassing the limit", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++  const get = () => app.handle({ method: "GET", path: "/health", headers: {} });
++
++  assert.equal((await get()).status, 200);
++  assert.equal((await get()).status, 429);
++});
++
++test("a whitespace-only client id is treated as no client id at all", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++
++  const blank = await app.handle({ method: "GET", path: "/health", headers: { "x-client-id": "   " } });
++  assert.equal(blank.status, 200);
++
++  // Same bucket as a request that omits the header: without the trim it would have
++  // got a private allowance of its own.
++  const absent = await app.handle({ method: "GET", path: "/health", headers: {} });
++  assert.equal(absent.status, 429);
++});
++
++test("a client id cannot be chosen to collide with the unidentified bucket", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++
++  const named = await app.handle({ method: "GET", path: "/health", headers: { "x-client-id": "anon" } });
++  assert.equal(named.status, 200);
++
++  const anonymous = await app.handle({ method: "GET", path: "/health", headers: {} });
++  assert.equal(anonymous.status, 200, "the unidentified bucket still has its own allowance");
++});
++
++test("an unknown path costs the caller a slot, so 404s cannot be used to evade the limit", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: { limit: 1, windowMs: 60_000, ...frozen } });
++  const headers = { "x-client-id": "c1" };
++
++  assert.equal((await app.handle({ method: "GET", path: "/nope", headers })).status, 404);
++  assert.equal((await app.handle({ method: "GET", path: "/health", headers })).status, 429);
++});
++
++test("the default limit applies when no options are passed: 60 requests per client per minute", async () => {
++  // Every existing createApp caller now gets this silently, so it is worth pinning.
++  const app = createApp();
++  const get = () => app.handle({ method: "GET", path: "/health", headers: { "x-client-id": "c1" } });
++
++  for (let i = 0; i < 60; i++) {
++    assert.equal((await get()).status, 200, `request ${i + 1} of the window should be allowed`);
++  }
++  const rejected = await get();
++  assert.equal(rejected.status, 429);
++  // The window is a minute wide, so 61 requests in quick succession cannot roll it over.
++  assert.ok(
++    (rejected.body as { retryAfterMs: number }).retryAfterMs > 0,
++    "the rejection reports time left in the window",
++  );
++});
++
++test("rate limiting can be disabled", async () => {
++  const app = createApp(undefined, () => {}, { rateLimit: null });
++  const headers = { "x-client-id": "c1" };
++
++  for (let i = 0; i < 100; i++) {
++    assert.equal((await app.handle({ method: "GET", path: "/health", headers })).status, 200);
++  }
++});
+diff --git a/src/http/handler.ts b/src/http/handler.ts
+index 4af02c1..4f7974a 100644
+--- a/src/http/handler.ts
++++ b/src/http/handler.ts
+@@ -5,7 +5,8 @@
+ import { randomUUID } from "node:crypto";
+ import { Router, type RouteRequest, type RouteResponse } from "./router.ts";
+ import { JobQueue } from "../jobs/JobQueue.ts";
+-import type { Sink } from "../platform/logging/AppLogger.ts";
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++import { RateLimiter, type RateLimitOptions } from "./RateLimiter.ts";
+ 
+ export interface IncomingRequest {
+   readonly method: RouteRequest["method"];
+@@ -14,7 +15,26 @@ export interface IncomingRequest {
+   readonly body?: unknown;
+ }
+ 
+-export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { handle(req: IncomingRequest): Promise<RouteResponse> } {
++export interface AppOptions {
++  /** Per-client rate limit. Null disables limiting; omitted uses DEFAULT_RATE_LIMIT. */
++  readonly rateLimit?: RateLimitOptions | null;
++}
++
++/** 60 requests per minute per client. */
++const DEFAULT_RATE_LIMIT: RateLimitOptions = { limit: 60, windowMs: 60_000 };
++
++/**
++ * The bucket every request without a usable `x-client-id` shares. Identified clients
++ * are keyed `id:<value>`, so no caller can reach this bucket by choosing a client id
++ * and drain it on the unidentified callers' behalf.
++ */
++const ANON_KEY = "anon";
++
++export function createApp(
++  queue: JobQueue = new JobQueue(),
++  sink?: Sink,
++  opts: AppOptions = {},
++): { handle(req: IncomingRequest): Promise<RouteResponse> } {
+   const router = new Router(sink)
+     .add("GET", "/health", (_req, log) => {
+       log.info("health check");
+@@ -26,9 +46,32 @@ export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { hand
+       return { status: 202, body: { jobId: id } };
+     });
+ 
++  const rateLimit = opts.rateLimit === undefined ? DEFAULT_RATE_LIMIT : opts.rateLimit;
++  const limiter = rateLimit === null ? null : new RateLimiter(rateLimit);
++
+   return {
+     async handle(req: IncomingRequest): Promise<RouteResponse> {
+       const requestId = req.headers["x-request-id"] ?? randomUUID();
++
++      // Coalesce before trimming: the header may be absent, and trimming undefined throws.
++      const clientId = (req.headers["x-client-id"] ?? "").trim();
++
++      // Checked before dispatch: the limit protects the routes, so even a 404 for an
++      // unknown path costs the caller a slot.
++      if (limiter !== null) {
++        const verdict = limiter.check(clientId === "" ? ANON_KEY : `id:${clientId}`);
++        if (!verdict.allowed) {
++          // The client id is caller-controlled text, so it is logged as a field rather
++          // than spliced into the message: AppLogger redacts secret-shaped values, and
++          // the line carries the request id like every other line this service writes.
++          AppLogger.withRequestId(requestId, sink).warn("rate limited", {
++            clientId: clientId === "" ? "(none)" : clientId,
++            retryAfterMs: verdict.retryAfterMs,
++          });
++          return { status: 429, body: { error: "rate limited", retryAfterMs: verdict.retryAfterMs } };
++        }
++      }
++
+       return router.dispatch({ method: req.method, path: req.path, requestId, body: req.body });
+     },
+   };

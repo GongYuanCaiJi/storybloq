@@ -1,0 +1,97 @@
+{
+  "planEntryContext": 71156,
+  "planEntries": [
+    71156
+  ],
+  "beforePlanWrittenContext": 80850,
+  "totalInputTokens": 10284962,
+  "mainRequests": 74,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01WJy42ZhBDge8Y693NBdH5N"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01WSekqxmNvWUW7yT3Z7uqMu"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_018vtf1xCFgBcBHHxqEwBBHv"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01EHkzZf9Ph3XVNRVJHpReMn"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_014JTKqvT7Zm7RRGZuR3ThDf"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01J5iH8R77khpffiiAcpGBm4"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01Lp1QKPDM8FuF2QffW3BgJE"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01FgjHpHEPtcUcxktZQ7pDxL"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01NZWWccjApqcMEV9ejGcyNW"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01XFsex8EzFeGgSNRpLBPBfs"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_012u5JDnJRbxAJD7JzwmYTvd"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01Q2U3qBjckajfkzH6UJZE8P"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_017R4AcMioEgej3uzH7jFrB8"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01WuEwiYWZLNC6SM1jojZ1CQ"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+      "toolUseId": "toolu_01C6BiqDaBLmcT61EpbiKL8e"
+    }
+  ],
+  "guideSessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9",
+  "firstPlanWrittenToolUseId": "toolu_018vtf1xCFgBcBHHxqEwBBHv",
+  "totalCostUsd": 11.776125500000001,
+  "numTurns": 74,
+  "resultSubtype": "success"
+}

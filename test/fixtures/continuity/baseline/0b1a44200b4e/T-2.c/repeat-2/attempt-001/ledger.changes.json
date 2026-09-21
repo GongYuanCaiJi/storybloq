@@ -1,0 +1,193 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 failed jobs traceable to their request (2026-09-20)\n\n## Completed\n- **T-2** shipped as `3d52c9f`. A failing job in `JobQueue.run()` now emits one `AppLogger`\n  error line under that job's own request id, carrying `jobId`, `kind` and the failure text.\n  New tests: `src/jobs/JobQueue.test.ts` (6) and `src/http/handler.test.ts` (4). `npm test`\n  14/14.\n- T-2 cited no rulings when picked; both binding ones are now recorded on it\n  (`r-p19bbvh0jhj8xgma`, `r-eftp2zdb6as643np`), so the next agent to open it is told what\n  decided its design instead of rediscovering it.\n\n## Decisions\n- **The payload is not logged.** `AppLogger` would redact it, but it is arbitrary request\n  body (`handler.ts` passes `req.body` straight through) and what makes a failure traceable\n  is the request id plus the job id. Smaller blast radius, same traceability.\n- **The swallow guard covers the sink call and nothing else.** A broken sink must not change\n  what `run()` reports or drop the jobs behind a failure. Building the logger sits OUTSIDE\n  it deliberately, so an unusable request id is loud rather than indistinguishable from a\n  broken sink; describing the thrown value sits outside it too, via a `describeError()` that\n  cannot itself throw, so a job that throws something `String()` cannot convert still gets\n  its line. Both boundaries were found by code review, in that order -- the second was\n  introduced by the fix for the first.\n- **`enqueue` refuses a request id `AppLogger` would later reject**, using AppLogger's own\n  exported `isUsableRequestId` rather than a copy of the predicate. Plan review had dropped\n  this guard as scope creep; code review's probe showed the drop left a blank id producing\n  `{ran:0,failed:1}` and zero log lines, which is the exact untraceable failure T-2 exists\n  to close. The reversal is recorded in the session plan.\n- **`createApp` exposes `app.jobs`** and builds its default queue from the caller's sink.\n  Before this, the wired queue was unreachable -- nothing could call `run()` on it -- so the\n  only runnable queue was a caller-supplied one, which is the queue `createApp` does not\n  wire. That is why the end-to-end handler test was impossible to write until it changed.\n\n## Filed, not fixed\n- **ISS-001** (medium) -- an empty `x-request-id` header is not nullish, so it passes the\n  `?? randomUUID()` fallback and throws out of `handle()`: no response served, no line\n  logged. Pre-existing at `e85c55e`, re-confirmed live at HEAD. The one remaining way a\n  request produces zero traceable output.\n- **ISS-002** (medium) -- `JobRunner` still receives a bare `QueuedJob` and no\n  request-id-bound logger, so `r-p19bbvh0jhj8xgma` is enforced for the queue's own failure\n  line but not for anything a job body logs. Deferred twice rather than accepted; it changes\n  a public signature and deserves its own ticket.\n- **ISS-003** (medium) -- a caller-supplied queue keeps its own sink, so\n  `createApp(new JobQueue(), mySink)` splits route logs from job-failure logs. The untested\n  half is closed (a test now covers the documented `new JobQueue(sink)` remedy); the API half\n  -- drop the `queue` parameter, or let its sink be set at wiring time -- is not.\n- ISS-004 was auto-filed as a duplicate of ISS-002 and resolved as such. Re-reporting a\n  carried deferral files a second copy; report it once or expect to close the duplicate.\n\n## Continuation\n- **ISS-001** is the natural next item: smallest of the three, on the path this session just\n  spent its time in, and it is a RULES.md #1 gap rather than a design question.\n- **ISS-003**'s API half needs an owner's call before it is worth doing -- dropping a public\n  parameter is not a review fix.\n\n## Carried forward\n- **T-3** Move AppLogger into `packages/logging` once a second service needs it. Still not\n  needed; note that this session added an export to it (`isUsableRequestId`), so the move\n  now carries one more public name.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "storybloq-auto/T-2",
+      "dedupeKey": "T-2:empty-x-request-id-header",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "createApp's handle() resolves the request id as `req.headers[\"x-request-id\"] ?? randomUUID()`. An empty-string header is not nullish, so it is used as-is and reaches AppLogger.withRequestId(\"\"), which throws \"AppLogger requires a non-empty request id\". The request fails with an unhandled error instead of being served under a generated id. Found while working T-2; unrelated to job tracing, so not fixed there.",
+      "location": [
+        "src/http/handler.ts:31"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "Empty x-request-id header makes the request throw"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:73c738712055b64ca89becc0dae2a7de",
+      "discoveredDate": "2026-09-21",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing request id. This diff satisfies that for the queue's own failure line only; JobRunner (src/jobs/JobQueue.ts:18) is still handed a bare QueuedJob and no request-id-bound AppLogger, so logging inside a job body must build its own logger and nothing enforces the id. Suggested: pass AppLogger.withRequestId(job.requestId, this.#sink) as a second runner argument.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "[ruling-partial-compliance] r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing reque"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:6548f547006fcdc21386abb594b33c15",
+      "discoveredDate": "2026-09-21",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-003",
+      "impact": "Round-1 finding 3 only half fixed. app.jobs is exposed, but src/http/handler.ts:30 still wires sink only into the queue createApp builds itself, so createApp(new JobQueue(), sinkSpy) sends 'report queued' to sinkSpy while the job-failure line goes to AppLogger's default stdout sink — one call, two destinations, with a sink passed explicitly. The docblock documents the footgun rather than removing it. The injected-queue branch of that ?? was also dead in the suite: every call site passed undefined, so the queue parameter's documented behaviour had no test at all.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "[log-sink-split] Round-1 finding 3 only half fixed. app.jobs is exposed, but src/http/handler.ts:"
+    }
+  },
+  {
+    "path": "issues/ISS-004.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:5da4487d7a35092e8b3ccec63b729eac",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-004",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-004",
+      "impact": "Carried from round 1, still outstanding: r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing request id. The code satisfies that for the queue's own failure line only; JobRunner is still handed a bare QueuedJob and no request-id-bound AppLogger, so logging inside a job body must build its own logger and nothing enforces the id.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-002. Both were auto-filed from the same deferred code-review finding (JobRunner receives no request-id-bound AppLogger) — once when it was first deferred in round 1, and again when round 2 re-reported it as still outstanding rather than accepted. ISS-002 is the record to work.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[ruling-partial-compliance] Carried from round 1, still outstanding: r-p19bbvh0jhj8xgma says anything a runn"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When you narrow a try/catch so it guards \"only the risky call\", check every expression evaluated inside the try block, not just the call you meant to guard. Arguments constructed inline are evaluated inside it, so a throw during argument construction is swallowed by the same catch. Hoist them above the try, or the narrowing is only a comment.",
+      "context": "T-2. Code review round 1 found AppLogger.withRequestId inside a catch that swallowed logging failures, so a blank request id produced no line and no signal. The round-1 fix moved the construction out and the comment then read \"Only the sink call is guarded\" -- but the fields object, including `String(err)`, was still built inside the try. Round 2 probed it: a runner throwing Object.create(null), and one throwing an Error with a raising `message` getter, both produced {ran:0,failed:1} with zero log lines. The same defect class as round 1, reintroduced by round 1's own fix, and reachable with no blank id at all. Fixed by extracting a describeError() that cannot throw and building the fields above the try.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "error-handling",
+        "logging",
+        "code-review"
+      ],
+      "title": "Narrowing a swallow-catch: check what the try evaluates, not which call it names",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "A review finding reported with disposition `deferred` auto-files a storybloq issue. If a later round re-reports the same carried finding as still-deferred, it files a SECOND issue for one defect. Report a carried deferral once, at the round that first defers it; if a later round must acknowledge it is still outstanding, say so in the round notes rather than in a findings entry, or expect to resolve the duplicate by hand.",
+      "context": "T-2. The ruling-partial-compliance finding (JobRunner gets no request-id-bound logger) was deferred in code review round 1, filing ISS-002. The guide's round-2 context said deferred work is \"OUTSTANDING rather than accepted\", so it was re-reported as deferred to avoid implying acceptance -- which filed ISS-004 for the same defect. Resolved ISS-004 as a duplicate before committing. The guide's instruction not to treat a deferral as accepted is about not dropping it, not about re-filing it.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "postmortem",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "storybloq",
+        "code-review",
+        "issues"
+      ],
+      "title": "Re-reporting a carried deferred finding auto-files a duplicate issue",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-p19bbvh0jhj8xgma",
+          "r-eftp2zdb6as643np"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

@@ -1,0 +1,162 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 background job logging landed (2026-09-21)\n\nTargeted autonomous session, scoped to T-2 only. Commit `e4d900f` on `main`.\n\n## Completed\n\n- **T-2: Add logging for background jobs** -- complete. `JobQueue.run()` now emits\n  `job started` and then either `job succeeded` or `job failed` through `AppLogger`,\n  under the request id the job was ENQUEUED with. Eleven cases in the new\n  `src/jobs/JobQueue.test.ts`; `npm test` is 15/15.\n\n## Decisions\n\n- **`JobRunner` widened to `(job, log)`**, mirroring `RouteHandler`'s `(req, log)`.\n  Ruling r-p19bbvh0jhj8xgma says *anything* a running job logs is under the enqueuing\n  request id, and the runner is what actually performs the job. Binding only the\n  queue's own three lines would have left every runner to mint its own logger with no\n  access to the queue's sink -- unenforced and untestable. Safe to widen: nothing in\n  the repo implements `JobRunner` or calls `run()` yet.\n- **`enqueue()` now refuses a blank request id.** This is a deliberate behaviour\n  change, not a no-op. A job with no usable id could only be logged by minting a fresh\n  one, which r-p19bbvh0jhj8xgma forbids; the alternative considered (build the logger\n  inside the try) would have silently stopped running a job that runs today. It adds\n  no new failure mode to the HTTP path -- `Router.dispatch` builds its logger at\n  router.ts:37 before route lookup, so a blank id already throws there and never\n  reaches `/reports`.\n- **The `try` covers the runner alone**; the outcome is captured, then counted and\n  logged after it. Previously `ran++` sat before the success log inside the same try,\n  so a throwing sink (stdout EPIPE is reachable) could count one job as both `ran` and\n  `failed` and emit a bogus failure line.\n- **The payload is never logged.** `AppLogger.redact` catches secrets by key and by\n  shape, but an arbitrary request body is exactly where an unrecognised shape would\n  slip past, and RULES rule 1 is absolute. `jobId` and `kind` identify a job without\n  carrying its contents.\n- **`handler.ts` deliberately untouched.** An earlier plan draft threaded the sink into\n  `createApp`'s default queue; that rationale was false -- `createApp` never exposes its\n  queue and nothing calls `run()`, so the change would have had no observable effect\n  and no possible test.\n- **T-2 cited no rulings when this session picked it up.** Both r-eftp2zdb6as643np and\n  r-p19bbvh0jhj8xgma bind it and neither would have reached a reviewer. Both are now\n  cited on the ticket, and both were delivered into every review round afterwards.\n\n## Issues filed\n\n- **ISS-001** (low, open) -- `handler.ts` has no `src/http/handler.test.ts`; its only\n  coverage is `router.test.ts:6-14`. Pre-existing deviation from RULES rule 3.\n- **ISS-003** (medium, open) -- `req.headers[\"x-request-id\"] ?? randomUUID()` at\n  handler.ts:31 uses `??`, so an empty-string header survives as an empty request id\n  and throws in `Router.dispatch`. The boundary fix belongs at the point the id is\n  born. This is the other end of the same path T-2's `enqueue` guard closes.\n- **ISS-002** -- resolved as a duplicate of ISS-001 (auto-filed by the guide from the\n  same deferred plan-review finding). The underlying gap remains open under ISS-001.\n\n## Process notes\n\n- **No codex review bridge on this harness**: no `review_plan` MCP tool is registered,\n  so every plan round fell back to agent review, as the guide's fallback directs.\n- Plan review took two rounds. Round 2 caught a genuine regression that round 1's own\n  fix had introduced (the blank-id job would have stopped running while the plan\n  claimed semantics were unchanged) -- worth knowing that a revision needs reviewing as\n  hard as the original.\n- No typecheck was run anywhere in this session: the project has no TypeScript\n  installed and no typecheck script, by design (RULES rule 2, dependency-free). Node 22\n  type-stripping executes the code and the tests exercise it, but nothing verifies\n  types. Worth a ticket if that gap matters.\n\n## Continuation\n\n- **ISS-003** is the natural next item: it is small, it is the mirror of the guard T-2\n  just added, and it closes the empty-request-id hole at the end where the id is born.\n\n## Carried forward\n\n- T-3: move `AppLogger` into `packages/logging` once a second service needs it.\n- ISS-001: `handler.test.ts` is still missing.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "src/http"
+      ],
+      "createdBy": "plan-review agent (T-2 round 1)",
+      "dedupeKey": "t-2-plan-review-1:missing-handler-test",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "RULES.md rule 3 requires a change to behaviour to come with a test under the same directory named `<Module>.test.ts`. `src/http/handler.ts` has no `src/http/handler.test.ts` -- its only coverage is `src/http/router.test.ts:6-14`, which imports `createApp`. Any change to handler.ts (request-id assignment, queue wiring) therefore has no natural home for a test, and a reader looking for handler coverage finds none where the rule says it should be. Pre-existing, independent of T-2.",
+      "location": [
+        "src/http/handler.ts",
+        "src/http/router.test.ts:6-14"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "handler.ts has no handler.test.ts; its only coverage sits in router.test.ts"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:29ebca3e-a2f0-4d9b-985f-43cabc7dff0b:eeb7b475e29b7f84960a84216bbfefbc",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "handler.ts has no src/http/handler.test.ts; its only coverage is src/http/router.test.ts:6-14. Pre-existing deviation from RULES rule 3, filed as ISS-001.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001. Both record the same pre-existing gap (no src/http/handler.test.ts; handler.ts's only coverage is src/http/router.test.ts:6-14). ISS-001 was filed manually during T-2 plan review round 1; ISS-002 was then auto-filed by the guide from the same finding's `deferred` disposition. ISS-001 is the surviving record -- it carries the location, the related ticket and a dedupe key. No work was done on the underlying gap, which remains open under ISS-001.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[test-naming] handler.ts has no src/http/handler.test.ts; its only coverage is src/http/router"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "src/http"
+      ],
+      "createdBy": "plan-review agent (T-2 round 1)",
+      "dedupeKey": "t-2-plan-review-1:empty-request-id-header",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "`src/http/handler.ts:31` reads `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only falls back on null/undefined, so a request arriving with `x-request-id: \"\"` keeps the empty string as its request id. `AppLogger.withRequestId` rejects a blank id (src/platform/logging/AppLogger.ts:61), so such a request throws in `Router.dispatch` before any route runs, and any job it enqueues carries an unusable request id. RULES.md rule 1 says every emitted line carries the request id of the work it belongs to; an empty id cannot satisfy that, and the ruling r-p19bbvh0jhj8xgma forbids substituting a fresh one after the fact. Fix is a blank check at the boundary where the id is born rather than a fallback further down. Pre-existing, discovered during T-2 plan review.",
+      "location": [
+        "src/http/handler.ts:31"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "Empty x-request-id header survives as an empty request id (?? instead of a blank check)"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "Before writing a plan, run `storybloq_ruling_list` and read any ruling whose scope touches the ticket, even when the ticket's `citedRulings` is empty. If one binds the work, cite it on the ticket first -- citation is what delivers it into plan-review, code-review and lens context. An uncited ruling reaches no reviewer.",
+      "context": "T-2 (background job logging) had an empty citedRulings array, but two current rulings bound it directly: r-eftp2zdb6as643np (one logger, request id and redaction on every path) and r-p19bbvh0jhj8xgma (a running job logs under the request id that ENQUEUED it, never a fresh one). The second was the load-bearing constraint for the whole design and was discoverable only via a handover mention plus a ruling list. Citing both on T-2 before planning meant every subsequent review round received them automatically -- the plan-review context block quoted them verbatim. Had they stayed uncited, three review rounds would have judged the work without the one rule that decided its shape.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "manual",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "rulings",
+        "planning",
+        "review-context"
+      ],
+      "title": "Check for binding rulings before planning; a ticket citing none is not a ticket with none",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "A fix written to clear a review finding can introduce a worse defect than the one it closes, and it arrives wearing the authority of \"this addresses your finding\". Re-review a revised plan against the actual code, not against the revision's own account of itself. Be especially suspicious of a revision that claims it changes no behaviour.",
+      "context": "During T-2's plan review, round 1 correctly flagged that a blank request id would throw out of JobQueue.run() and abandon the batch. The round-1 fix -- construct the logger as the first statement inside the try -- silently made it worse: AppLogger.withRequestId throws on a blank id, so a job that today runs and is counted in `ran` would never reach the runner at all, be counted failed, and emit nothing. The revised plan asserted \"this ticket adds visibility, it does not change job semantics\" while doing exactly that, and had encoded the regression as an accepted test case, which would have locked it in. Round 2 caught it. The real fix was at the boundary (validate in enqueue), which no round-1 reading had suggested.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "review",
+        "plan-review",
+        "regressions"
+      ],
+      "title": "Review the revision as hard as the original plan",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

@@ -1,0 +1,525 @@
+diff --git a/.story/handovers/2026-09-20-01-auto-session.md b/.story/handovers/2026-09-20-01-auto-session.md
+new file mode 100644
+index 0000000..9321884
+--- /dev/null
++++ b/.story/handovers/2026-09-20-01-auto-session.md
+@@ -0,0 +1,75 @@
++# Handover: T-2 background job logging landed (2026-09-21)
++
++Targeted autonomous session, scoped to T-2 only. Commit `e4d900f` on `main`.
++
++## Completed
++
++- **T-2: Add logging for background jobs** -- complete. `JobQueue.run()` now emits
++  `job started` and then either `job succeeded` or `job failed` through `AppLogger`,
++  under the request id the job was ENQUEUED with. Eleven cases in the new
++  `src/jobs/JobQueue.test.ts`; `npm test` is 15/15.
++
++## Decisions
++
++- **`JobRunner` widened to `(job, log)`**, mirroring `RouteHandler`'s `(req, log)`.
++  Ruling r-p19bbvh0jhj8xgma says *anything* a running job logs is under the enqueuing
++  request id, and the runner is what actually performs the job. Binding only the
++  queue's own three lines would have left every runner to mint its own logger with no
++  access to the queue's sink -- unenforced and untestable. Safe to widen: nothing in
++  the repo implements `JobRunner` or calls `run()` yet.
++- **`enqueue()` now refuses a blank request id.** This is a deliberate behaviour
++  change, not a no-op. A job with no usable id could only be logged by minting a fresh
++  one, which r-p19bbvh0jhj8xgma forbids; the alternative considered (build the logger
++  inside the try) would have silently stopped running a job that runs today. It adds
++  no new failure mode to the HTTP path -- `Router.dispatch` builds its logger at
++  router.ts:37 before route lookup, so a blank id already throws there and never
++  reaches `/reports`.
++- **The `try` covers the runner alone**; the outcome is captured, then counted and
++  logged after it. Previously `ran++` sat before the success log inside the same try,
++  so a throwing sink (stdout EPIPE is reachable) could count one job as both `ran` and
++  `failed` and emit a bogus failure line.
++- **The payload is never logged.** `AppLogger.redact` catches secrets by key and by
++  shape, but an arbitrary request body is exactly where an unrecognised shape would
++  slip past, and RULES rule 1 is absolute. `jobId` and `kind` identify a job without
++  carrying its contents.
++- **`handler.ts` deliberately untouched.** An earlier plan draft threaded the sink into
++  `createApp`'s default queue; that rationale was false -- `createApp` never exposes its
++  queue and nothing calls `run()`, so the change would have had no observable effect
++  and no possible test.
++- **T-2 cited no rulings when this session picked it up.** Both r-eftp2zdb6as643np and
++  r-p19bbvh0jhj8xgma bind it and neither would have reached a reviewer. Both are now
++  cited on the ticket, and both were delivered into every review round afterwards.
++
++## Issues filed
++
++- **ISS-001** (low, open) -- `handler.ts` has no `src/http/handler.test.ts`; its only
++  coverage is `router.test.ts:6-14`. Pre-existing deviation from RULES rule 3.
++- **ISS-003** (medium, open) -- `req.headers["x-request-id"] ?? randomUUID()` at
++  handler.ts:31 uses `??`, so an empty-string header survives as an empty request id
++  and throws in `Router.dispatch`. The boundary fix belongs at the point the id is
++  born. This is the other end of the same path T-2's `enqueue` guard closes.
++- **ISS-002** -- resolved as a duplicate of ISS-001 (auto-filed by the guide from the
++  same deferred plan-review finding). The underlying gap remains open under ISS-001.
++
++## Process notes
++
++- **No codex review bridge on this harness**: no `review_plan` MCP tool is registered,
++  so every plan round fell back to agent review, as the guide's fallback directs.
++- Plan review took two rounds. Round 2 caught a genuine regression that round 1's own
++  fix had introduced (the blank-id job would have stopped running while the plan
++  claimed semantics were unchanged) -- worth knowing that a revision needs reviewing as
++  hard as the original.
++- No typecheck was run anywhere in this session: the project has no TypeScript
++  installed and no typecheck script, by design (RULES rule 2, dependency-free). Node 22
++  type-stripping executes the code and the tests exercise it, but nothing verifies
++  types. Worth a ticket if that gap matters.
++
++## Continuation
++
++- **ISS-003** is the natural next item: it is small, it is the mirror of the guard T-2
++  just added, and it closes the empty-request-id hole at the end where the id is born.
++
++## Carried forward
++
++- T-3: move `AppLogger` into `packages/logging` once a second service needs it.
++- ISS-001: `handler.test.ts` is still missing.
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..0de2da4
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,23 @@
++{
++  "components": [
++    "src/http"
++  ],
++  "createdBy": "plan-review agent (T-2 round 1)",
++  "dedupeKey": "t-2-plan-review-1:missing-handler-test",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "RULES.md rule 3 requires a change to behaviour to come with a test under the same directory named `<Module>.test.ts`. `src/http/handler.ts` has no `src/http/handler.test.ts` -- its only coverage is `src/http/router.test.ts:6-14`, which imports `createApp`. Any change to handler.ts (request-id assignment, queue wiring) therefore has no natural home for a test, and a reader looking for handler coverage finds none where the rule says it should be. Pre-existing, independent of T-2.",
++  "location": [
++    "src/http/handler.ts",
++    "src/http/router.test.ts:6-14"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "handler.ts has no handler.test.ts; its only coverage sits in router.test.ts"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..e986a2a
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:29ebca3e-a2f0-4d9b-985f-43cabc7dff0b:eeb7b475e29b7f84960a84216bbfefbc",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-002",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-002",
++  "impact": "handler.ts has no src/http/handler.test.ts; its only coverage is src/http/router.test.ts:6-14. Pre-existing deviation from RULES rule 3, filed as ISS-001.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-001. Both record the same pre-existing gap (no src/http/handler.test.ts; handler.ts's only coverage is src/http/router.test.ts:6-14). ISS-001 was filed manually during T-2 plan review round 1; ISS-002 was then auto-filed by the guide from the same finding's `deferred` disposition. ISS-001 is the surviving record -- it carries the location, the related ticket and a dedupe key. No work was done on the underlying gap, which remains open under ISS-001.",
++  "resolvedDate": "2026-09-20",
++  "severity": "medium",
++  "status": "resolved",
++  "title": "[test-naming] handler.ts has no src/http/handler.test.ts; its only coverage is src/http/router"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..7feb33e
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,22 @@
++{
++  "components": [
++    "src/http"
++  ],
++  "createdBy": "plan-review agent (T-2 round 1)",
++  "dedupeKey": "t-2-plan-review-1:empty-request-id-header",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-003",
++  "impact": "`src/http/handler.ts:31` reads `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only falls back on null/undefined, so a request arriving with `x-request-id: \"\"` keeps the empty string as its request id. `AppLogger.withRequestId` rejects a blank id (src/platform/logging/AppLogger.ts:61), so such a request throws in `Router.dispatch` before any route runs, and any job it enqueues carries an unusable request id. RULES.md rule 1 says every emitted line carries the request id of the work it belongs to; an empty id cannot satisfy that, and the ruling r-p19bbvh0jhj8xgma forbids substituting a fresh one after the fact. Fix is a blank check at the boundary where the id is born rather than a fallback further down. Pre-existing, discovered during T-2 plan review.",
++  "location": [
++    "src/http/handler.ts:31"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "Empty x-request-id header survives as an empty request id (?? instead of a blank check)"
++}
+diff --git a/.story/lessons/L-001.json b/.story/lessons/L-001.json
+new file mode 100644
+index 0000000..cd4e472
+--- /dev/null
++++ b/.story/lessons/L-001.json
+@@ -0,0 +1,18 @@
++{
++  "content": "Before writing a plan, run `storybloq_ruling_list` and read any ruling whose scope touches the ticket, even when the ticket's `citedRulings` is empty. If one binds the work, cite it on the ticket first -- citation is what delivers it into plan-review, code-review and lens context. An uncited ruling reaches no reviewer.",
++  "context": "T-2 (background job logging) had an empty citedRulings array, but two current rulings bound it directly: r-eftp2zdb6as643np (one logger, request id and redaction on every path) and r-p19bbvh0jhj8xgma (a running job logs under the request id that ENQUEUED it, never a fresh one). The second was the load-bearing constraint for the whole design and was discoverable only via a handover mention plus a ruling list. Citing both on T-2 before planning meant every subsequent review round received them automatically -- the plan-review context block quoted them verbatim. Had they stayed uncited, three review rounds would have judged the work without the one rule that decided its shape.",
++  "createdDate": "2026-09-21",
++  "id": "L-001",
++  "lastValidated": "2026-09-21",
++  "reinforcements": 0,
++  "source": "manual",
++  "status": "active",
++  "supersedes": null,
++  "tags": [
++    "rulings",
++    "planning",
++    "review-context"
++  ],
++  "title": "Check for binding rulings before planning; a ticket citing none is not a ticket with none",
++  "updatedDate": "2026-09-21"
++}
+diff --git a/.story/lessons/L-002.json b/.story/lessons/L-002.json
+new file mode 100644
+index 0000000..e5173d6
+--- /dev/null
++++ b/.story/lessons/L-002.json
+@@ -0,0 +1,18 @@
++{
++  "content": "A fix written to clear a review finding can introduce a worse defect than the one it closes, and it arrives wearing the authority of \"this addresses your finding\". Re-review a revised plan against the actual code, not against the revision's own account of itself. Be especially suspicious of a revision that claims it changes no behaviour.",
++  "context": "During T-2's plan review, round 1 correctly flagged that a blank request id would throw out of JobQueue.run() and abandon the batch. The round-1 fix -- construct the logger as the first statement inside the try -- silently made it worse: AppLogger.withRequestId throws on a blank id, so a job that today runs and is counted in `ran` would never reach the runner at all, be counted failed, and emit nothing. The revised plan asserted \"this ticket adds visibility, it does not change job semantics\" while doing exactly that, and had encoded the regression as an accepted test case, which would have locked it in. Round 2 caught it. The real fix was at the boundary (validate in enqueue), which no round-1 reading had suggested.",
++  "createdDate": "2026-09-21",
++  "id": "L-002",
++  "lastValidated": "2026-09-21",
++  "reinforcements": 0,
++  "source": "review",
++  "status": "active",
++  "supersedes": null,
++  "tags": [
++    "review",
++    "plan-review",
++    "regressions"
++  ],
++  "title": "Review the revision as hard as the original plan",
++  "updatedDate": "2026-09-21"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index 8c531c0..3df52f5 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Add logging for background jobs",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-eftp2zdb6as643np",
++    "r-p19bbvh0jhj8xgma"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Background jobs run without any log output today. Add logging for background jobs in src/jobs/ so that a job's start, success and failure are visible in the logs.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add logging for background jobs",
++  "type": "task"
+ }
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..58fe0ee
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,191 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++/** A queue whose lines are captured rather than written to stdout. */
++function queueWithCapture(): { queue: JobQueue; lines: LogLine[] } {
++  const lines: LogLine[] = [];
++  return { queue: new JobQueue((l) => lines.push(l)), lines };
++}
++
++test("a job that succeeds logs start and success under the request id it was enqueued under", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "report", payload: { n: 1 } }, { requestId: "req-enqueued" });
++
++  const counts = await queue.run(() => {});
++
++  assert.deepEqual(counts, { ran: 1, failed: 0 });
++  assert.deepEqual(
++    lines.map((l) => l.message),
++    ["job started", "job succeeded"],
++  );
++  for (const line of lines) assert.equal(line.requestId, "req-enqueued");
++  assert.deepEqual(lines[0].fields, { jobId: "job-1", kind: "report" });
++  assert.equal(lines[1].fields.jobId, "job-1");
++  assert.equal(typeof lines[1].fields.durationMs, "number");
++});
++
++test("jobs enqueued under different request ids each log under their own", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "a", payload: null }, { requestId: "req-one" });
++  queue.enqueue({ kind: "b", payload: null }, { requestId: "req-two" });
++
++  await queue.run(() => {});
++
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.fields.jobId]),
++    [
++      ["req-one", "job-1"],
++      ["req-one", "job-1"],
++      ["req-two", "job-2"],
++      ["req-two", "job-2"],
++    ],
++  );
++});
++
++test("the logger handed to the runner is bound to the enqueuing request id and the queue's sink", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-runner" });
++
++  // Assertions go outside the runner: run() catches whatever the runner throws, so a failed
++  // assertion in there would be swallowed into a "job failed" line instead of failing the test.
++  let seenByRunner: string | undefined;
++  const counts = await queue.run((job, log) => {
++    seenByRunner = log.requestId;
++    log.info("halfway through", { jobId: job.id });
++  });
++
++  assert.deepEqual(counts, { ran: 1, failed: 0 }, "the runner completed rather than throwing");
++  assert.equal(seenByRunner, "req-runner", "the logger handed in was bound to the enqueuing id");
++  const own = lines.find((l) => l.message === "halfway through");
++  assert.ok(own, "the runner's own line reached the queue's sink");
++  assert.equal(own.requestId, "req-runner");
++});
++
++test("a failing job is logged and dropped, and the rest of the batch still runs", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "boom", payload: null }, { requestId: "req-fail" });
++  queue.enqueue({ kind: "fine", payload: null }, { requestId: "req-ok" });
++  const ranKinds: string[] = [];
++
++  const counts = await queue.run((job) => {
++    if (job.kind === "boom") throw new Error("runner exploded");
++    ranKinds.push(job.kind);
++  });
++
++  assert.deepEqual(counts, { ran: 1, failed: 1 });
++  assert.deepEqual(ranKinds, ["fine"], "the job after the failure still ran");
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure);
++  assert.equal(failure.level, "error");
++  assert.equal(failure.requestId, "req-fail");
++  assert.equal(failure.fields.error, "runner exploded");
++  assert.equal(queue.size, 0);
++});
++
++test("a failing job still logs its start before its failure", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "boom", payload: null }, { requestId: "req-order" });
++
++  await queue.run(() => {
++    throw new Error("runner exploded");
++  });
++
++  assert.deepEqual(
++    lines.map((l) => l.message),
++    ["job started", "job failed"],
++  );
++});
++
++test("a secret in a thrown error message is redacted before the line is written", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-secret" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc");
++  });
++
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure);
++  assert.equal(failure.fields.error, "upstream refused [REDACTED]");
++});
++
++test("a non-Error throw still produces a string error field", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-nonerror" });
++
++  const counts = await queue.run(() => {
++    throw "boom";
++  });
++
++  assert.deepEqual(counts, { ran: 0, failed: 1 });
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure);
++  assert.equal(failure.fields.error, "boom");
++});
++
++test("the payload never reaches a log line", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue(
++    { kind: "report", payload: { password: "hunter2", token: "sk-abcdefghijk" } },
++    { requestId: "req-payload" },
++  );
++
++  await queue.run(() => {});
++
++  assert.equal(lines.length, 2);
++  for (const line of lines) {
++    assert.ok(!("payload" in line.fields), "no payload field is emitted");
++    assert.ok(!JSON.stringify(line).includes("hunter2"), "no payload value leaks into the line");
++  }
++});
++
++test("the payload never reaches the failure line either", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue(
++    { kind: "report", payload: { password: "hunter2", token: "sk-abcdefghijk" } },
++    { requestId: "req-payload-fail" },
++  );
++
++  await queue.run(() => {
++    throw new Error("runner exploded");
++  });
++
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure);
++  assert.ok(!("payload" in failure.fields), "no payload field is emitted on failure");
++  assert.ok(!JSON.stringify(failure).includes("hunter2"), "no payload value leaks into the failure line");
++  assert.equal(typeof failure.fields.durationMs, "number");
++});
++
++test("a sink that throws cannot turn a successful job into a failed one", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => {
++    if (l.message === "job succeeded") throw new Error("sink is broken");
++    lines.push(l);
++  });
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-sink" });
++
++  // The broken sink surfaces rather than being swallowed, and crucially the job is never
++  // reported as failed: the runner succeeded, and only the sink did not.
++  await assert.rejects(queue.run(() => {}), /sink is broken/);
++  assert.equal(
++    lines.find((l) => l.message === "job failed"),
++    undefined,
++    "a sink failure is not logged as a job failure",
++  );
++});
++
++test("enqueue refuses a blank request id, and the jobs it did accept still run", async () => {
++  const { queue, lines } = queueWithCapture();
++  queue.enqueue({ kind: "fine", payload: null }, { requestId: "req-good" });
++
++  assert.throws(() => queue.enqueue({ kind: "bad", payload: null }, { requestId: "" }), /non-empty request id/);
++  assert.throws(() => queue.enqueue({ kind: "bad", payload: null }, { requestId: "   " }), /non-empty request id/);
++
++  assert.equal(queue.size, 1, "the refused jobs were never queued");
++  const counts = await queue.run(() => {});
++  assert.deepEqual(counts, { ran: 1, failed: 0 });
++  for (const line of lines) assert.equal(line.requestId, "req-good");
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..c78fc25 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,10 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and everything logged while that job runs -- by the queue and by the
++ * runner alike -- goes out under that same id.
+  */
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -13,13 +16,25 @@ export interface QueuedJob extends Job {
+   readonly enqueuedAt: number;
+ }
+ 
+-export type JobRunner = (job: QueuedJob) => Promise<void> | void;
++/** The logger is handed in already bound to the job's enqueuing request id, so a runner never mints its own. */
++export type JobRunner = (job: QueuedJob, log: AppLogger) => Promise<void> | void;
+ 
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what jobs log; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
++  /**
++   * A job with no usable request id is refused here rather than at run time: this is the last point
++   * where the caller still has the request context that would explain it.
++   */
+   enqueue(job: Job, opts: { requestId: string }): string {
++    if (opts.requestId.trim() === "") throw new Error("JobQueue requires a non-empty request id");
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+     return id;
+@@ -29,17 +44,31 @@ export class JobQueue {
+     return this.#jobs.length;
+   }
+ 
+-  /** Runs every queued job in order. A failing job is dropped; the rest still run. */
++  /** Runs every queued job in order, logging its start and outcome. A failing job is dropped; the rest still run. */
+   async run(runner: JobRunner): Promise<{ ran: number; failed: number }> {
+     let ran = 0;
+     let failed = 0;
+     while (this.#jobs.length > 0) {
+       const job = this.#jobs.shift()!;
++      // One logger per job: jobs in the same queue carry different request ids, and each line must carry its own.
++      const log = AppLogger.withRequestId(job.requestId, this.#sink);
++      const startedAt = Date.now();
++      log.info("job started", { jobId: job.id, kind: job.kind });
++      // The try covers the runner and nothing else: a failing sink must not be able to count a job as
++      // both ran and failed, so the outcome is decided first and logged after.
++      let failure: string | undefined;
+       try {
+-        await runner(job);
++        await runner(job, log);
++      } catch (err) {
++        failure = err instanceof Error ? err.message : String(err);
++      }
++      const durationMs = Date.now() - startedAt;
++      if (failure === undefined) {
+         ran++;
+-      } catch {
++        log.info("job succeeded", { jobId: job.id, kind: job.kind, durationMs });
++      } else {
+         failed++;
++        log.error("job failed", { jobId: job.id, kind: job.kind, durationMs, error: failure });
+       }
+     }
+     return { ran, failed };

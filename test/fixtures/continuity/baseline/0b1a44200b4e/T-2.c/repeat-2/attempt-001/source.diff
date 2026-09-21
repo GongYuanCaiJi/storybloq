@@ -1,0 +1,514 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..62b5030
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,22 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "storybloq-auto/T-2",
++  "dedupeKey": "T-2:empty-x-request-id-header",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "createApp's handle() resolves the request id as `req.headers[\"x-request-id\"] ?? randomUUID()`. An empty-string header is not nullish, so it is used as-is and reaches AppLogger.withRequestId(\"\"), which throws \"AppLogger requires a non-empty request id\". The request fails with an unhandled error instead of being served under a generated id. Found while working T-2; unrelated to job tracing, so not fixed there.",
++  "location": [
++    "src/http/handler.ts:31"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "Empty x-request-id header makes the request throw"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..c6262ba
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,25 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:73c738712055b64ca89becc0dae2a7de",
++  "discoveredDate": "2026-09-21",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-002",
++  "impact": "r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing request id. This diff satisfies that for the queue's own failure line only; JobRunner (src/jobs/JobQueue.ts:18) is still handed a bare QueuedJob and no request-id-bound AppLogger, so logging inside a job body must build its own logger and nothing enforces the id. Suggested: pass AppLogger.withRequestId(job.requestId, this.#sink) as a second runner argument.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "[ruling-partial-compliance] r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing reque"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..3d3bab8
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,25 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:6548f547006fcdc21386abb594b33c15",
++  "discoveredDate": "2026-09-21",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-003",
++  "impact": "Round-1 finding 3 only half fixed. app.jobs is exposed, but src/http/handler.ts:30 still wires sink only into the queue createApp builds itself, so createApp(new JobQueue(), sinkSpy) sends 'report queued' to sinkSpy while the job-failure line goes to AppLogger's default stdout sink — one call, two destinations, with a sink passed explicitly. The docblock documents the footgun rather than removing it. The injected-queue branch of that ?? was also dead in the suite: every call site passed undefined, so the queue parameter's documented behaviour had no test at all.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "[log-sink-split] Round-1 finding 3 only half fixed. app.jobs is exposed, but src/http/handler.ts:"
++}
+diff --git a/.story/issues/ISS-004.json b/.story/issues/ISS-004.json
+new file mode 100644
+index 0000000..82a734f
+--- /dev/null
++++ b/.story/issues/ISS-004.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:082344e8-79c8-4915-a651-1658a26b5ac6:5da4487d7a35092e8b3ccec63b729eac",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-004",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-004",
++  "impact": "Carried from round 1, still outstanding: r-p19bbvh0jhj8xgma says anything a running job logs is under the enqueuing request id. The code satisfies that for the queue's own failure line only; JobRunner is still handed a bare QueuedJob and no request-id-bound AppLogger, so logging inside a job body must build its own logger and nothing enforces the id.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "082344e8-79c8-4915-a651-1658a26b5ac6"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-002. Both were auto-filed from the same deferred code-review finding (JobRunner receives no request-id-bound AppLogger) — once when it was first deferred in round 1, and again when round 2 re-reported it as still outstanding rather than accepted. ISS-002 is the record to work.",
++  "resolvedDate": "2026-09-20",
++  "severity": "medium",
++  "status": "resolved",
++  "title": "[ruling-partial-compliance] Carried from round 1, still outstanding: r-p19bbvh0jhj8xgma says anything a runn"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index 15480a7..8cf3a05 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Make failed background jobs traceable to the originating request",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-p19bbvh0jhj8xgma",
++    "r-eftp2zdb6as643np"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "When a background job fails there is no way to tell which incoming request caused it. Make failed background jobs traceable to the originating request.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Make failed background jobs traceable to the originating request",
++  "type": "task"
+ }
+diff --git a/src/http/handler.test.ts b/src/http/handler.test.ts
+new file mode 100644
+index 0000000..94fb239
+--- /dev/null
++++ b/src/http/handler.test.ts
+@@ -0,0 +1,80 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { createApp } from "./handler.ts";
++import { JobQueue } from "../jobs/JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a job that fails later is logged under the request id of the request that queued it", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++
++  const res = await app.handle({
++    method: "POST",
++    path: "/reports",
++    headers: { "x-request-id": "req-http-fail" },
++    body: { kind: "daily" },
++  });
++  const { jobId } = res.body as { jobId: string };
++
++  const counts = await app.jobs.run(() => {
++    throw new Error("report generator exploded");
++  });
++
++  assert.deepEqual(counts, { ran: 0, failed: 1 });
++  const failure = lines.find((l) => l.message === "background job failed");
++  assert.ok(failure, "the failed job should have logged a line");
++  assert.equal(failure.requestId, "req-http-fail");
++  assert.deepEqual(failure.fields, { jobId, kind: "report", error: "report generator exploded" });
++});
++
++test("the app's default queue and its routes log to the same sink", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++
++  await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-one-sink" }, body: {} });
++  await app.jobs.run(() => {
++    throw new Error("boom");
++  });
++
++  assert.deepEqual(
++    lines.map((l) => l.message),
++    ["report queued", "background job failed"],
++  );
++  for (const line of lines) assert.equal(line.requestId, "req-one-sink");
++});
++
++test("a caller-supplied queue built from the same sink keeps both halves together", async () => {
++  const lines: LogLine[] = [];
++  const sink = (l: LogLine) => lines.push(l);
++  // The documented remedy for the one split createApp does not close for you: a queue passed in
++  // keeps its OWN sink, so build it from the same one.
++  const app = createApp(new JobQueue(sink), sink);
++
++  await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-supplied" }, body: {} });
++  await app.jobs.run(() => {
++    throw new Error("boom");
++  });
++
++  assert.deepEqual(
++    lines.map((l) => l.message),
++    ["report queued", "background job failed"],
++  );
++  for (const line of lines) assert.equal(line.requestId, "req-supplied");
++});
++
++test("each queued request's failure is traceable to its own request, not the last one", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp(undefined, (l) => lines.push(l));
++
++  await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-first" }, body: {} });
++  await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-second" }, body: {} });
++  await app.jobs.run(() => {
++    throw new Error("boom");
++  });
++
++  const failures = lines.filter((l) => l.message === "background job failed");
++  assert.deepEqual(
++    failures.map((l) => l.requestId),
++    ["req-first", "req-second"],
++  );
++});
+diff --git a/src/http/handler.ts b/src/http/handler.ts
+index 4af02c1..b43c673 100644
+--- a/src/http/handler.ts
++++ b/src/http/handler.ts
+@@ -14,19 +14,33 @@ export interface IncomingRequest {
+   readonly body?: unknown;
+ }
+ 
+-export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { handle(req: IncomingRequest): Promise<RouteResponse> } {
++export interface App {
++  handle(req: IncomingRequest): Promise<RouteResponse>;
++  /** The queue this app enqueues onto, so a caller can run it and see what its failures log. */
++  readonly jobs: JobQueue;
++}
++
++/**
++ * The default queue is built from `sink`, so route logs and job-failure logs share one
++ * destination, and it is exposed as `app.jobs` so a caller can actually run it. A queue passed
++ * in keeps whatever sink its own owner gave it -- pass `new JobQueue(sink)` if you want both
++ * halves going to the same place.
++ */
++export function createApp(queue?: JobQueue, sink?: Sink): App {
++  const jobs = queue ?? new JobQueue(sink);
+   const router = new Router(sink)
+     .add("GET", "/health", (_req, log) => {
+       log.info("health check");
+       return { status: 200, body: { ok: true } };
+     })
+     .add("POST", "/reports", (req, log) => {
+-      const id = queue.enqueue({ kind: "report", payload: req.body }, { requestId: req.requestId });
++      const id = jobs.enqueue({ kind: "report", payload: req.body }, { requestId: req.requestId });
+       log.info("report queued", { jobId: id });
+       return { status: 202, body: { jobId: id } };
+     });
+ 
+   return {
++    jobs,
+     async handle(req: IncomingRequest): Promise<RouteResponse> {
+       const requestId = req.headers["x-request-id"] ?? randomUUID();
+       return router.dispatch({ method: req.method, path: req.path, requestId, body: req.body });
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..a36c788
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,97 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue, type QueuedJob } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a failed job is logged under the request id that enqueued it, per job", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  const first = queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-b" });
++  const third = queue.enqueue({ kind: "digest", payload: null }, { requestId: "req-c" });
++
++  const counts = await queue.run((job: QueuedJob) => {
++    if (job.id !== first && job.id !== third) return;
++    throw new Error(`${job.kind} exploded`);
++  });
++
++  assert.deepEqual(counts, { ran: 1, failed: 2 });
++  assert.equal(lines.length, 2);
++  assert.equal(lines[0].level, "error");
++  assert.equal(lines[0].requestId, "req-a");
++  assert.equal(lines[0].message, "background job failed");
++  assert.deepEqual(lines[0].fields, { jobId: first, kind: "report", error: "report exploded" });
++  assert.equal(lines[1].requestId, "req-c");
++  assert.deepEqual(lines[1].fields, { jobId: third, kind: "digest", error: "digest exploded" });
++});
++
++test("secrets in a job failure are redacted before the line is written", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-secret" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc");
++  });
++
++  assert.equal(lines.length, 1);
++  assert.equal(lines[0].requestId, "req-secret");
++  assert.equal(lines[0].fields.error, "upstream refused [REDACTED]");
++});
++
++test("a job that succeeds logs nothing", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-quiet" });
++
++  assert.deepEqual(await queue.run(() => {}), { ran: 1, failed: 0 });
++  assert.deepEqual(lines, []);
++});
++
++test("a job cannot be queued without a request id to trace it back to", () => {
++  const queue = new JobQueue();
++  assert.throws(() => queue.enqueue({ kind: "report", payload: null }, { requestId: "" }), /non-empty request id/);
++  assert.throws(() => queue.enqueue({ kind: "report", payload: null }, { requestId: "   " }), /non-empty request id/);
++  assert.equal(queue.size, 0);
++});
++
++test("a job that throws something undescribable is still logged under its request id", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  const nullProto = queue.enqueue({ kind: "report", payload: null }, { requestId: "req-null-proto" });
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-bad-getter" });
++
++  const counts = await queue.run((job: QueuedJob) => {
++    // String() cannot convert a null-prototype object; the getter raises on access.
++    if (job.id === nullProto) throw Object.create(null);
++    const err = new Error("ignored");
++    Object.defineProperty(err, "message", {
++      get() {
++        throw new Error("message getter is broken");
++      },
++    });
++    throw err;
++  });
++
++  assert.deepEqual(counts, { ran: 0, failed: 2 });
++  assert.deepEqual(
++    lines.map((l) => l.requestId),
++    ["req-null-proto", "req-bad-getter"],
++  );
++  for (const line of lines) assert.equal(line.fields.error, "<unprintable error>");
++});
++
++test("a throwing sink does not change what run reports, or stop the jobs behind it", async () => {
++  const queue = new JobQueue(() => {
++    throw new Error("sink is broken");
++  });
++  const failing = queue.enqueue({ kind: "report", payload: null }, { requestId: "req-1" });
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-2" });
++
++  const counts = await queue.run((job: QueuedJob) => {
++    if (job.id === failing) throw new Error("boom");
++  });
++
++  assert.deepEqual(counts, { ran: 1, failed: 1 });
++  assert.equal(queue.size, 0);
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..d4cab3c 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,10 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and a job that fails while running is logged under that same id -- so a
++ * failure in the background is traceable back to the request that caused it.
+  */
++import { AppLogger, isUsableRequestId, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -15,11 +18,40 @@ export interface QueuedJob extends Job {
+ 
+ export type JobRunner = (job: QueuedJob) => Promise<void> | void;
+ 
++/**
++ * Describes a thrown value without ever throwing itself. A job can throw anything: an Error with
++ * a getter that raises, or a null-prototype object that `String()` cannot convert. Those must not
++ * cost the failure its log line, which is the whole point of the ticket -- a job that fails in an
++ * unusual way is exactly the one worth tracing.
++ */
++function describeError(err: unknown): string {
++  try {
++    if (err instanceof Error && typeof err.message === "string") return err.message;
++    return String(err);
++  } catch {
++    return "<unprintable error>";
++  }
++}
++
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what a failing job logs; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
++  /**
++   * Rejects an unusable request id here, where the caller can still see it. A job that cannot
++   * name its originating request is untraceable by construction, and accepting one only to
++   * discard it later, in the background, is the failure this ticket exists to remove. The check
++   * is AppLogger's own, not a copy of it, so the two cannot drift into a queue that accepts an
++   * id its logger will later refuse.
++   */
+   enqueue(job: Job, opts: { requestId: string }): string {
++    if (!isUsableRequestId(opts.requestId)) throw new Error("JobQueue requires a non-empty request id");
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+     return id;
+@@ -29,7 +61,10 @@ export class JobQueue {
+     return this.#jobs.length;
+   }
+ 
+-  /** Runs every queued job in order. A failing job is dropped; the rest still run. */
++  /**
++   * Runs every queued job in order. A failing job is dropped and the rest still run, and the
++   * failure is logged under the request id of the request that enqueued that job.
++   */
+   async run(runner: JobRunner): Promise<{ ran: number; failed: number }> {
+     let ran = 0;
+     let failed = 0;
+@@ -38,10 +73,32 @@ export class JobQueue {
+       try {
+         await runner(job);
+         ran++;
+-      } catch {
++      } catch (err) {
++        this.#logFailure(job, err);
+         failed++;
+       }
+     }
+     return { ran, failed };
+   }
++
++  /**
++   * One error line per failed job, under that job's own request id (never a fresh one). The
++   * payload is deliberately left out: it is arbitrary request body, and what makes the failure
++   * traceable is the request id plus the job id.
++   *
++   * Only the sink call is guarded: a broken sink must not change what run() reports or drop the
++   * jobs queued behind this one. Building the logger is deliberately left outside the guard, so
++   * a job that somehow reached the queue without a usable request id fails loudly instead of
++   * vanishing -- `enqueue` already refuses one, and a swallowed throw there would be
++   * indistinguishable from a broken sink.
++   */
++  #logFailure(job: QueuedJob, err: unknown): void {
++    const log = AppLogger.withRequestId(job.requestId, this.#sink);
++    const fields = { jobId: job.id, kind: job.kind, error: describeError(err) };
++    try {
++      log.error("background job failed", fields);
++    } catch {
++      // A broken sink must not take the queue down with it.
++    }
++  }
+ }
+diff --git a/src/platform/logging/AppLogger.ts b/src/platform/logging/AppLogger.ts
+index 811b5d6..09968a7 100644
+--- a/src/platform/logging/AppLogger.ts
++++ b/src/platform/logging/AppLogger.ts
+@@ -45,6 +45,15 @@ export function redactMessage(message: string): string {
+   return message.replace(SECRET_IN_TEXT, "[REDACTED]");
+ }
+ 
++/**
++ * Whether an id can carry a log line. Anywhere that accepts a request id on its way to a logger
++ * should check with THIS, so a caller cannot be told an id is fine and then have `withRequestId`
++ * reject it later, somewhere the throw is harder to attribute.
++ */
++export function isUsableRequestId(requestId: string): boolean {
++  return requestId.trim() !== "";
++}
++
+ export type Sink = (line: LogLine) => void;
+ 
+ export class AppLogger {
+@@ -58,7 +67,7 @@ export class AppLogger {
+ 
+   /** A logger bound to one request id. Every line it emits carries that id. */
+   static withRequestId(requestId: string, sink: Sink = defaultSink): AppLogger {
+-    if (requestId.trim() === "") throw new Error("AppLogger requires a non-empty request id");
++    if (!isUsableRequestId(requestId)) throw new Error("AppLogger requires a non-empty request id");
+     return new AppLogger(requestId, sink);
+   }

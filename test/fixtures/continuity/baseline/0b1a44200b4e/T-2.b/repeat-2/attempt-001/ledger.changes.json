@@ -1,0 +1,188 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Session Handover -- T-2: Add logging for background jobs\n\n**Date:** 2026-09-20 | **Session:** 274138a4 (targeted auto, 1 item) | **Branch:** main | **Commit:** 3ebc0c8\n\n## What was accomplished\n\nT-2 is complete and committed. `JobQueue.run` now logs `\"job started\"` before each runner and exactly one of `\"job succeeded\"` / `\"job failed\"` after, all through `AppLogger`, all under the request id recorded at enqueue time.\n\nFiles: `src/jobs/JobQueue.ts` (modified), `src/jobs/JobQueue.test.ts` (new, 12 cases). Suite 16/16.\n\n## Decisions worth carrying forward\n\n**T-2 cited no rulings when picked; two current ones bound it.** `r-eftp2zdb6as643np` (one logger, request ids, redaction -- supersedes `r-rvcf99q7dwhzzpav`) and `r-p19bbvh0jhj8xgma` (background work logs under the ENQUEUING request's id). Both were cited onto T-2 so they reach the review lenses. **Worth checking whether other tickets have the same gap** -- `storybloq validate` reports current rulings that nothing cites.\n\n**The handler.ts change from the approved plan was reverted, deliberately.** The plan called for threading the logging sink into `createApp`'s default queue. It is unpinnable by any test, because `createApp` never exposes the queue it builds -- so that queue's `run()` is unreachable and its sink unobservable in principle. Confirmed by mutation: reverting left every test green. Shipping an untestable behaviour change would breach RULES.md #3, so it was dropped and the underlying gap filed as **ISS-003**. T-2 touches only `src/jobs/`.\n\n**A blank request id aborts the batch, on purpose.** The logger is built before the try, so a job with a blank `requestId` makes `run` throw rather than run unlogged or be counted as a job that ran and failed. That job is consumed without running and later jobs are stranded. Documented on `run` and pinned by a test. Unreachable from HTTP today (the router rejects a blank id first). A queue-side guard on `enqueue` is the reviewer's suggested alternative and remains unbuilt -- a candidate ticket.\n\n**Only the runner sits inside the try.** Success is recorded via a flag afterwards, so a sink that fails on the success line cannot report a succeeded job as failed.\n\n## Process note: the tests were wrong twice before they were right\n\nThree review rounds, and the substantive findings were all about what the suite FAILED to pin, not about the implementation:\n\n- Round 1: the suite passed against a mutant that logged `\"job succeeded\"` for FAILED jobs, and against one that logged the start line only after the runner returned. Both defeat the ticket's acceptance criterion outright.\n- Round 2: no test used an async runner -- the normal shape for background work. Dropping the `await` left the whole suite green while every rejecting async job was counted and logged as a success.\n- Round 3: clean, zero findings.\n\n**Mutation testing is what caught all of these, and it should be the default here.** Every claimed fix in this session was re-verified by reverting it and confirming a test dies. A test that passes against the obvious wrong implementation is not coverage. This is filed as a lesson.\n\n## Review backend caveat\n\nThe guide asked for **codex** at plan review and at code-review round 3; no `review_plan` or `review_code` tool is exposed in this harness, so all four rounds ran on the documented **agent** fallback. Nothing in the session was reviewed by an independent codex session. If this project expects codex review, the bridge needs registering -- `storybloq health` checks it.\n\n## Open items\n\n| Issue | Severity | What |\n|---|---|---|\n| ISS-001 | medium | Empty/whitespace `x-request-id` header crashes request handling. `??` at handler.ts:31 only falls back on null/undefined, so `\"\"` reaches `AppLogger.withRequestId` and throws -- the caller gets a thrown error, not a response. Verified at HEAD. |\n| ISS-003 | medium | `createApp` never exposes its job queue, so a default-constructed app returns 202 for POST /reports and the job can never run. Nothing in the repo calls `JobQueue.run` at all. |\n| ISS-002 | resolved | Duplicate of ISS-001, auto-filed by the `deferred` disposition after I had already filed it by hand. Closed pointing at ISS-001. |\n\n## Next\n\nISS-003 is the more interesting of the two: fixing it (exposing the queue or a `runJobs()` handle) would also make the reverted sink-threading meaningful and testable. ISS-001 is a small, well-specified fix with a clear repro.\n\n**Left untracked on purpose:** `.continuity-mcp.json` (harness file) and `.story/.gitignore` (storybloq tooling infrastructure -- not T-2 work, so not folded into a ticket commit; someone should decide whether it belongs in version control).\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "agent-plan-review (T-2 round 1, codex unavailable)",
+      "dedupeKey": "t-2-plan-review-r1:blank-request-id-header",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "`createApp().handle` resolves the request id with `req.headers[\"x-request-id\"] ?? randomUUID()` (src/http/handler.ts:31). `??` only falls back on null/undefined, so a client-supplied empty or whitespace-only `x-request-id` header passes through as-is. `Router.dispatch` then calls `AppLogger.withRequestId(\"\")` (src/http/router.ts:37), which throws \"AppLogger requires a non-empty request id\" (src/platform/logging/AppLogger.ts:61). The rejected promise escapes `handle` entirely: the caller gets a thrown error instead of any HTTP response, so a one-header request from an untrusted client turns a routable request into an unhandled failure. Verified against HEAD by calling `handle` with `{\"x-request-id\": \"\"}` -- it throws rather than returning a response. Pre-existing; found during T-2 plan review, not introduced by it. Likely fix: treat blank as absent (`const supplied = req.headers[\"x-request-id\"]?.trim(); const requestId = supplied ? supplied : randomUUID();`), with a test pinning that an empty header still yields a response under a generated id.",
+      "location": [
+        "src/http/handler.ts:31",
+        "src/http/router.ts:37",
+        "src/platform/logging/AppLogger.ts:61"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "5916fa02b52317a4182f2b8a052e5017d87f7ec86bb17577899cf52cb51d5370",
+          "endLine": 31,
+          "path": "src/http/handler.ts",
+          "reviewId": "t-2-plan-review-r1",
+          "revision": "0243db683c79194f5bc189a309d04402c95fb8b2",
+          "startLine": 31
+        }
+      ],
+      "status": "open",
+      "title": "Empty or whitespace x-request-id header crashes request handling"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:274138a4-3256-4826-9142-a0365f78244a:9ac57149ce21f5ae5e29391cf51d42fa",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "Pre-existing: handler.ts:31 resolves the request id with `??`, which only falls back on null/undefined, so a client-sent empty or whitespace-only x-request-id header passes through and makes Router.dispatch throw at AppLogger.withRequestId. Verified at HEAD by invoking handle with an empty header -- it throws instead of returning a response. Not introduced by T-2 and out of its scope; filed as ISS-001 with the reproduction and a suggested fix.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "274138a4-3256-4826-9142-a0365f78244a"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001, which is the record to work. Both describe the same defect: handler.ts:31 resolves the request id with `??`, so a client-sent empty or whitespace-only x-request-id header passes through and makes Router.dispatch throw. ISS-002 was auto-filed by the T-2 plan-review round because the finding was reported with disposition `deferred`, which files an issue automatically; ISS-001 had already been filed by hand for the same finding moments earlier. ISS-001 carries the fuller detail (reproduction, location list, sourceRefs, suggested fix), so it is kept and this one closed. No code change: closing a duplicate ledger record, not the underlying defect, which remains open under ISS-001.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[error-handling] Pre-existing: handler.ts:31 resolves the request id with `??`, which only falls "
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http",
+        "jobs"
+      ],
+      "createdBy": "agent-code-review (T-2 round 1, agent backend)",
+      "dedupeKey": "t-2-code-review-r1:unreachable-default-queue",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "`createApp` returns only `{ handle }` (src/http/handler.ts:29-34). When no queue is passed it builds its own (`queue: JobQueue = new JobQueue()`, line 17) and keeps it private, and nothing anywhere in the repo ever calls `JobQueue.run`. So a default-constructed app accepts POST /reports, enqueues a job, returns 202 with a jobId, and that job is never executed and never will be -- the queue grows unbounded and the 202 is a promise the service cannot keep. A caller can only work around it by constructing the queue itself and passing it in. Found during T-2 code review: the T-2 plan proposed threading the logging sink into that default queue, and the change turned out to be unpinnable by any test precisely because the queue is unreachable, so the change was reverted rather than shipped untested. Pre-existing and out of T-2's scope. Likely fix: return the queue (or a `runJobs()` handle) from createApp, with a test that a job enqueued through POST /reports actually runs; that would also make the sink-threading testable.",
+      "location": [
+        "src/http/handler.ts:17",
+        "src/http/handler.ts:29"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "sourceRefs": [
+        {
+          "contentHash": "ed635267b9488e65a459c441773636f42b6b4f4b4184f064e4f18aa94cdf2c3b",
+          "endLine": 34,
+          "path": "src/http/handler.ts",
+          "reviewId": "t-2-code-review-r1",
+          "revision": "0243db683c79194f5bc189a309d04402c95fb8b2",
+          "startLine": 17
+        }
+      ],
+      "status": "open",
+      "title": "createApp never exposes its job queue, so enqueued jobs can never run"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "Before claiming a behaviour is covered, revert the fix (or apply the obvious wrong implementation) and confirm a test actually fails. A suite that passes against the mutant is not coverage, however readable its assertions. Assert a complete observed sequence — the full ordered list of emitted lines for the path under test — rather than the presence of one expected entry, because a presence check cannot see a spurious extra.",
+      "context": "T-2 (logging for background jobs) took three code-review rounds, and every substantive finding was about what the tests failed to pin, not about the implementation. Round 1: the suite stayed green against a mutant that logged \"job succeeded\" for FAILED jobs, and against one that moved the start line after the runner — both defeat the ticket's acceptance criterion outright. The failure test used `lines.find(l => l.message === \"job failed\")`, which cannot see an extra success line; replacing it with an assertion on the failing job's complete ordered line list killed both mutants. Round 2: no test used an async runner, the normal shape for background work, so dropping the `await` left all 13 tests green while every rejecting async job was logged and counted as a success. Round 3 was clean only after every fix had been re-verified by reverting it.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "testing",
+        "code-review",
+        "mutation-testing",
+        "t-2"
+      ],
+      "title": "Mutation-test the suite before reporting a review round approved",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "When a planned change turns out to be unpinnable by any test, check whether the cause is an unreachable code path rather than laziness about testing. If the path is unobservable in principle, revert the change instead of shipping it untested, and file the reachability gap as an issue. A change nothing can observe is not a small win — it is an unverifiable claim in the diff.",
+      "context": "T-2's approved plan called for threading the logging sink into the default JobQueue that `createApp` builds. A first attempt at a test for it was vacuous — confirmed by mutation, reverting `new JobQueue(sink)` to `new JobQueue()` left all 14 tests green. The root cause was not the test: `createApp` returns only `{ handle }` and never exposes the queue it builds, so that queue's `run()` is unreachable and its sink unobservable by any caller. Shipping it would have breached RULES.md #3 (a behaviour change comes with a test). The change was reverted, T-2 shipped touching only `src/jobs/`, and the underlying gap — a default-constructed app returns 202 for POST /reports for a job that can never run, since nothing in the repo calls `JobQueue.run` at all — was filed as ISS-003.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "testing",
+        "scope",
+        "code-review",
+        "t-2",
+        "iss-003"
+      ],
+      "title": "Don't ship a behaviour change that no test can observe — revert it and file the reason",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

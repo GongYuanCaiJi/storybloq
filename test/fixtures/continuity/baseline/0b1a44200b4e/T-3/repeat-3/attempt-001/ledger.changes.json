@@ -1,0 +1,124 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-3 AppLogger moved to packages/logging (2026-09-20)\n\nTargeted autonomous session, one item: `/story auto T-3`. Commit `954f430` on `main`.\n\n## Completed\n\n- **T-3: Move AppLogger into packages/logging** -- complete. `src/platform/logging/` moved to\n  `packages/logging/` with the same file names. Both files are byte-identical to their previous\n  versions (verified by sha256 against `cc31f85`; git records both as 100% renames), so nothing\n  about redaction or request-id behaviour changed. The three importers in `src/http/`\n  (`router.ts`, `handler.ts`, `router.test.ts`) now point at `../../packages/logging/AppLogger.ts`.\n  `src/platform/` is gone from disk and from the index. `npm test` still runs 4 tests, 4 passing,\n  with the three AppLogger tests executing from the new location.\n- No config change was needed: root `tsconfig.json` already had `\"include\": [\"src\", \"packages\"]`,\n  and `package.json`'s bare `node --test` discovers `packages/**/*.test.ts` on Node 22.18 (confirmed\n  by the passing run, not assumed).\n\n## Decisions\n\n- **T-3 now cites ruling r-eftp2zdb6as643np** (current; supersedes r-rvcf99q7dwhzzpav). It did not\n  cite it at the start of the session. The citation was added so any agent reviewing a change to the\n  logger receives the one-logger/redaction/request-id ruling through the ledger rather than by paste.\n- **No re-export shim at the old path.** A shim would leave two live paths to the one logger, which\n  cuts against the ruling's \"one logger\" framing. The ticket asked for the imports to be updated, and\n  they were.\n- **No manifest for `packages/logging`** -- see ISS-001 below. Out of scope for T-3 by the approved\n  plan; the repo has no workspaces today.\n- **Note N-1 was updated, the T-1 handover was not.** N-1 (\"AppLogger: where it lives and what it\n  guarantees\") is the durable location-of-record a future session reads to find the logger, so its\n  location sentence now says `packages/logging/AppLogger.ts`; its contract and ruling paragraphs are\n  untouched. `.story/handovers/2026-09-15-t-1-applogger.md` still names the old path and is\n  deliberately left alone: handovers are append-only historical records of what was true on their\n  date.\n\n## Stale references to the old path (known, deliberate)\n\n`grep -rn \"platform/logging\" . --exclude-dir=.git` returns three hits, all prose in `.story/`, none\nof them code:\n\n1. `.story/handovers/2026-09-15-t-1-applogger.md:4` -- dated record, append-only, left as-is. This\n   is the one that matters most to a new session, because `storybloq_handover_latest` serves it. Its\n   own \"Carried forward\" line names T-3, so a reader who also sees T-3 complete can reconcile it --\n   and this handover is now the newer record.\n2. `.story/tickets/T-1.json:4` -- a COMPLETE ticket's description, recording where the logger landed\n   when T-1 shipped. Rewriting it would falsify the record.\n3. `.story/tickets/T-3.json:14` -- this ticket's own description, which correctly names the source\n   and destination of the move.\n\nWorth flagging honestly: my implementation report initially claimed two hits, because the grep I ran\ncarried an `--exclude-dir=handovers` the disclosure did not mention. The code review caught it and I\nre-ran it clean. The number above is the verified one.\n\n## Filed\n\n- **ISS-001** (medium): `packages/logging` has no manifest, so a second service still cannot consume\n  it. The move satisfies T-3 as written, but not the motivation behind it -- there is no\n  `package.json` and no workspace config, and the importers reach the package by deep relative path\n  (`../../packages/logging/AppLogger.ts`), which does not port to another service or repo. Needs a\n  manifest and/or workspace entry, plus a decision on the specifier consumers should use, before the\n  second service lands.\n\n## Continuation\n\n- **ISS-001** is the natural next item: it is the remaining gap between \"the logger moved\" and \"the\n  logger is shareable\", and it blocks nothing until the second service is real.\n- T-4 (if it touches `src/http/handler.ts`) should be aware the logger's `Sink`/`LogLine` types now\n  come from `../../packages/logging/AppLogger.ts`.\n\n## Review notes for the next session\n\nThe Codex review bridge is NOT available on this client -- no `review_plan` or equivalent tool is\nregistered, and tool discovery for it returns nothing. Both the plan review and the code review in\nthis session ran through the agent fallback. `storybloq_health` with `only: [\"codex-bridge\"]` is\nworth running if a future session expects codex review.\n\nThe MCP server also reported a version skew at session start: server v1.15.9 vs v0.0.1 installed,\nwith a suggestion to restart the client. It did not affect this session.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "logging",
+        "packaging"
+      ],
+      "createdBy": "agent-code-review (T-3 CODE_REVIEW round 1)",
+      "dedupeKey": "t-3-code-review-1:packaging-followup",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "T-3 moved the logger to packages/logging/ and updated every import, which is all the ticket asked for, but the move alone does not deliver the ticket's stated motivation (\"the logger is about to be shared with a second service\"). packages/logging has no package.json and the repo has no workspace configuration, and the three importers reach it by deep relative path (\"../../packages/logging/AppLogger.ts\"). Deep relative escapes out of src/ do not port to another service or repo, so the second service cannot consume the logger as it stands. Needs a manifest and/or workspace entry (and a decision on the import specifier the consumers should use) before the second service lands. Deliberately out of scope for T-3: the approved plan excluded a manifest, since the repo has no workspaces today and the ticket did not ask for publishing.",
+      "location": [
+        "packages/logging/AppLogger.ts",
+        "package.json",
+        "src/http/router.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-3"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "packages/logging has no manifest, so a second service still cannot consume it"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When deferring an out-of-scope review finding on an approved round, omit `recommendedNextState` rather than passing through the reviewer's `PLAN`. The guide rejects the whole payload as \"Contradictory review payload: verdict is 'approve' but findings recommend replanning\", and `PLAN` means \"replan THIS item\", which a deferred finding by definition does not ask for. Omitting the field is legitimate; changing the verdict to match it is not.",
+      "context": "T-3 CODE_REVIEW round 1. The reviewer approved the move and marked a packaging follow-up (no manifest under packages/logging) with recommendedNextState PLAN. Reporting it verbatim was refused by storybloq_autonomous_guide. Resolved by filing the finding as ISS-001, keeping disposition deferred, and dropping the field -- verdict and findings otherwise unchanged. Related: a `deferred` finding at severity `suggestion` is exempt from auto-filing, so if you want the issue to exist you must call storybloq_issue_create yourself.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "autonomous-mode",
+        "code-review",
+        "findings"
+      ],
+      "title": "An approve verdict cannot carry a finding with recommendedNextState PLAN",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "When verifying that a moved or renamed path has no stragglers, run the grep with no exclusions beyond `.git`, then decide per hit what to do. Excluding a directory up front and reporting the count as clean states a verification you did not perform. Prose in the ledger counts: an active note is a live pointer and should be updated, while a dated handover or a completed ticket's description is a historical record and should be left alone.",
+      "context": "T-3 moved src/platform/logging to packages/logging. The implementation report claimed the widened grep left two hits; the grep had carried --exclude-dir=handovers, and the real count was three. The code review caught it. Note N-1 (the architecture note sessions read to find the one logger) was correctly updated; the T-1 handover and T-1's ticket description were correctly left stale as dated records.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "refactor",
+        "verification",
+        "ledger-hygiene"
+      ],
+      "title": "Scope a post-move grep to the whole tree, then justify each hit",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "notes/N-1.json",
+    "kind": "changed",
+    "fields": {
+      "content": {
+        "before": "AppLogger is the one logger in this service. It lives at src/platform/logging/AppLogger.ts with AppLogger.test.ts beside it.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id.",
+        "after": "AppLogger is the one logger in this service. It lives at packages/logging/AppLogger.ts with AppLogger.test.ts beside it.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id."
+      },
+      "updatedDate": {
+        "before": "2026-09-15",
+        "after": "2026-09-20"
+      },
+      "displayId": {
+        "after": "N-1"
+      }
+    }
+  },
+  {
+    "path": "tickets/T-3.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np"
+        ]
+      },
+      "displayId": {
+        "after": "T-3"
+      }
+    }
+  }
+]

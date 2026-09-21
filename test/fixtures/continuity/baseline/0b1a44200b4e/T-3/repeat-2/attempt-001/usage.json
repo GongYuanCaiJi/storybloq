@@ -1,0 +1,65 @@
+{
+  "planEntryContext": 77557,
+  "planEntries": [
+    77557
+  ],
+  "beforePlanWrittenContext": 93622,
+  "totalInputTokens": 3749272,
+  "mainRequests": 38,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01NTFWugnrYLrcER8P668RtL"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_014bJHfnYDW5VFz5i3cSYsk4"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01Uf1dAqHQRYxbScaaRKAdh9"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_013obn3wNZdV39i9yRvuAqub"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01XBGqYo9onSKDwHfsLXwvZ8"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_017qZykC2jmRq5HDYkK5knqU"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01X4KWz515HGC4JjovNLRSj6"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01B7nASe2J3E5kbfYbjWuxMv"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+      "toolUseId": "toolu_01BisyvTmqrxEGuQm4B2sDS5"
+    }
+  ],
+  "guideSessionId": "ba1a89ed-00d5-46e6-b9c9-b6539cd1a1d5",
+  "firstPlanWrittenToolUseId": "toolu_01Uf1dAqHQRYxbScaaRKAdh9",
+  "totalCostUsd": 3.4039020000000004,
+  "numTurns": 46,
+  "resultSubtype": "success"
+}

@@ -1,0 +1,463 @@
+[
+  {
+    "toolUseId": "toolu_012dgDzzD2DruX2HwV4mrM6a",
+    "input": {
+      "sessionId": null,
+      "action": "start",
+      "targetWork": [
+        "T-4"
+      ],
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e"
+    },
+    "resultHead": "# Targeted Autonomous Session Started\n\nYou are in targeted auto mode. Working on 1 specific item(s) in order, then ending the session. A checkpoint handover will be saved every 3 items.\nDo NOT stop to summarize. Do NOT ask the user. Do NOT cancel for context management; Storybloq rotates at a clean boundary when pressure reaches the configured threshold.\n\n## Targeted Work Items\n\n1. **T-4: Add per-"
+  },
+  {
+    "toolUseId": "toolu_01GFzSQPvEuZkmeL38uXHZSe",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "report": {
+        "completedAction": "ticket_picked",
+        "ticketId": "T-4"
+      },
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e"
+    },
+    "resultHead": "# Plan for T-4: Add per-client rate limiting to the HTTP handler\n\n## Ticket Description\n\nRequests from one client can starve the others. Add per-client rate limiting to the HTTP handler: a fixed window per client id (the x-client-id header), a 429 response when the window is exhausted, and a test.\n\n\nWrite an implementation plan for this ticket. Save it to `.story/sessions/7db8c03c-4d83-408f-a90d-3"
+  },
+  {
+    "toolUseId": "toolu_01HEJE4geE2zj3S2MbyqV2KZ",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_written"
+      },
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e"
+    },
+    "resultHead": "# Plan Review -- Round 1 of 1 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01VfRNnZFKtZkNRF4RsaLS1z",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "configured",
+        "notes": "codex unavailable: no review_plan tool is registered on this harness (tool discovery for a codex plan-review bridge returned nothing). Fell back to agent review per the guide's fallback instruction.",
+        "findings": [
+          {
+            "severity": "major",
+            "category": "test-placement-rule",
+            "description": "RULES.md rule 3 requires a behaviour change to ship with a test in the same directory named <Module>.test.ts. The plan changes behaviour in two modules (new src/http/RateLimiter.ts and modified src/http/handler.ts: new third parameter, new pre-routing 429 path, anonymous bucketing) but proposes only src/http/RateLimiter.test.ts. Plan tests 5 and 6 exercise createApp, i.e. handler.ts behaviour, from a file named after a different module; they belong in src/http/handler.test.ts.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "principle": "test placement",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "major",
+            "category": "unbounded-memory",
+            "description": "The plan's 'unbounded-growth guard' does not bound growth in the case that matters. It sweeps only entries whose window has already expired; a client rotating x-client-id on every request (the key is a caller-supplied header) produces only live, unexpired entries, so nothing is reclaimed, the map grows past maxTrackedClients without limit, and every insert past the cap triggers an O(n) scan that reclaims nothing, so per-request CPU grows with the attack. That is a worse resource-starvation vector than the one T-4 fixes. Needs a hard cap (eviction by oldest window, or refuse-to-track once full) or an explicit argued out-of-scope statement.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "minor",
+            "category": "test-adequacy",
+            "description": "Plan test 4 ('a denied request does not extend the window') does not discriminate as described: if the stub clock is not advanced between the calls that exhaust the limit and the denied calls, windowStart and the denial timestamp are identical, so advancing just past the original windowMs admits the client whether or not a denial reset windowStart. The test must advance the clock strictly inside the window before the denied calls.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "minor",
+            "category": "test-determinism",
+            "description": "Plan test 5 asserts the warn line's requestId is the refused request's id, but handler.ts falls back to randomUUID() when x-request-id is absent, so the refused request must explicitly carry an x-request-id header. Also the first (202) request logs 'report queued', so the shared sink holds two lines; the assertion must select the warn/'rate limited' line rather than copying router.test.ts's lines[0] pattern.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "minor",
+            "category": "residual-starvation",
+            "description": "Bucketing all header-less traffic under one shared 'anonymous' key closes the bypass but reintroduces the ticket's own failure mode inside that bucket: one flooding header-less client starves every other header-less client. The plan should state this residual rather than presenting the shared bucket as strictly safer.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "suggestion",
+            "category": "header-casing",
+            "description": "IncomingRequest.headers is a plain Record<string, string | undefined> with no normalisation, so a caller passing X-Client-Id silently lands in the anonymous bucket. For the request id that was cosmetic; for a limiter it is a bypass. A case-insensitive lookup helper stays within Node built-ins.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "suggestion",
+            "category": "rationale-error",
+            "description": "The stated justification 'a denied request does not increment the count, so a client hammering a closed window cannot push its own reset time out' is unsound for a fixed window: reset time is windowStart + windowMs, independent of count. The behaviour is correct; the reason given is not the reason.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "suggestion",
+            "category": "verification-step",
+            "description": "The plan's 'npx tsc --noEmit' verification step would fetch TypeScript, which the repo declares nowhere (no dependencies or devDependencies); it is not runnable offline and sits awkwardly beside rule 2. npm test (node --test) is the only verification the repo supports.",
+            "file": "package.json",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "suggestion",
+            "category": "limiter-scope",
+            "description": "Running the limiter strictly in front of routing means GET /health probes and unmatched 404 paths consume a client's quota. Defensible, but it is an unmentioned behaviour change with no test; one sentence deciding it deliberately would close it.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          }
+        ]
+      }
+    },
+    "resultHead": "# Plan Review -- Round 1 requested changes\n\nReview effort: standard (size-mapped).\n\nUpdate the plan to address these findings, then call me with completedAction: \"plan_review_round\" and the new review verdict.\n\n- [major] RULES.md rule 3 requires a behaviour change to ship with a test in the same directory named <Module>.test.ts. The plan changes behaviour in two modules (new src/http/RateLimiter.t"
+  },
+  {
+    "toolUseId": "toolu_01MMjrSXsrvwmBDMCyYFzRju",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "configured",
+        "notes": "codex unavailable (no review_plan bridge registered on this harness); agent review fallback, round 2. Both round-1 majors confirmed resolved by the reviewer. The round-2 minors and suggestions were all addressed in the plan before approving.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "eviction-rationale",
+            "description": "The eviction trade was stated but its central claim was wrong in the very attack it exists for: under a rotating-id flood the map fills with entries whose windowStart is ~now, so the oldest entry is a legitimate client seconds into its window (furthest from reset, not closest), and enforcement is effectively suspended for real clients for the duration of the flood. The bound itself (hard cap, one delete, O(1), Map insertion order per spec) is correct and the round-1 unbounded-memory defect is genuinely fixed.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now states the degradation honestly with the 10k/10k example, keeps the trade deliberately, and names authentication (already out of scope) as the real fix rather than a cleverer eviction order."
+          },
+          {
+            "severity": "minor",
+            "category": "test-observability",
+            "description": "RateLimiter test 5 asserted the tracked size never exceeds 2, but the sketched public API exposed only check(clientId): RateLimitDecision, with no size accessor and no map state on the decision, so the test could not be implemented against the stated interface.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Design now declares a readonly size getter on RateLimiter, which is what makes the cap testable."
+          },
+          {
+            "severity": "minor",
+            "category": "test-discrimination",
+            "description": "New test 5 specified maxTrackedClients but no limit, so at the default limit of 100 the assertion that the evicted client gets a fresh allowance passes identically whether or not eviction occurred. Same non-discriminating shape round 1 caught in test 4, reintroduced by the revision.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Test 5 now pins limit: 1, so the evicted client is allowed only if eviction happened, and additionally asserts the still-tracked client is denied."
+          },
+          {
+            "severity": "suggestion",
+            "category": "verification-claim",
+            "description": "The plan claimed type errors surface as test failures under node --test. Node's type stripping erases annotations without checking them, so type-only errors surface as nothing. Dropping the npx tsc step is right; the justification was false.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Verification section now states plainly that the repo has no type checking at all and that this change accepts that."
+          },
+          {
+            "severity": "suggestion",
+            "category": "ordering-invariant",
+            "description": "The delete-and-re-insert-on-reset discipline keeps Map insertion order equal to windowStart ascending on every path checked, but only under a monotonic clock; Date.now can step backwards, after which eviction picks a not-quite-oldest entry. Consequence is benign (still O(1), still bounded).",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now enumerates the paths the invariant holds on, qualifies it with 'given a monotonic clock', and marks the backwards-clock case as a caveat on ordering rather than on the cap."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "Test 9 was titled 'Unrouted and health requests count' but described only GET /health then POST /reports; the plan's reasoning leans specifically on 404s, and that half was untested.",
+            "file": ".story/sessions/7db8c03c-4d83-408f-a90d-301f727afab4/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Test 9 now sends GET /health and GET /nope (unrouted) before the third request, covering both halves."
+          },
+          {
+            "severity": "suggestion",
+            "category": "header-casing-consistency",
+            "description": "The new case-insensitive header helper was applied only to x-client-id; x-request-id kept the exact-lowercase lookup, so a caller sending X-Request-Id still gets a randomUUID and loses correlation with its own logs, which sits badly beside ruling r-eftp2zdb6as643np.",
+            "file": "src/http/handler.ts",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now reuses the same helper for x-request-id: one call site, no new machinery, and it closes a known request-id correlation gap the ruling speaks to."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-4: Add per-client rate limiting to the HTTP handler\n\n## Approved plan\n\n```markdown\n# T-4 — Per-client rate limiting in the HTTP handler\n\n## Goal\n\nOne client must not be able to starve the others. Add a fixed-window,\nper-client-id limiter in front of routing: requests are counted per\n`x-client-id`, and once a client's window is exhausted the request is refused\nwith a 429 instead of"
+  },
+  {
+    "toolUseId": "toolu_011JPtZhmP9FQFXVPf1jhiNX",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Created src/http/RateLimiter.ts (fixed window, injected clock, hard maxTrackedClients cap with O(1) oldest-window eviction, readonly size) and src/http/RateLimiter.test.ts. Modified src/http/handler.ts: case-insensitive header helper now used for both x-client-id and x-request-id, limiter runs in front of routing, 429 refusal logged via AppLogger under the request id. Added src/http/handler.test.ts for the app-level cases per RULES.md rule 3. RateLimitDecision gained a readonly limit field so the handler can log the limit the plan specified without reaching into config. Two tests beyond the plan: a 500-id rotating-id flood asserting size stays at the cap, and a regression that the allowed path still routes and logs exactly one line. npm test: 15/15 pass, existing router.test.ts and AppLogger.test.ts unchanged and passing."
+      }
+    },
+    "resultHead": "# Code Review -- Round 1 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01FwwnVT5PuhR3kWT6zL4PcC",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "configured",
+        "notes": "Agent code review, round 1, as instructed. Reviewer read the full 348-line diff, the approved plan, ran npm test (15/15), probed the limiter's edge cases with a scratch script, and type-checked with an external tsc 5.9.3 + @types/node.",
+        "findings": [
+          {
+            "severity": "major",
+            "category": "health-check-starvation",
+            "description": "The anonymous bucket and 'every request counts, including /health' are each justified separately but their interaction is an availability hazard the tests lock in. All requests with no x-client-id share the key 'anonymous', and the limiter runs before routing, so a load-balancer or k8s probe hitting GET /health (which carries no x-client-id) draws from the same default 100/min window as every other header-less caller. Scenario: a burst of 100 anonymous requests exhausts 'anonymous'; the next /health probe gets 429, the LB pulls the instance from rotation, load shifts to peers which trip the same bucket. A quota event becomes an outage. The plan's justification ('a caller that polls /health hard enough to exhaust its own window is a caller the limiter should be refusing') is false under the shared bucket: the probe's quota is spent by other clients, not by the probe.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "minor",
+            "category": "flaky-test",
+            "description": "handler.test.ts asserts an exact retryAfterSeconds of 60 twice while the app runs on the real Date.now (the injectable clock is not injected there). retryAfterSeconds is Math.ceil((windowStart + 60000 - now) / 1000), so it is 60 only while both app.handle calls land in the same 1000ms; a GC pause or loaded CI yields 59 and fails. It is also the ONLY assertion pinning the retryAfterSeconds arithmetic at all: the deterministic tests only check > 0, which Math.max(1, ...) makes true for almost any arithmetic mistake.",
+            "file": "src/http/handler.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "minor",
+            "category": "untested-behaviour-change",
+            "description": "The diff changes x-request-id resolution from an exact lowercase lookup to the case-insensitive helper. That is a real behaviour change on the request-id path governed by ruling r-eftp2zdb6as643np (a caller sending X-Request-Id previously got a fresh randomUUID and now gets its own id honoured), and no test in the diff covers it. RULES.md rule 3 requires a behaviour change to ship with a test.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "minor",
+            "category": "header-lookup-edge-case",
+            "description": "header() returns on the first name-matching key even when that key's value is undefined, and IncomingRequest.headers is explicitly Record<string, string | undefined>, so undefined values are in contract. With headers { 'X-Client-Id': undefined, 'x-client-id': 'c1' } the helper returns undefined and the request is bucketed as anonymous despite carrying a real client id. The same shape on x-request-id drops the caller's id for a randomUUID, losing the correlation the ruling is about.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "minor",
+            "category": "unvalidated-options",
+            "description": "maxTrackedClients is not validated and the guard degrades quietly on non-positive-integer input. Verified by running the module: NaN leaves the map UNBOUNDED (NaN >= NaN is false, so eviction never fires; 500 rotating ids produced 500 entries), which defeats the cap entirely; 2.5 settles at 3 entries; 0 and -1 still track 1 client. A misconfigured maxTrackedClients: Number(process.env.X) with an unset var is exactly the NaN case. The ordering invariant itself was traced and confirmed sound on every path.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "minor",
+            "category": "unhandled-input",
+            "description": "A whitespace-only or empty x-request-id makes handle() reject instead of responding: header(...) ?? randomUUID() does not treat '' or '   ' as absent, and AppLogger.withRequestId throws on a blank id. Pre-existing on the router path, but this diff adds a second call site for it on the new 429 path and rewrites the request-id resolution line anyway.",
+            "file": "src/http/handler.ts",
+            "origin": "pre-existing",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "RateLimitDecision.resetAt is never asserted by any test and is unused by the handler, so a wrong resetAt (e.g. computed from now rather than windowStart, silently turning the fixed window into a sliding one for reporting) would be caught only indirectly via the flaky exact-60 assertion.",
+            "file": "src/http/RateLimiter.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          },
+          {
+            "severity": "suggestion",
+            "category": "plan-deviation",
+            "description": "Two benign divergences from the approved plan. (1) RateLimitDecision gains a limit field the plan's interface sketch omits; it is required by the plan's own log-line spec, so the addition is right and the sketch was incomplete. (2) The plan's Verification section asserts the repo has no type checking at all and that tsc is unrunnable offline, but the repo does check in a tsconfig.json with strict: true, which the plan never mentions; the new code type-checks clean under tsc 5.9.3 with @types/node. Nothing is broken, but the plan's stated reason for skipping the step rests on a false premise about the repo.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "IMPLEMENT"
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-4: Add per-client rate limiting to the HTTP handler\n\n## Approved plan\n\n```markdown\n# T-4 — Per-client rate limiting in the HTTP handler\n\n## Goal\n\nOne client must not be able to starve the others. Add a fixed-window,\nper-client-id limiter in front of routing: requests are counted per\n`x-client-id`, and once a client's window is exhausted the request is refused\nwith a 429 instead of"
+  },
+  {
+    "toolUseId": "toolu_0136DvDxrwXeeEsnfoXsdEV7",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Round-1 code review findings addressed. (1) major health-check-starvation: GET /health is now exempt from the limiter; 404s and every other path still count. This deviates from the approved plan, which counted /health, so the plan's own section was rewritten to state the exemption and why the old justification was false under the shared anonymous bucket. (2) flaky-test: the handler test now injects a stub clock and asserts an exact retryAfterSeconds of 45 after advancing 15s, and RateLimiter.test.ts now pins the arithmetic directly (exact 40, and 1 with 1ms left). (3) untested-behaviour-change: added a test for case-insensitive x-request-id. (4) header-lookup-edge-case: header() now skips keys whose value is undefined, with a test. (5) unvalidated-options: limit/windowMs/maxTrackedClients must be positive integers or the constructor throws, with a test covering NaN, 0, 2.5 and -1. (6) unhandled-input (pre-existing, on a line this diff rewrites): a blank x-request-id is now treated as absent rather than throwing out of AppLogger.withRequestId; fixed inline rather than filed because the diff adds a second call site for it, with a test. (7) resetAt test-coverage suggestion: asserted under the stub clock both allowed and denied. (8) plan-deviation suggestion: the plan's verification section was corrected -- the repo does ship a tsconfig.json with strict: true, it just ships no compiler. npm test: 21/21 pass."
+      }
+    },
+    "resultHead": "# Code Review -- Round 2 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Previous round (round 1), verdict: revise\n\n  - major/health-check-starvation: The anonymous bucket and 'every request counts, including /health' are each justified separately but their interaction is an availability hazard the tests lock in. All requests with no x-client-id share the key 'anonymous', and the limiter r"
+  },
+  {
+    "toolUseId": "toolu_01PyPCYSYHD6PM3FpMeqyuN6",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "configured",
+        "notes": "Agent code review, round 2. Reviewer read the full 455-line diff and the updated plan, ran npm test (21/21 at review time), and mutation-tested every claimed round-1 fix in a throwaway copy: reverting each implementation line failed 1-4 tests, so all seven round-1 findings are confirmed genuinely fixed rather than restated. Verdict approve with four suggestions, all of which were then addressed; suite now 22/22.",
+        "findings": [
+          {
+            "severity": "suggestion",
+            "category": "unmetered-path",
+            "description": "The /health exemption is correctly scoped (method AND path, exact string) and is not a quota bypass: the route ignores the body, returns {ok:true}, and never touches the limiter map. But it leaves one path that emits a log line per request with no ceiling at all, so a client sending GET /health at 10k req/s gets unbounded log volume where every other path would 429. The plan called the route 'side-effect-free', which is not quite accurate.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Plan now states the cost explicitly: /health is cheap but not free, it is the one path whose log volume has no ceiling, that is the ordinary trade for a probe, and the exemption is scoped to GET so POST /health is metered."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "Mutating the exemption from `req.method === 'GET' && req.path === '/health'` to `req.path === '/health'` left all 21 tests passing. The implementation is correct, but nothing pinned the method half, so a later edit dropping it would silently open POST /health as an unmetered channel.",
+            "file": "src/http/handler.test.ts",
+            "origin": "introduced",
+            "originClass": "introduced-by-fix",
+            "disposition": "addressed",
+            "dispositionReason": "Added an assertion that POST /health from a spent client returns 429, pinning the method half of the scoping."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "The delete+re-insert on the window-reset path is the invariant that keeps Map insertion order equal to windowStart ascending, which is what makes #evictOldest evict the oldest. Replacing it with an in-place mutation left all 21 tests passing, so the invariant the module doc and the plan both lean on was untested.",
+            "file": "src/http/RateLimiter.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Added a test that lets one client's window elapse and renew, then inserts past the cap and asserts the renewed client survived while the genuinely older one was evicted. Verified it fails under the in-place-mutation mutant."
+          },
+          {
+            "severity": "suggestion",
+            "category": "dead-code",
+            "description": "Math.max(1, ...) in retryAfterSeconds is unreachable: a denial can only occur while now < resetAt, so resetAt - now >= 1ms and Math.ceil already yields >= 1. Dropping the guard left all tests green, including the one named 'retryAfterSeconds never rounds down to zero inside the window', which passes vacuously with respect to the guard it appears to protect.",
+            "file": "src/http/RateLimiter.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Dropped the unreachable Math.max and replaced it with a comment stating why Math.ceil suffices; renamed the test to 'a denial with a millisecond left still reports a whole second', which is what it actually covers."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Finalize\nCode review passed. Time to commit.\n1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)\n2. Update ticket T-4 status to \"complete\" in .story/\n3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`\n4. Call me with completedAction: \"files_staged\"\n---\n**Session:** 7db8c03c-4d83-408f-a90d-301f"
+  },
+  {
+    "toolUseId": "toolu_01Fsv9RqXhSBvYkevhhUMHqL",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "Staged: src/http/RateLimiter.ts, src/http/RateLimiter.test.ts, src/http/handler.ts, src/http/handler.test.ts, .story/tickets/T-4.json. Left unstaged and untracked: .continuity-mcp.json and .story/.gitignore, neither of which this ticket created or touched."
+      }
+    },
+    "resultHead": "Files staged. Now commit.\n\nCommit with message: \"feat: <description> (T-4)\"\n\nCall me with completedAction: \"commit_done\" and include the commitHash.\n---\n**Session:** 7db8c03c-4d83-408f-a90d-301f727afab4\n**State:** FINALIZE\n**Ticket:** T-4: Add per-client rate limiting to the HTTP handler\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n\n**Reminders:**\n- NEVER cancel this sess"
+  },
+  {
+    "toolUseId": "toolu_01LGUTqpbsBoJMBs7oy97n8N",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "commit_done",
+        "commitHash": "9b5c4a069c56c2a0b3e5d087ecadfa50264db5bc"
+      }
+    },
+    "resultHead": "# Targeted Session Complete -- All 1 target(s) done\n\nWrite a session handover summarizing what was accomplished, decisions made, and what's next.\n\nCall me with completedAction: \"handover_written\" and include the content in handoverContent.\n---\n**Session:** 7db8c03c-4d83-408f-a90d-301f727afab4\n**State:** HANDOVER (from COMPLETE)\n**Ticket:** none\n**Risk:** unknown\n**Completed:** T-4\n**Tickets done:*"
+  },
+  {
+    "toolUseId": "toolu_01MsdhgJMRtiBjXXhV4Jvdqw",
+    "input": {
+      "sessionId": "7db8c03c-4d83-408f-a90d-301f727afab4",
+      "action": "report",
+      "clientTaskId": "469e17fb-f691-4261-af43-15d455dfe87e",
+      "report": {
+        "completedAction": "handover_written",
+        "handoverContent": "# Session handover -- T-4, per-client rate limiting\n\nTargeted autonomous session (`/story auto T-4`). One item, completed and committed as `9b5c4a0`.\n\n## What shipped\n\n**T-4: Add per-client rate limiting to the HTTP handler** -- complete.\n\n- **New `src/http/RateLimiter.ts`**: fixed window per client id, injected clock, and a *hard* cap on tracked clients enforced by O(1) oldest-window eviction. Constructor validates `limit`/`windowMs`/`maxTrackedClients` as positive integers.\n- **`src/http/handler.ts`**: limiter runs in front of routing; 429 with `{ error, retryAfterSeconds }`; headers matched case-insensitively; missing client id shares one `\"anonymous\"` bucket; refusal logged through `AppLogger` under the request id.\n- **Tests**: `src/http/RateLimiter.test.ts` and `src/http/handler.test.ts` (rule 3 -- the change touches two modules, so it ships two test files). Suite 22/22.\n\n## Decisions worth carrying forward\n\n1. **`GET /health` is exempt from the limiter; unmatched paths are not.** This reversed the approved plan after code review round 1. A probe sends no `x-client-id`, so it lands in the shared `\"anonymous\"` bucket and its quota is spent by unrelated header-less callers: a burst 429s the probe, the LB pulls the instance from rotation, load shifts to peers that trip the same bucket. A rate limiter must not be able to take the service out of rotation. The exemption is scoped to method *and* path, and `POST /health` is metered like anything else. Cost accepted and recorded in the plan: `/health` is now the one path whose log volume has no ceiling.\n\n2. **The cap is a hard cap, not a sweep of expired entries.** The key is a caller-supplied header, so a client rotating `x-client-id` every request produces only *live* entries; an expiry sweep would reclaim nothing while charging a scan for it, making per-request CPU rise with the flood. Eviction takes the oldest window in O(1) by keeping `Map` insertion order equal to `windowStart` ascending (a reset deletes and re-inserts the entry).\n\n3. **Eviction's cost is real and was taken deliberately.** Under a sustained rotating-id flood the oldest entry is a *legitimate* client, so enforcement is effectively suspended for real clients for the duration. The fix for that is identity the caller cannot mint -- authentication -- not a cleverer eviction order. Explicitly out of scope for T-4.\n\n4. **Options are validated at construction.** `maxTrackedClients: NaN` would make `size >= max` false forever and silently leave the map unbounded -- the exact failure the cap exists to prevent. `Number(process.env.X)` with an unset variable is that case.\n\n5. **The repo has a `tsconfig.json` with `strict: true` but no compiler installed** (no deps/devDeps), and Node strips types without checking them. So `npm test` is the whole in-repo verification story and a type-level mistake is caught by nothing. Pre-existing; this change accepts it. Code review type-checked the new code out-of-band and found it clean.\n\n## Process notes\n\n- **The codex review bridge is not available on this harness** -- no `review_plan` tool is registered, so both plan review and code review ran on the agent fallback per the guide's instruction. Worth knowing before assuming a codex-backed review ran.\n- Review was productive rather than ceremonial: plan review caught an unbounded-memory hole in the first draft's \"growth guard\", and code review round 1 caught the `/health` availability hazard, which the tests at that point had locked in as intended behaviour. Round 2 mutation-tested each claimed fix (reverting the implementation line and re-running) before approving -- that is what distinguished genuine fixes from restatements, and it also surfaced three tests that passed vacuously.\n\n## Incidental fix\n\nA blank or whitespace-only `x-request-id` previously threw out of `AppLogger.withRequestId` instead of responding. Pre-existing, but this diff rewrote that exact line and added a second call site for it, so it was fixed inline (`?.trim() || randomUUID()`) with a test rather than filed.\n\n## What's next\n\nNothing is blocked and nothing was left half-done. No issues were filed this session. The backlog is unchanged apart from T-4 moving to complete -- run `/story` for the current ranking."
+      }
+    },
+    "resultHead": "# Session Complete\n\n1 ticket(s) and 0 issue(s) completed. Handover written. Session ended.\n\n- T-4: Add per-client rate limiting to the HTTP handler (9b5c4a069c56c2a0b3e5d087ecadfa50264db5bc)\n\n## Session Report\n\n**Duration:** 22m | **Tickets:** 1 | **Issues:** 0 | **Reviews:** 4 rounds (28 findings) | **Compactions:** 0\n\n### Completed\n| Ticket | Title | Duration |\n|--------|-------|----------|\n| T-"
+  }
+]

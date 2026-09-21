@@ -1,0 +1,148 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 background job logging landed (2026-09-21)\n\nTargeted autonomous session, scoped to T-2 only. Commit `bbc0df0` on `main`. 13/13 tests pass.\n\n## Completed\n\n- **T-2: Add logging for background jobs** -- `JobQueue.run()` now logs start, success and\n  failure through `AppLogger`, with the logger bound **per job** to `job.requestId`. New tests\n  in `src/jobs/JobQueue.test.ts` (7) and `src/http/handler.test.ts` (3).\n\n## Decisions\n\n- **The logger is per job, not per queue.** A drain mixes jobs from many requests, so a\n  queue-level logger would stamp one id on every line. This is what r-p19bbvh0jhj8xgma\n  actually requires, and it is the first thing to check if this code is touched again.\n- **`enqueue()` now rejects a blank request id** (behaviour change to an existing public\n  method). A job with no usable id cannot be logged under one. Catching it at enqueue puts the\n  error in front of the caller holding the bad id, rather than letting `run()` throw mid-drain\n  against an unrelated job. Minting a fresh id was rejected outright -- that is precisely what\n  the ruling forbids. The guard is the first statement of `enqueue`, before the id allocation,\n  so a rejected call consumes no job id.\n- **Only the runner call sits inside `run()`'s `try`.** Its `catch` means \"this job failed\",\n  so nothing else may reach it. This was a real bug in the first implementation, caught in code\n  review: with the success line inside the `try`, a throwing sink ran `ran++` *and* `failed++`\n  and wrote a `job failed` line for a job that succeeded. The default sink is\n  `process.stdout.write`, which throws on EPIPE, so a closed stdout would have mislabelled every\n  job. Consequence, now documented on `run()`: a failing **sink** stops the drain rather than\n  being absorbed, losing the tally and leaving queued jobs queued. That trade is deliberate --\n  a sink that cannot record what happened must not silently relabel a success as a failure.\n- **`createApp` returns `{ handle, jobs }`.** The plan had explicitly declined to widen this\n  API \"purely for a test\"; that was wrong and review proved it. The default queue was otherwise\n  unreachable, so its sink wiring had *zero* coverage -- verified by dropping the sink and\n  watching all tests still pass. A caller-supplied queue keeps its own sink; both halves of that\n  contract are now pinned by tests.\n- **T-2 cited no rulings when picked.** r-eftp2zdb6as643np and r-p19bbvh0jhj8xgma plainly bind\n  it, so they were added to its `citesRulings` before planning. Without that they would not have\n  reached the review packet. Worth checking on other open tickets.\n\n## Method note worth carrying forward\n\nEvery claim that a test pins a guarantee was **mutation-checked**: substituting a fresh id for\n`job.requestId` fails 4-6 tests; moving the success line back inside the `try` fails 3; dropping\nthe sink from the default queue fails 1 (it failed *0* before the fix, which is exactly how the\nvacuous test was caught). Two review findings this session were tests that asserted nothing --\nboth passed against a deliberately broken implementation. Running the mutation is cheap and is\nthe only thing that distinguishes a test from a decoration.\n\n## Open / next\n\n- **ISS-001 (open, medium): a blank `x-request-id` header crashes the request path.**\n  `handler.ts` falls back to a generated id only on null/undefined, so a whitespace header is\n  taken as the id and `AppLogger.withRequestId` throws unhandled from `Router.dispatch`.\n  Pre-existing since T-1, byte-identical to the fixture commit, out of scope for T-2. It is the\n  same blank-id hole T-2 closed one layer down, so it is a natural follow-up. Suggested fix is\n  in the issue.\n- ISS-002 and ISS-003 are duplicate deferral records auto-filed by the guide, one per review\n  round, for the finding already filed as ISS-001. Both resolved as duplicates; **ISS-001 is the\n  canonical record**. Worth knowing the guide files these automatically, so a manually filed\n  issue for a deferred finding produces duplicates.\n- **T-3: Move AppLogger into packages/logging** -- still carried forward from the T-1 handover.\n  Note it now has two more importers than it did: `src/jobs/JobQueue.ts` joins `router.ts` and\n  the test files.\n- **T-4: per-client rate limiting** -- untouched.\n\n## Not committed\n\n`.continuity-mcp.json` and `.story/.gitignore` are untracked and were left that way; neither is\nT-2 work.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "agent-code-review (T-2 CODE_REVIEW round 1)",
+      "dedupeKey": "T-2-code-review-r1:blank-x-request-id-header",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "src/http/handler.ts:37 uses `req.headers[\"x-request-id\"] ?? randomUUID()`, which only falls back on null/undefined. A client that sends an empty or whitespace-only x-request-id header has that value taken as the request id, and AppLogger.withRequestId then throws \"AppLogger requires a non-empty request id\" from Router.dispatch (src/http/router.ts:37). The rejection is unhandled, so a client-controlled header value crashes the request path rather than getting a generated id. Pre-existing since T-1 (AppLogger has thrown on blank ids from the start); found during T-2's code review. T-2 closed the same blank-id hole one layer down, in JobQueue.enqueue, but deliberately did not touch the HTTP layer, which is out of its scope. Suggested fix: `const raw = req.headers[\"x-request-id\"]; const requestId = raw?.trim() ? raw : randomUUID();` plus a test asserting a blank header yields a generated id rather than a rejection.",
+      "location": [
+        "src/http/handler.ts:37",
+        "src/http/router.ts:37"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "A blank x-request-id header crashes the request path"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:f7b27016-bc04-4f8d-bda9-52345b6d61bd:fdb0f8c2302ac09c3e1bdec37bbb5975",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "handler.ts:37 uses `req.headers['x-request-id'] ?? randomUUID()`, which only falls back on null/undefined, so a blank or whitespace header is taken as the request id and AppLogger.withRequestId then throws unhandled from Router.dispatch -- a client-controlled crash of the request path. Pre-existing since T-1 and outside this ticket's scope. Filed as ISS-001 rather than fixed inline.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": "Duplicate of ISS-001, which is the canonical record for this defect and remains open. Auto-filed as the round-1 deferral record for the same finding that was already filed manually as ISS-001. Closed as a duplicate rather than deleted so the review trail stays intact.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[input-validation] handler.ts:37 uses `req.headers['x-request-id'] ?? randomUUID()`, which only fal"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:f7b27016-bc04-4f8d-bda9-52345b6d61bd:57c28a263ceeccae3d2650d81e80f339",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-003",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-003",
+      "impact": "Blank x-request-id header crashes the request path. Reviewer confirmed genuinely pre-existing by diffing the line against commit 02929d5, where it is byte-identical, and AppLogger has rejected blank ids since T-1. Already filed as ISS-001; out of scope for T-2 and not re-litigated.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "f7b27016-bc04-4f8d-bda9-52345b6d61bd"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": "Duplicate of ISS-001, which is the canonical record for this defect and remains open. Auto-filed as the round-2 deferral record for the same finding; the per-round dedupeKey meant it did not dedupe against the round-1 record (ISS-002). Closed as a duplicate rather than deleted so the review trail stays intact.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[input-validation] Blank x-request-id header crashes the request path. Reviewer confirmed genuinely"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "Before reporting that a test enforces a guarantee, break the implementation deliberately and confirm the test fails. A test that passes against a knowingly broken implementation is a decoration, not a check. Restore and re-run green afterwards. This costs one command and is the only thing that distinguishes the two.",
+      "context": "T-2 (background job logging). Two of the four code-review findings this session were tests that asserted nothing. The worst: a test named \"the default queue is built with the sink the caller supplied\" never drained the queue, so the only line it observed came from the Router, which was already wired to that sink before the change. Reverting `new JobQueue(sink)` to `new JobQueue()` left all 10 tests passing -- the one behaviour change in handler.ts had zero coverage while looking covered. The reviewer found it by running that mutation rather than by reading. Applied in the other direction, mutation-checking also converts vague claims into specific ones: substituting a fresh id for job.requestId fails 4-6 tests, which is concrete evidence that ruling r-p19bbvh0jhj8xgma is pinned rather than an assertion that it \"looks right\". Cheap on this repo: `npm test` is a bare `node --test` and runs in under a second.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "testing",
+        "review",
+        "verification"
+      ],
+      "title": "Mutation-check a test before claiming it pins a guarantee",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]

@@ -1,0 +1,77 @@
+{
+  "planEntryContext": 78220,
+  "planEntries": [
+    78220
+  ],
+  "beforePlanWrittenContext": 92140,
+  "totalInputTokens": 7374645,
+  "mainRequests": 62,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01Uqh8GJZd9a8B8rmXhdeKrh"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01B4SfniRxCRDrk4B875XZZV"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_017T7XvsjtgM79J3aqw9AV7k"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_011ta8GVPJjkp9zhUfyC4iXg"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01TKVqxhsLuWHatoBMNkpU4y"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01WtdNbvmnq7TMTLTCrsRwZP"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01K9f98LkBSHmXgRcbVTcVHF"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_017rz3bWbaEF3upUMqMi1WPZ"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01EEWk74aUdkEEHHo1iUxTxA"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_01CfNrdWun2W324ieNzdKPY7"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+      "toolUseId": "toolu_019YZdzB2xzEfUzHYfqnBxDF"
+    }
+  ],
+  "guideSessionId": "29ebca3e-a2f0-4d9b-985f-43cabc7dff0b",
+  "firstPlanWrittenToolUseId": "toolu_017T7XvsjtgM79J3aqw9AV7k",
+  "totalCostUsd": 7.792962499999999,
+  "numTurns": 67,
+  "resultSubtype": "success"
+}

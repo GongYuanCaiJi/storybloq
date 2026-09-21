@@ -1,0 +1,62 @@
+{
+  "experimentHash": "0b1a44200b4e8167f6a01b2718a683fa4a75ca801f9c661def8d5bf1e1814ba5",
+  "arm": 1,
+  "task": "T-3",
+  "repeat": 1,
+  "attempt": 1,
+  "ticketId": "T-3",
+  "model": "claude-opus-5",
+  "effort": "high",
+  "isolation": "fresh",
+  "ownerException": null,
+  "timeoutMs": 1800000,
+  "maxBudgetUsd": 15,
+  "inputTreeHash": "ede6b728e50f68cae4f33a4ff264ff330c5429d6cf7ec00ba02e6e27282295bd",
+  "buildManifestHash": "cc6d0a55117a393525da08a970264cbebb681efbbb0977cc9368a5cf1789d010",
+  "build": {
+    "workspaceHead": "ea3ca8eca8d151f60dce0f365b568dd6092f2128",
+    "nodeVersion": "v22.18.0",
+    "packageJsonSha256": "20ed45ca7327362ef528af148a4329e9562abe83cd0e439330000a48945ee72b",
+    "lockfileSha256": "31b78e7c1b5ff6a06e286fe11f21c55b82cb11a817c053ba02c31f05cccebb29",
+    "installedLockSha256": "c00a97ec901904b398a9e315ee6e2c92ddfa2330ab3a6c7cb4aa5291db2eb401",
+    "tsupConfigSha256": "18b7cc499dbded649dda4896ffc1367f0b6011a488712bf3a7c6018a20e13775",
+    "dist": {
+      "dist/mcp.js": "accd396683ed03171d40bc1e616e234139510e56d8d5d133ff873200519e7ac1",
+      "dist/cli.js": "7b1ee98c29d5b9cfcbc804b6ea1b9435ef605888dc0bd3fda29a92a8f34ecd50",
+      "dist/index.js": "6ad105186aa7b5e9dec6f74a46855b7aeeba8950bddaee57d7606add018f3f3c",
+      "dist/presence.js": "07db9695dc999ee4dc18026a24c437c1eb6d0dfaaca0b3fef4c9bd26ee9b389b"
+    },
+    "storybloqVersion": "1.15.9",
+    "storybloqExecutable": "<PKG>/dist/cli.js",
+    "claudeVersion": "2.1.278 (Claude Code)"
+  },
+  "configHashExpected": "00e7772949db8d0fec811135a375aadaa4a3a7147941ab0054b08e757b5f77d8",
+  "configHashBefore": "00e7772949db8d0fec811135a375aadaa4a3a7147941ab0054b08e757b5f77d8",
+  "configInventory": {
+    "settings.json": "6036b0a0ceea6fe6932af03c37ba08835f36946157e8f6abf94483687ea64914",
+    "skills/story": "feea8d6441685678fc90bd4c1f08f12a3153da16627d4a10c2e59e5b3d913363"
+  },
+  "skillMarker": null,
+  "variantSha256": null,
+  "overlay": null,
+  "rubricVersion": "1",
+  "startedAt": "2026-09-21T04:17:02.468Z",
+  "post": {
+    "distAfter": {
+      "dist/mcp.js": "accd396683ed03171d40bc1e616e234139510e56d8d5d133ff873200519e7ac1",
+      "dist/cli.js": "7b1ee98c29d5b9cfcbc804b6ea1b9435ef605888dc0bd3fda29a92a8f34ecd50",
+      "dist/index.js": "6ad105186aa7b5e9dec6f74a46855b7aeeba8950bddaee57d7606add018f3f3c",
+      "dist/presence.js": "07db9695dc999ee4dc18026a24c437c1eb6d0dfaaca0b3fef4c9bd26ee9b389b"
+    },
+    "configHashAfter": "00e7772949db8d0fec811135a375aadaa4a3a7147941ab0054b08e757b5f77d8",
+    "stateBinaryFingerprintSha256": "accd396683ed03171d40bc1e616e234139510e56d8d5d133ff873200519e7ac1",
+    "mainModels": [
+      "claude-opus-5"
+    ],
+    "subagentModels": [
+      "claude-opus-5"
+    ],
+    "clientSessionId": "bea69824-0e3c-4925-b4be-896d5e57d888",
+    "finishedAt": "2026-09-21T04:30:14.251Z"
+  }
+}

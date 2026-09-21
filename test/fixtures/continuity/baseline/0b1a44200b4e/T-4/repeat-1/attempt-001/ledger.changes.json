@@ -1,0 +1,137 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Session Handover — T-4 per-client rate limiting\n\n**Session:** b5a59916 (targeted auto, 1 target)\n**Result:** T-4 complete, committed as `868fcae` on `main`. Tests 24/24.\n\n## What was done\n\nT-4 asked for per-client rate limiting on the HTTP handler: a fixed window keyed on `x-client-id`, a 429 when the window is exhausted, and a test.\n\n- **`src/http/RateLimiter.ts`** (new) — fixed-window counter, dependency-free, injectable clock. Bounded by `maxClients` (default 10,000) with front-only eviction. Options validated in the constructor; `limit: 0` refuses everything; `retryAfterSeconds` clamped to the window length.\n- **`src/http/handler.ts`** — third optional `RateLimitOptions` param on `createApp` (default 60/60,000s). Normalizes the client id once (trim, lowercase, truncate to 200), falls back to a shared `\"anonymous\"` bucket, and short-circuits with 429 **before** `router.dispatch`. Also now trims `x-request-id` and falls back to `randomUUID()`.\n- **`src/http/RateLimiter.test.ts`**, **`src/http/handler.test.ts`** (new) — 11 and 8 cases. `router.test.ts` is untouched and still passes.\n\n## Decisions worth carrying forward\n\n1. **The limiter keys on a self-asserted header, and that is a disclosed limitation, not an oversight.** `x-client-id` is unauthenticated, so the feature addresses *accidental* starvation between cooperating clients and nothing more. Three consequences are recorded in **ISS-003**: bypass (rotate the header for a fresh window every request), impersonation (send a victim's id to push them into 429s — a denial capability the service did not have before this ticket), and collateral eviction (a caller emitting more than `maxClients` distinct ids inside one window evicts honest clients' counters, so one hostile caller can neutralize the limiter for everyone, and can self-reset by pushing its own exhausted entry off the front). The only non-cosmetic fix is authenticated caller identity. **Do not \"harden\" the limiter without that** — every mitigation attempted during planning was either cosmetic or provably a no-op.\n\n2. **Eviction is front-only, and that is correct rather than lazy.** Every write path that moves `windowStart` does delete-then-set; the in-window increment mutates in place and must NOT reinsert. Given a non-decreasing clock, Map insertion order *is* `windowStart` order, so the front is always the oldest window. A \"prefer evicting a dead entry\" refinement was written, reviewed, and **removed as a provable no-op**: a dead entry behind a live one is unreachable. If someone proposes adding that scan back, this is the argument against it.\n\n3. **Every client id is hashed before it reaches a log line**, including the `anonymous` literal, with a separate boolean `anonymous` field for legibility. `AppLogger`'s redaction is key-based (`SECRET_KEY` does not match `clientId`) and shape-based (`sk-…`, `Bearer …`), so a credential stuffed into `x-client-id` matching neither would otherwise be written verbatim — rule 1 does not cover this automatically.\n\n4. **All traffic without an `x-client-id` shares one window.** Nothing in this repo sends the header today, so on day one that is every caller, sharing a single 60/min window. Accepted and disclosed; an `anonymousLimit` knob was designed and then withdrawn as unimplementable (it fit no interface and every way to honour it broke something the plan had settled).\n\n## Ledger changes\n\n- **T-4** → complete.\n- **ISS-001** (blank `x-request-id` throws instead of falling back) → **resolved**. Not deferrable: the 429 path builds a logger before `dispatch`, so a rate-limited request with a blank header would have thrown instead of returning 429.\n- **ISS-002** → resolved as a **duplicate of ISS-001**. It was auto-filed by a plan-review finding marked `deferred` while I had already filed the same defect by hand. See the lesson.\n- **ISS-003** (unauthenticated `x-client-id` threat model) → **open**, the real follow-up from this ticket.\n\n## Process notes\n\n- **Codex was unavailable this session.** `storybloq_health` reports the bridge as ok, but the bridge's `review_plan` tool is not registered in this client session (only the storybloq MCP server is), so every plan and code review ran through the sanctioned agent fallback. Anyone re-running this should expect the same unless the bridge is registered.\n- **Plan review took 4 rounds**, and rounds 2 and 3 found defects introduced by the *previous round's fixes* — an unimplementable knob, then a no-op optimization. Worth knowing that the fix for a review finding is itself prime territory for the next one.\n- Both the cap test and the limit-0 test were **mutation-checked**: reverting the feature makes them fail. Cheap, and it caught that an earlier draft of the cap test would have certified nothing.\n\n## What's next\n\nNo target work remains in this session. The open backlog item arising from it is **ISS-003**. Nothing is blocked; the working tree is clean apart from an untracked `.continuity-mcp.json` and `.story/.gitignore`, both pre-existing and deliberately left alone.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "plan-review-agent (T-4 session b5a59916, round 1)",
+      "dedupeKey": "t4-plan-review-r1:empty-request-id",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-001",
+      "id": "ISS-001",
+      "impact": "src/http/handler.ts resolves the request id with `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only catches null/undefined, so a present-but-empty header (`\"x-request-id\": \"\"`) survives the fallback. Router.dispatch then calls AppLogger.withRequestId(\"\"), which throws \"AppLogger requires a non-empty request id\" (src/platform/logging/AppLogger.ts). A client sending a blank x-request-id therefore gets an unhandled throw out of app.handle() rather than a response. Fix: trim the header and fall back to randomUUID() when it is blank, not only when it is absent.",
+      "location": [
+        "src/http/handler.ts",
+        "src/platform/logging/AppLogger.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": "Fixed in T-4. src/http/handler.ts now resolves the request id through `resolveRequestId()`, which trims the header and falls back to randomUUID() when the result is blank, so no path can reach AppLogger.withRequestId with an empty id. T-4 had to close this rather than defer it: its 429 path builds a logger before Router.dispatch, so a rate-limited request with a blank x-request-id would have thrown instead of returning 429. Covered by the handler test \"a blank x-request-id on a rate-limited request still returns 429 rather than throwing\"; the same helper serves the allowed path.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "Empty x-request-id header throws instead of falling back to a generated id"
+    }
+  },
+  {
+    "path": "issues/ISS-002.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "autonomous"
+      ],
+      "dedupeKey": "deferral:b5a59916-3066-4c27-a5be-c41f08466ad9:a71207b98cc65c305f3658afff022d8b",
+      "discoveredDate": "2026-09-21",
+      "displayId": "ISS-002",
+      "disposition": "accepted_out_of_scope",
+      "id": "ISS-002",
+      "impact": "src/http/handler.ts resolves the request id with `?? randomUUID()`, so an empty-string x-request-id survives and AppLogger.withRequestId throws. Pre-existing, but the plan moves logger construction into the new pre-dispatch refusal path, so a rate-limited request with a blank x-request-id would throw instead of returning the required 429. Filed as ISS-001; the plan should stop describing step 1 as 'unchanged'.",
+      "location": [],
+      "metadata": {
+        "review": {
+          "findingDisposition": "accepted_out_of_scope",
+          "origin": "reviewer-deferred",
+          "sessionId": "b5a59916-3066-4c27-a5be-c41f08466ad9"
+        }
+      },
+      "phase": "p1",
+      "relatedTickets": [],
+      "resolution": "Duplicate of ISS-001. Both record the same defect (blank x-request-id survives the `??` fallback and makes AppLogger.withRequestId throw). ISS-002 was auto-filed by the plan-review `deferred` disposition on the same finding I had already filed by hand as ISS-001; ISS-001 is the canonical record and carries the fix.",
+      "resolvedDate": "2026-09-20",
+      "severity": "medium",
+      "status": "resolved",
+      "title": "[empty-request-id] src/http/handler.ts resolves the request id with `?? randomUUID()`, so an empty-"
+    }
+  },
+  {
+    "path": "issues/ISS-003.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "T-4 implementation (session b5a59916)",
+      "dedupeKey": "t4-impl:unauthenticated-client-identity",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-003",
+      "impact": "T-4 added per-client rate limiting keyed on the x-client-id header, which the caller names itself. That is sufficient for the ticket's stated problem (accidental starvation between cooperating clients) but leaves three gaps, all with the same root and all disclosed in the T-4 plan's threat model rather than fixed there: (1) Bypass - rotating x-client-id yields a fresh window on every request. (2) Impersonation - any caller can send a victim's client id `limit` times per window and push the real owner into 429s, a denial capability the service did not have before T-4. (3) Collateral eviction - the limiter caps tracked ids at maxClients (default 10_000) and evicts oldest-window-first, so a caller emitting more than that many distinct ids inside one window evicts honest clients' counters and hands each of them a fresh window; one hostile caller can neutralize the limiter for everyone, and can self-reset by rotating ids to push its own exhausted entry off the front. Raising maxClients raises the attack cost and the memory ceiling together; it closes nothing. The only fix that is not cosmetic is an authenticated caller identity, which this service does not have. Also relevant: every request without an x-client-id shares one \"anonymous\" window, so today - no caller in this repo sends the header - all real traffic shares a single 60/min window, and a caller can deliberately send x-client-id: anonymous to drain it.",
+      "location": [
+        "src/http/RateLimiter.ts",
+        "src/http/handler.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-4"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "Rate limiting keys on a self-asserted x-client-id, so it is bypassable and abusable"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When reporting a review round, the `deferred` disposition AUTO-FILES a storybloq issue for that finding. Pick one route: either mark the finding `deferred` and let the guide file it, or file it yourself with `storybloq_issue_create` and report the finding with a different disposition. Doing both produces two issue records for one defect.",
+      "context": "T-4 plan review round 1 surfaced a pre-existing defect (blank x-request-id throws in AppLogger). I filed it manually as ISS-001 because the guide's instruction says to file pre-existing findings, and ALSO marked the finding `deferred` in the same report. The guide auto-filed ISS-002 for the same defect, which had to be resolved as a duplicate. The two instructions are not contradictory, but they overlap: the \"file pre-existing issues\" instruction and the `deferred` disposition both create records.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "correction",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "review",
+        "dispositions",
+        "issues",
+        "autonomous-mode"
+      ],
+      "title": "A `deferred` review finding auto-files an issue; never also file it by hand",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-4.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "displayId": {
+        "after": "T-4"
+      }
+    }
+  }
+]

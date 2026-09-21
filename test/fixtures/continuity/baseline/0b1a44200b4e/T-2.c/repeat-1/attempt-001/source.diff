@@ -1,0 +1,726 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..06406c5
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,32 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "plan-review (T-2, round 1)",
++  "dedupeKey": "t-2-plan-review-1:blank-request-id-header",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "handler.ts assigns `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only substitutes for null/undefined, so a header present but empty (`\"\"`, or whitespace) passes straight through to `router.dispatch`, where `AppLogger.withRequestId` rejects a blank id and throws. Verified at HEAD: `createApp().handle({ method: \"GET\", path: \"/health\", headers: { \"x-request-id\": \"\" } })` rejects with `AppLogger requires a non-empty request id` rather than returning a RouteResponse. A client can therefore turn any request into an unhandled error with one empty header, and the failure carries no request id of its own. Fix is to treat a blank header as absent (trim-and-fallback to randomUUID) at the point the id is born.",
++  "location": [
++    "src/http/handler.ts:33"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "sourceRefs": [
++    {
++      "contentHash": "926f7897aa601acfc23342dc28af725ffe434efc0df9aab38ad1b0a3622f8997",
++      "endLine": 35,
++      "path": "src/http/handler.ts",
++      "reviewId": "t-2-plan-review-1",
++      "revision": "392996646fe05ec36355d634b8b7c810c3a9e257",
++      "startLine": 31
++    }
++  ],
++  "status": "open",
++  "title": "A blank x-request-id header makes handle() throw instead of returning a response"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..ca2b5c8
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:af81be9f-4012-46be-8229-580b12b0db14:87a09b796265d7ac57343e64dccbc842",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-002",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-002",
++  "impact": "Pre-existing, not introduced by this plan: `req.headers[\"x-request-id\"] ?? randomUUID()` substitutes only for null/undefined, so a present-but-empty header reaches AppLogger.withRequestId and throws, making handle() reject instead of returning a RouteResponse. Verified by executing the path at HEAD. Out of scope for T-2, which traces job failures rather than minting request ids.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-001, which records the same defect (a present-but-empty x-request-id header reaches AppLogger.withRequestId and makes handle() throw) with the verification and the suggested fix. Filed twice because the plan-review round reported the finding with disposition \"deferred\", which auto-files an issue, after the same finding had already been filed by hand as ISS-001. No code change; track the defect on ISS-001.",
++  "resolvedDate": "2026-09-20",
++  "severity": "high",
++  "status": "resolved",
++  "title": "[correctness] Pre-existing, not introduced by this plan: `req.headers[\"x-request-id\"] ?? rando"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..432f9d7
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,32 @@
++{
++  "components": [
++    "logging"
++  ],
++  "createdBy": "code-review (T-2, round 2)",
++  "dedupeKey": "t-2-code-review-2:applogger-nonstring-request-id",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-003",
++  "impact": "withRequestId guards a blank id with `requestId.trim() === \"\"` but does not check the type first, so a JS caller (or any boundary where the id arrives untyped, e.g. a header value) gets `TypeError: Cannot read properties of undefined (reading 'trim')` for undefined and `TypeError: requestId.trim is not a function` for a number — both verified at HEAD — instead of the intended \"AppLogger requires a non-empty request id\". The logger is the choke point every path funnels through, so the clear message belongs here; T-2 added a `typeof` guard to JobQueue.enqueue, which covers the job path only. Fix: `typeof requestId !== \"string\" || requestId.trim() === \"\"`.",
++  "location": [
++    "src/platform/logging/AppLogger.ts:66"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "sourceRefs": [
++    {
++      "contentHash": "dae5f066aaf0a2b981100800ee72cc71a5082d096bab85d90b37c89a1d6b9b39",
++      "endLine": 68,
++      "path": "src/platform/logging/AppLogger.ts",
++      "reviewId": "t-2-code-review-2",
++      "revision": "392996646fe05ec36355d634b8b7c810c3a9e257",
++      "startLine": 64
++    }
++  ],
++  "status": "open",
++  "title": "AppLogger.withRequestId reports a non-string request id as a TypeError, not as its own error"
++}
+diff --git a/.story/issues/ISS-004.json b/.story/issues/ISS-004.json
+new file mode 100644
+index 0000000..3205818
+--- /dev/null
++++ b/.story/issues/ISS-004.json
+@@ -0,0 +1,26 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:af81be9f-4012-46be-8229-580b12b0db14:e995dea437c5969fed17283ad4e4db19",
++  "discoveredDate": "2026-09-21",
++  "displayId": "ISS-004",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-004",
++  "impact": "Pre-existing: withRequestId checks requestId.trim() without a type check, so a non-string id surfaces as a TypeError instead of the intended 'requires a non-empty request id'. Verified at HEAD for both undefined and a number. The logger is the choke point every path funnels through, so the guard belongs there rather than only in JobQueue.enqueue, but it is outside T-2's diff.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "af81be9f-4012-46be-8229-580b12b0db14"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": "Duplicate of ISS-003, which records the same defect (AppLogger.withRequestId calls .trim() without a type check, so a non-string request id surfaces as a TypeError instead of its own error) with the verification and the fix. Filed twice because reporting the finding with disposition \"deferred\" auto-files an issue, after the same finding had already been filed by hand as ISS-003. No code change; track it on ISS-003.",
++  "resolvedDate": "2026-09-20",
++  "severity": "medium",
++  "status": "resolved",
++  "title": "[input-validation] Pre-existing: withRequestId checks requestId.trim() without a type check, so a n"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index 15480a7..43739cc 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Make failed background jobs traceable to the originating request",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-eftp2zdb6as643np",
++    "r-p19bbvh0jhj8xgma"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "When a background job fails there is no way to tell which incoming request caused it. Make failed background jobs traceable to the originating request.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Make failed background jobs traceable to the originating request",
++  "type": "task"
+ }
+diff --git a/src/http/handler.test.ts b/src/http/handler.test.ts
+new file mode 100644
+index 0000000..30a9361
+--- /dev/null
++++ b/src/http/handler.test.ts
+@@ -0,0 +1,21 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { createApp } from "./handler.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a job enqueued by a request is traceable to that request when it fails", async () => {
++  const lines: LogLine[] = [];
++  const app = createApp((l) => lines.push(l));
++  const res = await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-http-2" }, body: { kind: "daily" } });
++  assert.equal(res.status, 202);
++
++  const result = await app.jobs.run(() => {
++    throw new Error("renderer exploded");
++  });
++
++  assert.deepEqual(result, { ran: 0, failed: 1 });
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure, "the failure reaches the sink the app was given");
++  assert.equal(failure.requestId, "req-http-2");
++  assert.deepEqual(failure.fields, { jobId: "job-1", kind: "report", error: "Error: renderer exploded" });
++});
+diff --git a/src/http/handler.ts b/src/http/handler.ts
+index 4af02c1..eb2a757 100644
+--- a/src/http/handler.ts
++++ b/src/http/handler.ts
+@@ -14,19 +14,32 @@ export interface IncomingRequest {
+   readonly body?: unknown;
+ }
+ 
+-export function createApp(queue: JobQueue = new JobQueue(), sink?: Sink): { handle(req: IncomingRequest): Promise<RouteResponse> } {
++export interface App {
++  handle(req: IncomingRequest): Promise<RouteResponse>;
++  /** The queue this app enqueues onto. Exposed so a caller can drain it and see what its failures logged. */
++  readonly jobs: JobQueue;
++}
++
++/**
++ * The app owns its queue rather than accepting one, so there is exactly one sink behind every line it
++ * produces -- a caller-supplied queue would keep its own, sending job-failure lines somewhere other than
++ * the sink the rest of the app logs to. Callers that need the queue read it back from `App.jobs`.
++ */
++export function createApp(sink?: Sink): App {
++  const jobs = new JobQueue(sink);
+   const router = new Router(sink)
+     .add("GET", "/health", (_req, log) => {
+       log.info("health check");
+       return { status: 200, body: { ok: true } };
+     })
+     .add("POST", "/reports", (req, log) => {
+-      const id = queue.enqueue({ kind: "report", payload: req.body }, { requestId: req.requestId });
++      const id = jobs.enqueue({ kind: "report", payload: req.body }, { requestId: req.requestId });
+       log.info("report queued", { jobId: id });
+       return { status: 202, body: { jobId: id } };
+     });
+ 
+   return {
++    jobs,
+     async handle(req: IncomingRequest): Promise<RouteResponse> {
+       const requestId = req.headers["x-request-id"] ?? randomUUID();
+       return router.dispatch({ method: req.method, path: req.path, requestId, body: req.body });
+diff --git a/src/http/router.test.ts b/src/http/router.test.ts
+index 6317aab..b2e78cb 100644
+--- a/src/http/router.test.ts
++++ b/src/http/router.test.ts
+@@ -5,7 +5,7 @@ import type { LogLine } from "../platform/logging/AppLogger.ts";
+ 
+ test("a routed request logs under the request id the handler layer assigned", async () => {
+   const lines: LogLine[] = [];
+-  const app = createApp(undefined, (l) => lines.push(l));
++  const app = createApp((l) => lines.push(l));
+   const res = await app.handle({ method: "POST", path: "/reports", headers: { "x-request-id": "req-http-1" }, body: { kind: "daily" } });
+   assert.equal(res.status, 202);
+   assert.equal(lines.length, 1);
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..a462f88
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,278 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue, type QueuedJob } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a failing job is logged under the request id that enqueued it", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: { n: 1 } }, { requestId: "req-a" });
++
++  const result = await queue.run(() => {
++    throw new Error("renderer exploded");
++  });
++
++  assert.deepEqual(result, { ran: 0, failed: 1 });
++  assert.equal(lines.length, 1);
++  assert.equal(lines[0].level, "error");
++  assert.equal(lines[0].requestId, "req-a");
++  assert.equal(lines[0].message, "job failed");
++  assert.deepEqual(lines[0].fields, { jobId: "job-1", kind: "report", error: "Error: renderer exploded" });
++});
++
++test("each failure carries its own originating request id, never a fresh one", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "export", payload: null }, { requestId: "req-b" });
++
++  await queue.run((job: QueuedJob) => {
++    throw new Error(`no handler for ${job.kind}`);
++  });
++
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.fields.kind]),
++    [
++      ["req-a", "report"],
++      ["req-b", "export"],
++    ],
++  );
++});
++
++test("a failure is logged and dropped; the jobs after it still run", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "bad", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "good", payload: null }, { requestId: "req-b" });
++
++  const seen: string[] = [];
++  const result = await queue.run((job) => {
++    if (job.kind === "bad") throw new Error("boom");
++    seen.push(job.kind);
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  assert.deepEqual(seen, ["good"]);
++  assert.equal(lines.length, 1);
++  assert.equal(lines[0].requestId, "req-a");
++});
++
++test("a non-Error throw is still traceable, whatever shape it has", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  for (const kind of ["string", "object", "nullish", "exotic", "nested"]) {
++    queue.enqueue({ kind, payload: null }, { requestId: `req-${kind}` });
++  }
++
++  const result = await queue.run((job) => {
++    if (job.kind === "string") throw "just a string";
++    if (job.kind === "object") throw { message: "detailed failure", code: 42, token: "sk-abcdefghijk" };
++    if (job.kind === "nullish") throw undefined;
++    if (job.kind === "exotic") throw Object.create(null); // no prototype: String() on this throws
++    throw { cause: new Error("upstream died"), attempts: 2 };
++  });
++
++  assert.deepEqual(result, { ran: 0, failed: 5 });
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.fields.error]),
++    [
++      ["req-string", "just a string"],
++      // Normalised to plain data, so redact() still reaches the secret key inside it.
++      ["req-object", { message: "detailed failure", code: 42, token: "[REDACTED]" }],
++      ["req-nullish", "[undefined]"],
++      ["req-exotic", {}],
++      // A nested Error keeps its message, which is non-enumerable and would otherwise vanish.
++      ["req-nested", { cause: "Error: upstream died", attempts: 2 }],
++    ],
++  );
++});
++
++test("a thrown value cannot smuggle a secret past redaction into the written line", async () => {
++  // The sink a real deployment has: one that serialises. `toJSON` on a thrown object would otherwise run
++  // AFTER redact() and write back exactly what redaction removed.
++  const written: string[] = [];
++  const queue = new JobQueue((l) => written.push(JSON.stringify(l)));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  await queue.run(() => {
++    throw {
++      toJSON() {
++        return { token: "sk-abcdefghijklmnop", auth: "Bearer supersecret" };
++      },
++    };
++  });
++
++  assert.equal(written.length, 1);
++  assert.ok(!written[0].includes("sk-abcdefghijklmnop"), `secret reached the written line: ${written[0]}`);
++  assert.ok(!written[0].includes("supersecret"), `secret reached the written line: ${written[0]}`);
++  assert.ok(written[0].includes('"requestId":"req-a"'));
++});
++
++test("a thrown value that resists inspection still produces a line under its request id", async () => {
++  const written: string[] = [];
++  const queue = new JobQueue((l) => written.push(JSON.stringify(l)));
++  const circular: Record<string, unknown> = {};
++  circular.self = circular;
++  const deep = { a: { b: { c: { d: { e: "too far down" } } } } };
++  const thrown: Record<string, unknown> = { circular, deep, big: 10n, sym: Symbol("oops") };
++  Object.defineProperty(thrown, "boom", {
++    enumerable: true,
++    get() {
++      throw new Error("getter exploded");
++    },
++  });
++
++  for (const kind of ["hostile", "symbol"]) queue.enqueue({ kind, payload: null }, { requestId: `req-${kind}` });
++  const result = await queue.run((job) => {
++    throw job.kind === "hostile" ? thrown : Symbol("just a symbol");
++  });
++
++  // Every one of these used to take the line down (or the whole drain with it).
++  assert.deepEqual(result, { ran: 0, failed: 2 });
++  assert.equal(written.length, 2, "a failure that cannot be described is still a failure worth logging");
++  const hostile = JSON.parse(written[0]) as LogLine;
++  assert.equal(hostile.requestId, "req-hostile");
++  assert.deepEqual(hostile.fields.error, {
++    circular: { self: "[seen]" },
++    deep: { a: { b: { c: "[truncated]" } } },
++    big: "10n",
++    sym: "Symbol(oops)",
++    boom: "[unreadable]",
++  });
++  assert.equal((JSON.parse(written[1]) as LogLine).fields.error, "Symbol(just a symbol)");
++});
++
++test("a sink that throws does not abort the drain", async () => {
++  const queue = new JobQueue(() => {
++    throw new Error("sink down");
++  });
++  queue.enqueue({ kind: "bad", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "good", payload: null }, { requestId: "req-b" });
++
++  const seen: string[] = [];
++  const result = await queue.run((job) => {
++    if (job.kind === "bad") throw new Error("boom");
++    seen.push(job.kind);
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  assert.deepEqual(seen, ["good"], "the job after the unloggable failure still ran");
++  assert.equal(queue.size, 0);
++});
++
++test("a secret inside a job's error message is redacted before it is written", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc");
++  });
++
++  assert.equal(lines[0].fields.error, "Error: upstream refused [REDACTED]");
++});
++
++test("a job that succeeds logs nothing", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  const result = await queue.run(() => {});
++
++  assert.deepEqual(result, { ran: 1, failed: 0 });
++  assert.deepEqual(lines, []);
++});
++
++test("enqueue refuses a job with no usable request id, and a refusal costs nothing", () => {
++  const queue = new JobQueue();
++  const job = { kind: "report", payload: null };
++  assert.throws(() => queue.enqueue(job, { requestId: "" }), /non-empty request id/);
++  assert.throws(() => queue.enqueue(job, { requestId: "  " }), /non-empty request id/);
++  // Types say string, but the guard is the last line of defence for a JS caller that ignores them.
++  assert.throws(() => queue.enqueue(job, { requestId: undefined as unknown as string }), /non-empty request id/);
++  assert.equal(queue.size, 0);
++  assert.equal(queue.enqueue(job, { requestId: "req-a" }), "job-1", "a refused enqueue does not burn a job id");
++});
++
++test("a value that cannot be described at all still produces exactly one line", async () => {
++  const written: LogLine[] = [];
++  const queue = new JobQueue((l) => written.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  await queue.run(() => {
++    // Hostile enough to defeat inspection itself: the prototype check that runs before any guard throws.
++    throw new Proxy(
++      {},
++      {
++        getPrototypeOf() {
++          throw new Error("no introspection for you");
++        },
++      },
++    );
++  });
++
++  assert.deepEqual(
++    written.map((l) => [l.requestId, l.fields.error]),
++    [["req-a", "[unloggable thrown value]"]],
++    "one line, never two: a second emit would contradict the first",
++  );
++});
++
++test("a secret cannot reach the written line by hiding in a key, a wrapper, or a byte buffer", async () => {
++  const written: string[] = [];
++  const queue = new JobQueue((l) => written.push(JSON.stringify(l)));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  await queue.run(() => {
++    throw {
++      // Key position: redaction tested key names but only ever replaced values.
++      ["sk-abcdefghijklmnop"]: "cache miss",
++      // Wrappers and byte views: exploded per index, a secret-shaped string stops matching any pattern.
++      boxed: new String("sk-abcdefghijklmnop"),
++      bytes: Buffer.from("Bearer supersecret"),
++    };
++  });
++
++  assert.equal(written.length, 1);
++  for (const secret of ["sk-abcdefghijklmnop", "supersecret", '"s","1":"k"']) {
++    assert.ok(!written[0].includes(secret), `secret reached the written line (${secret}): ${written[0]}`);
++  }
++  const fields = (JSON.parse(written[0]) as LogLine).fields.error as Record<string, unknown>;
++  assert.equal(fields["[REDACTED]"], "cache miss", "the secret-shaped key itself is scrubbed");
++  assert.equal(fields.boxed, "[REDACTED]", "a boxed secret is unwrapped back into something redaction sees");
++  assert.equal(fields.bytes, "[Buffer 18 bytes]", "a byte view is summarised, never spelled out");
++});
++
++test("a shared reference cannot amplify one failure into a huge line", async () => {
++  const written: string[] = [];
++  const queue = new JobQueue((l) => written.push(JSON.stringify(l)));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  // A small DAG: each level references the one below it twice. Re-expanding per path instead of per value
++  // turns ~7 objects into hundreds of thousands of entries.
++  const leaf = { detail: "x".repeat(50) };
++  const mid = { a: leaf, b: leaf };
++  const top = { a: mid, b: mid };
++  await queue.run(() => {
++    throw { a: top, b: top };
++  });
++
++  assert.equal(written.length, 1);
++  assert.ok(written[0].length < 4096, `one failure produced a ${written[0].length}-byte line`);
++  assert.ok(written[0].includes("[seen]"), "the repeat is marked rather than re-expanded");
++  assert.ok(written[0].includes("x".repeat(50)), "the shared value is still described once");
++});
++
++test("a __proto__ key in a thrown value neither pollutes nor swallows the diagnostic", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-a" });
++
++  await queue.run(() => {
++    throw JSON.parse('{"__proto__":{"detail":"the real error"},"code":7}');
++  });
++
++  const error = lines[0].fields.error as Record<string, unknown>;
++  assert.deepEqual(error, { __proto__: { detail: "the real error" }, code: 7 });
++  assert.equal(({} as Record<string, unknown>).detail, undefined, "nothing was written to Object.prototype");
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..f9b8ab8 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,10 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and a job that fails is logged under that same id -- so a failure in the
++ * background is traceable back to the request that caused it.
+  */
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -17,9 +20,18 @@ export type JobRunner = (job: QueuedJob) => Promise<void> | void;
+ 
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what a failing job logs; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
+   enqueue(job: Job, opts: { requestId: string }): string {
++    if (typeof opts.requestId !== "string" || opts.requestId.trim() === "") {
++      throw new Error("JobQueue requires a non-empty request id");
++    }
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+     return id;
+@@ -29,7 +41,7 @@ export class JobQueue {
+     return this.#jobs.length;
+   }
+ 
+-  /** Runs every queued job in order. A failing job is dropped; the rest still run. */
++  /** Runs every queued job in order. A failing job is logged under its own request id and dropped; the rest still run. */
+   async run(runner: JobRunner): Promise<{ ran: number; failed: number }> {
+     let ran = 0;
+     let failed = 0;
+@@ -38,10 +50,109 @@ export class JobQueue {
+       try {
+         await runner(job);
+         ran++;
+-      } catch {
++      } catch (err) {
++        this.#logFailure(job, err);
+         failed++;
+       }
+     }
+     return { ran, failed };
+   }
++
++  #logFailure(job: QueuedJob, err: unknown): void {
++    try {
++      // The job's own request id, never a fresh one: the failure belongs to the request that enqueued it.
++      const log = AppLogger.withRequestId(job.requestId, this.#sink);
++      let error: unknown;
++      try {
++        error = describeThrown(err);
++      } catch {
++        // The value could not be described. A failure still has to reach the log under its request id --
++        // that is the whole point of the trace -- so log it with a marker instead of not at all.
++        error = "[unloggable thrown value]";
++      }
++      // Exactly one emit: a retry around the write could not tell "nothing was written" from "the sink
++      // threw after writing", and would emit a second, contradicting line for the same failure.
++      log.error("job failed", { jobId: job.id, kind: job.kind, error });
++    } catch {
++      // The logger or the sink itself is unusable. Swallow: the jobs after this one still have to run, and
++      // nothing else in this service may write a log line (ruling r-eftp2zdb6as643np), so there is no
++      // fallback channel left to report it on.
++    }
++  }
++}
++
++/** A thrown value is diagnostic detail, not a payload dump: cap how much of one is copied into a log line. */
++const MAX_DEPTH = 4;
++const MAX_ENTRIES = 24;
++
++/**
++ * Converts a thrown value into plain, bounded data that is safe to hand to AppLogger.
++ *
++ * Plain data, because redaction works by key: flattening `{ token: "sk-..." }` to text first would hide the
++ * key from `redact()` and only a secret-SHAPED value would still be caught. Bounded and inert, because the
++ * value comes from arbitrary code -- a surviving `toJSON` would run after redaction and write back what
++ * redaction had just removed, and a cycle, a getter that throws, or an unserialisable value would take the
++ * whole line down. Errors keep their name and message; anything unreadable degrades to a marker.
++ */
++export function describeThrown(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
++  switch (typeof value) {
++    case "bigint":
++      return `${value}n`;
++    case "symbol":
++      return value.toString();
++    case "function":
++      return `[function ${value.name || "anonymous"}]`;
++    case "undefined":
++      return "[undefined]"; // JSON.stringify drops an undefined value, taking the whole `error` key with it
++    case "object":
++      break;
++    default:
++      return value; // string, number, boolean -- AppLogger redacts strings itself
++  }
++  if (value === null) return null;
++  if (value instanceof Error) return `${value.name}: ${value.message}`;
++  // A boxed primitive or a byte view would otherwise be exploded into per-index properties, which is how a
++  // secret-SHAPED string gets fragmented into something no redaction pattern can match any more.
++  if (value instanceof String || value instanceof Number || value instanceof Boolean) {
++    return describeThrown(value.valueOf(), depth, seen);
++  }
++  if (ArrayBuffer.isView(value)) return `[${value.constructor?.name ?? "binary"} ${value.byteLength} bytes]`;
++  // Described once per value, not once per path to it: `seen` is never released, so a shared (not circular)
++  // object cannot be re-expanded down every route to it. Without this a handful of objects referencing each
++  // other amplify to MAX_ENTRIES ^ MAX_DEPTH entries -- hundreds of megabytes on one line.
++  if (seen.has(value)) return "[seen]";
++  if (depth >= MAX_DEPTH) return "[truncated]";
++
++  seen.add(value);
++  try {
++    if (value instanceof Map) {
++      return fromEntries([...value].map(([k, v]) => [String(k), v] as const), depth, seen);
++    }
++    if (value instanceof Set) return [...value].slice(0, MAX_ENTRIES).map((v) => describeThrown(v, depth + 1, seen));
++    if (Array.isArray(value)) return value.slice(0, MAX_ENTRIES).map((v) => describeThrown(v, depth + 1, seen));
++    return fromEntries(readOwnEntries(value), depth, seen);
++  } catch {
++    return "[unreadable]";
++  }
++}
++
++/** Own enumerable properties, read one at a time: a getter that throws costs its own key, not the line. */
++function readOwnEntries(value: object): (readonly [string, unknown])[] {
++  return Object.keys(value)
++    .slice(0, MAX_ENTRIES)
++    .map((key) => {
++      try {
++        return [key, (value as Record<string, unknown>)[key]] as const;
++      } catch {
++        return [key, "[unreadable]"] as const;
++      }
++    });
++}
++
++function fromEntries(entries: (readonly [string, unknown])[], depth: number, seen: WeakSet<object>): Record<string, unknown> {
++  // Null prototype: the keys come from arbitrary thrown values, and plain assignment of a "__proto__" key
++  // would hit Object.prototype's setter instead of creating a property, silently dropping the diagnostic.
++  const out: Record<string, unknown> = Object.create(null);
++  for (const [key, value] of entries.slice(0, MAX_ENTRIES)) out[key] = describeThrown(value, depth + 1, seen);
++  return out;
+ }
+diff --git a/src/platform/logging/AppLogger.test.ts b/src/platform/logging/AppLogger.test.ts
+index 8ac00ab..228b9da 100644
+--- a/src/platform/logging/AppLogger.test.ts
++++ b/src/platform/logging/AppLogger.test.ts
+@@ -42,3 +42,15 @@ test("every emitted line carries the request id", () => {
+   for (const line of lines) assert.equal(line.requestId, "req-42");
+   assert.throws(() => AppLogger.withRequestId("  "), /non-empty request id/);
+ });
++
++test("a secret sitting in a key is redacted too, not just one sitting in a value", () => {
++  const lines: LogLine[] = [];
++  const log = AppLogger.withRequestId("req-3", (l) => lines.push(l));
++  // Keys are not always ours: a header map, or a value thrown by code we do not own, puts outside input in
++  // key position. Redaction has always tested key names; it used to replace only the value under them.
++  log.error("upstream refused", { "sk-abcdefghijk": "cache miss", note: "sk-abcdefghijk" });
++
++  assert.deepEqual(lines[0].fields, { "[REDACTED]": "cache miss", note: "[REDACTED]" });
++  assert.deepEqual(redact({ "Bearer abc": 1, password: "x" }), { "[REDACTED]": 1, password: "[REDACTED]" });
++  assert.deepEqual(redact({ plain: "ok" }), { plain: "ok" }, "an ordinary key is left alone");
++});
+diff --git a/src/platform/logging/AppLogger.ts b/src/platform/logging/AppLogger.ts
+index 811b5d6..c98e8a6 100644
+--- a/src/platform/logging/AppLogger.ts
++++ b/src/platform/logging/AppLogger.ts
+@@ -32,7 +32,10 @@ function redactValue(value: unknown): unknown {
+   if (value !== null && typeof value === "object") {
+     const out: Record<string, unknown> = {};
+     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+-      out[key] = SECRET_KEY.test(key) ? "[REDACTED]" : redactValue(v);
++      // The key is scrubbed too: a caller may log an object whose KEYS came from outside (a header map, a
++      // thrown value), and a secret sitting in key position would otherwise be written out verbatim --
++      // redaction has always tested key names, but only ever replaced values.
++      out[redactMessage(key)] = SECRET_KEY.test(key) ? "[REDACTED]" : redactValue(v);
+     }
+     return out;
+   }

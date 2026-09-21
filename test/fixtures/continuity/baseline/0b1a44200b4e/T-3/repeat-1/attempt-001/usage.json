@@ -1,0 +1,72 @@
+{
+  "planEntryContext": 78415,
+  "planEntries": [
+    78415
+  ],
+  "beforePlanWrittenContext": 93729,
+  "totalInputTokens": 5943171,
+  "mainRequests": 54,
+  "mainModels": [
+    "claude-opus-5"
+  ],
+  "subagentModels": [
+    "claude-opus-5"
+  ],
+  "guideStates": [
+    {
+      "state": "PICK_TICKET",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_014o4Jd8PsFAKXchpaTyujcv"
+    },
+    {
+      "state": "PLAN",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01JCmfEEH5Gq5fYtg3nZRm1p"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01UkpFGpdBJAUiBfgi6F2Mzk"
+    },
+    {
+      "state": "PLAN_REVIEW",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01Uqwv7Ea9ErCuBsrNuaBiAF"
+    },
+    {
+      "state": "IMPLEMENT",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_016iTUMfpnTwXS2LBb2hzNf4"
+    },
+    {
+      "state": "CODE_REVIEW",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01Ak6bk3UkPsZUeNVLQHb4Ep"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01PLeJcJV4pWrRxrbzTrhz2p"
+    },
+    {
+      "state": "FINALIZE",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01VH2sLVhFipVyC9BWeodHQm"
+    },
+    {
+      "state": "HANDOVER",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01UTfPW5wTQHfv5N9PmDnKA2"
+    },
+    {
+      "state": "SESSION_END",
+      "sessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+      "toolUseId": "toolu_01N29sdZFhvgCGJeK4AFprbw"
+    }
+  ],
+  "guideSessionId": "c9b2b30b-457f-437d-9e13-4809e7982dfa",
+  "firstPlanWrittenToolUseId": "toolu_01UkpFGpdBJAUiBfgi6F2Mzk",
+  "totalCostUsd": 6.58926,
+  "numTurns": 54,
+  "resultSubtype": "success"
+}

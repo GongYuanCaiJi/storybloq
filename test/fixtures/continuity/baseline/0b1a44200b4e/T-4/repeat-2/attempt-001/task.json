@@ -1,0 +1,13 @@
+{
+  "id": "T-4",
+  "title": "Add per-client rate limiting to the HTTP handler",
+  "description": "Requests from one client can starve the others. Add per-client rate limiting to the HTTP handler: a fixed window per client id (the x-client-id header), a 429 response when the window is exhausted, and a test.",
+  "type": "task",
+  "status": "open",
+  "phase": "p1",
+  "order": 40,
+  "createdDate": "2026-09-16",
+  "completedDate": null,
+  "blockedBy": [],
+  "parentTicket": null
+}

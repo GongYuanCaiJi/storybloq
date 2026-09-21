@@ -1,0 +1,4 @@
+{
+  "title": "Make failed background jobs traceable to the originating request",
+  "description": "When a background job fails there is no way to tell which incoming request caused it. Make failed background jobs traceable to the originating request."
+}

@@ -1,0 +1,122 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-3 AppLogger moved to packages/logging (2026-09-20)\n\nTargeted autonomous session, one item: T-3. Commit `cabdc77` on `main`.\n\n## Completed\n\n- **T-3: Move AppLogger into packages/logging** — complete. `src/platform/logging/{AppLogger.ts,AppLogger.test.ts}` moved to `packages/logging/` via `git mv`, both recorded as `R100` (byte-identical, SHA-verified against the pre-move blobs). `src/platform/` is gone. The three consumers in `src/http/` — `router.ts:6`, `handler.ts:8`, `router.test.ts:4` — now import `../../packages/logging/AppLogger.ts`. Pure relocation: no behaviour, API, or dependency change.\n\n## Decisions\n\n- **The move stops at the directory.** `packages/logging/` got no `package.json`, no workspaces entry, no bare import name; consumers keep relative specifiers. That is what the ticket asked for, and how a second service should consume the logger is a judgement call that wants the second service to exist first. The gap is now concrete, so it is filed as **ISS-001** rather than left implicit.\n- **Historical ledger records keep the old path on purpose.** `.story/tickets/T-1.json`, `.story/handovers/2026-09-15-t-1-applogger.md` and T-3's own description still say `src/platform/logging/`. They describe where the logger was when they were written. Only **N-1** — the note asserting where it lives *now* — was updated, and it records the move explicitly rather than quietly overwriting the old path. Verified untouched with `git diff <base> -- .story/tickets/T-1.json .story/handovers/`.\n- **`tsc --noEmit` is a baseline diff here, not a clean run.** This repo has 6 standing `@types/node` errors and cannot be made to exit 0 without adding a dependency, which RULES.md rule 2 forbids. The criterion is: same 6 errors before and after, AppLogger paths relocated, and no new `TS2307` for the rewritten specifier.\n- **Commit prefix is `refactor:`, not the guide's `feat:` template.** Nothing was added; `feat:` would misdescribe a file move in the log. `(T-3)` suffix preserved.\n\n## Verification\n\n- `npm test` at HEAD: **4 tests, 4 pass, 0 fail** — same count as baseline, with the three AppLogger subtests confirmed running by name from the new location (the flagged risk was a silent discovery loss, which looks identical to a pass).\n- `tsc --noEmit`: 6 errors before, 6 after, identical modulo the renamed path, no resolution error for the new specifier.\n- `grep -rn \"platform/logging\" src packages`: no hits.\n- Committed tree checked directly, not just the worktree: `git ls-tree -r HEAD | grep -c src/platform` → 0.\n\n## Two traps worth knowing (recorded as L-001, L-002)\n\n- **`git reset` unstages a `git mv`.** FINALIZE instructs a reset before staging; it dropped both renames, and re-staging only the new paths would have committed the logger at *both* locations — two loggers, against ruling `r-eftp2zdb6as643np`, with every test still green because nothing imports the stale copy. Re-stage the old path too and confirm `R100` in `git diff --cached --name-status -M`.\n- **A green suite does not prove an `import type` resolves.** Two of the three rewrites are type-only and are erased by Node's type stripping, so the tests exercised just one of them. `tsc` is what covered the other two.\n\n## Next\n\n- **T-2: Add logging for background jobs** is the natural continuation and is unblocked. `JobQueue` already records the enqueuing request id on each job but logs nothing during `run()`. Ruling **`r-p19bbvh0jhj8xgma`** binds it: a job logs under the request id of the request that enqueued it, not a fresh one. Note that `src/jobs/JobQueue.ts` currently imports nothing from logging — T-2 adds the first job-side consumer of `packages/logging/`, so it is also the first real test of the new path from outside `src/http/`.\n- **T-4: Add per-client rate limiting to the HTTP handler** — open, unblocked, independent.\n- **ISS-001** (medium): `packages/logging` is not consumable by an outside service. Worth resolving before, or together with, whatever second service prompted T-3.\n\n## State\n\nWorking tree clean apart from two untracked harness files, `.continuity-mcp.json` and `.story/.gitignore`, which were deliberately excluded from the commit. `.continuity-mcp.json` embeds an absolute path under one developer's home directory and should not be committed as-is.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "logging",
+        "packaging"
+      ],
+      "createdBy": "storybloq-auto-session (T-3)",
+      "dedupeKey": "T-3:packages-logging-not-consumable",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "T-3 moved AppLogger to packages/logging/ so a second service could share it, but stopped at the directory move — the ticket asked for that and no more. The directory has no package.json, no name, and no entry in a workspaces field (the root package.json declares none). Its only consumers, src/http/router.ts, src/http/handler.ts and src/http/router.test.ts, reach it through the relative specifier ../../packages/logging/AppLogger.ts, which works solely because they sit in the same repo at a fixed depth. A service outside this tree has nothing to import: no bare specifier resolves, and copying the file would create a second logger, which ruling r-eftp2zdb6as643np forbids (\"One logger, AppLogger; nothing else writes log lines\"). So the move made the logger shareable in principle without making it importable in practice, and the gap will not surface until someone tries. Resolving it means deciding how the second service consumes it (workspace, published package, or path mapping) — a judgement call that wants the second service's requirements to exist first, which is why it was left out of T-3 rather than guessed at.",
+      "location": [
+        "packages/logging/AppLogger.ts",
+        "package.json",
+        "src/http/router.ts",
+        "src/http/handler.ts"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-3"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "medium",
+      "status": "open",
+      "title": "packages/logging is not a consumable package — a second service cannot import it"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "After a `git mv`, do not run a bare `git reset` and then re-stage \"the files you changed\" — the reset drops the rename, and re-staging only the new paths commits the file at BOTH locations. Always re-stage the OLD path too (`git add <old-path>`, which records the deletion), then confirm with `git diff --cached --name-status -M` that the entry reads `R100` rather than a lone `A`.",
+      "context": "T-3 (move AppLogger to packages/logging). The FINALIZE step instructs `git reset` to clear stale staging, then stage the ticket's files. `git mv` had already staged both halves of each rename; the reset unstaged them, leaving the deletions of src/platform/logging/*.ts out of the index while the additions under packages/ went back in. Caught at staging by diffing the index against the base. The failure is quiet in the worst way: the committed tree would have held two copies of the logger — violating ruling r-eftp2zdb6as643np, \"one logger, nothing else writes log lines\" — and every test would still have passed, because the new path resolves fine and nothing imports the stale copy. Verified the final commit with `git ls-tree -r HEAD | grep -c src/platform` returning 0 rather than trusting the worktree.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "correction",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "git",
+        "process",
+        "finalize",
+        "refactor"
+      ],
+      "title": "`git reset` silently unstages a `git mv`, splitting a move into an add without a delete",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "lessons/L-002.json",
+    "kind": "added",
+    "content": {
+      "content": "In this repo Node strips types at runtime, so `import type` lines are erased and a wrong path in one never fails a test. When a change rewrites import specifiers, run `tsc --noEmit` as well — and compare it against a pre-change baseline rather than demanding exit 0, since this project has standing `@types/node` errors that installing types would resolve only by breaking RULES.md rule 2.",
+      "context": "T-3 rewrote three import specifiers to ../../packages/logging/AppLogger.ts. Only src/http/router.ts imports a value (AppLogger); src/http/handler.ts:8 and src/http/router.test.ts:4 are `import type` (Sink, LogLine). The 4/4 passing suite therefore exercised just one of the three rewrites. The code reviewer surfaced this. Mechanism: `tsc --noEmit` reported the same 6 pre-existing @types/node errors before and after, with no new TS2307 for the new specifier — the absence of that error is the actual evidence the type-only imports resolve. The baseline-diff framing also came out of plan review, which caught that demanding a clean tsc run was unsatisfiable on this repo and would have pushed toward `npm i -D @types/node`.",
+      "createdDate": "2026-09-21",
+      "id": "L-002",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "typescript",
+        "testing",
+        "verification",
+        "node"
+      ],
+      "title": "A green test run does not prove an `import type` specifier resolves",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "notes/N-1.json",
+    "kind": "changed",
+    "fields": {
+      "content": {
+        "before": "AppLogger is the one logger in this service. It lives at src/platform/logging/AppLogger.ts with AppLogger.test.ts beside it.\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id.",
+        "after": "AppLogger is the one logger in this service. It lives at packages/logging/AppLogger.ts with AppLogger.test.ts beside it. (It was moved there from src/platform/logging/ by T-3, so that a second service can share it; consumers in src/http/ import it as ../../packages/logging/AppLogger.ts.)\n\nContract: AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before the line reaches the sink.\n\nThe ruling behind it is r-eftp2zdb6as643np (logging keeps redaction and request ids on every path). The router (src/http/router.ts) already logs through it under the incoming request id."
+      },
+      "updatedDate": {
+        "before": "2026-09-15",
+        "after": "2026-09-20"
+      },
+      "displayId": {
+        "after": "N-1"
+      }
+    }
+  },
+  {
+    "path": "tickets/T-3.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "displayId": {
+        "after": "T-3"
+      }
+    }
+  }
+]

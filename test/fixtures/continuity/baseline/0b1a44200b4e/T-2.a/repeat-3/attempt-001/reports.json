@@ -1,0 +1,313 @@
+[
+  {
+    "toolUseId": "toolu_01Jkp1octRBNzTMm6eATXLo4",
+    "input": {
+      "sessionId": null,
+      "action": "start",
+      "targetWork": [
+        "T-2"
+      ]
+    },
+    "resultHead": "# Targeted Autonomous Session Started\n\nYou are in targeted auto mode. Working on 1 specific item(s) in order, then ending the session. A checkpoint handover will be saved every 3 items.\nDo NOT stop to summarize. Do NOT ask the user. Do NOT cancel for context management; Storybloq rotates at a clean boundary when pressure reaches the configured threshold.\n\n## Targeted Work Items\n\n1. **T-2: Add logg"
+  },
+  {
+    "toolUseId": "toolu_0157wLiVA4REthPMNcGmUzNa",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "ticket_picked",
+        "ticketId": "T-2"
+      }
+    },
+    "resultHead": "# Plan for T-2: Add logging for background jobs\n\n## Ticket Description\n\nBackground jobs run without any log output today. Add logging for background jobs in src/jobs/ so that a job's start, success and failure are visible in the logs.\n\n\nWrite an implementation plan for this ticket. Save it to `.story/sessions/092139c0-0962-4869-a87f-7ba9d8687b12/plan.md`.\n\nWhen done, call `storybloq_autonomous_gui"
+  },
+  {
+    "toolUseId": "toolu_01BQLuEFkt1N4qJ3TqKLrJow",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_written"
+      }
+    },
+    "resultHead": "# Plan Review -- Round 1 of 1 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01PTAocDevYUP1sghLsr3wiQ",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "reviewerSource": "session-default",
+        "notes": "codex unavailable: storybloq_health reports the codex-bridge backend answers, but no review_plan tool is callable in this session (targeted tool discovery for review_plan/review_code returned no matches), so this round ran as an agent review per the fallback rule.",
+        "findings": [
+          {
+            "severity": "major",
+            "category": "control-flow-regression",
+            "description": "The plan constructs the logger BEFORE the try in run(): AppLogger.withRequestId throws on a blank request id (AppLogger.ts:61) and JobQueue.enqueue never validates opts.requestId (JobQueue.ts:22-26), so a job enqueued with requestId \"\" makes the throw escape run() entirely -- the job was already shift()ed off, the remaining jobs never run, and {ran, failed} is never returned. This contradicts run()'s own contract (JobQueue.ts:32, 'A failing job is dropped; the rest still run') and the plan's claim that control flow is unchanged.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open",
+            "recommendedNextState": "PLAN"
+          },
+          {
+            "severity": "minor",
+            "category": "error-handling",
+            "description": "The planned errorMessage(err) falls back to String(err), which itself throws for a null-prototype object or an object with a throwing toString (e.g. throw Object.create(null)). It runs inside the catch block, so that secondary throw escapes run() and aborts the remaining jobs for the same reason as the major finding. The conversion needs to be defensive.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "test-coverage",
+            "description": "Change 2 alters src/http/handler.ts behaviour (signature becomes createApp(queue?, sink?) and the default queue is constructed with the sink) but nothing tests it: there is no handler.test.ts, router.test.ts never calls run(), and the planned JobQueue tests construct JobQueue directly. RULES.md rule 3 requires a test beside a behaviour change. The change also has no observable effect today because createApp never exposes its default queue, so dropping it as out of scope is the alternative.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "minor",
+            "category": "incomplete-edit",
+            "description": "The handler.ts snippet introduces `const jobQueue = queue ?? new JobQueue(sink)` but elides the body and never repoints the existing route closure at handler.ts:24 (queue.enqueue) to jobQueue. As written, queue is JobQueue | undefined under strict mode (tsconfig.json) and queue.enqueue is a compile error, so the plan's stated verification that router.test.ts still compiles would not hold.",
+            "file": "src/http/handler.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          }
+        ]
+      }
+    },
+    "resultHead": "# Plan Review -- Round 1 requested changes\n\nReview effort: standard (size-mapped).\n\nUpdate the plan to address these findings, then call me with completedAction: \"plan_review_round\" and the new review verdict.\n\n- [major] The plan constructs the logger BEFORE the try in run(): AppLogger.withRequestId throws on a blank request id (AppLogger.ts:61) and JobQueue.enqueue never validates opts.requestId "
+  },
+  {
+    "toolUseId": "toolu_01QAxL7v5DaYxvVzYi8Gidqh",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "plan_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "reviewerSource": "session-default",
+        "notes": "codex unavailable (no review_plan tool callable this session); agent review. Round 2 confirmed all four round-1 findings closed by mechanism, not assertion: the reviewer verified #jobs is hard-private with enqueue() its only writer and the guard predicate character-identical to AppLogger.ts:61, and executed the errorMessage snippet against null-prototype objects, Symbols, throwing toString, throwing message getters and a Proxy with throwing getPrototypeOf. Three suggestions folded into the plan before reporting.",
+        "findings": [
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "Plan test 2 was credited as the round-1 major finding's regression test, but it exercises a runner throw, which the existing catch at JobQueue.ts:41 already handled. Test 5 (enqueue rejects a blank request id) is what actually pins the blank-id path.",
+            "file": ".story/sessions/092139c0-0962-4869-a87f-7ba9d8687b12/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Relabelled: test 2 now states it covers batch survival only, and test 5 is marked as the round-1 major regression test."
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "The plan adds String(err.message) for an Error subclass carrying a non-string message, but no planned test reaches that branch -- test 6 throws Object.create(null), which takes the String(err) path.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Added test 7: an Error subclass with a non-string message, asserting the error field is still a string."
+          },
+          {
+            "severity": "suggestion",
+            "category": "risk-characterisation",
+            "description": "The out-of-scope note claimed run() inherits 'exactly that exposure and no more' as Router for a throwing sink. Overstated: because the logger construction and the 'job started' line sit outside the try, a throwing sink in run() loses the shift()ed job and aborts the drain, where Router only fails one dispatch.",
+            "file": ".story/sessions/092139c0-0962-4869-a87f-7ba9d8687b12/plan.md",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Wording corrected to state run()'s exposure is worse than Router's, and that moving the calls inside the try would not fix it; the conclusion (contain it in AppLogger) is unchanged."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-2: Add logging for background jobs\n\n## Approved plan\n\n```markdown\n# Plan: T-2 Add logging for background jobs\n\n## Goal\n\n`JobQueue.run()` logs nothing today (`src/jobs/JobQueue.ts:32`). Make each job's\nstart, success and failure visible in the logs, without breaking either logging\nguarantee this project already holds.\n\n## Rulings this ticket cites\n\nBoth are current; neither has a s"
+  },
+  {
+    "toolUseId": "toolu_01Pxhef8LxwPadap2vK6NA7X",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Implemented per the approved plan. src/jobs/JobQueue.ts: optional Sink constructor, enqueue() guards a blank request id, run() logs job started/succeeded/failed through AppLogger bound to job.requestId, total errorMessage() helper, header comment updated. handler.ts untouched (dropped to ISS-001). New src/jobs/JobQueue.test.ts with 7 tests. npm test: 11/11 pass (7 new, 4 pre-existing untouched). grep for console. in src/jobs/ returns nothing."
+      }
+    },
+    "resultHead": "# Code Review -- Round 1 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Project rules\n\n## RULES.md\n\n# Rules\n\n1. Every emitted log line carries the request id of the work it belongs to, and secrets never reach a log line unredacted.\n2. Keep the code dependency-free: Node built-ins only.\n3. A change to behaviour comes with a test under the same directory, named `<Module>.test.ts`.\n\n\nREPORTI"
+  },
+  {
+    "toolUseId": "toolu_01Rm5hm5tseezPocUiW7o8NA",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "reviewerSource": "session-default",
+        "notes": "Agent code review (the guide specified agent for this stage). Reviewer verified finding 1 by mutation: deleting the await in run() leaves all 11 tests green. Ruling compliance confirmed clean -- all three lines go through AppLogger bound to job.requestId -- and errorMessage confirmed total against null-prototype throws, throwing toString, throwing message getters and symbols.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "test-coverage",
+            "description": "All 7 new tests drive run() with a synchronous runner, so `await runner(job)` at src/jobs/JobQueue.ts:58 is never exercised against a real Promise. Verified by mutation: deleting the await leaves all 11 tests green. Without it, 'job succeeded' would be logged and ran++ before an async job finished, and a rejected runner Promise would escape the try as an unhandled rejection instead of producing the 'job failed' line -- the exact behaviour this ticket adds -- with no test noticing. JobRunner is declared Promise<void> | void and background jobs are the async case.",
+            "file": "src/jobs/JobQueue.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "suggestion",
+            "category": "test-coverage",
+            "description": "`kind` is caller-supplied and appears on all three new lines, but no test pins that it is redacted; the redaction test only covers the `error` field. The reviewer probed that a job with kind 'Bearer abc' does emit kind: '[REDACTED]', so the code is correct today, but it is the one new field whose content comes from outside the module and the property is untested.",
+            "file": "src/jobs/JobQueue.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "open"
+          },
+          {
+            "severity": "suggestion",
+            "category": "scope-and-dead-code",
+            "description": "The blank-request-id guard at src/jobs/JobQueue.ts:37 is unreachable for every caller in the repo: the only enqueue() call site is handler.ts:24, and Router.dispatch calls AppLogger.withRequestId -- which already throws on a blank id -- before any route handler runs. The reviewer confirmed app.handle with an empty x-request-id rejects before reaching enqueue, and explicitly framed this as a judgement call rather than a defect.",
+            "file": "src/jobs/JobQueue.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "contested",
+            "dispositionReason": "Not a defect. The guard is the mechanism the approved plan's safety argument rests on: it is what makes constructing the logger outside the try in run() provably non-throwing, which closed the plan-review round-1 major finding. JobQueue is an exported class with no coupling to Router, so 'unreachable today' is a property of the current single call site, not of the class. The wording deliberately mirrors AppLogger's own guard rather than diverging from it. Keeping it."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-2: Add logging for background jobs\n\n## Approved plan\n\n```markdown\n# Plan: T-2 Add logging for background jobs\n\n## Goal\n\n`JobQueue.run()` logs nothing today (`src/jobs/JobQueue.ts:32`). Make each job's\nstart, success and failure visible in the logs, without breaking either logging\nguarantee this project already holds.\n\n## Rulings this ticket cites\n\nBoth are current; neither has a s"
+  },
+  {
+    "toolUseId": "toolu_014e6t2GvsQtj2sEMoxWkRQM",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "Addressed both open code-review findings. Added two async tests (an awaited runner whose success line must follow the job finishing, and a rejected runner promise that must be logged as a failure while the batch continues), and extended the redaction test to a secret-shaped `kind` on all three lines. Re-ran the reviewer's own mutation on a copied tree: deleting the await in run() now fails 2 of 13 tests, where before it failed 0. npm test: 13/13 pass. No production code changed this round; the contested enqueue guard is unchanged."
+      }
+    },
+    "resultHead": "# Code Review -- Round 2 of 2 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_017qhkhEKBQaehMtWMfrGaFp",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "revise",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "reviewerSource": "session-default",
+        "notes": "Round 2 agent review. Reviewer independently re-ran the round-1 mutation (13/13 green baseline, 11/2 mutated) and confirmed findings 1 and 2 addressed, and accepted the round-1 finding-3 contest on reading the code. Also confirmed tsc --noEmit clean and the setTimeout delays non-flaky (nothing asserts elapsed time). One new finding, fixed this turn and verified by mutation battery below.",
+        "findings": [
+          {
+            "severity": "minor",
+            "category": "test-coverage",
+            "description": "No test pinned where the start/success lines sit relative to the runner actually executing, only that run() awaits it. Verified by two mutations each leaving all 13 tests green: (a) moving the 'job started' line inside the try after await, so a failing or hanging job emits no start line at all, and (b) emitting 'job succeeded' before the await, so a failing job emits both 'job succeeded' and 'job failed'. Both break the ticket's own acceptance that start, success and failure are visible. The async test's `order` array appended all log messages wholesale after run() resolved, so it only encoded 'the runner body completed before run() returned', never the interleaving its comment claimed.",
+            "file": "src/jobs/JobQueue.test.ts",
+            "origin": "introduced",
+            "originClass": "new",
+            "disposition": "addressed",
+            "dispositionReason": "Reported by the reviewer as pre-existing/unchanged, but the file is new in this diff, so it is introduced/new. Fixed two ways: the async test now records order from inside the sink, so it captures the real interleaving (start line -> job body -> success line) rather than post-hoc ordering; and the single-failing-job test now asserts the exact line sequence [info job started, error job failed]. Mutation battery re-run on copied trees: baseline 13/13 green, mutation (a) 2 failures, mutation (b) 2 failures, and the round-1 await-removal mutation still 2 failures."
+          }
+        ]
+      }
+    },
+    "resultHead": "# Implement -- T-2: Add logging for background jobs\n\n## Approved plan\n\n```markdown\n# Plan: T-2 Add logging for background jobs\n\n## Goal\n\n`JobQueue.run()` logs nothing today (`src/jobs/JobQueue.ts:32`). Make each job's\nstart, success and failure visible in the logs, without breaking either logging\nguarantee this project already holds.\n\n## Rulings this ticket cites\n\nBoth are current; neither has a s"
+  },
+  {
+    "toolUseId": "toolu_012iNxngih37Gph7GwQUpJNm",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "implementation_done",
+        "implementerModel": "claude-opus-5",
+        "implementerSource": "session-default",
+        "implementerEvidence": "observed",
+        "notes": "The round-2 finding was already fixed during that round (test-only change, no production code touched): the async test now records ordering from inside the sink to capture real interleaving, and the single-failing-job test asserts the exact line sequence. Verified by mutation battery on copied trees -- baseline 13/13 green; start-line-moved-inside-try: 2 failures; success-line-before-await: 2 failures; await-removed: 2 failures. Nothing further to implement."
+      }
+    },
+    "resultHead": "# Code Review -- Round 3 of 3 minimum\n\nReview effort: standard (size-mapped).\n\n# Prior review history (1 of 1 recorded acceptances)\n\nHOW TO TREAT THE HISTORY BELOW. Each entry is what a round REPORTED, not a statement about the code now: none is confirmed current, and absence of an entry is not acceptance. Reopen an item whose acceptance still stands only on new evidence, changed relevant code or "
+  },
+  {
+    "toolUseId": "toolu_01Kc6e262TovufeTm47vguDf",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "code_review_round",
+        "verdict": "approve",
+        "reviewer": "agent",
+        "reviewerEvidence": "observed",
+        "reviewerSource": "session-default",
+        "findings": [],
+        "notes": "Round 3 agent review: approve, no findings. The reviewer independently re-ran the mutation battery on verified-mutated copies (diffing each against the working tree before trusting a result): start-line-moved 2 failures, success-line-before-await 2 failures, await-removed 2 failures -- matching the reported battery exactly -- plus three of its own: logger bound to a fresh id instead of job.requestId (5 failures), 'job failed' line deleted (5 failures), 'job started' line deleted (4 failures). Confirmed the ordering assertions are neither flaky (recorded synchronously inside the sink, never compared against a clock; 8 consecutive baseline runs 13/13 green, no unhandled-rejection warnings) nor tautological. Nothing from rounds 1-3 remains open."
+      }
+    },
+    "resultHead": "# Finalize\nCode review passed. Time to commit.\n1. Run `git reset` to clear the staging area (ensures no stale files from prior operations)\n2. Update ticket T-2 status to \"complete\" in .story/\n3. Stage only the files you modified for this fix (code + .story/ changes). Do NOT use `git add -A` or `git add .`\n4. Call me with completedAction: \"files_staged\"\n---\n**Session:** 092139c0-0962-4869-a87f-7ba9"
+  },
+  {
+    "toolUseId": "toolu_01WENzL51HtUNscdxRXytQ9B",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "files_staged",
+        "notes": "Staged: src/jobs/JobQueue.ts, src/jobs/JobQueue.test.ts (new), .story/tickets/T-2.json (status complete + cited rulings), .story/issues/ISS-001.json (filed during plan review). Left unstaged deliberately: .continuity-mcp.json (pre-existing untracked at session start) and .story/.gitignore (created by storybloq tooling this session, not part of T-2)."
+      }
+    },
+    "resultHead": "Files staged. Now commit.\n\nCommit with message: \"feat: <description> (T-2)\"\n\nCall me with completedAction: \"commit_done\" and include the commitHash.\n---\n**Session:** 092139c0-0962-4869-a87f-7ba9d8687b12\n**State:** FINALIZE\n**Ticket:** T-2: Add logging for background jobs\n**Risk:** low\n**Completed:** none\n**Tickets done:** 0\n**Branch:** main\n\n**Reminders:**\n- NEVER cancel this session due to contex"
+  },
+  {
+    "toolUseId": "toolu_01J1zZAgUJtqYjENwFRRk3zR",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "commit_done",
+        "commitHash": "b42631322d1187e32f7ea70f584eee53ddddbc19",
+        "notes": "Committed as b426313 on main: feat: log background job start, success and failure (T-2)."
+      }
+    },
+    "resultHead": "# Targeted Session Complete -- All 1 target(s) done\n\nWrite a session handover summarizing what was accomplished, decisions made, and what's next.\n\nCall me with completedAction: \"handover_written\" and include the content in handoverContent.\n---\n**Session:** 092139c0-0962-4869-a87f-7ba9d8687b12\n**State:** HANDOVER (from COMPLETE)\n**Ticket:** none\n**Risk:** unknown\n**Completed:** T-2\n**Tickets done:*"
+  },
+  {
+    "toolUseId": "toolu_0199JSz3A7EezT8GoMrjL9x5",
+    "input": {
+      "sessionId": "092139c0-0962-4869-a87f-7ba9d8687b12",
+      "action": "report",
+      "report": {
+        "completedAction": "handover_written",
+        "handoverContent": "# Handover: T-2 background job logging landed (2026-09-20)\n\nTargeted autonomous session, `/story auto T-2`. One item, completed and committed.\n\n## Completed\n\n- **T-2: Add logging for background jobs** -- commit `b426313`. `JobQueue.run()` emitted nothing; each job now logs `job started`, then `job succeeded` or `job failed`, through `AppLogger` bound to `job.requestId`. New `src/jobs/JobQueue.test.ts` (9 tests). Full suite 13/13 green.\n\n## Decisions\n\n- **T-2 cited no rulings when picked up.** Both `r-eftp2zdb6as643np` (one logger, redaction and request ids on every path) and `r-p19bbvh0jhj8xgma` (background work logs under the enqueuing request's id) plainly bind this work, so they were added to the ticket during PLAN rather than merely quoted in the plan. They then reached every review stage automatically. Worth repeating for T-3 and T-4, which also cite nothing.\n- **`enqueue()` now rejects a blank request id.** This is a behaviour change to an existing public method, made deliberately. A job with no request id can never satisfy r-p19bbvh0jhj8xgma, and refusing it at the boundary is what makes constructing the logger outside `run()`'s `try` provably non-throwing -- a throw there would lose the already-`shift()`ed job and abort the rest of the drain. Code review flagged the guard as unreachable from the repo's only call site (`Router.dispatch` constructs `AppLogger` first, so a blank id is rejected before `enqueue`). That was contested and the contest accepted: `JobQueue` is an exported class whose precondition should not depend on Router being its only caller.\n- **`job.payload` is not logged.** Redaction is a backstop, not a licence to write arbitrary request bodies to the log. `jobId` and `kind` identify a job.\n- **`errorMessage()` is total on purpose.** It runs inside the `catch`, so a throw there would escape `run()`. `String()` is unsafe on a null-prototype object or a throwing `toString`, and an `Error`'s `message` may be neither a string nor readable without throwing.\n- **`handler.ts` was left untouched.** The first plan draft rewired `createApp` so its default queue could receive the sink; dropped because it has no observable effect today (`createApp` never exposes that queue) and so cannot be tested without widening the API, which RULES.md rule 3 would require. Filed as ISS-001 with the fix written out.\n\n## Open\n\n- **ISS-001** (low): `createApp` cannot pass its log sink to the default `JobQueue` it constructs -- a default-parameter expression may only reference parameters declared before it. Fix when something actually needs the app's own queue to run jobs.\n\n## Process note worth carrying\n\nBoth code-review rounds that found something found it by **mutation**, not by reading. Round 1: deleting the `await` in `run()` left all 11 tests green, so the async path -- which is what background jobs actually are -- was unpinned. Round 2: moving the `job started` line inside the `try`, or the `job succeeded` line before the `await`, both left 13 tests green while breaking the ticket's own acceptance. Neither gap was visible by inspection; the tests looked thorough. The final round re-ran the battery on verified-mutated copies plus three mutations of its own (fresh id instead of `job.requestId`, `job failed` deleted, `job started` deleted) and caught all six. For logging work especially, assert the exact line sequence and record ordering from inside the sink -- a post-hoc read of the collected lines only proves the runner finished before `run()` returned.\n\n## Continuation\n\n- **T-4 Add per-client rate limiting to the HTTP handler** is the next actionable ticket: fixed window per `x-client-id`, 429 when exhausted, plus a test. No ruling cites it yet; check whether one binds before planning.\n- **T-3 Move AppLogger into packages/logging** is still open and still carried forward from the T-1 handover. It touches every import in the repo, including the new `src/jobs/JobQueue.ts` one. Doing it before T-4 keeps the rate-limiter's imports from needing a second rewrite.\n",
+        "notes": "Snapshot taken before the handover (2026-09-21T01-59-35-643.json)."
+      }
+    },
+    "resultHead": "# Session Complete\n\n1 ticket(s) and 0 issue(s) completed. Handover written. Session ended.\n\n- T-2: Add logging for background jobs (b42631322d1187e32f7ea70f584eee53ddddbc19)\n\n## Session Report\n\n**Duration:** 19m | **Tickets:** 1 | **Issues:** 0 | **Reviews:** 5 rounds (11 findings) | **Compactions:** 0\n\n### Completed\n| Ticket | Title | Duration |\n|--------|-------|----------|\n| T-2 | Add logging f"
+  }
+]

@@ -1,0 +1,371 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..104d27d
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,25 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:1e8c539c-cef8-4ee8-96ce-8ca087ed7433:142e8a996bce0887a95b8ab4ee810ae0",
++  "discoveredDate": "2026-09-21",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-001",
++  "impact": "Pre-existing: src/http/handler.ts:31 derives the request id as req.headers['x-request-id'] ?? randomUUID(). ?? only catches null/undefined, so a client sending an empty or whitespace x-request-id yields a blank id and AppLogger.withRequestId then throws inside Router.dispatch (src/http/router.ts:37) -- app.handle() rejects instead of returning a RouteResponse, for any route including /health. No existing test covers a blank or whitespace header.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "1e8c539c-cef8-4ee8-96ce-8ca087ed7433"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "[unhandled-request-id] Pre-existing: src/http/handler.ts:31 derives the request id as req.headers['x-re"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..8026b3e
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,25 @@
++{
++  "components": [
++    "tooling",
++    "typescript"
++  ],
++  "createdBy": "storybloq-auto-session:T-2",
++  "dedupeKey": "T-2:tsc-missing-node-types",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-002",
++  "impact": "tsconfig.json sets noEmit: true and strict: true, so a typecheck is clearly intended, but it cannot pass today: every `node:` built-in import fails to resolve (TS2307 on node:crypto, node:test, node:assert/strict) and `process` is unknown (TS2580 at AppLogger.ts:87), because no @types/node is installed and package.json declares no devDependencies. Consequences: strict-mode type errors in real code can only be caught by reading, and a contributor running tsc sees nine pre-existing errors that mask any new one. Discovered during T-2 (one genuine strict finding in new test code was only visible after filtering these out by error code). Not fixed inline: RULES.md rule 2 keeps the code dependency-free, so whether a types-only devDependency is acceptable, or whether a `npm run typecheck` script should pass --types / skipLibCheck flags instead, is a project decision rather than part of T-2.",
++  "location": [
++    "tsconfig.json",
++    "package.json",
++    "src/platform/logging/AppLogger.ts:87"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "tsc --noEmit cannot pass: node: built-in types unresolvable without @types/node"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..1c15494
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,25 @@
++{
++  "components": [
++    "autonomous"
++  ],
++  "dedupeKey": "deferral:1e8c539c-cef8-4ee8-96ce-8ca087ed7433:a7e64f0436ff323f45bc15dff26f5e7d",
++  "discoveredDate": "2026-09-21",
++  "disposition": "accepted_out_of_scope",
++  "id": "ISS-003",
++  "impact": "Pre-existing: nothing in production calls JobQueue.run -- grep -rn '\\.run(' src/ matches only the call sites in src/jobs/JobQueue.test.ts. createApp enqueues jobs (handler.ts:24) but never drains the queue, so the log lines T-2 adds cannot appear in any real deployment; they are observable only from tests today. This makes the plan's decision to leave handler.ts alone consistent, but the ticket's goal ('a job's start, success and failure are visible in the logs') is only half-reachable until some caller drains the queue.",
++  "location": [],
++  "metadata": {
++    "review": {
++      "findingDisposition": "accepted_out_of_scope",
++      "origin": "reviewer-deferred",
++      "sessionId": "1e8c539c-cef8-4ee8-96ce-8ca087ed7433"
++    }
++  },
++  "phase": "p1",
++  "relatedTickets": [],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "status": "open",
++  "title": "[dead-production-path] Pre-existing: nothing in production calls JobQueue.run -- grep -rn '\\.run(' src/"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index ba8328d..09a3cd2 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Add logging for background jobs",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-eftp2zdb6as643np",
++    "r-p19bbvh0jhj8xgma"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Background jobs run without any log output today. Add logging for background jobs so that a job's start, success and failure are visible in the logs.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add logging for background jobs",
++  "type": "task"
+ }
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..0c93fb2
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,149 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++test("a job that succeeds logs its start and its success under the enqueuing request id", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: { n: 1 } }, { requestId: "req-1" });
++
++  const result = await queue.run(() => {});
++
++  assert.deepEqual(result, { ran: 1, failed: 0 });
++  assert.deepEqual(
++    lines.map((l) => [l.level, l.message, l.requestId]),
++    [
++      ["info", "job started", "req-1"],
++      ["info", "job succeeded", "req-1"],
++    ],
++  );
++  for (const line of lines) assert.deepEqual(line.fields, { jobId: "job-1", kind: "report" });
++});
++
++test("a failing job logs the failure and is dropped; the jobs behind it still run", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "bad", payload: null }, { requestId: "req-2" });
++  queue.enqueue({ kind: "good", payload: null }, { requestId: "req-3" });
++
++  const result = await queue.run((job) => {
++    if (job.kind === "bad") throw new Error("upstream refused");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  assert.deepEqual(
++    lines.map((l) => [l.level, l.message]),
++    [
++      ["info", "job started"],
++      ["error", "job failed"],
++      ["info", "job started"],
++      ["info", "job succeeded"],
++    ],
++  );
++  assert.deepEqual(lines[1].fields, { jobId: "job-1", kind: "bad", error: "upstream refused" });
++});
++
++test("each job logs under its own enqueuing request id, never a fresh one", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "first", payload: null }, { requestId: "req-a" });
++  queue.enqueue({ kind: "second", payload: null }, { requestId: "req-b" });
++
++  await queue.run(() => {});
++
++  assert.deepEqual(
++    lines.map((l) => l.requestId),
++    ["req-a", "req-a", "req-b", "req-b"],
++  );
++});
++
++test("a secret in a job failure never reaches the log line unredacted", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-4" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc123");
++  });
++
++  const failures = lines.filter((l) => l.level === "error");
++  assert.equal(failures.length, 1);
++  assert.equal(failures[0].fields.error, "upstream refused [REDACTED]");
++});
++
++test("a job whose request id is unusable still runs, is still counted, and logs nothing", async () => {
++  const lines: LogLine[] = [];
++  const ranKinds: string[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "blank-id", payload: null }, { requestId: "" });
++  queue.enqueue({ kind: "after", payload: null }, { requestId: "req-5" });
++
++  const result = await queue.run((job) => {
++    ranKinds.push(job.kind);
++  });
++
++  // The job's work happened and was counted; only its log lines are missing, because no
++  // compliant line can be written without a request id.
++  assert.deepEqual(ranKinds, ["blank-id", "after"]);
++  assert.deepEqual(result, { ran: 2, failed: 0 });
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.message]),
++    [
++      ["req-5", "job started"],
++      ["req-5", "job succeeded"],
++    ],
++  );
++});
++
++test("a sink that throws does not change whether a job ran or how it was counted", async () => {
++  const queue = new JobQueue(() => {
++    throw new Error("sink is broken");
++  });
++  queue.enqueue({ kind: "good", payload: null }, { requestId: "req-6" });
++  queue.enqueue({ kind: "bad", payload: null }, { requestId: "req-7" });
++
++  const result = await queue.run((job) => {
++    if (job.kind === "bad") throw new Error("runner failed");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++});
++
++test("a runner that returns a rejected promise is a counted failure", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "async", payload: null }, { requestId: "req-8" });
++
++  const result = await queue.run(async () => {
++    await Promise.resolve();
++    throw new Error("async failure");
++  });
++
++  assert.deepEqual(result, { ran: 0, failed: 1 });
++  assert.deepEqual(lines[1].fields, { jobId: "job-1", kind: "async", error: "async failure" });
++});
++
++test("a thrown value that cannot be stringified is still logged as a failure, and the queue drains", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "unstringifiable", payload: null }, { requestId: "req-9" });
++  queue.enqueue({ kind: "after", payload: null }, { requestId: "req-10" });
++
++  const result = await queue.run((job) => {
++    if (job.kind === "unstringifiable") throw Object.create(null);
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  assert.deepEqual(
++    lines.map((l) => [l.requestId, l.message]),
++    [
++      ["req-9", "job started"],
++      ["req-9", "job failed"],
++      ["req-10", "job started"],
++      ["req-10", "job succeeded"],
++    ],
++  );
++  // The value could not be described, but the failure is still visible under its own id.
++  assert.deepEqual(lines[1].fields, { jobId: "job-1", kind: "unstringifiable", error: "unstringifiable object" });
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..1adc48b 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,10 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and everything a job logs while it runs goes through AppLogger under that
++ * same id -- never a fresh one (ruling r-p19bbvh0jhj8xgma).
+  */
++import { AppLogger, type LogLevel, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -17,8 +20,14 @@ export type JobRunner = (job: QueuedJob) => Promise<void> | void;
+ 
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what jobs log; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
+   enqueue(job: Job, opts: { requestId: string }): string {
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+@@ -29,19 +38,57 @@ export class JobQueue {
+     return this.#jobs.length;
+   }
+ 
+-  /** Runs every queued job in order. A failing job is dropped; the rest still run. */
++  /**
++   * Runs every queued job in order, logging each job's start, success and failure under the
++   * request id that enqueued it. A failing job is dropped; the rest still run.
++   *
++   * Only the runner sits inside the try: logging is additive and never decides whether a job
++   * ran or how it was counted.
++   */
+   async run(runner: JobRunner): Promise<{ ran: number; failed: number }> {
+     let ran = 0;
+     let failed = 0;
+     while (this.#jobs.length > 0) {
+       const job = this.#jobs.shift()!;
++      this.#emit(job, "info", "job started");
+       try {
+         await runner(job);
+         ran++;
+-      } catch {
++        this.#emit(job, "info", "job succeeded");
++      } catch (err) {
+         failed++;
++        this.#emit(job, "error", "job failed", { err });
+       }
+     }
+     return { ran, failed };
+   }
++
++  /**
++   * The only place this class writes a line. Everything that can throw happens inside the
++   * try, so no logging fault can reach the caller and abandon the jobs still queued.
++   */
++  #emit(job: QueuedJob, level: LogLevel, message: string, cause?: { readonly err: unknown }): void {
++    try {
++      const fields: Record<string, unknown> = { jobId: job.id, kind: job.kind };
++      if (cause) fields.error = describeError(cause.err);
++      AppLogger.withRequestId(job.requestId, this.#sink)[level](message, fields);
++    } catch {
++      // A logging fault never changes a job's outcome. An unusable request id cannot produce
++      // a compliant line at all (r-eftp2zdb6as643np), so the line is dropped rather than
++      // written without one.
++    }
++  }
++}
++
++/**
++ * A thrown value need not be describable: `String(Object.create(null))` throws, and so can a
++ * `message` getter. The failure still has to be visible, so an undescribable value degrades to
++ * its type rather than costing the whole line.
++ */
++function describeError(err: unknown): string {
++  try {
++    return err instanceof Error ? err.message : String(err);
++  } catch {
++    return `unstringifiable ${typeof err}`;
++  }
+ }

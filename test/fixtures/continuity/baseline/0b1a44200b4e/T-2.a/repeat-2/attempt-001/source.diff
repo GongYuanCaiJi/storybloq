@@ -1,0 +1,323 @@
+diff --git a/.story/issues/ISS-001.json b/.story/issues/ISS-001.json
+new file mode 100644
+index 0000000..8ac5094
+--- /dev/null
++++ b/.story/issues/ISS-001.json
+@@ -0,0 +1,32 @@
++{
++  "components": [
++    "http"
++  ],
++  "createdBy": "plan-review agent (T-2 round 1)",
++  "dedupeKey": "t-2-plan-review-r1:blank-x-request-id-header",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-001",
++  "impact": "src/http/handler.ts:31 mints the request id with `req.headers[\"x-request-id\"] ?? randomUUID()`. `??` only falls back on null/undefined, so a client sending an empty or whitespace-only `x-request-id` yields a blank id. Router.dispatch then calls AppLogger.withRequestId at src/http/router.ts:37, which throws \"AppLogger requires a non-empty request id\" before any route body runs, so app.handle rejects and the request 500s/crashes instead of being served under a fresh id. Fix: normalize at the boundary, e.g. `const raw = req.headers[\"x-request-id\"]; const requestId = raw !== undefined && raw.trim() !== \"\" ? raw : randomUUID()`. This does not conflict with r-p19bbvh0jhj8xgma, which constrains a job inheriting the enqueuing request's id, not how handler.ts mints an id for a request that supplied none. Found during T-2 plan review; pre-existing and out of scope for T-2, which touches src/jobs/.",
++  "location": [
++    "src/http/handler.ts:31"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "medium",
++  "sourceRefs": [
++    {
++      "contentHash": "5916fa02b52317a4182f2b8a052e5017d87f7ec86bb17577899cf52cb51d5370",
++      "endLine": 31,
++      "path": "src/http/handler.ts",
++      "reviewId": "t-2-plan-review-r1",
++      "revision": "8be4ebbd0c5e78976d2b05d672af7b4e79da3105",
++      "startLine": 31
++    }
++  ],
++  "status": "open",
++  "title": "Blank x-request-id header produces an unhandled rejection from app.handle"
++}
+diff --git a/.story/issues/ISS-002.json b/.story/issues/ISS-002.json
+new file mode 100644
+index 0000000..0d3129e
+--- /dev/null
++++ b/.story/issues/ISS-002.json
+@@ -0,0 +1,24 @@
++{
++  "components": [
++    "build",
++    "tooling"
++  ],
++  "createdBy": "T-2 autonomous session (IMPLEMENT verification)",
++  "dedupeKey": "t-2-implement:no-types-node-typecheck-broken",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-002",
++  "impact": "`tsc --noEmit -p tsconfig.json` reports TS2307 \"Cannot find module 'node:test' / 'node:assert/strict' / 'node:crypto'\" and TS2580 \"Cannot find name 'process'\" on pristine HEAD, across src/http/handler.ts, src/http/router.test.ts, src/platform/logging/AppLogger.ts and AppLogger.test.ts. The cause is that no @types/node is installed (there is no node_modules and package.json declares no devDependencies). Consequence: tsconfig.json sets `strict: true` and `noEmit: true`, but nothing can actually typecheck the project, and `npm test` is `node --test`, which strips types without checking them. A genuine type error therefore reaches main unnoticed - one did surface during T-2 (TS18048 in a new test, masked among the resolution noise). Resolving this is an owner call, because the obvious fix (`npm i --save-dev @types/node`) sits against RULES.md #2 \"Keep the code dependency-free: Node built-ins only\" - whether that rule is about runtime dependencies only, or about devDependencies too, is not settled anywhere in the repo. Found during T-2 implementation verification; pre-existing and out of scope for T-2.",
++  "location": [
++    "tsconfig.json",
++    "package.json"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "status": "open",
++  "title": "Project cannot be typechecked: no @types/node, so tsc --noEmit fails on every file using a Node built-in"
++}
+diff --git a/.story/issues/ISS-003.json b/.story/issues/ISS-003.json
+new file mode 100644
+index 0000000..c989281
+--- /dev/null
++++ b/.story/issues/ISS-003.json
+@@ -0,0 +1,33 @@
++{
++  "components": [
++    "http",
++    "jobs"
++  ],
++  "createdBy": "code-review agent (T-2 round 1)",
++  "dedupeKey": "t-2-code-review-r1:createapp-default-queue-ignores-sink",
++  "discoveredDate": "2026-09-21",
++  "id": "ISS-003",
++  "impact": "src/http/handler.ts:17 is `createApp(queue: JobQueue = new JobQueue(), sink?: Sink)`. The default queue is constructed before `sink` is in play, so `createApp(undefined, sink)` yields route lines on the injected sink and job lines on AppLogger's default stdout sink. Harmless today and deliberately left alone by T-2: `createApp` never exposes the queue and `JobQueue.run()` has zero callers in src, so nothing drains the app-level queue and no test can observe the split. It becomes a real trap for whoever first drains it - job logging would silently bypass a test's sink, and a test asserting on job lines would see none. Fix when that caller appears: `createApp(queue?: JobQueue, sink?: Sink)` with `const jobs = queue ?? new JobQueue(sink)`, together with whatever makes the queue reachable (returning it, or a `drain(runner)` from createApp), so the change is observable in a test under src/http/ per RULES.md #3. Raised in T-2 code review; T-2 deliberately scoped itself to src/jobs/.",
++  "location": [
++    "src/http/handler.ts:17"
++  ],
++  "phase": "p1",
++  "relatedTickets": [
++    "T-2"
++  ],
++  "resolution": null,
++  "resolvedDate": null,
++  "severity": "low",
++  "sourceRefs": [
++    {
++      "contentHash": "cd78e8e6f179396a28d99de80f5ee0b9829a5cb8f1d5108ab88d623467de8cf3",
++      "endLine": 17,
++      "path": "src/http/handler.ts",
++      "reviewId": "t-2-code-review-r1",
++      "revision": "8be4ebbd0c5e78976d2b05d672af7b4e79da3105",
++      "startLine": 17
++    }
++  ],
++  "status": "open",
++  "title": "createApp's default JobQueue ignores the injected sink, so job lines and route lines go to different destinations"
++}
+diff --git a/.story/tickets/T-2.json b/.story/tickets/T-2.json
+index 8c531c0..3df52f5 100644
+--- a/.story/tickets/T-2.json
++++ b/.story/tickets/T-2.json
+@@ -1,13 +1,18 @@
+ {
+-  "id": "T-2",
+-  "title": "Add logging for background jobs",
++  "blockedBy": [],
++  "citesRulings": [
++    "r-eftp2zdb6as643np",
++    "r-p19bbvh0jhj8xgma"
++  ],
++  "completedDate": "2026-09-20",
++  "createdDate": "2026-09-16",
+   "description": "Background jobs run without any log output today. Add logging for background jobs in src/jobs/ so that a job's start, success and failure are visible in the logs.",
+-  "type": "task",
+-  "status": "open",
+-  "phase": "p1",
++  "displayId": "T-2",
++  "id": "T-2",
+   "order": 20,
+-  "createdDate": "2026-09-16",
+-  "completedDate": null,
+-  "blockedBy": [],
+-  "parentTicket": null
++  "parentTicket": null,
++  "phase": "p1",
++  "status": "complete",
++  "title": "Add logging for background jobs",
++  "type": "task"
+ }
+diff --git a/src/jobs/JobQueue.test.ts b/src/jobs/JobQueue.test.ts
+new file mode 100644
+index 0000000..34093d3
+--- /dev/null
++++ b/src/jobs/JobQueue.test.ts
+@@ -0,0 +1,109 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import { JobQueue } from "./JobQueue.ts";
++import type { LogLine } from "../platform/logging/AppLogger.ts";
++
++/** The message/requestId/level spine of the emitted lines, which is what the ordering assertions are about. */
++function spine(lines: LogLine[]): Array<Pick<LogLine, "requestId" | "level" | "message">> {
++  return lines.map(({ requestId, level, message }) => ({ requestId, level, message }));
++}
++
++test("a job's start and success are logged under the request id that enqueued it", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  const id = queue.enqueue({ kind: "report", payload: { secretish: "hunter2" } }, { requestId: "req-job-1" });
++
++  assert.deepEqual(await queue.run(() => {}), { ran: 1, failed: 0 });
++  assert.deepEqual(spine(lines), [
++    { requestId: "req-job-1", level: "info", message: "job started" },
++    { requestId: "req-job-1", level: "info", message: "job succeeded" },
++  ]);
++  // Closed field set: it is what pins "payload is not logged". redact() would not catch a secret
++  // under a neutral key inside a caller-supplied payload.
++  for (const line of lines) assert.deepEqual(line.fields, { jobId: id, kind: "report" });
++});
++
++test("a failing job logs a failure under its own request id, and the rest still run", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-job-a" });
++  queue.enqueue({ kind: "digest", payload: null }, { requestId: "req-job-b" });
++
++  const result = await queue.run((job) => {
++    if (job.requestId === "req-job-a") throw new Error("upstream refused");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  // The full sequence, not an existence check: a `finally`-emitted success line would add a fifth
++  // line under req-job-a, and the differing ids catch a queue-level or per-run() logger.
++  assert.deepEqual(spine(lines), [
++    { requestId: "req-job-a", level: "info", message: "job started" },
++    { requestId: "req-job-a", level: "error", message: "job failed" },
++    { requestId: "req-job-b", level: "info", message: "job started" },
++    { requestId: "req-job-b", level: "info", message: "job succeeded" },
++  ]);
++  assert.deepEqual(lines[1].fields, { jobId: "job-1", kind: "report", error: "upstream refused" });
++});
++
++test("a secret in a job failure is redacted before the line is written", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-job-2" });
++
++  await queue.run(() => {
++    throw new Error("upstream refused Bearer abc-secret for job");
++  });
++
++  const failure = lines.find((l) => l.message === "job failed");
++  assert.ok(failure, "expected a job failed line");
++  assert.equal(failure?.fields.error, "upstream refused [REDACTED] for job");
++});
++
++test("a job cannot be enqueued without a request id", () => {
++  const queue = new JobQueue(() => {});
++  assert.throws(() => queue.enqueue({ kind: "report", payload: null }, { requestId: "  " }), /non-empty request id/);
++  assert.equal(queue.size, 0);
++});
++
++test("an async runner that rejects is awaited, logged as failed, and does not stall the drain", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-job-4" });
++  queue.enqueue({ kind: "digest", payload: null }, { requestId: "req-job-5" });
++
++  // Without the `await` in run(), the rejection escapes as an unhandled rejection and the job is
++  // counted as ran and logged as succeeded -- exactly what this ticket exists to make visible.
++  // Every other test uses a synchronous runner, so this is the only one that pins the await.
++  const result = await queue.run(async (job) => {
++    if (job.requestId === "req-job-4") throw new Error("async upstream refused");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 1 });
++  assert.deepEqual(spine(lines), [
++    { requestId: "req-job-4", level: "info", message: "job started" },
++    { requestId: "req-job-4", level: "error", message: "job failed" },
++    { requestId: "req-job-5", level: "info", message: "job started" },
++    { requestId: "req-job-5", level: "info", message: "job succeeded" },
++  ]);
++  assert.equal(lines[1].fields.error, "async upstream refused");
++});
++
++test("the runner is handed a logger already bound to the job's request id", async () => {
++  const lines: LogLine[] = [];
++  const queue = new JobQueue((l) => lines.push(l));
++  queue.enqueue({ kind: "report", payload: null }, { requestId: "req-job-3" });
++
++  // run() swallows whatever the runner throws, so the assertions that matter are the outer ones:
++  // a wrong id in here would otherwise be converted into a "job failed" line and pass unnoticed.
++  const result = await queue.run((job, log) => {
++    assert.equal(log.requestId, job.requestId);
++    log.info("runner line");
++  });
++
++  assert.deepEqual(result, { ran: 1, failed: 0 });
++  assert.deepEqual(spine(lines), [
++    { requestId: "req-job-3", level: "info", message: "job started" },
++    { requestId: "req-job-3", level: "info", message: "runner line" },
++    { requestId: "req-job-3", level: "info", message: "job succeeded" },
++  ]);
++});
+diff --git a/src/jobs/JobQueue.ts b/src/jobs/JobQueue.ts
+index 807e78b..07eddd8 100644
+--- a/src/jobs/JobQueue.ts
++++ b/src/jobs/JobQueue.ts
+@@ -1,7 +1,11 @@
+ /**
+  * Background jobs. A job records the request id of the request that enqueued
+- * it. Running a job does not log anything yet.
++ * it, and everything logged while it runs goes out under that id -- never a
++ * fresh one. The runner is handed the bound logger for the same reason Router
++ * hands one to a route handler: so it cannot get the id wrong.
+  */
++import { AppLogger, type Sink } from "../platform/logging/AppLogger.ts";
++
+ export interface Job {
+   readonly kind: string;
+   readonly payload: unknown;
+@@ -13,13 +17,24 @@ export interface QueuedJob extends Job {
+   readonly enqueuedAt: number;
+ }
+ 
+-export type JobRunner = (job: QueuedJob) => Promise<void> | void;
++export type JobRunner = (job: QueuedJob, log: AppLogger) => Promise<void> | void;
+ 
+ export class JobQueue {
+   readonly #jobs: QueuedJob[] = [];
++  readonly #sink: Sink | undefined;
+   #next = 1;
+ 
++  /** A sink can be supplied so a test can observe what jobs log; production uses AppLogger's default. */
++  constructor(sink?: Sink) {
++    this.#sink = sink;
++  }
++
++  /**
++   * A job with no request id could not be logged under one, and neither way out is allowed: a fresh
++   * id is forbidden, dropping the lines is forbidden. So it never reaches the queue.
++   */
+   enqueue(job: Job, opts: { requestId: string }): string {
++    if (opts.requestId.trim() === "") throw new Error("JobQueue requires a non-empty request id");
+     const id = `job-${this.#next++}`;
+     this.#jobs.push({ ...job, id, requestId: opts.requestId, enqueuedAt: Date.now() });
+     return id;
+@@ -35,11 +50,22 @@ export class JobQueue {
+     let failed = 0;
+     while (this.#jobs.length > 0) {
+       const job = this.#jobs.shift()!;
++      const log = AppLogger.withRequestId(job.requestId, this.#sink);
++      log.info("job started", { jobId: job.id, kind: job.kind });
++      // Only the runner is guarded. Counting or logging the outcome inside the same try would let a
++      // throw from the sink count one job both ways and log a succeeded job as failed.
++      let succeeded = false;
+       try {
+-        await runner(job);
+-        ran++;
+-      } catch {
++        await runner(job, log);
++        succeeded = true;
++      } catch (err) {
+         failed++;
++        log.error("job failed", { jobId: job.id, kind: job.kind, error: err instanceof Error ? err.message : String(err) });
++      }
++      if (succeeded) {
++        ran++;
++        // Not a finally: a failed job must never be logged as succeeded.
++        log.info("job succeeded", { jobId: job.id, kind: job.kind });
+       }
+     }
+     return { ran, failed };

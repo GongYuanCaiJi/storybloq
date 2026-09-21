@@ -1,0 +1,85 @@
+[
+  {
+    "path": ".gitignore",
+    "kind": "added",
+    "content": "snapshots/\nstatus.json\nsessions/\nfederation-cache.json\nchannel-inbox/\nservers/\n<ABS>\n"
+  },
+  {
+    "path": "handovers/2026-09-20-01-auto-session.md",
+    "kind": "added",
+    "content": "# Handover: T-2 background job logging landed (2026-09-20)\n\nTargeted autonomous session, `/story auto T-2`. One item, completed and committed.\n\n## Completed\n\n- **T-2: Add logging for background jobs** -- commit `b426313`. `JobQueue.run()` emitted nothing; each job now logs `job started`, then `job succeeded` or `job failed`, through `AppLogger` bound to `job.requestId`. New `src/jobs/JobQueue.test.ts` (9 tests). Full suite 13/13 green.\n\n## Decisions\n\n- **T-2 cited no rulings when picked up.** Both `r-eftp2zdb6as643np` (one logger, redaction and request ids on every path) and `r-p19bbvh0jhj8xgma` (background work logs under the enqueuing request's id) plainly bind this work, so they were added to the ticket during PLAN rather than merely quoted in the plan. They then reached every review stage automatically. Worth repeating for T-3 and T-4, which also cite nothing.\n- **`enqueue()` now rejects a blank request id.** This is a behaviour change to an existing public method, made deliberately. A job with no request id can never satisfy r-p19bbvh0jhj8xgma, and refusing it at the boundary is what makes constructing the logger outside `run()`'s `try` provably non-throwing -- a throw there would lose the already-`shift()`ed job and abort the rest of the drain. Code review flagged the guard as unreachable from the repo's only call site (`Router.dispatch` constructs `AppLogger` first, so a blank id is rejected before `enqueue`). That was contested and the contest accepted: `JobQueue` is an exported class whose precondition should not depend on Router being its only caller.\n- **`job.payload` is not logged.** Redaction is a backstop, not a licence to write arbitrary request bodies to the log. `jobId` and `kind` identify a job.\n- **`errorMessage()` is total on purpose.** It runs inside the `catch`, so a throw there would escape `run()`. `String()` is unsafe on a null-prototype object or a throwing `toString`, and an `Error`'s `message` may be neither a string nor readable without throwing.\n- **`handler.ts` was left untouched.** The first plan draft rewired `createApp` so its default queue could receive the sink; dropped because it has no observable effect today (`createApp` never exposes that queue) and so cannot be tested without widening the API, which RULES.md rule 3 would require. Filed as ISS-001 with the fix written out.\n\n## Open\n\n- **ISS-001** (low): `createApp` cannot pass its log sink to the default `JobQueue` it constructs -- a default-parameter expression may only reference parameters declared before it. Fix when something actually needs the app's own queue to run jobs.\n\n## Process note worth carrying\n\nBoth code-review rounds that found something found it by **mutation**, not by reading. Round 1: deleting the `await` in `run()` left all 11 tests green, so the async path -- which is what background jobs actually are -- was unpinned. Round 2: moving the `job started` line inside the `try`, or the `job succeeded` line before the `await`, both left 13 tests green while breaking the ticket's own acceptance. Neither gap was visible by inspection; the tests looked thorough. The final round re-ran the battery on verified-mutated copies plus three mutations of its own (fresh id instead of `job.requestId`, `job failed` deleted, `job started` deleted) and caught all six. For logging work especially, assert the exact line sequence and record ordering from inside the sink -- a post-hoc read of the collected lines only proves the runner finished before `run()` returned.\n\n## Continuation\n\n- **T-4 Add per-client rate limiting to the HTTP handler** is the next actionable ticket: fixed window per `x-client-id`, 429 when exhausted, plus a test. No ruling cites it yet; check whether one binds before planning.\n- **T-3 Move AppLogger into packages/logging** is still open and still carried forward from the T-1 handover. It touches every import in the repo, including the new `src/jobs/JobQueue.ts` one. Doing it before T-4 keeps the rate-limiter's imports from needing a second rewrite.\n"
+  },
+  {
+    "path": "issues/ISS-001.json",
+    "kind": "added",
+    "content": {
+      "components": [
+        "http"
+      ],
+      "createdBy": "plan-review agent (T-2 session 092139c0)",
+      "dedupeKey": "t-2-plan-review-round-1:handler-default-queue-sink",
+      "discoveredDate": "2026-09-21",
+      "id": "ISS-001",
+      "impact": "createApp(queue: JobQueue = new JobQueue(), sink?: Sink) cannot hand `sink` to its own default queue: a default-parameter expression may only reference parameters declared before it, and `sink` is declared after `queue`. Once JobQueue logs (T-2), a caller that relies on the default queue gets routes logging to the injected sink while its background jobs log to AppLogger's stdout sink. No observable effect today -- createApp never exposes the queue it creates, so nothing outside can call run() on it -- which is why T-2 left it alone rather than shipping an untested signature change. Fix when something needs the app's own queue to run jobs: make the parameter optional, resolve it in the body (`const jobQueue = queue ?? new JobQueue(sink)`), repoint the route closure at handler.ts:24 from `queue` to `jobQueue`, and add src/http/handler.test.ts covering it (RULES.md rule 3).",
+      "location": [
+        "src/http/handler.ts:17",
+        "src/http/handler.ts:24"
+      ],
+      "phase": "p1",
+      "relatedTickets": [
+        "T-2"
+      ],
+      "resolution": null,
+      "resolvedDate": null,
+      "severity": "low",
+      "status": "open",
+      "title": "createApp cannot pass its log sink to the default JobQueue it constructs"
+    }
+  },
+  {
+    "path": "lessons/L-001.json",
+    "kind": "added",
+    "content": {
+      "content": "When a ticket's deliverable is log output, assert the exact line sequence and record ordering from inside the sink as lines are emitted. Before calling such tests done, mutate the production code on a copied tree and confirm each mutation turns the suite red: remove the `await` around the unit of work, move the start line inside the try, move the success line before the await, and bind the logger to a fresh id instead of the inherited one. Always check the substitution actually applied before trusting a green result.",
+      "context": "T-2 (background job logging). Both code-review rounds that found anything found it by mutation, not inspection. Round 1: deleting the `await` in JobQueue.run() left all 11 tests green, so the async path -- which is what a background job actually is -- was unpinned; without it a success line would be logged before the job finished and a rejected promise would escape as an unhandled rejection. Round 2: moving the \"job started\" line inside the try, or the \"job succeeded\" line before the await, both left 13 tests green while breaking the ticket's own acceptance that start, success and failure are visible. The tests looked thorough in both cases. The root cause of the round-2 gap was a test that appended collected log messages to an order array after run() had already resolved, which only proves the runner finished before run() returned and encodes nothing about interleaving. A first mutation attempt in this session also silently failed to apply (an unexported shell variable) and reported a false green, which is why verifying the substitution is part of the rule.",
+      "createdDate": "2026-09-21",
+      "id": "L-001",
+      "lastValidated": "2026-09-21",
+      "reinforcements": 0,
+      "source": "review",
+      "status": "active",
+      "supersedes": null,
+      "tags": [
+        "testing",
+        "logging",
+        "review",
+        "mutation-testing"
+      ],
+      "title": "Verify logging/observability tests by mutation, not by reading",
+      "updatedDate": "2026-09-21"
+    }
+  },
+  {
+    "path": "tickets/T-2.json",
+    "kind": "changed",
+    "fields": {
+      "status": {
+        "before": "open",
+        "after": "complete"
+      },
+      "completedDate": {
+        "before": null,
+        "after": "2026-09-20"
+      },
+      "citesRulings": {
+        "after": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ]
+      },
+      "displayId": {
+        "after": "T-2"
+      }
+    }
+  }
+]
