@@ -68,6 +68,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **ruling get <id>** (--format?) - Get a ruling by ID
 - **ruling create** (--text, --attribution, --date, --client-task-id?, --scope-tag?, --cites?, --format?) - Record a ruling verbatim and cite it from the tickets or issues it binds
 - **ruling supersede <id>** (--with?, --text?, --attribution?, --date?, --client-task-id?, --scope-tag?, --format?) - Supersede a ruling: link an existing one with --with, or record a new superseding ruling
+- **duet spawn** (--name, --pen, --model?, --dir?, --role?, --permission-mode?, --terminal?, --print?, --format?) - Start a visible duet worker session from the pen (N-131): writes a launch script, role and record under .story/sessions/spawn/ and opens it in the OS terminal. Permission mode defaults to auto, inheriting bypassPermissions only when the pen itself runs in bypass
 - **arrangement compact <id>** (--client-task-id?, --format?) - Compact a duet arrangement's coordination checkpoint: resolved assignments keep their last event, overflow moves to an archive list. Pen only
 - **arrangement rotate <id>** (--client-task-id?, --format?) - Close a duet arrangement at capacity and carry its open assignments, verified session and earmarks into a fresh successor. Pen only
 - **validate** (--integrity-only?, --format?) - Reference, schema, source-provenance, and loader-independent JSON checks

@@ -373,6 +373,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--with", "--text", "--attribution", "--date", "--client-task-id", "--scope-tag", "--format"],
   },
   {
+    name: "duet spawn",
+    description: "Start a visible duet worker session from the pen (N-131): writes a launch script, role and record under .story/sessions/spawn/ and opens it in the OS terminal. Permission mode defaults to auto, inheriting bypassPermissions only when the pen itself runs in bypass",
+    usage: "storybloq duet spawn --name <value> --pen <value> [--model <value>] [--dir <value>] [--role <value>] [--permission-mode <mode>] [--terminal <app>] [--print] [--format <json|md>]",
+    flags: ["--name", "--pen", "--model", "--dir", "--role", "--permission-mode", "--terminal", "--print", "--format"],
+  },
+  {
     name: "arrangement compact",
     description: "Compact a duet arrangement's coordination checkpoint: resolved assignments keep their last event, overflow moves to an archive list. Pen only",
     usage: "storybloq arrangement compact <id> [--client-task-id <id>] [--format json|md]",

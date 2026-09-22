@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -28,8 +28,9 @@ export interface SpawnWorkerOptions {
    * Probe finding (N-131, environment mismatch): a spawned session inherits
    * nothing from the pen and starts in the client's default (prompting) mode,
    * so every tool call it makes waits on the developer and cross-session mail
-   * from a bypass pen may be held. The pen names the mode explicitly; it is
-   * passed through as `claude --permission-mode <mode>`.
+   * from a bypass pen may be held. Explicit here wins. Absent, the product
+   * default is `auto`; it rises to `bypassPermissions` only when the pen
+   * itself is found running in bypass (owner ruling, 2026-09-22).
    */
   readonly permissionMode?: string;
   /** Write the script and role but do not launch. */
@@ -43,10 +44,117 @@ export interface SpawnWorkerResult {
   readonly recordPath: string;
   /** The exact command the script runs, for pasting where no launcher exists. */
   readonly command: string;
+  /** The mode actually passed to the worker. */
+  readonly permissionMode: string;
+  /** How it was chosen: named on the command line, inherited from a bypass pen, or the product default. */
+  readonly permissionModeSource: "explicit" | "inherited-bypass" | "default";
   /** "opened" when the launcher ran, "printed" when --print or no launcher. */
   readonly launch: "opened" | "printed";
   readonly launcher: string | null;
 }
+
+/** Reports the pen's own permission mode, or null when it cannot be determined. */
+export type PenModeDetector = () => string | null;
+
+export const DEFAULT_WORKER_PERMISSION_MODE = "auto";
+
+/** One ancestor process: its parent pid and its flattened command line, or null when unreadable. */
+export type ProcessReader = (pid: number) => { ppid: number; command: string } | null;
+
+/**
+ * Parse `ps -o ppid=,command=` output for one pid. Exactly one nonempty line
+ * is accepted; a command line spanning several lines (a newline inside an
+ * argument) cannot be classified from its first line alone and is unknown.
+ */
+export function parsePsLine(out: string): { ppid: number; command: string } | null {
+  const lines = out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length !== 1) return null;
+  const m = /^(\d+)\s+(.*)$/.exec(lines[0]!);
+  return m ? { ppid: Number(m[1]), command: m[2]! } : null;
+}
+
+export const psProcessReader: ProcessReader = (pid) => {
+  try {
+    return parsePsLine(execFileSync("ps", ["-o", "ppid=,command=", "-p", String(pid)], { encoding: "utf-8", timeout: 5_000 }));
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Boolean Claude Code flags known to take no value. Every other token is
+ * unknown: it might be a value-taking option whose value is the next token,
+ * so nothing on that line can be trusted (Codex round 3 finding).
+ */
+const CLAUDE_BOOLEAN_FLAGS = new Set(["-c", "--continue", "--verbose", "--ide", "--chrome", "--no-chrome"]);
+
+/** The token is the Claude Code executable: `claude`, a path to it, or the versioned binary it runs as. */
+function isClaudeExecutable(token: string): boolean {
+  const base = token.split("/").pop() ?? token;
+  return base === "claude" || /\/claude\/versions\/[0-9][0-9A-Za-z.+-]*$/.test(token);
+}
+
+/** A node wrapper: `node <path>` where the path is exactly Claude Code's installed cli entry or versioned binary. */
+function isClaudeNodeEntry(exe: string, script: string | undefined): boolean {
+  const base = exe.split("/").pop() ?? exe;
+  if (base !== "node" && !/^node\d*$/.test(base)) return false;
+  if (script === undefined) return false;
+  return /(^|\/)@anthropic-ai\/claude-code\/cli\.(m?js)$/.test(script) || /\/claude\/versions\/[0-9][0-9A-Za-z.+-]*$/.test(script);
+}
+
+/**
+ * Classify one flattened command line. `session: false` means it is not a
+ * Claude Code process. Otherwise `mode` is the effective permission mode,
+ * and it is settled ONLY when every token after the executable is one of:
+ * --dangerously-skip-permissions, --permission-mode <known mode>, or a
+ * known boolean flag; the last mode option wins, "default" when there is
+ * none. Any other token (a positional prompt or subcommand, `--`, an
+ * `--opt=value` form, an option not on the allowlist) makes the whole line
+ * unknown (null), whatever appeared before it: ps flattens argv, so a flag
+ * inside a value, or a value that IS a flag, is indistinguishable from the
+ * real thing, and a later option may override an earlier one.
+ */
+export function classifyClaudeCommand(command: string): { session: boolean; mode: string | null } {
+  const tokens = command.trim().split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === 0) return { session: false, mode: null };
+  let start: number;
+  if (isClaudeExecutable(tokens[0]!)) start = 1;
+  else if (isClaudeNodeEntry(tokens[0]!, tokens[1])) start = 2;
+  else return { session: false, mode: null };
+  let mode: string | null = null;
+  for (let i = start; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (t === "--dangerously-skip-permissions") { mode = "bypassPermissions"; continue; }
+    if (t === "--permission-mode") {
+      const value = tokens[++i];
+      if (value === undefined || !(PERMISSION_MODES as readonly string[]).includes(value)) return { session: true, mode: null };
+      mode = value; continue;
+    }
+    if (CLAUDE_BOOLEAN_FLAGS.has(t)) continue;
+    return { session: true, mode: null };
+  }
+  return { session: true, mode: mode ?? "default" };
+}
+
+/**
+ * The pen's mode is not in the environment; it is on the pen's `claude` argv,
+ * which is an ancestor of this process (claude -> shell -> storybloq). Walk up
+ * to the NEAREST Claude Code process and classify it; never look past it to
+ * an outer session. Any failure or ambiguity yields null, never bypass.
+ */
+export function detectPenPermissionModeWith(read: ProcessReader, startPid: number = process.ppid): string | null {
+  let pid = startPid;
+  for (let depth = 0; depth < 12 && pid > 1; depth++) {
+    const p = read(pid);
+    if (p === null) return null;
+    const c = classifyClaudeCommand(p.command);
+    if (c.session) return c.mode;
+    pid = p.ppid;
+  }
+  return null;
+}
+
+export const detectPenPermissionMode: PenModeDetector = () => detectPenPermissionModeWith(psProcessReader);
 
 export type Launcher = (scriptPath: string, terminal: string | undefined) => string | null;
 
@@ -114,12 +222,23 @@ export const osLauncher: Launcher = (scriptPath, terminal) => {
   return null;
 };
 
-export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: Launcher = osLauncher): SpawnWorkerResult {
+export function resolvePermissionMode(explicit: string | undefined, detect: PenModeDetector): { mode: string; source: SpawnWorkerResult["permissionModeSource"] } {
+  if (explicit !== undefined && explicit !== "") return { mode: explicit, source: "explicit" };
+  if (detect() === "bypassPermissions") return { mode: "bypassPermissions", source: "inherited-bypass" };
+  return { mode: DEFAULT_WORKER_PERMISSION_MODE, source: "default" };
+}
+
+export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: Launcher = osLauncher, detect: PenModeDetector = detectPenPermissionMode): SpawnWorkerResult {
   validateWorkerName(opts.name);
   validateWorkerName(opts.pen);
   if (opts.name === opts.pen) throw new Error("The worker name must differ from the pen name.");
-  const spawnDir = join(resolve(root), ".story", "sessions", "spawn");
-  mkdirSync(spawnDir, { recursive: true });
+  // Review finding (Codex, 2026-09-22): a repeat or concurrent spawn of the same
+  // name must never overwrite artifacts a launched-but-not-yet-read script
+  // depends on. Each invocation gets its own directory, so the three files
+  // describe exactly one invocation and `open` can read them at its leisure.
+  const spawnRoot = join(resolve(root), ".story", "sessions", "spawn");
+  mkdirSync(spawnRoot, { recursive: true });
+  const spawnDir = mkdtempSync(join(spawnRoot, `${opts.name}.`));
   const dir = opts.dir ? (isAbsolute(opts.dir) ? opts.dir : resolve(root, opts.dir)) : resolve(root);
 
   let rolePath: string;
@@ -128,12 +247,13 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     readFileSync(rolePath, "utf-8"); // must exist and be readable before we write a script that names it
   } else {
     rolePath = join(spawnDir, `${opts.name}-role.md`);
-    writeFileSync(rolePath, defaultWorkerRole(opts.pen, opts.name), "utf-8");
+    writeFileSync(rolePath, defaultWorkerRole(opts.pen, opts.name), { encoding: "utf-8", flag: "wx" });
   }
 
-  const command = buildWorkerCommand({ name: opts.name, model: opts.model, permissionMode: opts.permissionMode, rolePath });
+  const { mode: permissionMode, source: permissionModeSource } = resolvePermissionMode(opts.permissionMode, detect);
+  const command = buildWorkerCommand({ name: opts.name, model: opts.model, permissionMode, rolePath });
   const scriptPath = join(spawnDir, `${opts.name}.command`);
-  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir, command }), "utf-8");
+  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir, command }), { encoding: "utf-8", flag: "wx" });
   chmodSync(scriptPath, 0o755);
 
   const recordPath = join(spawnDir, `${opts.name}.json`);
@@ -141,14 +261,15 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     name: opts.name,
     pen: opts.pen,
     model: opts.model ?? null,
-    permissionMode: opts.permissionMode ?? null,
+    permissionMode,
+    permissionModeSource,
     dir,
     rolePath,
     scriptPath,
     createdAt: new Date().toISOString(),
     platform: process.platform,
   };
-  writeFileSync(recordPath, JSON.stringify(record, null, 2) + "\n", "utf-8");
+  writeFileSync(recordPath, JSON.stringify(record, null, 2) + "\n", { encoding: "utf-8", flag: "wx" });
 
   let launch: "opened" | "printed" = "printed";
   let used: string | null = null;
@@ -156,5 +277,5 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     used = launcher(scriptPath, opts.terminal);
     if (used !== null) launch = "opened";
   }
-  return { name: opts.name, scriptPath, rolePath, recordPath, command: `cd ${shellQuote(dir)} && ${command}`, launch, launcher: used };
+  return { name: opts.name, scriptPath, rolePath, recordPath, command: `cd ${shellQuote(dir)} && ${command}`, permissionMode, permissionModeSource, launch, launcher: used };
 }

@@ -3161,7 +3161,7 @@ export function registerDuetCommand(yargs: Argv): Argv {
             .option("model", { type: "string", describe: "Model id or alias for `claude --model`; pin it deliberately" })
             .option("dir", { type: "string", describe: "Directory the worker starts in (default: this project)" })
             .option("role", { type: "string", describe: "Role file to use instead of the generated default" })
-            .option("permission-mode", { type: "string", describe: "claude --permission-mode for the worker (a spawned session starts in the client default, prompting, unless named here)" })
+            .option("permission-mode", { type: "string", describe: "claude --permission-mode for the worker; omitted: auto, or bypassPermissions when the pen itself runs in bypass" })
             .option("terminal", { type: "string", describe: "macOS: open with this terminal app instead of the default handler" })
             .option("print", { type: "boolean", default: false, describe: "Write the script and role, print the command, launch nothing" })),
           async (argv) => {
