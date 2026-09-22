@@ -14,12 +14,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
 import { handleTicketCreate } from "../../src/cli/commands/ticket.js";
-import { handleRulingCreate } from "../../src/cli/commands/ruling.js";
+import { handleRulingCreate, handleRulingPropose } from "../../src/cli/commands/ruling.js";
 import { citationsForReviewTarget } from "../../src/autonomous/cited-rulings.js";
 import { PlanReviewStage } from "../../src/autonomous/stages/plan-review.js";
 import { CodeReviewStage } from "../../src/autonomous/stages/code-review.js";
 import { StageContext, type ResolvedRecipe } from "../../src/autonomous/stages/types.js";
 import type { FullSessionState } from "../../src/autonomous/session-types.js";
+
+const CALLER = "test-task";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -53,6 +55,22 @@ async function projectWithCitedRuling(): Promise<{ root: string; rulingId: strin
 }
 
 describe("citationsForReviewTarget", () => {
+  it("T-522: carries the item's proposals beside its citations", async () => {
+    const { root } = await projectWithCitedRuling();
+    const proposed = await handleRulingPropose(
+      { text: "Proposed for T-001.", attribution: "owner-direct", date: "2026-09-21", scopeTags: [], proposedFor: ["T-001"], clientTaskId: CALLER },
+      "json",
+      root,
+    );
+    const pid = JSON.parse(proposed.output).data.id as string;
+    const result = await citationsForReviewTarget(root, "T-001");
+    expect(result.kind).toBe("resolved");
+    if (result.kind === "resolved") {
+      expect(result.citations).toHaveLength(1);
+      expect(result.proposals.map((p) => p.id)).toEqual([pid]);
+    }
+  });
+
   it("resolves the citations of a ticket fresh from disk", async () => {
     const { root, rulingId } = await projectWithCitedRuling();
     const result = await citationsForReviewTarget(root, "T-001");

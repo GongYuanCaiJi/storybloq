@@ -545,7 +545,7 @@ export class PlanReviewStage implements WorkflowStage {
       projectRoot: ctx.root,
       target: planTarget,
       ...(planCitations.kind === "resolved"
-        ? { citedRulings: planCitations.citations }
+        ? { citedRulings: planCitations.citations, proposals: planCitations.proposals }
         : { citedRulingsUnavailable: planCitations.reason }),
       stage: "plan",
       generation: ctx.state.itemAttempt?.generation ?? 0,

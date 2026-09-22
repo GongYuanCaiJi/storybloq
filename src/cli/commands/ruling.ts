@@ -15,9 +15,21 @@ import { isIssueShapedRef, isTicketShapedRef } from "../../core/review-coverage.
 import type { ProjectState } from "../../core/project-state.js";
 import {
   buildCitationResolutionContext,
+  buildSuccessorIndex,
   resolveCitation,
+  validateAcceptCandidate,
   validateSupersedeCandidate,
 } from "../../core/ruling.js";
+import {
+  classifyLifecycle,
+  isEffectivelyAccepted,
+  lifecycleOf,
+  makeAcceptance,
+  payloadDigest,
+  proposalsAgainst,
+  type RulingLifecycle,
+} from "../../core/ruling-lifecycle.js";
+import { formatDecisionsListing } from "../../core/decisions-listing.js";
 import { generateCanonicalId } from "../../core/canonical-id.js";
 import { ownerTaskForCurrentClient } from "../../autonomous/client-profile.js";
 import { summarizeZodIssues, describeSchemaIssues } from "../../core/zod-issues.js";
@@ -35,6 +47,9 @@ import {
   formatRulingList,
   formatRulingCreateResult,
   formatRulingSupersedeResult,
+  formatRulingProposeResult,
+  formatRulingAcceptResult,
+  formatRulingWithdrawResult,
   formatError,
   ExitCode,
 } from "../../core/output-formatter.js";
@@ -53,6 +68,25 @@ function requireCallerIdentity(clientTaskId: string | undefined): OwnerTaskLike 
   return { client: ownerTask.client, id: ownerTask.id };
 }
 
+/** T-522: the four narrative flags, shared by create, supersede and propose. */
+export interface NarrativeArgs {
+  context?: string;
+  alternatives?: string;
+  consequences?: string;
+  reconsiderWhen?: string;
+}
+
+function narrativeFrom(args: NarrativeArgs): Ruling["narrative"] | undefined {
+  const n: Record<string, string> = {};
+  for (const key of ["context", "alternatives", "consequences", "reconsiderWhen"] as const) {
+    const v = args[key];
+    if (typeof v === "string" && v.length > 0) n[key] = v;
+  }
+  return Object.keys(n).length > 0 ? n : undefined;
+}
+
+const RULING_LIFECYCLES: readonly RulingLifecycle[] = ["proposed", "accepted", "withdrawn", "superseded", "quarantined", "conflicted"];
+
 function validateOrThrow(candidate: unknown): Ruling {
   const result = RulingSchema.safeParse(candidate);
   if (!result.success) {
@@ -68,15 +102,28 @@ function validateOrThrow(candidate: unknown): Ruling {
 // directly.
 
 export function handleRulingList(
-  filters: { scopeTag?: string; superseded?: boolean },
+  filters: { scopeTag?: string; superseded?: boolean; status?: string },
   ctx: CommandContext,
 ): CommandResult {
-  const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries, warnings } = loadRulingsSafe(ctx.root);
+  const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries, warnings, lifecycleById } = loadRulingsSafe(ctx.root);
   let filtered = rulings;
   if (filters.scopeTag) {
     filtered = filtered.filter((r) => r.scopeTags.includes(filters.scopeTag!));
   }
   const allWarnings = [...warnings];
+  if (filters.status !== undefined) {
+    // T-522: `accepted` means the effectively accepted set minus superseded
+    // (what binds NOW); `superseded` is its own bucket; the legacy form is
+    // folded into `accepted` because a 1.15 record is accepted by shape.
+    if (!RULING_LIFECYCLES.includes(filters.status as RulingLifecycle)) {
+      throw new CliValidationError("invalid_input", `Unknown status "${filters.status}": must be one of ${RULING_LIFECYCLES.join(", ")}`);
+    }
+    filtered = filtered.filter((r) => {
+      const lc = lifecycleById.get(r.id);
+      if (filters.status === "accepted") return lc === "accepted" || lc === "accepted-legacy";
+      return lc === filters.status;
+    });
+  }
   if (filters.superseded !== undefined) {
     // Codex round-2 finding 1: a naive successorsByTarget lookup only sees
     // LOADED rulings' own `supersedes` pointers -- an unreadable ruling could
@@ -97,7 +144,13 @@ export function handleRulingList(
       return resolution.status === "resolved" && resolution.stale === filters.superseded;
     });
   }
-  return { output: formatRulingList(filtered, ctx.format), ...(allWarnings.length > 0 && { warnings: allWarnings }) };
+  if (ctx.format === "md") {
+    // T-522 plan section 6: the Markdown list IS the Decisions listing.
+    const index = buildSuccessorIndex(rulings);
+    const output = formatDecisionsListing(filtered, lifecycleById, { index }, [...ctx.state.tickets, ...ctx.state.issues]);
+    return { output, ...(allWarnings.length > 0 && { warnings: allWarnings }) };
+  }
+  return { output: formatRulingList(filtered, ctx.format, lifecycleById), ...(allWarnings.length > 0 && { warnings: allWarnings }) };
 }
 
 export function handleRulingGet(id: string, ctx: CommandContext): CommandResult {
@@ -132,7 +185,13 @@ export function handleRulingGet(id: string, ctx: CommandContext): CommandResult 
   }
   const rulingCtx = buildCitationResolutionContext(rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries);
   const resolution = resolveCitation(id, rulingCtx);
-  return { output: formatRuling(ruling, ctx.format, resolution), ...(warnings.length > 0 && { warnings }) };
+  const lifecycle = rulingCtx.lifecycleById.get(id);
+  const extras = {
+    ...(lifecycle !== undefined && { lifecycle }),
+    reasons: classifyLifecycle(ruling).reasons,
+    proposalsAgainst: proposalsAgainst(rulings, id).map((p) => p.id),
+  };
+  return { output: formatRuling(ruling, ctx.format, resolution, extras), ...(warnings.length > 0 && { warnings }) };
 }
 
 // --- Write handlers ---
@@ -210,7 +269,7 @@ export async function handleRulingCreate(
     scopeTags: string[];
     cites?: string[];
     clientTaskId?: string;
-  },
+  } & NarrativeArgs,
   format: OutputFormat,
   root: string,
 ): Promise<CommandResult> {
@@ -232,7 +291,8 @@ export async function handleRulingCreate(
   // every cited create would fail five seconds in. Same verdict either way,
   // different symptom, and the symptom is what a future debugger will see.
   await withProjectLock(root, { strict: true }, async (loadResult) => {
-    const candidate = {
+    const narrative = narrativeFrom(args);
+    const payload = {
       id: generateCanonicalId("r"),
       text: args.text,
       attribution: args.attribution as RulingAttribution,
@@ -240,8 +300,17 @@ export async function handleRulingCreate(
       date: args.date,
       scopeTags: args.scopeTags,
       supersedes: null,
+      proposesToSupersede: null,
+      ...(narrative && { narrative }),
     };
-    const ruling = validateOrThrow(candidate);
+    // T-522: `create` records an ACCEPTED ruling, so it carries the same
+    // acceptance evidence `accept` would write. The recorder's claim of who
+    // ruled is the record's own attribution.
+    const ruling = validateOrThrow({
+      ...payload,
+      status: "accepted",
+      acceptance: makeAcceptance(payload, { attribution: payload.attribution, recordedBy, date: args.date }),
+    });
 
     if (cites.length === 0) {
       await writeRulingUnlocked(ruling, root, { createOnly: true });
@@ -362,7 +431,8 @@ export async function handleRulingSupersede(
     date?: string;
     scopeTags?: string[];
     clientTaskId?: string;
-  },
+    branch?: boolean;
+  } & NarrativeArgs,
   format: OutputFormat,
   root: string,
 ): Promise<CommandResult> {
@@ -407,11 +477,38 @@ export async function handleRulingSupersede(
           `Ruling ${args.withId} already supersedes ${existing.supersedes}; refusing to repoint an existing chain link`,
         );
       }
-      const refusal = validateSupersedeCandidate(rulings, existing.id, oldId);
+      // T-522: a proposal never gets an edge through this path; `accept` is
+      // the one write that records an edge WITH evidence.
+      if (existing.status === "proposed") {
+        throw new CliValidationError(
+          "invalid_input",
+          `Ruling ${existing.id} is a proposal; accept it with \`ruling accept ${existing.id} --revision ${payloadDigest(existing)}\` instead of linking it`,
+        );
+      }
+      const refusal = validateSupersedeCandidate(rulings, existing.id, oldId, { branch: args.branch });
       if (refusal) {
         throw new CliValidationError("invalid_input", `Cannot link ${existing.id} to supersede ${oldId}: ${refusal.detail}`);
       }
-      const updated = validateOrThrow({ ...existing, supersedes: oldId });
+      // A legacy record is linked in place, as in 1.15. A 1.16 accepted
+      // record's edge is INSIDE its accepted payload (the digest covers
+      // `proposesToSupersede`), so linking it re-records the acceptance for
+      // the new payload: same claimed attribution as the record itself, the
+      // caller as recorder. This is the same footing as create-and-supersede,
+      // which also mints acceptance on the caller's word.
+      const linked = { ...existing, supersedes: oldId, ...(existing.status !== undefined && { proposesToSupersede: oldId }) };
+      const updated = validateOrThrow(
+        existing.status === undefined
+          ? linked
+          : {
+              ...linked,
+              status: "accepted",
+              acceptance: makeAcceptance(linked, {
+                attribution: existing.attribution,
+                recordedBy: requireCallerIdentity(args.clientTaskId),
+                date: existing.acceptance?.date ?? existing.date,
+              }),
+            },
+      );
       await writeRulingUnlocked(updated, root);
       result = { ruling: updated, noop: false };
       return;
@@ -431,11 +528,12 @@ export async function handleRulingSupersede(
     }
     const recordedBy = requireCallerIdentity(args.clientTaskId);
     const newId = generateCanonicalId("r");
-    const refusal = validateSupersedeCandidate(rulings, newId, oldId);
+    const refusal = validateSupersedeCandidate(rulings, newId, oldId, { branch: args.branch });
     if (refusal) {
       throw new CliValidationError("invalid_input", `Cannot supersede ${oldId}: ${refusal.detail}`);
     }
-    const candidate = validateOrThrow({
+    const narrative = narrativeFrom(args);
+    const payload = {
       id: newId,
       text: args.text,
       attribution: args.attribution as RulingAttribution,
@@ -443,6 +541,13 @@ export async function handleRulingSupersede(
       date: args.date,
       scopeTags: args.scopeTags ?? [],
       supersedes: oldId,
+      proposesToSupersede: oldId,
+      ...(narrative && { narrative }),
+    };
+    const candidate = validateOrThrow({
+      ...payload,
+      status: "accepted",
+      acceptance: makeAcceptance(payload, { attribution: payload.attribution, recordedBy, date: args.date }),
     });
     await writeRulingUnlocked(candidate, root, { createOnly: true });
     result = { ruling: candidate, noop: false };
@@ -450,4 +555,231 @@ export async function handleRulingSupersede(
 
   if (!result) throw new Error("Ruling supersede did not complete");
   return { output: formatRulingSupersedeResult(result.ruling, result.noop, format) };
+}
+
+
+// --- T-522: proposal lifecycle write handlers ---
+
+/**
+ * `ruling propose`: one file, no item writes. A proposal names the ruling it
+ * asks to replace in `proposesToSupersede` and the items it is for in
+ * `proposedFor`; its own `supersedes` stays null so a 1.15 reader's index,
+ * which reads `supersedes` unconditionally, cannot be displaced by it.
+ */
+export async function handleRulingPropose(
+  args: {
+    text: string;
+    attribution: string;
+    date: string;
+    scopeTags: string[];
+    proposesToSupersede?: string;
+    proposedFor?: string[];
+    clientTaskId?: string;
+  } & NarrativeArgs,
+  format: OutputFormat,
+  root: string,
+): Promise<CommandResult> {
+  if (!RULING_ATTRIBUTIONS.includes(args.attribution as RulingAttribution)) {
+    throw new CliValidationError(
+      "invalid_input",
+      `Unknown attribution "${args.attribution}": must be one of ${RULING_ATTRIBUTIONS.join(", ")}`,
+    );
+  }
+  const recordedBy = requireCallerIdentity(args.clientTaskId);
+  let created: Ruling | undefined;
+  await withProjectLock(root, { strict: true }, async (loadResult) => {
+    const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loadRulingsSafe(root);
+    const target = args.proposesToSupersede ?? null;
+    if (target !== null) {
+      if (scanCompleteness !== "complete" || unavailableIds.size > 0 || hasUnrecoverableEntries) {
+        throw new CliValidationError(
+          "conflict",
+          "Refusing to propose against a ruling: the ruling ledger is currently unverifiable (an unreadable ruling or incomplete scan). Fix the unreadable file(s) first.",
+        );
+      }
+      const existing = rulings.find((r) => r.id === target);
+      if (!existing) throw new CliValidationError("not_found", `Ruling ${target} not found`);
+      const lc = lifecycleOf(existing, buildSuccessorIndex(rulings));
+      if (!isEffectivelyAccepted(lc)) {
+        throw new CliValidationError(
+          "invalid_input",
+          `Cannot propose against ${target}: it is ${lc}, not an accepted ruling${lc === "proposed" ? "; withdraw or accept it first" : ""}`,
+        );
+      }
+    }
+    // Trimmed before dedupe and persist: resolveCitedTargets trims when it
+    // resolves, and `accept` re-resolves what was PERSISTED.
+    const proposedFor = [...new Set((args.proposedFor ?? []).map((ref) => ref.trim()).filter((ref) => ref.length > 0))];
+    if (proposedFor.length > 0) resolveCitedTargets(loadResult.state, proposedFor);
+    const narrative = narrativeFrom(args);
+    const ruling = validateOrThrow({
+      id: generateCanonicalId("r"),
+      text: args.text,
+      attribution: args.attribution as RulingAttribution,
+      recordedBy,
+      date: args.date,
+      scopeTags: args.scopeTags,
+      supersedes: null,
+      status: "proposed",
+      proposesToSupersede: target,
+      proposedFor,
+      ...(narrative && { narrative }),
+    });
+    await writeRulingUnlocked(ruling, root, { createOnly: true });
+    created = ruling;
+  });
+  if (!created) throw new Error("Ruling not proposed");
+  return { output: formatRulingProposeResult(created, format) };
+}
+
+/**
+ * `ruling accept <id> --revision <digest>`: one lock. `validateAcceptCandidate`
+ * gates the write; then the proposed-for items gain the citation (set union)
+ * and the ruling is rewritten as accepted with the edge copied into
+ * `supersedes`, items FIRST and ruling LAST through the same transaction
+ * `create --cites` uses, for the same fail-loud reason.
+ *
+ * Repeat after completion is a noop success ONLY on valid local acceptance
+ * state: explicit status accepted, no conflict, no classification violation,
+ * and the current digest equals both the recorded acceptance digest and the
+ * revision the caller quoted. It performs no writes. Anything else is refused
+ * with the classification reason.
+ */
+export async function handleRulingAccept(
+  id: string,
+  args: {
+    revision: string;
+    attribution: string;
+    date: string;
+    branch?: boolean;
+    clientTaskId?: string;
+  },
+  format: OutputFormat,
+  root: string,
+): Promise<CommandResult> {
+  if (!RULING_ATTRIBUTIONS.includes(args.attribution as RulingAttribution)) {
+    throw new CliValidationError(
+      "invalid_input",
+      `Unknown attribution "${args.attribution}": must be one of ${RULING_ATTRIBUTIONS.join(", ")}`,
+    );
+  }
+  if (!/^[0-9a-f]{64}$/.test(args.revision)) {
+    throw new CliValidationError("invalid_input", "--revision must be the 64-hex revision shown by `ruling get`");
+  }
+  const recordedBy = requireCallerIdentity(args.clientTaskId);
+  let result: { ruling: Ruling; noop: boolean } | undefined;
+
+  await withProjectLock(root, { strict: true }, async (loadResult) => {
+    const loaded = loadRulingsSafe(root);
+    const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loaded;
+    const existing = rulings.find((r) => r.id === id);
+    if (!existing) {
+      if (unavailableIds.has(id) || scanCompleteness !== "complete") {
+        throw new CliValidationError("io_error", `Ruling ${id} cannot be read or the ledger scan is incomplete`);
+      }
+      throw new CliValidationError("not_found", `Ruling ${id} not found`);
+    }
+    const ctx = buildCitationResolutionContext(rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries);
+    const lifecycle = ctx.lifecycleById.get(id)!;
+
+    // The noop rule, checked before anything else so a retry after a
+    // completed accept is safe and writes nothing.
+    if (
+      existing.status === "accepted"
+      && existing.acceptance !== undefined
+      && classifyLifecycle(existing).reasons.length === 0
+      && lifecycle !== "conflicted"
+      && payloadDigest(existing) === existing.acceptance.payloadDigest
+      && args.revision === existing.acceptance.payloadDigest
+    ) {
+      result = { ruling: existing, noop: true };
+      return;
+    }
+
+    const state = loadResult.state;
+    const itemExists = (ref: string): boolean =>
+      state.resolveTicketRef(ref).kind === "found" || state.resolveIssueRef(ref).kind === "found";
+    const refusal = validateAcceptCandidate(existing, args.revision, ctx, itemExists, { branch: args.branch });
+    if (refusal) {
+      throw new CliValidationError(
+        refusal.code === "revision_mismatch" ? "conflict" : "invalid_input",
+        `Cannot accept ${id}: ${refusal.detail}`,
+      );
+    }
+
+    const accepted = validateOrThrow({
+      ...existing,
+      status: "accepted",
+      supersedes: existing.proposesToSupersede ?? null,
+      acceptance: makeAcceptance(existing, { attribution: args.attribution as RulingAttribution, recordedBy, date: args.date }),
+    });
+
+    const targets = resolveCitedTargets(state, existing.proposedFor ?? []);
+    const itemOps: Array<{ op: "write"; target: string; content: string }> = [];
+    for (const target of targets) {
+      const current = target.item.citesRulings ?? [];
+      if (current.includes(accepted.id)) continue;
+      const next = [...current, accepted.id];
+      const prepared =
+        target.kind === "issue"
+          ? await prepareIssueWrite({ ...target.item, citesRulings: next }, root)
+          : await prepareTicketWrite({ ...target.item, citesRulings: next }, root);
+      itemOps.push({ op: "write", target: prepared.target, content: prepared.content });
+    }
+    const rulingPrepared = await prepareRulingWrite(accepted, root);
+    try {
+      await runTransactionUnlocked(root, [
+        ...itemOps,
+        { op: "write", target: rulingPrepared.target, content: rulingPrepared.content },
+      ]);
+    } catch (err) {
+      if (err instanceof TransactionRecoveryPendingError) {
+        throw new CliValidationError(
+          "io_error",
+          `Ruling ${accepted.id}: the accept had already begun and forward recovery is pending. `
+            + `Do NOT re-run with different arguments; run \`storybloq ruling get ${accepted.id}\` and \`storybloq validate\` to see what landed. `
+            + `A repeat \`ruling accept ${accepted.id} --revision ${args.revision}\` after recovery is a safe no-op. `
+            + `Underlying failure: ${err.message}`,
+        );
+      }
+      throw err;
+    }
+    result = { ruling: accepted, noop: false };
+  });
+
+  if (!result) throw new Error("Ruling accept did not complete");
+  return { output: formatRulingAcceptResult(result.ruling, result.noop, format) };
+}
+
+/** `ruling withdraw <id> [--reason]`: proposed records only. */
+export async function handleRulingWithdraw(
+  id: string,
+  args: { reason?: string; clientTaskId?: string },
+  format: OutputFormat,
+  root: string,
+): Promise<CommandResult> {
+  const recordedBy = requireCallerIdentity(args.clientTaskId);
+  let withdrawn: Ruling | undefined;
+  await withProjectLock(root, { strict: true }, async () => {
+    const { rulings, unavailableIds, scanCompleteness, lifecycleById } = loadRulingsSafe(root);
+    const existing = rulings.find((r) => r.id === id);
+    if (!existing) {
+      if (unavailableIds.has(id) || scanCompleteness !== "complete") {
+        throw new CliValidationError("io_error", `Ruling ${id} cannot be read or the ledger scan is incomplete`);
+      }
+      throw new CliValidationError("not_found", `Ruling ${id} not found`);
+    }
+    const lc = lifecycleById.get(id);
+    if (lc !== "proposed") {
+      throw new CliValidationError("invalid_input", `Cannot withdraw ${id}: it is ${lc}, not a proposal. Withdrawal never revokes an accepted ruling; supersede it instead.`);
+    }
+    withdrawn = validateOrThrow({
+      ...existing,
+      status: "withdrawn",
+      withdrawal: { recordedBy, createdAt: new Date().toISOString(), ...(args.reason && { reason: args.reason }) },
+    });
+    await writeRulingUnlocked(withdrawn, root);
+  });
+  if (!withdrawn) throw new Error("Ruling withdraw did not complete");
+  return { output: formatRulingWithdrawResult(withdrawn, format) };
 }

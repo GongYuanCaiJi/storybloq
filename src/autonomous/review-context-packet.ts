@@ -41,8 +41,9 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { telemetryDirPath } from "./liveness.js";
 import { appendContractDelivery } from "./principle-policy-report.js";
-import { formatCitedRulingsSectionBounded } from "../core/output-formatter.js";
+import { formatCitedRulingsSectionBounded, formatProposalsSectionBounded, PROPOSALS_TEXT_BUDGET_FRACTION } from "../core/output-formatter.js";
 import type { CitationResolution } from "../core/ruling.js";
+import type { Ruling } from "../models/ruling.js";
 import {
   parseVerdictFilename,
   computeContentHash,
@@ -127,6 +128,13 @@ export interface BuildPacketParams {
    * rulings and no reason to doubt it.
    */
   readonly citedRulingsUnavailable?: string;
+  /**
+   * T-522: proposals `proposedFor` the item under review. Rendered in their
+   * own bounded block AFTER the cited rulings, budgeted separately
+   * (`PROPOSALS_TEXT_BUDGET_FRACTION` of the round) so no number of proposals
+   * can change one byte of what an accepted citation says.
+   */
+  readonly proposals?: readonly Ruling[];
 }
 
 /**
@@ -516,6 +524,10 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
     citedRulings,
     Math.floor(budget * CITED_RULINGS_TEXT_BUDGET_FRACTION),
   );
+  const proposalsRender = formatProposalsSectionBounded(
+    params.proposals ?? [],
+    Math.floor(budget * PROPOSALS_TEXT_BUDGET_FRACTION),
+  );
 
   const { rounds, rejected } = collectRounds(sessionDir, target, stage, generation);
   const priorRounds = [...rounds.values()]
@@ -539,6 +551,12 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
     baseOmissions.push(
       `${rulingsRender.truncatedIds.length} cited ruling text(s) truncated: ${rulingsRender.truncatedIds.join(", ")}. ` +
       "Metadata for each is present above; read the full text with ruling_get.",
+    );
+  }
+  if (proposalsRender.omittedIds.length > 0) {
+    baseOmissions.push(
+      `${proposalsRender.omittedIds.length} proposal(s) against this item not shown: ${proposalsRender.omittedIds.join(", ")}. ` +
+      "Proposals bind nothing; read any of them with ruling_get.",
     );
   }
   for (let r = 1; r < roundNum; r++) {
@@ -645,6 +663,7 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
     const mandatory = [
       ORIGIN_RULE,
       ...(rulingsRender.text === "" ? [] : [rulingsRender.text.trim()]),
+      ...(proposalsRender.text === "" ? [] : [proposalsRender.text.trim()]),
       disclosure,
       captureDirective,
     ].join("\n\n");

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { RulingSchema, type Ruling } from "../models/ruling.js";
+import { RulingSchema, type Ruling, type RulingAcceptance, type RulingAttribution } from "../models/ruling.js";
+import type { OwnerTaskLike } from "../models/types.js";
 
 /**
  * T-522: the proposal lifecycle, DERIVED at read time from a record's shape.
@@ -182,4 +183,24 @@ export function proposalsFor(rulings: readonly Ruling[], itemId: string): Ruling
 /** Proposals (lifecycle exactly `proposed`) whose `proposesToSupersede` names `targetId`. */
 export function proposalsAgainst(rulings: readonly Ruling[], targetId: string): Ruling[] {
   return rulings.filter((r) => classifyLifecycle(r).lifecycle === "proposed" && r.proposesToSupersede === targetId);
+}
+
+/**
+ * T-522: the acceptance record a writer attaches when it records an accepted
+ * ruling (`create`, `supersede`, `accept`). The digest is computed from the
+ * record it is attached to, so an acceptance can never be minted for a payload
+ * other than the one on disk at write time.
+ */
+export function makeAcceptance(
+  ruling: Pick<Ruling, "text" | "attribution" | "scopeTags" | "proposesToSupersede" | "proposedFor">,
+  by: { readonly attribution: RulingAttribution; readonly recordedBy: OwnerTaskLike; readonly date: string },
+  createdAt: string = new Date().toISOString(),
+): RulingAcceptance {
+  return {
+    attribution: by.attribution,
+    recordedBy: by.recordedBy,
+    date: by.date,
+    createdAt,
+    payloadDigest: payloadDigest(ruling),
+  };
 }

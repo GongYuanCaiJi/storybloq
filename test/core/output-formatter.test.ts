@@ -1600,6 +1600,19 @@ describe("T-476 binding ruling: every attribution-displaying ruling formatter ou
       { label: "md", output: outputFormatter.formatRulingSupersedeResult(sampleRuling, false, "md"), showsAttribution: false },
       { label: "json", output: outputFormatter.formatRulingSupersedeResult(sampleRuling, false, "json"), showsAttribution: true },
     ],
+    // T-522: the lifecycle write results. Their md forms name the id only.
+    formatRulingProposeResult: () => [
+      { label: "md", output: outputFormatter.formatRulingProposeResult(sampleRuling, "md"), showsAttribution: false },
+      { label: "json", output: outputFormatter.formatRulingProposeResult(sampleRuling, "json"), showsAttribution: true },
+    ],
+    formatRulingAcceptResult: () => [
+      { label: "md", output: outputFormatter.formatRulingAcceptResult(sampleRuling, false, "md"), showsAttribution: false },
+      { label: "json", output: outputFormatter.formatRulingAcceptResult(sampleRuling, false, "json"), showsAttribution: true },
+    ],
+    formatRulingWithdrawResult: () => [
+      { label: "md", output: outputFormatter.formatRulingWithdrawResult(sampleRuling, "md"), showsAttribution: false },
+      { label: "json", output: outputFormatter.formatRulingWithdrawResult(sampleRuling, "json"), showsAttribution: true },
+    ],
   };
 
   it("covers every exported formatRuling* function -- a new one with no adapter here fails loudly", () => {
@@ -1731,5 +1744,76 @@ describe("ISS-1219: trajectory zero-count rendering", () => {
       ["ISS-1210", 0],
       ["ISS-950", 2],
     ]);
+  });
+});
+
+describe("T-522: formatProposalsSectionBounded is bounded on both axes", () => {
+  const sampleRulingForCompat: Ruling = {
+    id: "r-0000000000000001", text: "legacy", attribution: "owner-direct",
+    recordedBy: { client: "claude", id: "t" }, date: "2026-01-01", scopeTags: [], supersedes: null,
+  };
+  const proposal = (i: number, text: string): Ruling => ({
+    id: `r-${String(i).padStart(16, "0")}`,
+    text,
+    attribution: "owner-direct",
+    recordedBy: { client: "claude", id: "t" },
+    date: "2026-09-22",
+    scopeTags: [],
+    supersedes: null,
+    status: "proposed",
+    proposesToSupersede: null,
+    proposedFor: ["T-001"],
+  } as Ruling);
+
+  it("names at most PROPOSALS_MAX entries even under an unlimited text budget", () => {
+    const out = outputFormatter.formatProposalsSectionBounded([1, 2, 3, 4, 5, 6, 7].map((i) => proposal(i, "short")), Number.MAX_SAFE_INTEGER);
+    expect((out.text.match(/^- \*\*r-/gm) ?? []).length).toBe(outputFormatter.PROPOSALS_MAX);
+    expect(out.omittedIds).toEqual([proposal(6, "").id, proposal(7, "").id]);
+  });
+
+  it("the complete returned block never exceeds the budget: header counted, exact fit kept, one byte less omits", () => {
+    const three = [1, 2, 3].map((i) => proposal(i, "x".repeat(240)));
+    const oneEntry = outputFormatter.formatProposalsSectionBounded([three[0]!], Number.MAX_SAFE_INTEGER).text;
+    const exact = outputFormatter.formatProposalsSectionBounded(three, oneEntry.length);
+    expect(exact.text).toBe(oneEntry);
+    expect(exact.text.length).toBeLessThanOrEqual(oneEntry.length);
+    expect(exact.omittedIds).toEqual([three[1]!.id, three[2]!.id]);
+    const under = outputFormatter.formatProposalsSectionBounded(three, oneEntry.length - 1);
+    expect(under.text).toBe("");
+    expect(under.omittedIds).toHaveLength(3);
+    const twoEntries = outputFormatter.formatProposalsSectionBounded(three.slice(0, 2), Number.MAX_SAFE_INTEGER).text;
+    const two = outputFormatter.formatProposalsSectionBounded(three, twoEntries.length);
+    expect(two.text).toBe(twoEntries);
+    expect(two.omittedIds).toEqual([three[2]!.id]);
+    for (const budget of [0, 10, 100, 400, 700, 1000]) {
+      expect(outputFormatter.formatProposalsSectionBounded(three, budget).text.length).toBeLessThanOrEqual(budget);
+    }
+  });
+
+  it("shows a proposal's text whole or not at all: never sliced, never narrative", () => {
+    const long = proposal(1, "a".repeat(5000) + " END");
+    const p = { ...long, narrative: { context: "SECRET-NARRATIVE" } } as Ruling;
+    const shown = outputFormatter.formatProposalsSectionBounded([p], Number.MAX_SAFE_INTEGER);
+    expect(shown.text).toContain("a".repeat(5000) + " END");
+    expect(shown.text).not.toContain("...");
+    expect(shown.text).not.toContain("SECRET-NARRATIVE");
+    const hidden = outputFormatter.formatProposalsSectionBounded([p], 3000);
+    expect(hidden.text).toBe("");
+    expect(hidden.omittedIds).toEqual([p.id]);
+  });
+
+  it("formatRuling without extras renders as before T-522: no lifecycle, no revision, no narrative", () => {
+    const withNarrative = { ...sampleRulingForCompat, narrative: { context: "NARR-CTX" } } as Ruling;
+    expect(outputFormatter.formatRuling(withNarrative, "md")).toBe(outputFormatter.formatRuling(sampleRulingForCompat, "md"));
+    expect(outputFormatter.formatRuling(withNarrative, "md")).not.toContain("NARR-CTX");
+    expect(outputFormatter.formatRuling(withNarrative, "md", undefined, { lifecycle: "accepted-legacy" })).toContain("- context: NARR-CTX");
+    const md = outputFormatter.formatRuling(sampleRulingForCompat, "md");
+    expect(md).not.toContain("Revision:");
+    expect(md).not.toMatch(/^# Ruling r-[0-9a-f]+ \[/m);
+    const json = JSON.parse(outputFormatter.formatRuling(sampleRulingForCompat, "json")).data;
+    expect(json).not.toHaveProperty("revision");
+    expect(json).not.toHaveProperty("lifecycle");
+    const withLc = JSON.parse(outputFormatter.formatRuling(sampleRulingForCompat, "json", undefined, { lifecycle: "accepted-legacy" })).data;
+    expect(withLc.revision).toMatch(/^[0-9a-f]{64}$/);
   });
 });

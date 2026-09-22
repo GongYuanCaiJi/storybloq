@@ -461,7 +461,7 @@ export async function handleCodexReview(options: CodexReviewOptions): Promise<Gu
     projectRoot: root,
     target: packetTarget,
     ...(packetCitations.kind === "resolved"
-      ? { citedRulings: packetCitations.citations }
+      ? { citedRulings: packetCitations.citations, proposals: packetCitations.proposals }
       : { citedRulingsUnavailable: packetCitations.reason }),
     stage: options.kind,
     generation: state.itemAttempt?.generation ?? 0,

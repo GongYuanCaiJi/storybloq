@@ -35,6 +35,7 @@ import { boundedLines } from "./bounded-list.js";
 import type { CitationResolution } from "./ruling.js";
 import { renderCitation, rulingAttributionCaveat } from "./ruling.js";
 import type { Ruling } from "../models/ruling.js";
+import { payloadDigest, type LifecycleReason, type RulingLifecycle } from "./ruling-lifecycle.js";
 
 /**
  * How many diagnostic lines the human-readable section may carry (ISS-897).
@@ -1997,12 +1998,30 @@ export function formatArrangementUpdateResult(
 
 // --- Ruling formatters (T-476) ---
 
+/**
+ * T-522: what `ruling get` shows beyond the record and its chain status. All
+ * optional so every pre-existing caller renders exactly as before.
+ */
+export interface RulingViewExtras {
+  readonly lifecycle?: RulingLifecycle;
+  readonly reasons?: readonly LifecycleReason[];
+  /** Ids of proposals whose `proposesToSupersede` names this ruling. */
+  readonly proposalsAgainst?: readonly string[];
+}
+
 export function formatRuling(
   ruling: Ruling,
   format: OutputFormat,
   resolution?: CitationResolution,
+  extras: RulingViewExtras = {},
 ): string {
   const rendered = resolution ? renderCitation(resolution) : undefined;
+  const lifecycle = extras.lifecycle;
+  // The revision is what `ruling accept --revision` must quote: the digest of
+  // the payload as it is on disk right now. Shown for every record whose
+  // caller supplied a lifecycle (the `get` surface) so a reader can check an
+  // acceptance by hand; a caller that passes no extras renders as in 1.15.
+  const revision = lifecycle !== undefined ? payloadDigest(ruling) : undefined;
   if (format === "json") {
     // Codex round-3 finding 4: the caveat must be unconditional at the TOP
     // level too -- relying on chainStatus.current.caveat (renderCitation's
@@ -2010,13 +2029,20 @@ export function formatRuling(
     // cycle resolution -- or no resolution at all -- exposed the ruling's
     // attribution with no caveat anywhere in the JSON output.
     return JSON.stringify(
-      successEnvelope({ ...ruling, attributionCaveat: rulingAttributionCaveat(ruling.recordedBy), chainStatus: rendered ?? null }),
+      successEnvelope({
+        ...ruling,
+        attributionCaveat: rulingAttributionCaveat(ruling.recordedBy),
+        chainStatus: rendered ?? null,
+        ...(lifecycle !== undefined && { lifecycle, revision }),
+        ...(extras.reasons && extras.reasons.length > 0 && { lifecycleViolations: extras.reasons }),
+        ...(extras.proposalsAgainst && { proposalsAgainst: extras.proposalsAgainst }),
+      }),
       null,
       2,
     );
   }
   const lines: string[] = [
-    `# Ruling ${escapeMarkdownInline(ruling.id)}`,
+    `# Ruling ${escapeMarkdownInline(ruling.id)}${lifecycle ? ` [${lifecycle}]` : ""}`,
     "",
     `Attribution: ${ruling.attribution} | Recorded by: ${ruling.recordedBy.client}/${ruling.recordedBy.id} | Date: ${ruling.date}`,
   ];
@@ -2026,8 +2052,37 @@ export function formatRuling(
   if (ruling.supersedes) {
     lines.push(`Supersedes: ${escapeMarkdownInline(ruling.supersedes)}`);
   }
+  if (lifecycle === "proposed" || lifecycle === "withdrawn") {
+    if (ruling.proposesToSupersede) lines.push(`Proposes to supersede: ${escapeMarkdownInline(ruling.proposesToSupersede)}`);
+    if ((ruling.proposedFor ?? []).length > 0) lines.push(`Proposed for: ${(ruling.proposedFor ?? []).map(escapeMarkdownInline).join(", ")}`);
+  }
+  if (revision !== undefined) lines.push(`Revision: ${revision}`);
   lines.push("", "## Text", "", fencedBlock(ruling.text));
   lines.push("", rulingAttributionCaveat(ruling.recordedBy));
+  if (lifecycle === "proposed") {
+    lines.push("", "This is a PROPOSAL. It is not policy and binds nothing until `storybloq ruling accept` records who accepted it.");
+  } else if (lifecycle === "withdrawn") {
+    lines.push("", `Withdrawn${ruling.withdrawal?.reason ? `: ${escapeMarkdownInline(ruling.withdrawal.reason)}` : ""}. It binds nothing.`);
+  } else if (lifecycle === "quarantined" || lifecycle === "conflicted") {
+    lines.push("", `QUARANTINED (${lifecycle}): this record claims a state its evidence does not support. It binds nothing and its edges are not trusted.`);
+    for (const reason of extras.reasons ?? []) lines.push(`- ${reason.code}: ${escapeMarkdownInline(reason.detail)}`);
+  }
+  if (ruling.acceptance && lifecycle !== undefined && lifecycle !== "quarantined" && lifecycle !== "conflicted") {
+    lines.push("", `Accepted: ${ruling.acceptance.attribution} (claimed), recorded by ${ruling.acceptance.recordedBy.client}/${ruling.acceptance.recordedBy.id} on ${ruling.acceptance.date}`);
+  }
+  // Narrative, like revision, belongs to the lifecycle-aware `get` surface: a
+  // caller passing no extras renders exactly as 1.15 did, narrative or not.
+  const narrative = lifecycle !== undefined ? ruling.narrative : undefined;
+  if (narrative && Object.values(narrative).some((v) => typeof v === "string" && v.length > 0)) {
+    lines.push("", `## Narrative (recorded by ${ruling.recordedBy.client}/${ruling.recordedBy.id}, commentary, not the decision)`, "");
+    for (const key of ["context", "alternatives", "consequences", "reconsiderWhen"] as const) {
+      const v = narrative[key];
+      if (typeof v === "string" && v.length > 0) lines.push(`- ${key}: ${escapeMarkdownInline(v)}`);
+    }
+  }
+  if (extras.proposalsAgainst && extras.proposalsAgainst.length > 0) {
+    lines.push("", `${extras.proposalsAgainst.length} proposal(s) against this ruling (not binding): ${extras.proposalsAgainst.map(escapeMarkdownInline).join(", ")}`);
+  }
   if (rendered) {
     if (rendered.status === "resolved") {
       lines.push(
@@ -2041,14 +2096,22 @@ export function formatRuling(
   return lines.join("\n");
 }
 
-export function formatRulingList(rulings: readonly Ruling[], format: OutputFormat): string {
+export function formatRulingList(
+  rulings: readonly Ruling[],
+  format: OutputFormat,
+  lifecycleById?: ReadonlyMap<string, RulingLifecycle>,
+): string {
   if (format === "json") {
     // Codex round-2 finding 2: attribution is a CLAIM (see
     // rulingAttributionCaveat's binding constraint) and must render
     // unconditionally everywhere a ruling's attribution is shown, including
     // the list surface -- not only single-ruling get/create/supersede.
     return JSON.stringify(
-      successEnvelope(rulings.map((r) => ({ ...r, attributionCaveat: rulingAttributionCaveat(r.recordedBy) }))),
+      successEnvelope(rulings.map((r) => ({
+        ...r,
+        attributionCaveat: rulingAttributionCaveat(r.recordedBy),
+        ...(lifecycleById?.has(r.id) && { lifecycle: lifecycleById.get(r.id) }),
+      }))),
       null,
       2,
     );
@@ -2057,12 +2120,103 @@ export function formatRulingList(rulings: readonly Ruling[], format: OutputForma
   return rulings
     .map((r) => {
       const preview = r.text.length > 80 ? `${r.text.slice(0, 80)}...` : r.text;
+      const lc = lifecycleById?.get(r.id);
       return [
-        `- ${escapeMarkdownInline(r.id)} [${r.attribution}] (${r.date}): "${escapeMarkdownInline(preview)}"`,
+        `- ${escapeMarkdownInline(r.id)}${lc ? ` [${lc}]` : ""} [${r.attribution}] (${r.date}): "${escapeMarkdownInline(preview)}"`,
         `  ${rulingAttributionCaveat(r.recordedBy)}`,
       ].join("\n");
     })
     .join("\n");
+}
+
+// --- T-522 lifecycle write results ---
+
+export function formatRulingProposeResult(ruling: Ruling, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(
+      successEnvelope({ ...ruling, revision: payloadDigest(ruling), attributionCaveat: rulingAttributionCaveat(ruling.recordedBy) }),
+      null,
+      2,
+    );
+  }
+  return [
+    `Proposed ruling ${ruling.id} (revision ${payloadDigest(ruling)}).`,
+    `A proposal binds nothing. Accept it with \`storybloq ruling accept ${ruling.id} --revision <revision> --attribution <a> --date <d>\`.`,
+  ].join("\n");
+}
+
+export function formatRulingAcceptResult(ruling: Ruling, noop: boolean, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(
+      successEnvelope({ ...ruling, noop, revision: payloadDigest(ruling), attributionCaveat: rulingAttributionCaveat(ruling.recordedBy) }),
+      null,
+      2,
+    );
+  }
+  const edge = ruling.supersedes ? ` It supersedes ${ruling.supersedes}.` : "";
+  return noop
+    ? `Ruling ${ruling.id} was already accepted at this revision (no-op).`
+    : `Accepted ruling ${ruling.id}.${edge} Acceptance records a CLAIM of who ruled; the revision proves what was accepted.`;
+}
+
+export function formatRulingWithdrawResult(ruling: Ruling, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(
+      successEnvelope({ ...ruling, attributionCaveat: rulingAttributionCaveat(ruling.recordedBy) }),
+      null,
+      2,
+    );
+  }
+  return `Withdrew proposal ${ruling.id}.`;
+}
+
+/** T-522 plan section 7: how many proposals a review packet names, and the share of the round budget the block may spend. */
+export const PROPOSALS_MAX = 5;
+export const PROPOSALS_TEXT_BUDGET_FRACTION = 0.05;
+const PROPOSALS_BLOCK_HEADER = "\n\n## Proposed, not binding\n\nThese are PROPOSALS against this item or its rulings. None is policy; none is enforced by this review.\n\n";
+
+export interface BoundedProposals {
+  readonly text: string;
+  /** Proposal ids the packet could not name within its bounds. */
+  readonly omittedIds: readonly string[];
+}
+
+/**
+ * The "Proposed, not binding" block of a review packet. Bounded on TWO axes:
+ * at most `PROPOSALS_MAX` entries, and a total text budget the caller derives
+ * from the round budget, measured on the COMPLETE returned block (header,
+ * separators and escaped entry lines), so the text never exceeds the budget.
+ * A proposal's text is shown whole (escaped inline, as the Cited Rulings block
+ * shows a citation) or not at all: never sliced, because a cut sentence can
+ * read as a different proposal. No narrative, ever: a reviewer who wants
+ * either reads the record with ruling_get. Nothing here is a citation and the
+ * block says so.
+ */
+export function formatProposalsSectionBounded(
+  proposals: readonly Ruling[],
+  textBudget: number,
+): BoundedProposals {
+  if (proposals.length === 0) return { text: "", omittedIds: [] };
+  const lines: string[] = [];
+  const omittedIds: string[] = [];
+  let spent = PROPOSALS_BLOCK_HEADER.length;
+  for (const p of proposals) {
+    if (lines.length >= PROPOSALS_MAX) {
+      omittedIds.push(p.id);
+      continue;
+    }
+    const target = p.proposesToSupersede ? ` (proposes to supersede ${escapeMarkdownInline(p.proposesToSupersede)})` : "";
+    const line = `- **${escapeMarkdownInline(p.id)}**${target}: "${escapeMarkdownInline(p.text)}"`;
+    const separator = lines.length === 0 ? 0 : 1;
+    if (spent + separator + line.length > textBudget) {
+      omittedIds.push(p.id);
+      continue;
+    }
+    spent += separator + line.length;
+    lines.push(line);
+  }
+  if (lines.length === 0) return { text: "", omittedIds };
+  return { text: `${PROPOSALS_BLOCK_HEADER}${lines.join("\n")}`, omittedIds };
 }
 
 export function formatRulingCreateResult(ruling: Ruling, format: OutputFormat): string {

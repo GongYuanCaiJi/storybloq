@@ -420,7 +420,7 @@ export class CodeReviewStage implements WorkflowStage {
       projectRoot: ctx.root,
       target: codeTarget,
       ...(codeCitations.kind === "resolved"
-        ? { citedRulings: codeCitations.citations }
+        ? { citedRulings: codeCitations.citations, proposals: codeCitations.proposals }
         : { citedRulingsUnavailable: codeCitations.reason }),
       stage: "code",
       generation: ctx.state.itemAttempt?.generation ?? 0,

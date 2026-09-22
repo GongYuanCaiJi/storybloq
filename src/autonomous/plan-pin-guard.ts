@@ -24,8 +24,17 @@ import { citationsForReviewTarget } from "./cited-rulings.js";
 import type { CitationResolution } from "../core/ruling.js";
 
 export type PlanPinGuardVerdict =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      /** T-522: proposals against this item, named for the record and enforced by nothing. */
+      readonly note?: string;
+    }
   | { readonly ok: false; readonly instruction: string };
+
+function proposalsNote(proposals: readonly { readonly id: string }[]): { note?: string } {
+  if (proposals.length === 0) return {};
+  return { note: `Proposals against this item (not enforced): ${proposals.map((p) => p.id).join(", ")}` };
+}
 
 /**
  * The per-citation rule. Returns null when the citation is satisfied, or the
@@ -85,12 +94,15 @@ export async function guardPlanNamesCitedRulings(
       instruction: `Cannot verify the plan against the item's cited rulings: ${citations.reason}. Escalate -- do not treat this plan as approved.`,
     };
   }
-  if (citations.citations.length === 0) return { ok: true };
+  // T-522: refusals come from CITATIONS only. A proposal is not policy, so
+  // the guard never demands a plan name one; it is carried on the OK verdict
+  // as a note so the record shows it was seen.
+  if (citations.citations.length === 0) return { ok: true, ...proposalsNote(citations.proposals) };
 
   const refusals = citations.citations
     .map((resolution) => refusalFor(resolution, planText))
     .filter((r): r is string => r !== null);
-  if (refusals.length === 0) return { ok: true };
+  if (refusals.length === 0) return { ok: true, ...proposalsNote(citations.proposals) };
 
   return {
     ok: false,

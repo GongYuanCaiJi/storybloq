@@ -12,9 +12,11 @@
  * were still current).
  */
 import { loadProject } from "../core/project-loader.js";
-import { buildCitationInputs } from "../core/ruling-loader.js";
+import { buildCitationInputs, loadRulingsSafe } from "../core/ruling-loader.js";
 import { resolveEntityCitations } from "../core/ruling.js";
 import type { CitationResolution } from "../core/ruling.js";
+import { proposalsFor } from "../core/ruling-lifecycle.js";
+import type { Ruling } from "../models/ruling.js";
 
 /**
  * Either the resolved citations, or a REASON they could not be resolved.
@@ -26,7 +28,16 @@ import type { CitationResolution } from "../core/ruling.js";
  * shown a packet with no rulings and no reason to doubt it.
  */
 export type TargetCitations =
-  | { readonly kind: "resolved"; readonly citations: readonly CitationResolution[] }
+  | {
+      readonly kind: "resolved";
+      readonly citations: readonly CitationResolution[];
+      /**
+       * T-522: proposals whose `proposedFor` names this item. NOT citations:
+       * they bind nothing, the guard never refuses on them, and the packet
+       * renders them in their own bounded "Proposed, not binding" block.
+       */
+      readonly proposals: readonly Ruling[];
+    }
   | { readonly kind: "unavailable"; readonly reason: string };
 
 export async function citationsForReviewTarget(
@@ -57,9 +68,12 @@ export async function citationsForReviewTarget(
     // exists to prevent. The ids are passed so no other board is read when
     // this item cites nothing.
     const cited = (resolvedItem as { citesRulings?: readonly string[] }).citesRulings ?? [];
+    // Proposals are LOCAL only: a proposal is filed where the item lives.
+    const proposals = proposalsFor(loadRulingsSafe(root).rulings, resolvedItem.id);
     return {
       kind: "resolved",
       citations: resolveEntityCitations(resolvedItem, buildCitationInputs(root, cited)),
+      proposals,
     };
   } catch (err) {
     return { kind: "unavailable", reason: `the ledger could not be read (${(err as Error).message})` };

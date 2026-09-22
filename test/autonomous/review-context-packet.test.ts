@@ -758,6 +758,48 @@ describe("T-494: cited rulings in the packet", () => {
     });
   }
 
+  it("T-522: 50 proposals (short and 10 KB) leave the cited-rulings block byte-identical, name at most 5 whole texts, and list the rest as omissions", () => {
+    const citations = resolvedCitations([{ id: "r-0000000000000001", size: 200 }, { id: "r-0000000000000002", size: 300 }]);
+    const proposals = Array.from({ length: 50 }, (_, i) =>
+      makeRuling({ id: `r-${String(i + 100).padStart(16, "0")}`, text: i < 3 ? `short ${i}` : "p".repeat(10_000), status: "proposed", proposesToSupersede: "r-0000000000000001" }),
+    );
+    const dir = tmpSession();
+    const without = buildReviewContextPacket({ ...base, budget: 16_000, sessionDir: dir, projectRoot: dir, citedRulings: citations });
+    const withP = buildReviewContextPacket({ ...base, budget: 16_000, sessionDir: dir, projectRoot: dir, citedRulings: citations, proposals });
+    const block = (t: string) => t.slice(t.indexOf("## Cited Rulings"), t.indexOf("## Proposed, not binding") > -1 ? t.indexOf("## Proposed, not binding") : t.indexOf("CONTEXT COMPLETENESS"));
+    expect(block(withP.text)).toBe(block(without.text));
+    const proposalsAt = withP.text.indexOf("## Proposed, not binding");
+    expect(proposalsAt).toBeGreaterThan(withP.text.indexOf("## Cited Rulings"));
+    expect(proposalsAt).toBeLessThan(withP.text.indexOf("CONTEXT COMPLETENESS"));
+    const proposalsBlock = withP.text.slice(proposalsAt, withP.text.indexOf("CONTEXT COMPLETENESS"));
+    const named = (proposalsBlock.match(/^- \*\*r-/gm) ?? []).length;
+    expect(named).toBeLessThanOrEqual(5);
+    expect(named).toBeGreaterThan(0);
+    // A text is shown whole or not at all: the 10 KB texts never fit the
+    // 5% budget, so none of them appears, sliced or otherwise.
+    expect(withP.text).not.toContain("p".repeat(100));
+    expect(withP.text).not.toContain("...\"");
+    expect(withP.text).toContain("short 0");
+    const omission = withP.omissions.find((o) => o.includes("proposal(s) against this item not shown"));
+    expect(omission).toContain(`${50 - named} proposal(s)`);
+    // Every id not named in the block is listed in the omission, and no
+    // named id is: the disclosure is exact, not just the right count.
+    const shownIds = (proposalsBlock.match(/^- \*\*(r-[0-9a-f]+)\*\*/gm) ?? []).map((m) => m.slice(4, -2));
+    expect(shownIds).toHaveLength(named);
+    for (const p of proposals) {
+      if (shownIds.includes(p.id)) expect(omission).not.toContain(p.id);
+      else expect(omission).toContain(p.id);
+    }
+    expect(withP.completeness).toBe("partial");
+  });
+
+  it("T-522: no proposals means no block and no omission", () => {
+    const dir = tmpSession();
+    const p = buildReviewContextPacket({ ...base, budget: 16_000, sessionDir: dir, projectRoot: dir, citedRulings: [], proposals: [] });
+    expect(p.text).not.toContain("Proposed, not binding");
+    expect(p.omissions.some((o) => o.includes("proposal"))).toBe(false);
+  });
+
   it("places the block inside the MANDATORY payload, after the origin rule and before the disclosure", () => {
     const packet = packetWith(resolvedCitations([{ id: "r-0000000000000001", size: 20 }]), 16_000);
     const blockAt = packet.text.indexOf("## Cited Rulings");

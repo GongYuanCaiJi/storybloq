@@ -20,7 +20,7 @@ import { PlanReviewStage } from "../../src/autonomous/stages/plan-review.js";
 import type { FullSessionState } from "../../src/autonomous/session-types.js";
 import { initProject } from "../../src/core/init.js";
 import { handleTicketCreate } from "../../src/cli/commands/ticket.js";
-import { handleRulingCreate, handleRulingSupersede } from "../../src/cli/commands/ruling.js";
+import { handleRulingCreate, handleRulingPropose, handleRulingSupersede } from "../../src/cli/commands/ruling.js";
 import { guardPlanNamesCitedRulings } from "../../src/autonomous/plan-pin-guard.js";
 import * as planPinGuardModule from "../../src/autonomous/plan-pin-guard.js";
 import { writeRulingUnlocked } from "../../src/core/ruling-loader.js";
@@ -180,12 +180,27 @@ describe("the guard's table, per citation status", () => {
     // Written directly: `ruling supersede` will not create this state.
     const other = "r-000000000000cyc1";
     await writeRulingUnlocked(makeRuling({ id: other, supersedes: citedId }), root);
-    const cited = JSON.parse(readFileSync(join(root, ".story", "rulings", `${citedId}.json`), "utf-8"));
+    // T-522: a hand-edited 1.16 record is QUARANTINED (its edge no longer
+    // matches its acceptance), which is a different refusal. The cycle case
+    // is a legacy-record hazard, so the cited record is rewritten as legacy.
+    const { status: _s, acceptance: _a, proposesToSupersede: _p, ...cited } = JSON.parse(readFileSync(join(root, ".story", "rulings", `${citedId}.json`), "utf-8"));
     await writeRulingUnlocked({ ...cited, supersedes: other }, root);
 
     const verdict = await guardPlanNamesCitedRulings(root, "T-001", `# Plan\n\nPer ${citedId}.`);
     expect(verdict.ok).toBe(false);
     expect(verdict.ok === false && verdict.instruction).toContain("cycle");
+  });
+
+  it("does NOT refuse on a proposal against the item; the OK verdict names it as not enforced (T-522)", async () => {
+    const root = await newProject();
+    const proposeResult = await handleRulingPropose(
+      { text: "Only proposed.", attribution: "owner-direct", date: "2026-09-21", scopeTags: [], proposedFor: ["T-001"], clientTaskId: CALLER },
+      "json",
+      root,
+    );
+    const pid = JSON.parse(proposeResult.output).data.id as string;
+    const verdict = await guardPlanNamesCitedRulings(root, "T-001", "# Plan\n\nNo rulings named at all.");
+    expect(verdict).toEqual({ ok: true, note: `Proposals against this item (not enforced): ${pid}` });
   });
 
   it("REFUSES a citation of a PROPOSAL, even when the plan names it (T-522)", async () => {
