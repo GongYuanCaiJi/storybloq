@@ -98,4 +98,23 @@ describe("N-131: storybloq duet spawn", () => {
     expect(json.data.launch).toBe("printed");
     expect(json.data.name).toBe("w2");
   });
+
+  // Probe loop, bug category: environment mismatch. A real spawn came up in
+  // "prompting" mode beside a bypass pen; the mode must be an explicit,
+  // validated passthrough that reaches the claude argv.
+  it("--permission-mode reaches the argv exactly and is validated; absent means the client default", () => {
+    const root = project();
+    const r = spawnWorker(root, { name: "w", pen: "p", permissionMode: "bypassPermissions", print: true });
+    expect(readFileSync(r.scriptPath, "utf-8")).toContain(`--permission-mode 'bypassPermissions' --append-system-prompt-file`);
+    expect(JSON.parse(readFileSync(r.recordPath, "utf-8")).permissionMode).toBe("bypassPermissions");
+    const bin = join(root, "bin"); mkdirSync(bin);
+    const log = join(root, "argv.log");
+    writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\n`);
+    execFileSync("chmod", ["755", join(bin, "claude")]);
+    execFileSync(r.scriptPath, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+    expect(readFileSync(log, "utf-8").trim().split("\n")).toEqual(["-n", "w", "--permission-mode", "bypassPermissions", "--append-system-prompt-file", r.rolePath]);
+    expect(() => spawnWorker(root, { name: "w2", pen: "p", permissionMode: "yolo", print: true })).toThrow(/Unknown permission mode/);
+    const plain = spawnWorker(root, { name: "w3", pen: "p", print: true });
+    expect(readFileSync(plain.scriptPath, "utf-8")).not.toContain("--permission-mode");
+  });
 });

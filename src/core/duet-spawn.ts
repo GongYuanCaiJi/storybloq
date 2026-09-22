@@ -24,6 +24,14 @@ export interface SpawnWorkerOptions {
   readonly role?: string;
   /** macOS only: open with this terminal application instead of the default handler. */
   readonly terminal?: string;
+  /**
+   * Probe finding (N-131, environment mismatch): a spawned session inherits
+   * nothing from the pen and starts in the client's default (prompting) mode,
+   * so every tool call it makes waits on the developer and cross-session mail
+   * from a bypass pen may be held. The pen names the mode explicitly; it is
+   * passed through as `claude --permission-mode <mode>`.
+   */
+  readonly permissionMode?: string;
   /** Write the script and role but do not launch. */
   readonly print?: boolean;
 }
@@ -55,9 +63,17 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function buildWorkerCommand(opts: { name: string; model?: string; rolePath: string }): string {
+export const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "default", "plan", "dontAsk"] as const;
+
+export function buildWorkerCommand(opts: { name: string; model?: string; permissionMode?: string; rolePath: string }): string {
   const parts = ["claude", "-n", shellQuote(opts.name)];
   if (opts.model !== undefined && opts.model !== "") parts.push("--model", shellQuote(opts.model));
+  if (opts.permissionMode !== undefined && opts.permissionMode !== "") {
+    if (!(PERMISSION_MODES as readonly string[]).includes(opts.permissionMode)) {
+      throw new Error(`Unknown permission mode "${opts.permissionMode}"; one of ${PERMISSION_MODES.join(", ")}.`);
+    }
+    parts.push("--permission-mode", shellQuote(opts.permissionMode));
+  }
   parts.push("--append-system-prompt-file", shellQuote(opts.rolePath));
   return parts.join(" ");
 }
@@ -115,7 +131,7 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     writeFileSync(rolePath, defaultWorkerRole(opts.pen, opts.name), "utf-8");
   }
 
-  const command = buildWorkerCommand({ name: opts.name, model: opts.model, rolePath });
+  const command = buildWorkerCommand({ name: opts.name, model: opts.model, permissionMode: opts.permissionMode, rolePath });
   const scriptPath = join(spawnDir, `${opts.name}.command`);
   writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir, command }), "utf-8");
   chmodSync(scriptPath, 0o755);
@@ -125,6 +141,7 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     name: opts.name,
     pen: opts.pen,
     model: opts.model ?? null,
+    permissionMode: opts.permissionMode ?? null,
     dir,
     rolePath,
     scriptPath,
