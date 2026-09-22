@@ -8,6 +8,8 @@ import type { ProjectState } from "../../core/project-state.js";
 import type { LoadWarning } from "../../core/errors.js";
 import type { ConflictEntry } from "../../models/types.js";
 import type { Arrangement } from "../../models/arrangement.js";
+import type { Ruling } from "../../models/ruling.js";
+import { loadRulingsSafe, writeRulingUnlocked } from "../../core/ruling-loader.js";
 import type { CommandResult } from "../types.js";
 
 export type ConflictTarget =
@@ -15,6 +17,7 @@ export type ConflictTarget =
   | { kind: "roadmap" }
   | { kind: "ticket" | "issue" | "note" | "lesson"; entity: Record<string, unknown> }
   | { kind: "arrangement"; entity: Arrangement }
+  | { kind: "ruling"; entity: Ruling }
   | { kind: "ambiguous"; matches: string[] }
   | { kind: "missing" };
 
@@ -28,6 +31,7 @@ export function resolveConflictTarget(
   state: ProjectState,
   id: string,
   arrangements: readonly Arrangement[] = [],
+  rulings: readonly Ruling[] = [],
 ): ConflictTarget {
   if (id === "config" || id === "config.json") return { kind: "config" };
   if (id === "roadmap" || id === "roadmap.json") return { kind: "roadmap" };
@@ -44,6 +48,9 @@ export function resolveConflictTarget(
 
   const arrangement = arrangements.find((a) => a.id === id);
   if (arrangement) return { kind: "arrangement", entity: arrangement };
+  // T-522: rulings by direct id, same footing as arrangements.
+  const ruling = rulings.find((r) => r.id === id);
+  if (ruling) return { kind: "ruling", entity: ruling };
 
   for (const { result } of chains) {
     if (result.kind === "ambiguous") {
@@ -75,6 +82,25 @@ function arrangementWarningsSection(warnings: readonly string[]): string[] {
   ];
 }
 
+function rulingWarningsSection(warnings: readonly string[]): string[] {
+  if (warnings.length === 0) return [];
+  return [
+    "",
+    `Ruling scan incomplete: ${warnings.join("; ")}. A damaged ruling is hidden from this ` +
+    "list and cannot be confirmed clean. Run `storybloq validate` for details.",
+  ];
+}
+
+/** T-478 / T-522: a not-found under an incomplete scan names the scan, not a flat miss. */
+function notFoundMessage(id: string, arrangementWarnings: readonly string[], rulingWarnings: readonly string[]): string {
+  const incomplete: string[] = [];
+  if (arrangementWarnings.length > 0) incomplete.push(`Arrangement scan was incomplete (${arrangementWarnings.join("; ")})`);
+  if (rulingWarnings.length > 0) incomplete.push(`Ruling scan was incomplete (${rulingWarnings.join("; ")})`);
+  if (incomplete.length === 0) return `Entity ${id} not found.`;
+  return `Entity ${id} not found. ${incomplete.join(". ")}, so ` +
+    `this id may be one of the unreadable entries. Run \`storybloq validate\` for details.`;
+}
+
 export async function handleConflictsList(
   root: string,
   format: "md" | "json",
@@ -82,12 +108,13 @@ export async function handleConflictsList(
   const { loadProject } = await import("../../core/project-loader.js");
   const { state, warnings } = await loadProject(resolve(root));
   const arrangementScan = loadArrangementsSafe(root);
-  const report = hasConflicts(state, arrangementScan.arrangements);
+  const rulingScan = loadRulingsSafe(root);
+  const report = hasConflicts(state, arrangementScan.arrangements, rulingScan.rulings);
 
   if (format === "json") {
     return {
       output: JSON.stringify(
-        { ok: true, data: report, arrangementWarnings: arrangementScan.warnings },
+        { ok: true, data: report, arrangementWarnings: arrangementScan.warnings, rulingWarnings: rulingScan.warnings },
         null,
         2,
       ),
@@ -100,6 +127,7 @@ export async function handleConflictsList(
         "No conflicts found.",
         ...diagnosticsSection(warnings),
         ...arrangementWarningsSection(arrangementScan.warnings),
+        ...rulingWarningsSection(rulingScan.warnings),
       ].join("\n"),
     };
   }
@@ -120,6 +148,7 @@ export async function handleConflictsList(
   );
   lines.push(...diagnosticsSection(warnings));
   lines.push(...arrangementWarningsSection(arrangementScan.warnings));
+  lines.push(...rulingWarningsSection(rulingScan.warnings));
   return { output: lines.join("\n") };
 }
 
@@ -177,21 +206,19 @@ export async function handleConflictsShow(
   const { loadProject } = await import("../../core/project-loader.js");
   const { state } = await loadProject(resolve(root));
   const arrangementScan = loadArrangementsSafe(root);
+  const rulingScan = loadRulingsSafe(root);
 
   // ISS-910: these branches must honor `format`. This command documents an
   // {"ok", ...} JSON contract in its --help, and a routine lookup failure
   // answering in prose hands an automated caller non-JSON on stdout -- the
   // exact parser breakage this issue exists to close. Failure shape matches
   // the sibling handleResolve: {ok: false, error}.
-  const target = resolveConflictTarget(state, id, arrangementScan.arrangements);
+  const target = resolveConflictTarget(state, id, arrangementScan.arrangements, rulingScan.rulings);
   if (target.kind === "missing") {
     // T-478: an incomplete arrangement scan means this id might be one of
     // the unreadable entries, not genuinely nonexistent -- repair-oriented
     // message instead of a flat not-found that could mislead.
-    const message = arrangementScan.warnings.length > 0
-      ? `Entity ${id} not found. Arrangement scan was incomplete (${arrangementScan.warnings.join("; ")}), so ` +
-        `this id may be one of the unreadable entries. Run \`storybloq validate\` for details.`
-      : `Entity ${id} not found.`;
+    const message = notFoundMessage(id, arrangementScan.warnings, rulingScan.warnings);
     return {
       output: format === "json" ? JSON.stringify({ ok: false, error: message }, null, 2) : message,
       exitCode: 1,
@@ -213,7 +240,7 @@ export async function handleConflictsShow(
   } else if (target.kind === "roadmap") {
     holder = state.roadmap as Record<string, unknown>;
     label = "roadmap.json";
-  } else if (target.kind === "arrangement") {
+  } else if (target.kind === "arrangement" || target.kind === "ruling") {
     holder = target.entity as unknown as Record<string, unknown>;
     label = target.entity.id;
   } else {
@@ -265,13 +292,11 @@ export async function handleResolve(
     // snapshot that a concurrent write could invalidate before the lock is
     // actually held (same TOCTOU class closed elsewhere in this plan).
     const arrangementScan = loadArrangementsSafe(root);
-    const target = resolveConflictTarget(state, id, arrangementScan.arrangements);
+    const rulingScan = loadRulingsSafe(root);
+    const target = resolveConflictTarget(state, id, arrangementScan.arrangements, rulingScan.rulings);
 
     if (target.kind === "missing") {
-      const message = arrangementScan.warnings.length > 0
-        ? `Entity ${id} not found. Arrangement scan was incomplete (${arrangementScan.warnings.join("; ")}), so ` +
-          `this id may be one of the unreadable entries. Run \`storybloq validate\` for details.`
-        : `Entity ${id} not found.`;
+      const message = notFoundMessage(id, arrangementScan.warnings, rulingScan.warnings);
       output = format === "json"
         ? JSON.stringify({ ok: false, error: message }, null, 2)
         : message;
@@ -319,6 +344,13 @@ export async function handleResolve(
       const mutable = { ...target.entity };
       result = resolveConflicts(mutable, resolveOptions);
       await writeArrangementUnlocked(mutable as never, root);
+      label = target.entity.id;
+    } else if (target.kind === "ruling") {
+      // T-522: `resolve --use` swaps the whole lifecycle group; the written
+      // record is one coherent side and classifies on its own evidence.
+      const mutable = { ...target.entity } as Record<string, unknown>;
+      result = resolveConflicts(mutable, resolveOptions);
+      await writeRulingUnlocked(JSON.parse(JSON.stringify(mutable)) as never, root);
       label = target.entity.id;
     } else {
       const mutable = { ...target.entity };

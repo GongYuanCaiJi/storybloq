@@ -2,7 +2,7 @@ import type { ProjectState } from "./project-state.js";
 import { ProjectLoaderError } from "./errors.js";
 
 export interface ConflictedItem {
-  type: "ticket" | "issue" | "note" | "lesson" | "config" | "roadmap" | "arrangement";
+  type: "ticket" | "issue" | "note" | "lesson" | "config" | "roadmap" | "arrangement" | "ruling";
   id: string;
   conflictCount: number;
 }
@@ -19,11 +19,13 @@ export interface ConflictsReport {
  * below deliberately does NOT gain this parameter -- that would route
  * arrangement conflicts through the write-blocking assertion nearly every
  * ordinary ticket/issue/note/lesson write goes through, violating the same
- * binding item.
+ * binding item. `rulings` (T-522) is the same additive shape for the same
+ * reason: rulings load through `loadRulingsSafe`, not `ProjectState`.
  */
 export function hasConflicts(
   state: ProjectState,
   arrangements?: readonly { id: string; _conflicts?: unknown[] }[],
+  rulings?: readonly { id: string; _conflicts?: unknown[] }[],
 ): ConflictsReport {
   const items: ConflictedItem[] = [];
 
@@ -41,6 +43,7 @@ export function hasConflicts(
   scan(state.notes, "note");
   scan(state.lessons, "lesson");
   if (arrangements) scan(arrangements, "arrangement");
+  if (rulings) scan(rulings, "ruling");
 
   const configConflicts = (state.config as Record<string, unknown>)._conflicts;
   if (Array.isArray(configConflicts) && configConflicts.length > 0) {

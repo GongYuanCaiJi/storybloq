@@ -67,3 +67,4 @@ Everything under `storybloq/` is projected to the public repository. Only saniti
 ## Ledger version log
 
 - v0 (2026-09-20): core as above. No proposal record, no catalogs.
+- v1 (2026-09-22): overlays/lifecycle carries R4, the proposed ruling against R1 (T-522). Core unchanged; no behavioural arm includes it.

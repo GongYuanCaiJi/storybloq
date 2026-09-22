@@ -152,6 +152,17 @@ function applyEntityLevel(
     : `Restored edited entity from ${side}.`;
 }
 
+/**
+ * T-522: a side that never HAD the member (its recorded value is undefined)
+ * must leave no key behind. Assigning `undefined` keeps an own property that
+ * `Object.hasOwn`, `in` and a later structural merge all see; only a JSON
+ * round-trip would have hidden it.
+ */
+function applySide(entity: Record<string, unknown>, name: string, value: unknown): void {
+  if (value === undefined) delete entity[name];
+  else entity[name] = value;
+}
+
 export function resolveConflicts(
   entity: Record<string, unknown>,
   options: ResolveOptions,
@@ -185,7 +196,7 @@ export function resolveConflicts(
           const name = fieldName(c);
           // ISS-801: reserved names are never legitimate top-level fields;
           // skip the write, still consume the conflict.
-          if (!isReservedKey(name)) entity[name] = side === "ours" ? c.ours : c.theirs;
+          if (!isReservedKey(name)) applySide(entity, name, side === "ours" ? c.ours : c.theirs);
           resolved.push(name);
         } else {
           remaining.push(c);
@@ -229,7 +240,7 @@ export function resolveConflicts(
     }
     for (const c of fieldLevel) {
       const name = fieldName(c);
-      if (!isReservedKey(name)) entity[name] = side === "ours" ? c.ours : c.theirs;
+      if (!isReservedKey(name)) applySide(entity, name, side === "ours" ? c.ours : c.theirs);
       resolved.push(name);
     }
   } else {

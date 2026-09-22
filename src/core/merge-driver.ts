@@ -269,8 +269,16 @@ export function threeWayMerge(
       }
     } else {
       for (const m of group.members) {
-        // ISS-747/R6: same undefined-base fallback as the ambiguous branch.
-        merged[m] = base[m] !== undefined ? base[m] : ours[m] !== undefined ? ours[m] : theirs[m];
+        if (group.onDivergence === "keep-ours") {
+          // T-522: the group is one reviewed unit; the body keeps OUR side
+          // whole (an absent member stays absent: never a null write), and
+          // the entries below carry theirs whole for `resolve --use`.
+          if (ours[m] !== undefined) merged[m] = ours[m];
+          else delete merged[m];
+        } else {
+          // ISS-747/R6: same undefined-base fallback as the ambiguous branch.
+          merged[m] = base[m] !== undefined ? base[m] : ours[m] !== undefined ? ours[m] : theirs[m];
+        }
         handledByCoupled.add(m);
         conflicts.push({
           fieldPath: toPointer(m),

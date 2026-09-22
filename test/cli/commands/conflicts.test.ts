@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { handleConflictsList, handleConflictsShow, handleResolve } from "../../../src/cli/commands/conflicts.js";
 import { writeTicket as writeTicketLocked } from "../../../src/core/project-loader.js";
+import { threeWayMerge } from "../../../src/core/merge-driver.js";
+import { RulingSchema } from "../../../src/models/ruling.js";
+import { classifyLifecycle, makeAcceptance, payloadDigest } from "../../../src/core/ruling-lifecycle.js";
 
 type Json = Record<string, unknown>;
 
@@ -340,5 +343,96 @@ describe("ISS-768: attacker-crafted conflict fieldPath through the resolve comma
     expect(threw || exitCode !== 0).toBe(true);
     expect(readFileSync(join(dir, ".story", "config.json"), "utf-8")).toBe(before);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+});
+
+describe("T-522 commit 3: conflicts list/show/resolve reach rulings", () => {
+  const ID = "r-0000000000000009";
+  const BY = { client: "claude", id: "t" };
+  const base = {
+    id: ID, text: "rev 1 text", attribution: "owner-direct", recordedBy: BY,
+    date: "2026-09-21", scopeTags: [], supersedes: null, createdAt: "2026-09-21T10:00:00.000Z",
+    status: "proposed", proposesToSupersede: null, proposedFor: [],
+  };
+  const theirsAccepted = {
+    ...base, status: "accepted",
+    acceptance: makeAcceptance(RulingSchema.parse(base), { attribution: "owner-direct", recordedBy: BY, date: "2026-09-22" }, "2026-09-22T09:00:00.000Z"),
+  };
+  const oursEdited = { ...base, text: "rev 2 text" };
+  /** The fixture is what the real driver writes, not a hand-shaped subset. */
+  function writeMergedRuling(dir: string): number {
+    const { merged, conflicts } = threeWayMerge(base, oursEdited, theirsAccepted, "ruling");
+    mkdirSync(join(dir, ".story", "rulings"), { recursive: true });
+    writeFileSync(join(dir, ".story", "rulings", `${ID}.json`), JSON.stringify(merged, null, 2) + "\n");
+    return conflicts.length;
+  }
+  function readRuling(dir: string): Json {
+    return JSON.parse(readFileSync(join(dir, ".story", "rulings", `${ID}.json`), "utf-8"));
+  }
+
+  it("lists and shows a conflicted ruling, with every lifecycle member the driver recorded", async () => {
+    const dir = makeProject();
+    const count = writeMergedRuling(dir);
+    expect(count).toBe(10);
+    const list = await handleConflictsList(dir, "json");
+    const data = JSON.parse(list.output).data;
+    expect(data.items).toEqual([{ type: "ruling", id: ID, conflictCount: 10 }]);
+    const md = await handleConflictsList(dir, "md");
+    expect(md.output).toContain(`| ruling | ${ID} | 10 |`);
+    const show = await handleConflictsShow(ID, dir, "md");
+    expect(show.output).toContain("text");
+    expect(show.output).toContain("lifecycle");
+    const showJson = JSON.parse((await handleConflictsShow(ID, dir, "json")).output);
+    expect(showJson.ok).toBe(true);
+  });
+
+  it("resolve --use theirs rewrites the ruling as their whole side: a VALID accepted record, conflict cleared", async () => {
+    const dir = makeProject();
+    writeMergedRuling(dir);
+    const res = await handleResolve(ID, dir, { use: "theirs", format: "json" });
+    expect(JSON.parse(res.output).ok).toBe(true);
+    const after = readRuling(dir);
+    expect(after._conflicts).toBeUndefined();
+    expect(after).toEqual(theirsAccepted);
+    const parsed = RulingSchema.parse(after);
+    expect(parsed.acceptance!.payloadDigest).toBe(payloadDigest(parsed));
+    expect(classifyLifecycle(parsed).lifecycle).toBe("accepted");
+    expect((await handleConflictsList(dir, "json")).output).toContain('"hasConflicts": false');
+  });
+
+  it("resolve --use ours keeps the edited side whole and no acceptance key exists on disk", async () => {
+    const dir = makeProject();
+    writeMergedRuling(dir);
+    await handleResolve(ID, dir, { use: "ours", format: "json" });
+    const after = readRuling(dir);
+    expect(after).toEqual(oursEdited);
+    expect(Object.hasOwn(after, "acceptance")).toBe(false);
+    expect(classifyLifecycle(RulingSchema.parse(after)).lifecycle).toBe("proposed");
+  });
+
+  it("resolve --value is refused on a ruling: the payload is one reviewed unit", async () => {
+    const dir = makeProject();
+    writeMergedRuling(dir);
+    await expect(handleResolve(ID, dir, { field: "text", value: "hand-picked", format: "json" })).rejects.toThrow(/coupled group/);
+    expect(readRuling(dir)._conflicts).toBeDefined();
+    expect(readRuling(dir).text).toBe("rev 2 text");
+  });
+
+  it("an unreadable ruling file is never reported as conflict-free: list carries the ruling warnings, show names the incomplete scan", async () => {
+    const dir = makeProject();
+    mkdirSync(join(dir, ".story", "rulings"), { recursive: true });
+    writeFileSync(join(dir, ".story", "rulings", "r-0000000000000008.json"), "{ not json");
+    const list = JSON.parse((await handleConflictsList(dir, "json")).output);
+    expect(list.data.hasConflicts).toBe(false);
+    expect(list.rulingWarnings).toHaveLength(1);
+    expect(list.rulingWarnings[0]).toContain("r-0000000000000008.json");
+    const md = (await handleConflictsList(dir, "md")).output;
+    expect(md).toContain("Ruling scan incomplete");
+    expect(md).toContain("cannot be confirmed clean");
+    const show = await handleConflictsShow("r-0000000000000008", dir, "json");
+    expect(show.exitCode).toBe(1);
+    expect(JSON.parse(show.output).error).toContain("Ruling scan was incomplete");
+    const res = await handleResolve("r-0000000000000008", dir, { use: "ours", format: "json" });
+    expect(JSON.parse(res.output).error).toContain("Ruling scan was incomplete");
   });
 });

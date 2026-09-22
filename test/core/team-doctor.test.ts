@@ -316,3 +316,37 @@ describe("checkLocalIdAllocator (ISS-734)", () => {
     expect(result.findings.find((f) => f.code === "local_id_allocator")).toBeUndefined();
   });
 });
+
+describe("T-522 commit 3: team doctor advises on the 1.16 rulings gaps", () => {
+  it("warns when the fence is below 1.16.0 and when .gitattributes lacks the rulings line, each with the team setup repair", async () => {
+    const { checkRulingLifecycleReadiness } = await import("../../src/core/team-doctor.js");
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const root = mkdtempSync(join(tmpdir(), "doctor-rulings-"));
+    const { execFileSync } = await import("node:child_process");
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    mkdirSync(join(root, ".story", "rulings"), { recursive: true });
+    writeFileSync(join(root, ".story", ".gitattributes"), "# storybloq-merge-begin\ntickets/*.json merge=storybloq-json\n# storybloq-merge-end\n");
+    // Without a single ruling on disk the check is silent: a project that records no rulings owes nothing.
+    const silent = state({ config: { ...teamConfig, team: { enabled: true, minCliVersion: "1.4.4" } } as Config });
+    expect(await checkRulingLifecycleReadiness(silent, teamCtx({ root, cliVersion: "1.16.0" }))).toEqual([]);
+    writeFileSync(join(root, ".story", "rulings", "r-0000000000000001.json"), "{}");
+    const low = state({ config: { ...teamConfig, team: { enabled: true, minCliVersion: "1.4.4" } } as Config });
+    const findings = await checkRulingLifecycleReadiness(low, teamCtx({ root, cliVersion: "1.16.0" }));
+    const codes = findings.map((f) => f.code).sort();
+    expect(codes).toEqual(["gitattributes_no_rulings", "ruling_fence_below_1_16"]);
+    for (const f of findings) {
+      expect(f.severity).toBe("warning");
+      expect(f.repair).toEqual({ command: ["storybloq", "team", "setup"] });
+    }
+    writeFileSync(join(root, ".story", ".gitattributes"), "# storybloq-merge-begin\nrulings/*.json merge=storybloq-json\n# storybloq-merge-end\n");
+    const ok = state({ config: { ...teamConfig, team: { enabled: true, minCliVersion: "1.16.0" } } as Config });
+    expect(await checkRulingLifecycleReadiness(ok, teamCtx({ root, cliVersion: "1.16.0" }))).toEqual([]);
+  });
+
+  it("is part of the default checks", async () => {
+    const { defaultChecks, checkRulingLifecycleReadiness } = await import("../../src/core/team-doctor.js");
+    expect(defaultChecks).toContain(checkRulingLifecycleReadiness);
+  });
+});

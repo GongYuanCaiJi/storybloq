@@ -384,3 +384,54 @@ describe("withdraw and list", () => {
     expect(md).toContain(`### ${scoped.id} [accepted]`);
   });
 });
+
+describe("T-522 commit 3: team-mode precondition on every ruling write", () => {
+  const saved = process.env.STORYBLOQ_VERSION;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.STORYBLOQ_VERSION;
+    else process.env.STORYBLOQ_VERSION = saved;
+  });
+
+  async function teamProject(fence: string): Promise<string> {
+    const root = await newProject();
+    const configPath = join(root, ".story", "config.json");
+    const config = JSON.parse(await readFile(configPath, "utf-8"));
+    config.team = { enabled: true, minCliVersion: fence, mergeDriverVersion: 1 };
+    await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
+    const { execFileSync } = await import("node:child_process");
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+    execFileSync("git", ["init", "-q"], { cwd: root, env });
+    return root;
+  }
+
+  it("refuses create, supersede, propose, accept and withdraw until team setup raised the fence and wrote the rulings attribute; reads are never refused", async () => {
+    process.env.STORYBLOQ_VERSION = "1.16.0";
+    const root = await teamProject("1.4.4");
+    const refusal = /storybloq team setup/;
+    await expect(handleRulingCreate({ ...BASE, text: "R1" }, "json", root)).rejects.toThrow(refusal);
+    await expect(handleRulingPropose({ ...BASE, text: "P" }, "json", root)).rejects.toThrow(refusal);
+    await expect(handleRulingSupersede("r-0000000000000001", { text: "x", attribution: "owner-direct", date: "2026-09-22", clientTaskId: CALLER }, "json", root)).rejects.toThrow(refusal);
+    await expect(handleRulingAccept("r-0000000000000001", { revision: "0".repeat(64), attribution: "owner-direct", date: "2026-09-22", clientTaskId: CALLER }, "json", root)).rejects.toThrow(refusal);
+    await expect(handleRulingWithdraw("r-0000000000000001", { clientTaskId: CALLER }, "json", root)).rejects.toThrow(refusal);
+    expect(handleRulingList({}, await ctxFor(root)).output).toContain('"data": []');
+
+    const { teamSetup } = await import("../../../src/core/team-setup.js");
+    const setup = await teamSetup(root);
+    expect(setup.rulingFence).toBe("raised");
+    const r1 = await createR1(root);
+    const p = JSON.parse((await handleRulingPropose({ ...BASE, text: "P", proposesToSupersede: r1 }, "json", root)).output).data;
+    await handleRulingAccept(p.id, { revision: p.revision, attribution: "owner-direct", date: "2026-09-22", clientTaskId: CALLER }, "json", root);
+    expect((await get(root, r1)).lifecycle).toBe("superseded");
+  });
+
+  it("a fence at 1.16.0 without the rulings attribute line is still refused, naming the missing line", async () => {
+    process.env.STORYBLOQ_VERSION = "1.16.0";
+    const root = await teamProject("1.16.0");
+    await expect(handleRulingCreate({ ...BASE, text: "R1" }, "json", root)).rejects.toThrow(/rulings\/\*\.json merge=storybloq-json/);
+  });
+
+  it("a non-team project has no precondition", async () => {
+    const root = await newProject();
+    await expect(createR1(root)).resolves.toMatch(/^r-/);
+  });
+});

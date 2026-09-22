@@ -838,3 +838,51 @@ describe("I5: non-team repos never invoke the driver", () => {
     expect(raw).toContain("<<<<<<<");
   });
 });
+
+describe("T-522 commit 3: rulings through the real git merge driver", () => {
+  function writeRuling(dir: string, body: Record<string, unknown>): void {
+    mkdirSync(join(dir, ".story", "rulings"), { recursive: true });
+    writeFileSync(join(dir, ".story", "rulings", `${body.id}.json`), JSON.stringify(body, null, 2) + "\n");
+  }
+  const base = {
+    id: "r-2222222222222222", text: "rev 1", attribution: "owner-direct", recordedBy: { client: "claude", id: "t" },
+    date: "2026-09-21", scopeTags: [], supersedes: null, createdAt: "2026-09-21T10:00:00.000Z",
+    status: "proposed", proposesToSupersede: null, proposedFor: [],
+  };
+
+  it("A accepts, B edits: the merged file keeps ours whole, carries the lifecycle conflict, and loads as conflicted", () => {
+    const dir = createTeamRepo();
+    tmpDirs.push(dir);
+    writeFileSync(join(dir, ".story", ".gitattributes"), "rulings/*.json merge=storybloq-json\ntickets/*.json merge=storybloq-json\n");
+    writeRuling(dir, base);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-m", "base");
+
+    git(dir, "checkout", "-b", "branch-a");
+    writeRuling(dir, {
+      ...base, status: "accepted",
+      acceptance: { attribution: "owner-direct", recordedBy: { client: "claude", id: "t" }, date: "2026-09-22", createdAt: "2026-09-22T09:00:00.000Z", payloadDigest: "0".repeat(64) },
+    });
+    git(dir, "add", "-A");
+    git(dir, "commit", "-m", "accept on A");
+
+    git(dir, "checkout", "main");
+    git(dir, "checkout", "-b", "branch-b");
+    writeRuling(dir, { ...base, text: "rev 2" });
+    git(dir, "add", "-A");
+    git(dir, "commit", "-m", "edit on B");
+
+    const mergeResult = gitMerge(dir, "branch-a");
+    expect(mergeResult.exitCode).toBe(1);
+    const unmerged = git(dir, "ls-files", "--unmerged");
+    expect(unmerged).toContain(`.story/rulings/${base.id}.json`);
+
+    const merged = JSON.parse(readFileSync(join(dir, ".story", "rulings", `${base.id}.json`), "utf-8"));
+    expect(merged.text).toBe("rev 2");
+    expect(merged.status).toBe("proposed");
+    expect(merged.acceptance).toBeUndefined();
+    expect(Array.isArray(merged._conflicts)).toBe(true);
+    expect(merged._conflicts.every((c: { group?: string }) => c.group === "lifecycle")).toBe(true);
+    expect(merged._conflicts.find((c: { field: string }) => c.field === "acceptance").theirs.payloadDigest).toBe("0".repeat(64));
+  });
+});

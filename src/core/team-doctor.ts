@@ -3,7 +3,10 @@ import { execFileSync } from "node:child_process";
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { isClaimStale } from "./claims.js";
-import { compareVersionStrings } from "./team-capabilities.js";
+import { compareVersionStrings, RULING_LIFECYCLE_MIN_CLI_VERSION } from "./team-capabilities.js";
+import { rulingLifecycleReadiness } from "./team-setup.js";
+import { join } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
 import { ENABLE_GIT_REFS_REMEDY } from "./branch-allocation-warning.js";
 
 export type DoctorSeverity = "error" | "warning" | "info";
@@ -521,6 +524,45 @@ async function checkReservationHealth(state: ProjectState, ctx: DoctorContext): 
  * gates all checks on ctx.isTeamMode); an absent idAllocator means the runtime
  * default, which is local.
  */
+/**
+ * T-522: a team-mode ledger admits 1.16 ruling records (proposals,
+ * acceptance evidence) only behind a fence of at least 1.16.0 and with ruling
+ * files merging structurally. Both gaps are one `team setup` away; until
+ * then every ruling write refuses and says so.
+ */
+export function checkRulingLifecycleReadiness(state: ProjectState, ctx: DoctorContext): DoctorFinding[] {
+  // Only a project that records rulings is asked to be ready for them.
+  const rulingsDir = join(ctx.root, ".story", "rulings");
+  let hasRulings = false;
+  try {
+    hasRulings = existsSync(rulingsDir) && readdirSync(rulingsDir).some((f) => f.endsWith(".json"));
+  } catch {
+    hasRulings = false;
+  }
+  if (!hasRulings) return [];
+  const readiness = rulingLifecycleReadiness(join(ctx.root, ".story"), state.config.team?.minCliVersion);
+  const findings: DoctorFinding[] = [];
+  if (!readiness.fenceOk) {
+    findings.push({
+      severity: "warning",
+      code: "ruling_fence_below_1_16",
+      message: `team.minCliVersion is ${state.config.team?.minCliVersion ?? "unset"}; 1.16 ruling writes (propose, accept, acceptance evidence) need at least ${RULING_LIFECYCLE_MIN_CLI_VERSION}. Run storybloq team setup on a ${RULING_LIFECYCLE_MIN_CLI_VERSION}+ CLI.`,
+      entity: null,
+      repair: { command: ["storybloq", "team", "setup"] },
+    });
+  }
+  if (!readiness.attributeOk) {
+    findings.push({
+      severity: "warning",
+      code: "gitattributes_no_rulings",
+      message: ".story/.gitattributes has no `rulings/*.json merge=storybloq-json` line; ruling files would merge as text. Run storybloq team setup.",
+      entity: null,
+      repair: { command: ["storybloq", "team", "setup"] },
+    });
+  }
+  return findings;
+}
+
 export function checkLocalIdAllocator(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
   if (state.config.team?.idAllocator === "git-refs") return [];
   return [{
@@ -565,4 +607,5 @@ registerDoctorCheck(checkConflictsPresent);
 registerDoctorCheck(checkMergeDriverConfig);
 registerDoctorCheck(checkReservationHealth);
 registerDoctorCheck(checkLocalIdAllocator);
+registerDoctorCheck(checkRulingLifecycleReadiness);
 registerDoctorCheck(checkHandoverFilenamePolicy);

@@ -522,7 +522,9 @@ export function validateProject(
     }
   }
 
-  const conflicts = hasConflicts(state);
+  // T-522: a conflicted ruling binds nothing until resolved; it is reported
+  // here with every other unresolved conflict so one `validate` names them all.
+  const conflicts = hasConflicts(state, undefined, aux.rulings);
   for (const item of conflicts.items) {
     findings.push({
       level: "error",

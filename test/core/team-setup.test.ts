@@ -11,6 +11,8 @@ import {
   updateConfigVersion,
   teamSetup,
   checkMergeDriverSetup,
+  rulingLifecycleReadiness,
+  effectiveMergeDriver,
 } from "../../src/core/team-setup.js";
 import { STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
 
@@ -241,5 +243,119 @@ describe("ISS-754: teamSetup ensures .story/.gitignore", () => {
     for (const entry of STORY_GITIGNORE_ENTRIES) {
       expect(content).toContain(entry);
     }
+  });
+});
+
+describe("T-522 commit 3: team setup enables 1.16 rulings", () => {
+  const saved = process.env.STORYBLOQ_VERSION;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.STORYBLOQ_VERSION;
+    else process.env.STORYBLOQ_VERSION = saved;
+  });
+
+  it("writes the rulings merge attribute line", async () => {
+    const root = createTempGitRepo();
+    const storyDir = createStoryDir(root);
+    await writeGitattributes(storyDir);
+    const content = readFileSync(join(storyDir, ".gitattributes"), "utf-8");
+    expect(content).toContain("rulings/*.json merge=storybloq-json");
+  });
+
+  it("raises minCliVersion to 1.16.0 when the running CLI is at least 1.16.0, and reports it", async () => {
+    process.env.STORYBLOQ_VERSION = "1.16.0";
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig({ team: { enabled: true, minCliVersion: "1.4.4" } }));
+    const result = await teamSetup(root);
+    expect(result.rulingFence).toBe("raised");
+    const config = JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8"));
+    expect(config.team.minCliVersion).toBe("1.16.0");
+  });
+
+  it("keeps a fence already at or above 1.16.0", async () => {
+    process.env.STORYBLOQ_VERSION = "1.17.2";
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig({ team: { enabled: true, minCliVersion: "1.16.5" } }));
+    const result = await teamSetup(root);
+    expect(result.rulingFence).toBe("already");
+    expect(JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8")).team.minCliVersion).toBe("1.16.5");
+  });
+
+  it("DEFERS the raise when the running CLI is older than 1.16.0: a fence this CLI cannot pass is never written", async () => {
+    process.env.STORYBLOQ_VERSION = "1.15.9";
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig({ team: { enabled: true, minCliVersion: "1.4.4" } }));
+    const result = await teamSetup(root);
+    expect(result.rulingFence).toBe("deferred");
+    expect(JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8")).team.minCliVersion).toBe("1.4.4");
+  });
+});
+
+describe("T-522 commit 3 (byte-review round 2): the fence is SemVer-aware and the attribute check is git-accurate", () => {
+  const saved = process.env.STORYBLOQ_VERSION;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.STORYBLOQ_VERSION;
+    else process.env.STORYBLOQ_VERSION = saved;
+  });
+
+  it("a prerelease of 1.16.0 cannot raise the fence: 1.16.0-rc.1 defers", async () => {
+    process.env.STORYBLOQ_VERSION = "1.16.0-rc.1";
+    const root = createTempGitRepo();
+    writeConfig(root, baseConfig({ team: { enabled: true, minCliVersion: "1.4.4" } }));
+    const result = await teamSetup(root);
+    expect(result.rulingFence).toBe("deferred");
+    expect(JSON.parse(readFileSync(join(root, ".story", "config.json"), "utf-8")).team.minCliVersion).toBe("1.4.4");
+  });
+
+  it("readiness: a prerelease fence of the minimum's core is below it; a prerelease of a later core is above it", () => {
+    const storyDir = createStoryDir(createTempGitRepo());
+    expect(rulingLifecycleReadiness(storyDir, "1.16.0-rc").fenceOk).toBe(false);
+    expect(rulingLifecycleReadiness(storyDir, "1.16.0-rc.1").fenceOk).toBe(false);
+    expect(rulingLifecycleReadiness(storyDir, "1.16.0").fenceOk).toBe(true);
+    expect(rulingLifecycleReadiness(storyDir, "1.16.1-rc.1").fenceOk).toBe(true);
+    expect(rulingLifecycleReadiness(storyDir, "1.15.9").fenceOk).toBe(false);
+    expect(rulingLifecycleReadiness(storyDir, "garbage").fenceOk).toBe(false);
+    expect(rulingLifecycleReadiness(storyDir, undefined).fenceOk).toBe(false);
+  });
+
+  it("attribute: git's own answer for the actual ruling path; comments, unrelated patterns and every kind of later override are honoured", () => {
+    const root = createTempGitRepo();
+    const storyDir = createStoryDir(root);
+    const attrs = join(storyDir, ".gitattributes");
+    const ok = (content: string, id = "r-0000000000000000"): boolean => {
+      writeFileSync(attrs, content);
+      return rulingLifecycleReadiness(storyDir, "1.16.0", id).attributeOk;
+    };
+    const managed = "# storybloq-merge-begin\nrulings/*.json merge=storybloq-json\n# storybloq-merge-end\n";
+    expect(ok(managed)).toBe(true);
+    expect(ok("# rulings/*.json merge=storybloq-json\n")).toBe(false);
+    expect(ok("old-rulings/*.json merge=storybloq-json\n")).toBe(false);
+    expect(ok("")).toBe(false);
+    expect(ok("/rulings/*.json merge=storybloq-json\n")).toBe(true);
+    expect(ok("*.json merge=storybloq-json\n")).toBe(true);
+    // Overrides placed after the managed block (setup preserves custom content there) win, as in git.
+    expect(ok(managed + "rulings/*.json merge=text\n")).toBe(false);
+    expect(ok(managed + "rulings/*.json -merge\n")).toBe(false);
+    expect(ok(managed + "*.json merge=text\n")).toBe(false);
+    expect(ok(managed + "**/*.json merge=text\n")).toBe(false);
+    expect(ok(managed + "rulings/** -merge\n")).toBe(false);
+    expect(ok(managed + "rulings/r-[0-9a-f]*.json merge=text\n")).toBe(false);
+    // A per-file override is caught for THAT file and only that file: the check runs on the real path.
+    expect(ok(managed + "rulings/r-a*.json merge=text\n", "r-abcdefabcdefabcd")).toBe(false);
+    expect(ok(managed + "rulings/r-a*.json merge=text\n", "r-0000000000000000")).toBe(true);
+    expect(ok(managed + "*.txt merge=text\n")).toBe(true);
+    expect(ok(managed + "tickets/*.json merge=text\n")).toBe(true);
+    expect(ok("rulings/*.json merge=text\n" + managed)).toBe(true);
+    // Outside a git repository nothing can merge structurally: not ready.
+    const bare = mkdtempSync(join(tmpdir(), "no-git-"));
+    mkdirSync(join(bare, ".story"), { recursive: true });
+    writeFileSync(join(bare, ".story", ".gitattributes"), managed);
+    expect(rulingLifecycleReadiness(join(bare, ".story"), "1.16.0").attributeOk).toBe(false);
+    expect(effectiveMergeDriver(bare, ".story/rulings/r-0000000000000000.json")).toBeNull();
+  });
+
+  it("the file setup itself writes is active", async () => {
+    const storyDir = createStoryDir(createTempGitRepo());
+    await writeGitattributes(storyDir);
+    expect(rulingLifecycleReadiness(storyDir, "1.16.0")).toEqual({ fenceOk: true, attributeOk: true });
   });
 });

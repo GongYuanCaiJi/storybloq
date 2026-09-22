@@ -153,12 +153,35 @@ export function conflictAlternatives(ruling: Ruling): Ruling[] {
   const own = RulingSchema.safeParse(body);
   if (own.success) out.push(own.data);
   if (!Array.isArray(_conflicts)) return out;
+  // Field-level entries (the merge driver's coupled `lifecycle` group writes
+  // one per member) describe each side by its member VALUES: a side is the
+  // kept body with that side's values applied, an absent value deleting the
+  // key. Entity-level entries (delete-edit) carry whole snapshots.
+  const sides: Record<"ours" | "theirs", Record<string, unknown>> = { ours: { ...body }, theirs: { ...body } };
+  let fieldLevel = false;
   for (const entry of _conflicts) {
     if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    const field = typeof e.field === "string" ? e.field : typeof e.fieldPath === "string" && e.fieldPath.startsWith("/") ? e.fieldPath.slice(1) : "";
+    if (field === "" || field === "_entity") {
+      for (const side of ["ours", "theirs"] as const) {
+        const alt = e[side];
+        if (typeof alt !== "object" || alt === null || Array.isArray(alt)) continue;
+        const parsed = RulingSchema.safeParse({ ...(alt as Record<string, unknown>), _conflicts: undefined });
+        if (parsed.success) out.push(parsed.data);
+      }
+      continue;
+    }
+    if (field === "_conflicts" || field.includes("/")) continue;
+    fieldLevel = true;
     for (const side of ["ours", "theirs"] as const) {
-      const alt = (entry as Record<string, unknown>)[side];
-      if (typeof alt !== "object" || alt === null || Array.isArray(alt)) continue;
-      const parsed = RulingSchema.safeParse({ ...(alt as Record<string, unknown>), _conflicts: undefined });
+      if (e[side] === undefined) delete sides[side][field];
+      else sides[side][field] = e[side];
+    }
+  }
+  if (fieldLevel) {
+    for (const side of ["ours", "theirs"] as const) {
+      const parsed = RulingSchema.safeParse(sides[side]);
       if (parsed.success) out.push(parsed.data);
     }
   }

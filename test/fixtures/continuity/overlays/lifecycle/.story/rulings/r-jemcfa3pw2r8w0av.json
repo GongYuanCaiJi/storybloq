@@ -1,0 +1,23 @@
+{
+  "id": "r-jemcfa3pw2r8w0av",
+  "text": "Background work carries the request id of the job that enqueued it",
+  "attribution": "owner-direct",
+  "recordedBy": {
+    "client": "claude",
+    "id": "fixture-seed-0000-0000-000000000000"
+  },
+  "date": "2026-09-21",
+  "scopeTags": [
+    "logging"
+  ],
+  "supersedes": null,
+  "createdAt": "2026-09-21T10:00:00.000Z",
+  "status": "proposed",
+  "proposesToSupersede": "r-eftp2zdb6as643np",
+  "proposedFor": [
+    "T-2"
+  ],
+  "narrative": {
+    "context": "Jobs lose the request id at the queue boundary"
+  }
+}

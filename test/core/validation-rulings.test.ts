@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { validateProject } from "../../src/core/validation.js";
-import { makeTicket, makeIssue, makeRuling, makeState } from "./test-factories.js";
+import { makeTicket, makeIssue, makeRuling, makeState, makeRoadmap, makePhase } from "./test-factories.js";
+import type { Ruling } from "../../src/models/ruling.js";
 
 describe("validateProject with rulings aux", () => {
   it("runs no ruling checks at all when aux.rulings is not supplied (pre-T-476 behavior unchanged)", () => {
@@ -349,5 +350,22 @@ describe("ruling lifecycle (T-522)", () => {
     const rulings = [makeRuling({ id: "r-0000000000000001" }), makeRuling({ id: "r-0000000000000002", supersedes: "r-0000000000000001" })];
     const c = codes(validateProject(makeState({}), undefined, aux(rulings)));
     expect(c.filter((x) => x.startsWith("ruling_") && x !== "ruling_unreachable")).toEqual([]);
+  });
+});
+
+describe("T-522 commit 3: a conflicted ruling is an unresolved_conflicts error", () => {
+  it("names the ruling id with the resolve command", () => {
+    const state = makeState({ roadmap: makeRoadmap([makePhase({ id: "p1" })]) });
+    const conflicted = {
+      id: "r-0000000000000001", text: "x", attribution: "owner-direct", recordedBy: { client: "claude", id: "t" },
+      date: "2026-01-01", scopeTags: [], supersedes: null, createdAt: "2026-01-01T00:00:00.000Z",
+      _conflicts: [{ fieldPath: "/text", field: "text", kind: "coupled", group: "lifecycle", base: "x", ours: "x", theirs: "y" }],
+    } as unknown as Ruling;
+    const result = validateProject(state, undefined, { rulings: [conflicted], unavailableRulingIds: new Set(), rulingScanCompleteness: "complete" });
+    const finding = result.findings.find((f) => f.code === "unresolved_conflicts");
+    expect(finding).toBeDefined();
+    expect(finding!.level).toBe("error");
+    expect(finding!.entity).toBe("r-0000000000000001");
+    expect(finding!.message).toContain("storybloq resolve");
   });
 });

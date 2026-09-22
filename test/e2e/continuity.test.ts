@@ -5,13 +5,22 @@
  * todo with the owning ticket; that ticket records the RED evidence.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadProject } from "../../src/core/project-loader.js";
 import { handleValidate } from "../../src/cli/commands/validate.js";
 import { citationsForReviewTarget } from "../../src/autonomous/cited-rulings.js";
+import { guardPlanNamesCitedRulings } from "../../src/autonomous/plan-pin-guard.js";
+import { loadRulingsSafe } from "../../src/core/ruling-loader.js";
+import { buildSuccessorIndex, buildCitationResolutionContext, resolveCitation } from "../../src/core/ruling.js";
+import { classifyLifecycle, payloadDigest } from "../../src/core/ruling-lifecycle.js";
+import { threeWayMerge } from "../../src/core/merge-driver.js";
+import { RulingSchema } from "../../src/models/ruling.js";
+import { handleRulingAccept, handleRulingGet, handleRulingList, handleRulingPropose } from "../../src/cli/commands/ruling.js";
+import * as oracle from "../core/oracle-1-15/ruling-655b03bf.js";
+import { RulingSchema as OldRulingSchema } from "../core/oracle-1-15/ruling-schema-655b03bf.js";
 import { handleAutonomousGuide } from "../../src/autonomous/guide.js";
 import type { CommandContext } from "../../src/cli/types.js";
 import { materialize, hashTree, TASKS } from "../../scripts/continuity-lib.js";
@@ -34,6 +43,13 @@ function copy(arm: 1 | 2 | 3, task: (typeof TASKS)[number] = "T-2.a", git = fals
   return dest;
 }
 afterEach(() => { for (const r of roots.splice(0)) { killSidecarsInRoot(r); rmSync(r, { recursive: true, force: true }); } });
+
+/** Copies overlays/lifecycle/.story (R4, the proposal against R1) over a materialised core. */
+function withLifecycle(root: string): string {
+  cpSync(join(FIXTURE, "overlays", "lifecycle", ".story"), join(root, ".story"), { recursive: true });
+  return root;
+}
+const CALLER = "continuity-suite";
 
 async function ctxFor(root: string): Promise<CommandContext> {
   const { state, warnings } = await loadProject(root);
@@ -120,16 +136,138 @@ describe("continuity cases 4 and 5: compatibility (green today, pinned)", () => 
 describe("continuity cases owned by later 1.16.0 tickets (RED evidence recorded by each owner)", () => {
   it.todo("1 delivery tiers: T-2 (a) brief has no binding, suggested R1 and R2 by scopeTag logging, R3 absent (T-526; entry: the guide's PLAN instruction / brief file)");
   it.todo("2 discovery then citation: R2 suggested, then cited via ticket update, then binding in the packet and enforced by the plan-pin guard (T-526; entry: brief, packet, plan-pin-guard)");
-  it.todo("3 proposed not binding: R4 renders under Proposed, the guard ignores it, R1 stays current, no successor index entry for R1 (T-522; entry: resolveCitation, buildSuccessorIndex, packet; uses overlays/lifecycle)");
   it.todo("6 no-path variant (b) delivers cap-logging by title-word match with the no-paths-named disclosure (T-523 + T-526)");
   it.todo("7 EXISTING gate: a plan without the EXISTING line is retried (T-526; entry: PLAN report)");
   it.todo("7n EXISTING negative: a grep transcript in the EXISTING line is a plan-review finding; asserts the reviewer prompt line (T-526; entry: PLAN_REVIEW instruction text)");
   it.todo("8 completion: T-3 move marks cap-logging review at FINALIZE; a report without knowledgeImpact is retried; stale-reference advances and lands in the handover (T-527)");
   it.todo("9 arm 2 subset: with the capability file removed, cases 1 to 5 and 7 pass and the disclosure says no capability inventory (T-526)");
-  it.todo("10 lifecycle isolation matrix, per operation per reader: ruling get, incoming citation, list/export/JSON, create-against, old-reader fixture (T-522 P-1)");
-  it.todo("11 revision-bound acceptance: accept refused when the proposal changed since review; idempotent retry (T-522 P-2)");
-  it.todo("12 interrupted-accept recovery via the ruling-create transaction pattern (T-522 P-2)");
-  it.todo("13 merge integrity: acceptance does not survive onto an edited revision (T-522 P-3)");
+  it.todo("10x export half of case 10: the Decisions section of `export` renders R4 under Proposed (T-522 commit 2b)");
   it.todo("14 context manifest change detection on resume, replan and CODE_REVIEW entry (T-526 P-3)");
   it.todo("15 second-handoff maintenance: a disposition per impact, follow-up durable across a second session (T-527 P-1/P-2)");
+});
+
+describe("continuity cases 3 and 10 to 13: ruling lifecycle (T-522)", () => {
+  const R1 = MAP.rulings.R1;
+  const R4 = MAP.rulings.R4;
+
+  it("3 proposed not binding: R4 renders under Proposed, the guard ignores it, R1 stays current, no successor index entry for R1", async () => {
+    const root = withLifecycle(copy(1));
+    const { rulings, lifecycleById, unavailableIds } = loadRulingsSafe(root);
+    expect(lifecycleById.get(R4)).toBe("proposed");
+    expect(lifecycleById.get(R1)).toBe("accepted-legacy");
+    expect(unavailableIds.size).toBe(0);
+    const index = buildSuccessorIndex(rulings);
+    expect(index.successorsByTarget.get(R1)).toBeUndefined();
+    expect(index.uncertainSuccessorsByTarget.get(R1)).toBeUndefined();
+    const ctx = buildCitationResolutionContext(rulings, unavailableIds, "complete", false);
+    expect(resolveCitation(R1, ctx)).toMatchObject({ status: "resolved", stale: false, current: { id: R1 } });
+    // Delivery: the proposal reaches the item beside its citations, never among them.
+    const res = await citationsForReviewTarget(root, "T-2");
+    expect(res.kind).toBe("resolved");
+    if (res.kind !== "resolved") return;
+    expect(res.proposals.map((p) => p.id)).toEqual([R4]);
+    expect(res.citations.map((c) => c.citedId)).not.toContain(R4);
+    // The guard does not demand the plan name R4; it names it as not enforced.
+    const verdict = await guardPlanNamesCitedRulings(root, "T-2", "# Plan\n\nNothing about rulings.");
+    expect(verdict).toEqual({ ok: true, note: `Proposals against this item (not enforced): ${R4}` });
+    // The Decisions listing files R4 under Proposed, R1 under Accepted.
+    const md = handleRulingList({}, await ctxFor(root)).output;
+    const proposedAt = md.indexOf("## Proposed (not binding)");
+    expect(proposedAt).toBeGreaterThan(md.indexOf("## Accepted"));
+    expect(md.indexOf(`### ${R4} [proposed]`)).toBeGreaterThan(proposedAt);
+    expect(md).toContain(`Proposals against this ruling (not binding): ${R4}`);
+  });
+
+  it("10 lifecycle isolation matrix, per operation per reader: get, incoming citation, list JSON, create-against, old reader", async () => {
+    const root = withLifecycle(copy(1));
+    const jsonCtx = { ...(await ctxFor(root)), format: "json" as const };
+    // (a) get: an explicit proposal result, never a chain.
+    const got = JSON.parse(handleRulingGet(R4, jsonCtx).output).data;
+    expect(got.lifecycle).toBe("proposed");
+    expect(got.revision).toMatch(/^[0-9a-f]{64}$/);
+    expect(got.chainStatus.status).toBe("nonaccepted");
+    // (b) an item hand-cites R4: validate errors, the guard fails closed, the citation never converts R4.
+    const t = join(root, ".story", "tickets", "T-2.json");
+    writeFileSync(t, JSON.stringify({ ...JSON.parse(readFileSync(t, "utf-8")), citesRulings: [R4] }, null, 2));
+    const out = handleValidate(await ctxFor(root)).output;
+    expect(out).toContain("ruling_citation_of_nonaccepted");
+    const refused = await guardPlanNamesCitedRulings(root, "T-2", `# Plan\n\nPer ${R4}.`);
+    expect(refused.ok).toBe(false);
+    if (refused.ok) return;
+    expect(refused.instruction).toContain("proposed");
+    const cited = await citationsForReviewTarget(root, "T-2");
+    expect(cited.kind === "resolved" && cited.citations[0]!.status).toBe("nonaccepted");
+    expect(loadRulingsSafe(root).lifecycleById.get(R4)).toBe("proposed");
+    // (c) list JSON carries lifecycle on every record.
+    const listed = JSON.parse(handleRulingList({}, jsonCtx).output).data as { id: string; lifecycle: string }[];
+    expect(listed.find((r) => r.id === R4)!.lifecycle).toBe("proposed");
+    expect(listed.find((r) => r.id === R1)!.lifecycle).toBe("accepted-legacy");
+    expect(listed.every((r) => typeof r.lifecycle === "string")).toBe(true);
+    // (d) a second proposal against R1 changes nothing about R1.
+    const q = JSON.parse((await handleRulingPropose({ text: "Q", attribution: "owner-direct", date: "2026-09-22", scopeTags: [], proposesToSupersede: R1, clientTaskId: CALLER }, "json", root)).output).data;
+    const after = loadRulingsSafe(root);
+    expect(buildSuccessorIndex(after.rulings).successorsByTarget.get(R1)).toBeUndefined();
+    expect(after.unavailableIds.size).toBe(0);
+    expect(resolveCitation(R1, buildCitationResolutionContext(after.rulings, after.unavailableIds, "complete", false)).status).toBe("resolved");
+    expect(JSON.parse(handleRulingGet(R1, { ...jsonCtx }).output).data.proposalsAgainst.sort()).toEqual([R4, q.id].sort());
+    // (e) the OLD reader (1.15 code pinned at 655b03bf) over the same ledger: every record parses, R1 unsuperseded,
+    // R4 shown as an ordinary current ruling. The documented boundary, not a promise.
+    const oldRulings = after.rulings.map((r) => OldRulingSchema.parse(JSON.parse(JSON.stringify(r))));
+    const oldIndex = oracle.buildSuccessorIndex(oldRulings);
+    expect(oldIndex.successorsByTarget.get(R1)).toBeUndefined();
+    const oldCtx = oracle.buildCitationResolutionContext(oldRulings, new Set(), "complete", false);
+    expect(oracle.resolveCitation(R1, oldCtx)).toMatchObject({ status: "resolved", stale: false });
+    expect(oracle.resolveCitation(R4, oldCtx)).toMatchObject({ status: "resolved", stale: false, current: { id: R4 } });
+  });
+
+  it("11 revision-bound acceptance: accept refused when the proposal changed since review; accepted at the current revision; retry is a no-op", async () => {
+    const root = withLifecycle(copy(1));
+    const file = join(root, ".story", "rulings", `${R4}.json`);
+    const reviewed = payloadDigest(RulingSchema.parse(JSON.parse(readFileSync(file, "utf-8"))));
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, "utf-8")), text: "Background work carries the request id of the job that enqueued it, always" }, null, 2));
+    const args = { revision: reviewed, attribution: "owner-direct", date: "2026-09-22", clientTaskId: CALLER };
+    await expect(handleRulingAccept(R4, args, "json", root)).rejects.toThrow(/changed since it was reviewed/);
+    expect(loadRulingsSafe(root).lifecycleById.get(R4)).toBe("proposed");
+    const current = payloadDigest(RulingSchema.parse(JSON.parse(readFileSync(file, "utf-8"))));
+    const accepted = JSON.parse((await handleRulingAccept(R4, { ...args, revision: current }, "json", root)).output).data;
+    expect(accepted.noop).toBe(false);
+    expect(accepted.supersedes).toBe(R1);
+    const t2 = JSON.parse(readFileSync(join(root, ".story", "tickets", "T-2.json"), "utf-8"));
+    expect(t2.citesRulings).toContain(R4);
+    const again = JSON.parse((await handleRulingAccept(R4, { ...args, revision: current }, "json", root)).output).data;
+    expect(again.noop).toBe(true);
+    const { rulings, unavailableIds } = loadRulingsSafe(root);
+    expect(resolveCitation(R1, buildCitationResolutionContext(rulings, unavailableIds, "complete", false))).toMatchObject({ status: "resolved", stale: true, current: { id: R4 } });
+  });
+
+  it("12 interrupted-accept recovery: covered where the commit-phase failure can be injected, test/core/ruling-transaction-recovery.test.ts (T-522 case 12)", () => {
+    const src = readFileSync(resolve(__dirname, "../core/ruling-transaction-recovery.test.ts"), "utf-8");
+    expect(src).toContain("continuity case 12");
+  });
+
+  it("13 merge integrity: acceptance does not survive onto an edited revision; the merged record binds nothing until resolved", async () => {
+    const root = withLifecycle(copy(1));
+    const base = JSON.parse(readFileSync(join(root, ".story", "rulings", `${R4}.json`), "utf-8")) as Record<string, unknown>;
+    const reviewed = payloadDigest(RulingSchema.parse(base));
+    await handleRulingAccept(R4, { revision: reviewed, attribution: "owner-direct", date: "2026-09-22", clientTaskId: CALLER }, "json", root);
+    const sideA = JSON.parse(readFileSync(join(root, ".story", "rulings", `${R4}.json`), "utf-8")) as Record<string, unknown>;
+    const sideB = { ...base, text: "Background work carries the request id of the job that enqueued it, always" };
+    for (const [ours, theirs] of [[sideA, sideB], [sideB, sideA]] as const) {
+      const merged = threeWayMerge(base, ours, theirs, "ruling").merged;
+      const parsed = RulingSchema.parse(merged);
+      expect(classifyLifecycle(parsed).lifecycle).toBe("conflicted");
+      const editedWithAcceptance = parsed.text === sideB.text && parsed.acceptance !== undefined;
+      expect(editedWithAcceptance).toBe(false);
+      if (parsed.acceptance) expect(parsed.acceptance.payloadDigest).toBe(payloadDigest(parsed));
+      // Written back, the merged record binds nothing: R1's chain is indeterminate and a citation of R4 is refused.
+      writeFileSync(join(root, ".story", "rulings", `${R4}.json`), JSON.stringify(merged, null, 2));
+      const { rulings, unavailableIds } = loadRulingsSafe(root);
+      const ctx = buildCitationResolutionContext(rulings, unavailableIds, "complete", false);
+      expect(resolveCitation(R1, ctx).status).toBe("indeterminate");
+      expect(resolveCitation(R4, ctx).status).toBe("nonaccepted");
+      const verdict = await guardPlanNamesCitedRulings(root, "T-2", `# Plan\n\nPer ${R4}.`);
+      expect(verdict.ok).toBe(false);
+      expect(handleValidate(await ctxFor(root)).output).toContain("unresolved_conflicts");
+    }
+  });
 });

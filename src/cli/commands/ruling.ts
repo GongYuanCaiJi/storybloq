@@ -1,4 +1,5 @@
 import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   withProjectLock,
   runTransactionUnlocked,
@@ -54,6 +55,9 @@ import {
   ExitCode,
 } from "../../core/output-formatter.js";
 import { CliValidationError } from "../helpers.js";
+import { isTeamModeConfig, RULING_LIFECYCLE_MIN_CLI_VERSION } from "../../core/team-capabilities.js";
+import { rulingLifecycleReadiness } from "../../core/team-setup.js";
+import type { Config } from "../../models/config.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import type { OutputFormat } from "../../models/types.js";
 
@@ -86,6 +90,32 @@ function narrativeFrom(args: NarrativeArgs): Ruling["narrative"] | undefined {
 }
 
 const RULING_LIFECYCLES: readonly RulingLifecycle[] = ["proposed", "accepted", "withdrawn", "superseded", "quarantined", "conflicted"];
+
+/**
+ * T-522 plan section 8: in a team-mode project EVERY ruling write (all of
+ * them produce 1.16 records) refuses until `team setup` has raised the fence
+ * to 1.16.0 and written the rulings merge attribute. Reads are never refused.
+ * Checked inside the lock, against the config the lock loaded.
+ *
+ * Ordering note: `withProjectLock` finishes any interrupted transaction whose
+ * commit had already begun BEFORE it hands the config to this callback. That
+ * is forward-only recovery of a write that was accepted while the project was
+ * ready (every lock holder performs it, a ticket update included), not a new
+ * ruling write, so this precondition deliberately does not gate it: refusing
+ * would strand a half-renamed commit for the next unrelated command to finish.
+ */
+function assertRulingWritesEnabled(config: Config, root: string, rulingId: string): void {
+  if (!isTeamModeConfig(config)) return;
+  const readiness = rulingLifecycleReadiness(join(root, ".story"), config.team?.minCliVersion, rulingId);
+  if (readiness.fenceOk && readiness.attributeOk) return;
+  const gaps: string[] = [];
+  if (!readiness.fenceOk) gaps.push(`team.minCliVersion is ${config.team?.minCliVersion ?? "unset"}, below ${RULING_LIFECYCLE_MIN_CLI_VERSION}`);
+  if (!readiness.attributeOk) gaps.push(`git does not resolve \`merge=storybloq-json\` for .story/rulings/${rulingId}.json (\`.story/.gitattributes\` needs the \`rulings/*.json merge=storybloq-json\` line, unoverridden)`);
+  throw new CliValidationError(
+    "conflict",
+    `Ruling writes are disabled in this team project until \`storybloq team setup\` enables 1.16 rulings (${gaps.join("; ")}). Run it on a ${RULING_LIFECYCLE_MIN_CLI_VERSION}+ CLI; reads are unaffected.`,
+  );
+}
 
 function validateOrThrow(candidate: unknown): Ruling {
   const result = RulingSchema.safeParse(candidate);
@@ -291,9 +321,11 @@ export async function handleRulingCreate(
   // every cited create would fail five seconds in. Same verdict either way,
   // different symptom, and the symptom is what a future debugger will see.
   await withProjectLock(root, { strict: true }, async (loadResult) => {
+    const newId = generateCanonicalId("r");
+    assertRulingWritesEnabled(loadResult.state.config, root, newId);
     const narrative = narrativeFrom(args);
     const payload = {
-      id: generateCanonicalId("r"),
+      id: newId,
       text: args.text,
       attribution: args.attribution as RulingAttribution,
       recordedBy,
@@ -449,7 +481,9 @@ export async function handleRulingSupersede(
 
   let result: { ruling: Ruling; noop: boolean } | undefined;
 
-  await withProjectLock(root, { strict: true }, async () => {
+  await withProjectLock(root, { strict: true }, async (loadResult) => {
+    const newId = generateCanonicalId("r");
+    assertRulingWritesEnabled(loadResult.state.config, root, newId);
     const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loadRulingsSafe(root);
     if (scanCompleteness !== "complete" || unavailableIds.size > 0 || hasUnrecoverableEntries) {
       throw new CliValidationError(
@@ -527,7 +561,6 @@ export async function handleRulingSupersede(
       );
     }
     const recordedBy = requireCallerIdentity(args.clientTaskId);
-    const newId = generateCanonicalId("r");
     const refusal = validateSupersedeCandidate(rulings, newId, oldId, { branch: args.branch });
     if (refusal) {
       throw new CliValidationError("invalid_input", `Cannot supersede ${oldId}: ${refusal.detail}`);
@@ -588,6 +621,8 @@ export async function handleRulingPropose(
   const recordedBy = requireCallerIdentity(args.clientTaskId);
   let created: Ruling | undefined;
   await withProjectLock(root, { strict: true }, async (loadResult) => {
+    const newId = generateCanonicalId("r");
+    assertRulingWritesEnabled(loadResult.state.config, root, newId);
     const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loadRulingsSafe(root);
     const target = args.proposesToSupersede ?? null;
     if (target !== null) {
@@ -613,7 +648,7 @@ export async function handleRulingPropose(
     if (proposedFor.length > 0) resolveCitedTargets(loadResult.state, proposedFor);
     const narrative = narrativeFrom(args);
     const ruling = validateOrThrow({
-      id: generateCanonicalId("r"),
+      id: newId,
       text: args.text,
       attribution: args.attribution as RulingAttribution,
       recordedBy,
@@ -670,6 +705,7 @@ export async function handleRulingAccept(
   let result: { ruling: Ruling; noop: boolean } | undefined;
 
   await withProjectLock(root, { strict: true }, async (loadResult) => {
+    assertRulingWritesEnabled(loadResult.state.config, root, id);
     const loaded = loadRulingsSafe(root);
     const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries } = loaded;
     const existing = rulings.find((r) => r.id === id);
@@ -760,7 +796,8 @@ export async function handleRulingWithdraw(
 ): Promise<CommandResult> {
   const recordedBy = requireCallerIdentity(args.clientTaskId);
   let withdrawn: Ruling | undefined;
-  await withProjectLock(root, { strict: true }, async () => {
+  await withProjectLock(root, { strict: true }, async (loadResult) => {
+    assertRulingWritesEnabled(loadResult.state.config, root, id);
     const { rulings, unavailableIds, scanCompleteness, lifecycleById } = loadRulingsSafe(root);
     const existing = rulings.find((r) => r.id === id);
     if (!existing) {

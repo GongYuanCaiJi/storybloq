@@ -201,3 +201,33 @@ describe("T-494: a post-commit failure that is itself a ProjectLoaderError", () 
     expect(err!.message).toContain("Lock ownership lost");
   });
 });
+
+const { handleRulingPropose, handleRulingAccept } = await import("../../src/cli/commands/ruling.js");
+
+describe("T-522 continuity case 12: an accept that fails after the commit began", () => {
+
+  it("reports recovery-pending by name with the safe retry, and the retry after recovery is a no-op that leaves the citation in place", async () => {
+    const { root, ticketId } = await projectWithTicket();
+    const proposed = JSON.parse((await handleRulingPropose(
+      { text: "Proposed once.", attribution: "owner-direct", date: "2026-09-06", scopeTags: [], proposedFor: [ticketId], clientTaskId: "txn-test" },
+      "json",
+      root,
+    )).output).data as { id: string; revision: string };
+    const args = { revision: proposed.revision, attribution: "owner-direct", date: "2026-09-07", clientTaskId: "txn-test" };
+
+    inject.armed = true;
+    const err = await handleRulingAccept(proposed.id, args, "json", root).then(() => null, (e: Error) => e);
+    inject.armed = false;
+    expect(err).not.toBeNull();
+    expect(err!.message).toContain(proposed.id);
+    expect(err!.message).toContain("recovery is pending");
+    expect(err!.message).toContain("Do NOT re-run with different arguments");
+    expect(err!.message).toContain("injected commit-phase failure");
+
+    const again = JSON.parse((await handleRulingAccept(proposed.id, args, "json", root)).output).data;
+    expect(again.noop).toBe(true);
+    expect(again.status).toBe("accepted");
+    const { state } = await loadProject(root);
+    expect(state.tickets.find((t) => t.id === ticketId)!.citesRulings).toEqual([proposed.id]);
+  });
+});

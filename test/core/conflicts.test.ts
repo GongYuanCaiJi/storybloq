@@ -92,3 +92,20 @@ describe("assertNoConflicts", () => {
     expect(() => assertNoConflicts(state)).not.toThrow();
   });
 });
+
+describe("T-522: hasConflicts scans rulings additively", () => {
+  it("reports a conflicted ruling as type ruling, and nothing when none are passed", async () => {
+    const { hasConflicts } = await import("../../src/core/conflicts.js");
+    const { makeState, makeRoadmap, makePhase } = await import("./test-factories.js");
+    const state = makeState({ roadmap: makeRoadmap([makePhase({ id: "p1" })]) });
+    const clean = hasConflicts(state);
+    expect(clean.hasConflicts).toBe(false);
+    const rulings = [
+      { id: "r-0000000000000001", _conflicts: [{ fieldPath: "/text", field: "text", kind: "coupled", group: "lifecycle", base: "a", ours: "b", theirs: "c" }] },
+      { id: "r-0000000000000002" },
+    ];
+    const report = hasConflicts(state, undefined, rulings);
+    expect(report.hasConflicts).toBe(true);
+    expect(report.items).toEqual([{ type: "ruling", id: "r-0000000000000001", conflictCount: 1 }]);
+  });
+});

@@ -37,6 +37,39 @@ export function currentCliVersion(): string | null {
   }
 }
 
+/**
+ * T-522: the first CLI that writes 1.16 ruling records (status, acceptance,
+ * proposals). A team-mode ledger admits those records only once its
+ * `minCliVersion` fence is at least this, so an older writer cannot produce
+ * a record the new readers would quarantine or the old ones would misread.
+ */
+export const RULING_LIFECYCLE_MIN_CLI_VERSION = "1.16.0";
+
+/**
+ * T-522: SemVer-aware "at least" for the rulings fence. `compareVersionStrings`
+ * folds a prerelease tag into 0, so `1.16.0-rc` would pass as `1.16.0`; here a
+ * prerelease of the minimum's own core is BELOW the minimum (SemVer 11.4), a
+ * prerelease of a later core is above it, and anything unparseable is below.
+ */
+export function meetsVersionMinimum(version: string | undefined, minimum: string): boolean {
+  const parse = (v: string): { core: number[]; prerelease: string | null } | null => {
+    const m = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(v.trim());
+    if (!m) return null;
+    return { core: [Number(m[1]), Number(m[2]), Number(m[3])], prerelease: m[4] ?? null };
+  };
+  if (typeof version !== "string") return false;
+  const v = parse(version);
+  const min = parse(minimum);
+  if (v === null || min === null) return false;
+  for (let i = 0; i < 3; i++) {
+    if (v.core[i]! < min.core[i]!) return false;
+    if (v.core[i]! > min.core[i]!) return true;
+  }
+  // Same core: a prerelease is below a release; a release is at least a prerelease.
+  if (v.prerelease === null) return true;
+  return min.prerelease !== null && v.prerelease >= min.prerelease;
+}
+
 export function compareVersionStrings(a: string, b: string): number {
   const pa = a.split(/[.-]/).map((part) => {
     const n = Number.parseInt(part, 10);

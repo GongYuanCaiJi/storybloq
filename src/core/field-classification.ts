@@ -9,9 +9,9 @@ export type MergeRule =
   | { kind: "monotonic"; compare: "max" }
   | { kind: "latest-wins"; timestampField: string }
   | { kind: "hard-conflict" }
-  | { kind: "coupled"; group: string; members: string[]; latestWinsField?: string; onAmbiguous?: "conflict" | "release" };
+  | { kind: "coupled"; group: string; members: string[]; latestWinsField?: string; onAmbiguous?: "conflict" | "release"; onDivergence?: "base" | "keep-ours" };
 
-export type EntityType = "ticket" | "issue" | "note" | "lesson" | "arrangement";
+export type EntityType = "ticket" | "issue" | "note" | "lesson" | "arrangement" | "ruling";
 
 const TICKET_RULES: Record<string, MergeRule> = {
   id: { kind: "identity" },
@@ -194,26 +194,56 @@ const ARRANGEMENT_RULES: Record<string, MergeRule> = {
   coordinationCheckpoint: { kind: "hard-conflict" },
 };
 
+// T-522 (P-3): a ruling's reviewed payload is ONE unit. Every member of the
+// `lifecycle` group travels together: when both sides changed any member and
+// the sides differ, the driver keeps OURS as a complete side (`onDivergence:
+// "keep-ours"`, never the per-member base fallback, which would mix an
+// accepted side's `acceptance` with an edited side's `text`) and records the
+// group's conflict entries, so `resolve --use ours|theirs` swaps the WHOLE
+// side and `--value` is refused (coupled groups never take a field value).
+// A record carrying `_conflicts` is `conflicted` at read time and binds
+// nothing until resolved. `narrative` is commentary: latest-wins, and with
+// no timestamp on a ruling a tie keeps ours; it never blocks a merge.
+const RULING_LIFECYCLE_MEMBERS = ["status", "text", "attribution", "date", "scopeTags", "supersedes", "proposesToSupersede", "proposedFor", "acceptance", "withdrawal"];
+const RULING_LIFECYCLE_RULE: MergeRule = { kind: "coupled", group: "lifecycle", members: RULING_LIFECYCLE_MEMBERS, onDivergence: "keep-ours" };
+const RULING_RULES: Record<string, MergeRule> = {
+  id: { kind: "identity" },
+  createdAt: { kind: "identity" },
+  recordedBy: { kind: "identity" },
+  ...Object.fromEntries(RULING_LIFECYCLE_MEMBERS.map((m) => [m, RULING_LIFECYCLE_RULE])),
+  narrative: { kind: "latest-wins", timestampField: "updatedAt" },
+};
+
 const RULES_BY_TYPE: Record<string, Record<string, MergeRule>> = {
   ticket: TICKET_RULES,
   issue: ISSUE_RULES,
   note: NOTE_RULES,
   lesson: LESSON_RULES,
   arrangement: ARRANGEMENT_RULES,
+  ruling: RULING_RULES,
 };
 
 export function getMergeRules(entityType: EntityType | string): Record<string, MergeRule> {
   return RULES_BY_TYPE[entityType] ?? {};
 }
 
-export function getCoupledGroups(entityType: EntityType): Array<{ group: string; members: string[]; latestWinsField?: string; onAmbiguous?: "conflict" | "release" }> {
+export interface CoupledGroup {
+  group: string;
+  members: string[];
+  latestWinsField?: string;
+  onAmbiguous?: "conflict" | "release";
+  /** T-522: what the BODY holds when both sides changed the group and differ. Default "base" (per member). */
+  onDivergence?: "base" | "keep-ours";
+}
+
+export function getCoupledGroups(entityType: EntityType): CoupledGroup[] {
   const rules = getMergeRules(entityType);
   const seen = new Set<string>();
-  const groups: Array<{ group: string; members: string[]; latestWinsField?: string; onAmbiguous?: "conflict" | "release" }> = [];
+  const groups: CoupledGroup[] = [];
   for (const rule of Object.values(rules)) {
     if (rule.kind === "coupled" && !seen.has(rule.group)) {
       seen.add(rule.group);
-      groups.push({ group: rule.group, members: [...rule.members], latestWinsField: rule.latestWinsField, onAmbiguous: rule.onAmbiguous });
+      groups.push({ group: rule.group, members: [...rule.members], latestWinsField: rule.latestWinsField, onAmbiguous: rule.onAmbiguous, onDivergence: rule.onDivergence });
     }
   }
   return groups;

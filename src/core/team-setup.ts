@@ -1,9 +1,10 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { ensureGitignoreEntries, STORY_GITIGNORE_ENTRIES } from "./init.js";
 import { withProjectLock, writeConfigUnlocked } from "./project-loader.js";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { RULING_LIFECYCLE_MIN_CLI_VERSION, currentCliVersion, meetsVersionMinimum } from "./team-capabilities.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +32,7 @@ const GITATTRIBUTES_PATTERNS = [
   "notes/*.json merge=storybloq-json",
   "lessons/*.json merge=storybloq-json",
   "arrangements/*.json merge=storybloq-json",
+  "rulings/*.json merge=storybloq-json",
   "config.json merge=storybloq-json",
   "roadmap.json merge=storybloq-json",
 ];
@@ -87,12 +89,35 @@ export async function writeGitattributes(storyDir: string): Promise<void> {
   writeFileSync(filePath, result, "utf-8");
 }
 
-export async function updateConfigVersion(root: string): Promise<void> {
+/** T-522: what `team setup` did about the 1.16 rulings fence. */
+export type RulingFenceOutcome = "raised" | "already" | "deferred";
+
+export async function updateConfigVersion(root: string): Promise<RulingFenceOutcome> {
+  let outcome: RulingFenceOutcome = "already";
   await withProjectLock(root, { strict: false }, async ({ state }) => {
     const config = { ...state.config, team: { ...(state.config.team ?? {}) } };
     config.team.mergeDriverVersion = MERGE_DRIVER_VERSION;
+    // T-522: raise the write fence to the first rulings-lifecycle CLI, but
+    // ONLY when this CLI itself passes it. Writing a fence this binary cannot
+    // pass would brick its own next write (the ISS-748 class of failure); a
+    // pre-1.16 build reports the raise as deferred and the ruling write
+    // precondition keeps refusing until a 1.16 build reruns setup.
+    // An existing lower fence is raised to exactly the minimum (never past
+    // a teammate's 1.16.x); an ABSENT fence takes this CLI's own version,
+    // which is `team init`'s convention for a fresh team.
+    const fence = typeof config.team.minCliVersion === "string" ? config.team.minCliVersion : null;
+    if (fence === null || !meetsVersionMinimum(fence, RULING_LIFECYCLE_MIN_CLI_VERSION)) {
+      const current = currentCliVersion();
+      if (current !== null && meetsVersionMinimum(current, RULING_LIFECYCLE_MIN_CLI_VERSION)) {
+        config.team.minCliVersion = fence === null ? current : RULING_LIFECYCLE_MIN_CLI_VERSION;
+        outcome = "raised";
+      } else {
+        outcome = "deferred";
+      }
+    }
     await writeConfigUnlocked(config, root);
   });
+  return outcome;
 }
 
 export interface SetupResult {
@@ -103,6 +128,8 @@ export interface SetupResult {
   gitRoot: string;
   /** Effective id allocator after setup: anything but an explicit "git-refs" runs as "local". */
   idAllocator: "local" | "git-refs";
+  /** T-522: whether `team.minCliVersion` now admits 1.16 ruling records. */
+  rulingFence: RulingFenceOutcome;
 }
 
 export async function teamSetup(root: string): Promise<SetupResult> {
@@ -120,7 +147,7 @@ export async function teamSetup(root: string): Promise<SetupResult> {
 
   await installMergeDriver(gitRoot);
   await writeGitattributes(storyDir);
-  await updateConfigVersion(root);
+  const rulingFence = await updateConfigVersion(root);
   // ISS-754: legacy projects upgraded to team mode predate init's gitignore
   // writing; without this, sessions/, snapshots/, status.json (absolute paths
   // including the username) become committed to the shared team repo.
@@ -147,7 +174,53 @@ export async function teamSetup(root: string): Promise<SetupResult> {
     gitignoreEnsured: true,
     gitRoot,
     idAllocator,
+    rulingFence,
   };
+}
+
+/**
+ * T-522: the two facts a team-mode ledger needs before any 1.16 ruling write:
+ * the fence admits only 1.16 writers, and the ruling file merges structurally.
+ * Pure read; shared by the ruling write precondition and `team doctor`.
+ *
+ * The attribute answer comes from git itself (`git check-attr merge`) on the
+ * ACTUAL path about to be written (or a representative one for a project-wide
+ * check), so every rule git would apply is honoured: broader patterns after
+ * the managed block, character classes, `-merge`, the repo-root file and
+ * `info/attributes`. No git, not a repository, or any other failure reads as
+ * not ready: a team-mode ledger without git cannot merge structurally anyway.
+ */
+export function rulingLifecycleReadiness(
+  storyDir: string,
+  minCliVersion: string | undefined,
+  rulingId: string = "r-0000000000000000",
+): { fenceOk: boolean; attributeOk: boolean } {
+  const fenceOk = meetsVersionMinimum(minCliVersion, RULING_LIFECYCLE_MIN_CLI_VERSION);
+  const root = dirname(storyDir);
+  const attributeOk = effectiveMergeDriver(root, `${basename(storyDir)}/rulings/${rulingId}.json`) === MERGE_DRIVER_NAME;
+  return { fenceOk, attributeOk };
+}
+
+/** The `merge` attribute git resolves for `relPath` under `root`, or null when unset or unknowable. */
+export function effectiveMergeDriver(root: string, relPath: string): string | null {
+  let out: string;
+  try {
+    out = execFileSync("git", ["check-attr", "merge", "--", relPath], {
+      cwd: root,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+    });
+  } catch {
+    return null;
+  }
+  // `<path>: merge: <value>`; the path may itself contain ": ", so split from the right.
+  const marker = ": merge: ";
+  const at = out.lastIndexOf(marker);
+  if (at < 0) return null;
+  const value = out.slice(at + marker.length).trim();
+  if (value === "unspecified" || value === "unset" || value === "set" || value === "") return null;
+  return value;
 }
 
 export interface CheckResult {

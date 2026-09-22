@@ -16,6 +16,7 @@ import { ConfigSchema } from "../../models/config.js";
 import { RoadmapSchema } from "../../models/roadmap.js";
 import { ConflictEntrySchema } from "../../models/types.js";
 import { ArrangementSchema } from "../../models/arrangement.js";
+import { RulingSchema } from "../../models/ruling.js";
 
 function entityTypeFromPath(pathname: string): EntityType | null {
   const dir = basename(dirname(pathname));
@@ -25,6 +26,7 @@ function entityTypeFromPath(pathname: string): EntityType | null {
     case "notes": return "note";
     case "lessons": return "lesson";
     case "arrangements": return "arrangement";
+    case "rulings": return "ruling";
     default: return null;
   }
 }
@@ -53,6 +55,7 @@ export function schemaFor(strategy: MergeStrategy): ZodTypeAny {
     case "note": return NoteSchema;
     case "lesson": return LessonSchema;
     case "arrangement": return ArrangementSchema;
+    case "ruling": return RulingSchema;
   }
 }
 
