@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { spawnWorker, buildWorkerCommand, shellQuote, defaultWorkerRole, validateWorkerName, resolvePermissionMode, detectPenPermissionMode, detectPenPermissionModeWith, classifyClaudeCommand, psProcessReader, parsePsLine, type Launcher, type ProcessReader } from "../../src/core/duet-spawn.js";
 import { handleDuetSpawn } from "../../src/cli/commands/duet-spawn.js";
 
@@ -199,6 +199,49 @@ describe("N-131: storybloq duet spawn", () => {
     expect(c("claude-companion --dangerously-skip-permissions")).toEqual({ session: false, mode: null });
     expect(c("/x/claude/versions/notes.txt --dangerously-skip-permissions")).toEqual({ session: false, mode: null });
     expect(c("")).toEqual({ session: false, mode: null });
+  });
+
+  // Codex post-ship review (2026-09-22, critical): ps flattens argv, so a pen
+  // started as `claude ' --dangerously-skip-permissions'` (one positional
+  // prompt argument) prints as `claude  --dangerously-skip-permissions` and
+  // read as bypass. Whitespace inside an argument always leaves a doubled,
+  // leading or trailing space (tabs are escaped by ps on macOS and are not a
+  // space anyway), so any such line is a session of unknown mode.
+  it("an argument that merely contains a bypass flag never yields bypass: doubled, leading or trailing spaces and tabs mean unknown", () => {
+    const c = classifyClaudeCommand;
+    expect(c("claude  --dangerously-skip-permissions")).toEqual({ session: true, mode: null });
+    expect(c("claude --dangerously-skip-permissions ")).toEqual({ session: true, mode: null });
+    expect(c(" claude --dangerously-skip-permissions")).toEqual({ session: true, mode: null });
+    expect(c("claude --permission-mode  bypassPermissions")).toEqual({ session: true, mode: null });
+    expect(c("claude\t--dangerously-skip-permissions")).toEqual({ session: false, mode: null });
+    expect(c("claude --dangerously-skip-permissions\t")).toEqual({ session: true, mode: null });
+    expect(c("node  /x/@anthropic-ai/claude-code/cli.js --dangerously-skip-permissions")).toEqual({ session: true, mode: null });
+    // the parser keeps the command's spacing intact for the classifier
+    expect(parsePsLine("  123 claude  --dangerously-skip-permissions\n")).toEqual({ ppid: 123, command: "claude  --dangerously-skip-permissions" });
+    expect(parsePsLine("123 claude --dangerously-skip-permissions \n")).toEqual({ ppid: 123, command: "claude --dangerously-skip-permissions " });
+    expect(c("claude --dangerously-skip-permissions")).toEqual({ session: true, mode: "bypassPermissions" });
+  });
+
+  it("through the production ps reader, a real bypass flag and a one-argument prompt with the same text are told apart", () => {
+    // A node script at Claude Code's installed cli.js path (a node-entry the classifier
+    // accepts) ignores its argv and stays alive; node is present wherever vitest runs.
+    const dir = mkdtempSync(join(tmpdir(), "duet-argv-"));
+    mkdirSync(join(dir, "@anthropic-ai", "claude-code"), { recursive: true });
+    const cli = join(dir, "@anthropic-ai", "claude-code", "cli.js");
+    writeFileSync(cli, "#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n", { mode: 0o755 });
+    const run = (arg: string) => spawn(process.execPath, [cli, arg], { stdio: "ignore" });
+    const real = run("--dangerously-skip-permissions");
+    const prompt = run(" --dangerously-skip-permissions");
+    try {
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && (psProcessReader(real.pid!) === null || psProcessReader(prompt.pid!) === null)) execFileSync("sleep", ["0.05"]);
+      expect(psProcessReader(real.pid!)?.command).toBe(`${process.execPath} ${cli} --dangerously-skip-permissions`);
+      expect(psProcessReader(prompt.pid!)?.command).toBe(`${process.execPath} ${cli}  --dangerously-skip-permissions`);
+      expect(detectPenPermissionModeWith(psProcessReader, real.pid!)).toBe("bypassPermissions");
+      expect(detectPenPermissionModeWith(psProcessReader, prompt.pid!)).toBeNull();
+    } finally {
+      real.kill(); prompt.kill();
+    }
   });
 
   it("the ps parser accepts exactly one line and the reader treats a missing process or a throw as unknown", () => {

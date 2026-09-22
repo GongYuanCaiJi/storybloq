@@ -67,9 +67,11 @@ export type ProcessReader = (pid: number) => { ppid: number; command: string } |
  * argument) cannot be classified from its first line alone and is unknown.
  */
 export function parsePsLine(out: string): { ppid: number; command: string } | null {
-  const lines = out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  // Only the line break is stripped: a space that ps printed inside the command
+  // is evidence about argument boundaries and the classifier needs it intact.
+  const lines = out.split(/\r?\n/).filter((l) => l.trim().length > 0);
   if (lines.length !== 1) return null;
-  const m = /^(\d+)\s+(.*)$/.exec(lines[0]!);
+  const m = /^\s*(\d+) (.*)$/.exec(lines[0]!);
   return m ? { ppid: Number(m[1]), command: m[2]! } : null;
 }
 
@@ -115,12 +117,19 @@ function isClaudeNodeEntry(exe: string, script: string | undefined): boolean {
  * real thing, and a later option may override an earlier one.
  */
 export function classifyClaudeCommand(command: string): { session: boolean; mode: string | null } {
-  const tokens = command.trim().split(/\s+/).filter((t) => t.length > 0);
+  // ps joins argv with exactly one space, so a leading, trailing or doubled
+  // space means one ARGUMENT contained whitespace (`claude ' --dangerously-
+  // skip-permissions'` is a prompt, not a flag). The boundary is unrecoverable
+  // from flattened text, so such a line identifies the session but never a
+  // mode (Codex post-ship review, 2026-09-22).
+  const raw = command.split(" ");
+  const tokens = raw.filter((t) => t.length > 0);
   if (tokens.length === 0) return { session: false, mode: null };
   let start: number;
   if (isClaudeExecutable(tokens[0]!)) start = 1;
   else if (isClaudeNodeEntry(tokens[0]!, tokens[1])) start = 2;
   else return { session: false, mode: null };
+  if (raw.length !== tokens.length || /\s/.test(command.replace(/ /g, ""))) return { session: true, mode: null };
   let mode: string | null = null;
   for (let i = start; i < tokens.length; i++) {
     const t = tokens[i]!;
