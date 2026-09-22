@@ -37,6 +37,28 @@ describe("loadRulingsSafe", () => {
     expect(result.scanCompleteness).toBe("complete");
   });
 
+  it("T-522: reports a derived lifecycle for every loaded record; a proposal stays loaded, never unavailable", async () => {
+    const legacy = baseRuling();
+    const proposal = baseRuling({ id: "r-0123456789abcdee", status: "proposed", proposesToSupersede: legacy.id });
+    await writeRulingUnlocked(legacy, root);
+    await writeRulingUnlocked(proposal, root);
+    const result = loadRulingsSafe(root);
+    expect(result.rulings.map((r) => r.id).sort()).toEqual([proposal.id, legacy.id].sort());
+    expect(result.unavailableIds.size).toBe(0);
+    expect(result.lifecycleById.get(legacy.id)).toBe("accepted-legacy");
+    expect(result.lifecycleById.get(proposal.id)).toBe("proposed");
+  });
+
+  it("T-522: lifecycleById marks a legacy record superseded by a legacy successor", async () => {
+    const old = baseRuling();
+    const successor = baseRuling({ id: "r-0123456789abcdee", supersedes: old.id });
+    await writeRulingUnlocked(old, root);
+    await writeRulingUnlocked(successor, root);
+    const result = loadRulingsSafe(root);
+    expect(result.lifecycleById.get(old.id)).toBe("superseded");
+    expect(result.lifecycleById.get(successor.id)).toBe("accepted-legacy");
+  });
+
   it("loads a valid ruling written via writeRulingUnlocked", async () => {
     const ruling = baseRuling();
     await writeRulingUnlocked(ruling, root, { createOnly: true });

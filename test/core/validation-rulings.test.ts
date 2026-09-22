@@ -271,3 +271,83 @@ describe("ruling reachability (T-494 scope 5)", () => {
     expect(result.findings.filter((f) => f.code === "unreachable_ruling")).toEqual([]);
   });
 });
+
+describe("ruling lifecycle (T-522)", () => {
+  const acceptance = (payloadDigest: string) => ({
+    attribution: "owner-direct" as const,
+    recordedBy: { client: "claude", id: "test-session" },
+    date: "2026-09-21",
+    createdAt: "2026-09-21T00:00:00.000Z",
+    payloadDigest,
+  });
+  const aux = (rulings: ReturnType<typeof makeRuling>[]) => ({
+    rulings,
+    unavailableRulingIds: new Set<string>(),
+    rulingScanCompleteness: "complete" as const,
+    citingEntityLoadComplete: true,
+  });
+  const codes = (r: ReturnType<typeof validateProject>) => r.findings.map((f) => f.code);
+
+  it("flags a proposal carrying a supersedes edge with the classifier's own code", () => {
+    const rulings = [
+      makeRuling({ id: "r-0000000000000001" }),
+      makeRuling({ id: "r-0000000000000002", status: "proposed", supersedes: "r-0000000000000001", proposesToSupersede: "r-0000000000000001" }),
+    ];
+    const result = validateProject(makeState({}), undefined, aux(rulings));
+    expect(codes(result)).toContain("ruling_proposed_with_supersedes");
+    expect(result.findings.find((f) => f.code === "ruling_proposed_with_supersedes")?.level).toBe("error");
+  });
+
+  const findingOf = (r: ReturnType<typeof validateProject>, code: string) => r.findings.find((f) => f.code === code);
+
+  it("flags status accepted without acceptance evidence", () => {
+    const rulings = [makeRuling({ id: "r-0000000000000001", status: "accepted" })];
+    const f = findingOf(validateProject(makeState({}), undefined, aux(rulings)), "ruling_status_without_acceptance");
+    expect(f).toMatchObject({ level: "error", entity: "r-0000000000000001" });
+    expect(f?.message).toContain("no acceptance record");
+  });
+
+  it("flags an accepted record whose digest no longer matches", () => {
+    const rulings = [makeRuling({ id: "r-0000000000000001", status: "accepted", acceptance: acceptance("0".repeat(64)) })];
+    const f = findingOf(validateProject(makeState({}), undefined, aux(rulings)), "ruling_acceptance_digest_mismatch");
+    expect(f).toMatchObject({ level: "error", entity: "r-0000000000000001" });
+    expect(f?.message).toContain("edited after acceptance");
+  });
+
+  it("flags a citation of a proposal as an error on the citing item, and does not also call it dangling", () => {
+    const rulings = [makeRuling({ id: "r-0000000000000001", status: "proposed" })];
+    const state = makeState({ tickets: [makeTicket({ id: "T-1", citesRulings: ["r-0000000000000001"] })] });
+    const result = validateProject(state, undefined, aux(rulings));
+    const f = findingOf(result, "ruling_citation_of_nonaccepted");
+    expect(f).toMatchObject({ level: "error", entity: "T-1" });
+    expect(f?.message).toContain("r-0000000000000001");
+    expect(f?.message).toContain("proposed");
+    expect(codes(result)).not.toContain("dangling_ruling_citation");
+  });
+
+  it("flags an accepted-legacy record superseding a proposal", () => {
+    const rulings = [
+      makeRuling({ id: "r-0000000000000001", status: "proposed" }),
+      makeRuling({ id: "r-0000000000000002", supersedes: "r-0000000000000001" }),
+    ];
+    const f = findingOf(validateProject(makeState({}), undefined, aux(rulings)), "ruling_successor_of_nonaccepted");
+    expect(f).toMatchObject({ level: "error", entity: "r-0000000000000002" });
+    expect(f?.message).toContain("r-0000000000000001");
+    expect(f?.message).toContain("proposed");
+    expect(f?.message).not.toContain("never bound");
+  });
+
+  it("warns about a proposal aimed at an already-complete item", () => {
+    const rulings = [makeRuling({ id: "r-0000000000000001", status: "proposed", proposedFor: ["T-1"] })];
+    const state = makeState({ tickets: [makeTicket({ id: "T-1", status: "complete" })] });
+    const finding = validateProject(state, undefined, aux(rulings)).findings.find((f) => f.code === "ruling_proposal_on_completed_item");
+    expect(finding?.level).toBe("warning");
+    expect(finding?.entity).toBe("r-0000000000000001");
+  });
+
+  it("produces no lifecycle finding on a legacy-only ledger", () => {
+    const rulings = [makeRuling({ id: "r-0000000000000001" }), makeRuling({ id: "r-0000000000000002", supersedes: "r-0000000000000001" })];
+    const c = codes(validateProject(makeState({}), undefined, aux(rulings)));
+    expect(c.filter((x) => x.startsWith("ruling_") && x !== "ruling_unreachable")).toEqual([]);
+  });
+});

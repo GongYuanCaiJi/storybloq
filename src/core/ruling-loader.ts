@@ -6,7 +6,8 @@ import { atomicCreate, atomicWrite, guardPath, serializeJSON } from "./project-l
 import { ProjectLoaderError } from "./errors.js";
 import { sanitizeDisplayText } from "./display-text.js";
 import { readBoundedFile } from "./limit-config.js";
-import { buildCitationResolutionContext, type CitationResolutionContext, type UpwardBoard } from "./ruling.js";
+import { buildCitationResolutionContext, buildSuccessorIndex, lifecycleMapFor, type CitationResolutionContext, type UpwardBoard } from "./ruling.js";
+import type { RulingLifecycle } from "./ruling-lifecycle.js";
 import { readdirSafe, verifyContainment, verifyDirIdentity } from "./readdir-safe.js";
 import { resolveOrchestratorRoot } from "../federation/resolver.js";
 
@@ -62,6 +63,13 @@ export interface LoadRulingsResult {
    * because no SPECIFIC id is known to attach the taint to.
    */
   readonly hasUnrecoverableEntries: boolean;
+  /**
+   * T-522: derived lifecycle per LOADED record. A quarantined or conflicted
+   * record is a readable file that parsed, so it lives in `rulings` and here,
+   * never in `unavailableIds` -- it taints only its own chain, not the whole
+   * id-space.
+   */
+  readonly lifecycleById: ReadonlyMap<string, RulingLifecycle>;
 }
 
 /**
@@ -79,10 +87,11 @@ export function loadRulingsSafe(root: string): LoadRulingsResult {
       unavailableIds: new Set(),
       scanCompleteness: "incomplete",
       hasUnrecoverableEntries: false,
+      lifecycleById: new Map(),
     };
   }
   if (scan.dirents === null) {
-    return { rulings: [], warnings: [], unavailableIds: new Set(), scanCompleteness: "complete", hasUnrecoverableEntries: false };
+    return { rulings: [], warnings: [], unavailableIds: new Set(), scanCompleteness: "complete", hasUnrecoverableEntries: false, lifecycleById: new Map() };
   }
 
   const rulings: Ruling[] = [];
@@ -181,10 +190,12 @@ export function loadRulingsSafe(root: string): LoadRulingsResult {
         unavailableIds: new Set(),
         scanCompleteness: "incomplete",
         hasUnrecoverableEntries: true,
+        lifecycleById: new Map(),
       };
     }
   }
-  return { rulings, warnings, unavailableIds, scanCompleteness: "complete", hasUnrecoverableEntries };
+  const lifecycleById = lifecycleMapFor(rulings, buildSuccessorIndex(rulings));
+  return { rulings, warnings, unavailableIds, scanCompleteness: "complete", hasUnrecoverableEntries, lifecycleById };
 }
 
 /**

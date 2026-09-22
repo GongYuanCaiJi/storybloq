@@ -50,6 +50,10 @@ function refusalFor(resolution: CitationResolution, planText: string): string | 
       return `${resolution.citedId} is cited but missing from the ledger`;
     case "unreadable":
       return `${resolution.citedId} is cited but its record could not be read`;
+    case "nonaccepted":
+      // T-522: a proposal is not a ruling. A plan pinned to one is pinned to
+      // nothing, and the guard says so rather than letting the citation pass.
+      return `${resolution.citedId} is cited but is ${resolution.lifecycle}, not an accepted ruling`;
     case "indeterminate":
       return `${resolution.citedId} could not be resolved to a current ruling (${resolution.reason})`;
     case "branch":

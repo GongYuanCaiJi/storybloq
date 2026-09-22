@@ -7,7 +7,8 @@ import { isTeamModeConfig } from "./team-capabilities.js";
 import { isTicketEarmarkStale, isIssueEarmarkStale } from "./earmarks.js";
 import type { Ruling } from "../models/ruling.js";
 import type { RulingScanCompleteness } from "./ruling-loader.js";
-import { buildSuccessorIndex, buildCitationResolutionContext, resolveCitation, type UpwardBoard } from "./ruling.js";
+import { buildSuccessorIndex, buildCitationResolutionContext, lifecycleMapFor, resolveCitation, type UpwardBoard } from "./ruling.js";
+import { classifyLifecycle, isEffectivelyAccepted } from "./ruling-lifecycle.js";
 
 const DEFAULT_EARMARK_STALE_THRESHOLD_HOURS = 48;
 
@@ -842,6 +843,45 @@ function validateRulings(
 ): void {
   const rulingsById = new Map(rulings.map((r) => [r.id, r]));
 
+  // T-522: lifecycle invariants. A record that claims a state its evidence
+  // does not support is reported with the SAME code the classifier uses, so
+  // `validate`'s output and the read-side quarantine can never disagree.
+  const lifecycleIndex = buildSuccessorIndex(rulings);
+  const lifecycleById = lifecycleMapFor(rulings, lifecycleIndex);
+  const completedItemIds = new Set<string>([
+    ...state.tickets.filter((t) => t.status === "complete").map((t) => t.id),
+    ...state.issues.filter((i) => i.status === "resolved").map((i) => i.id),
+  ]);
+  for (const r of rulings) {
+    for (const reason of classifyLifecycle(r).reasons) {
+      findings.push({ level: "error", code: reason.code, message: `Ruling ${reason.detail}.`, entity: r.id });
+    }
+    const lifecycle = lifecycleById.get(r.id);
+    if (lifecycle === "proposed") {
+      for (const itemId of r.proposedFor ?? []) {
+        if (completedItemIds.has(itemId)) {
+          findings.push({
+            level: "warning",
+            code: "ruling_proposal_on_completed_item",
+            message: `Ruling ${r.id} is proposed for ${itemId}, which is already complete; accept or withdraw it.`,
+            entity: r.id,
+          });
+        }
+      }
+    }
+    if (lifecycle !== undefined && isEffectivelyAccepted(lifecycle) && r.supersedes) {
+      const targetLifecycle = lifecycleById.get(r.supersedes);
+      if (targetLifecycle !== undefined && !isEffectivelyAccepted(targetLifecycle)) {
+        findings.push({
+          level: "error",
+          code: "ruling_successor_of_nonaccepted",
+          message: `Ruling ${r.id} supersedes ${r.supersedes}, which is ${targetLifecycle} and does not currently bind.`,
+          entity: r.id,
+        });
+      }
+    }
+  }
+
   // Self-supersedes / dangling / unreadable supersedes-target invariants
   // (rulings #5-adjacent structural checks, distinct from the citation checks below).
   for (const r of rulings) {
@@ -932,6 +972,16 @@ function validateRulings(
           level: "error",
           code: "dangling_ruling_citation",
           message: `${entity.id} cites ${citedId}, which does not exist.`,
+          entity: entity.id,
+        });
+      } else if (resolution.status === "nonaccepted") {
+        // T-522: the citation names a real, readable record that is not a
+        // ruling. An ERROR, like a dangling citation: the item is bound to
+        // nothing and a reader must not be shown the proposal as if it bound.
+        findings.push({
+          level: "error",
+          code: "ruling_citation_of_nonaccepted",
+          message: `${entity.id} cites ${citedId}, which is ${resolution.lifecycle} and binds nothing.`,
           entity: entity.id,
         });
       } else if (resolution.status === "unreadable") {

@@ -188,6 +188,19 @@ describe("the guard's table, per citation status", () => {
     expect(verdict.ok === false && verdict.instruction).toContain("cycle");
   });
 
+  it("REFUSES a citation of a PROPOSAL, even when the plan names it (T-522)", async () => {
+    const root = await newProject();
+    const id = await cite(root, "Still only proposed.");
+    // Demote the record to a proposal in place. A proposal is not a ruling:
+    // a plan pinned to one is pinned to nothing, and naming it cannot rescue it.
+    const cited = JSON.parse(readFileSync(join(root, ".story", "rulings", `${id}.json`), "utf-8"));
+    await writeRulingUnlocked({ ...cited, status: "proposed" }, root);
+
+    const verdict = await guardPlanNamesCitedRulings(root, "T-001", `# Plan\n\nPer ${id}.`);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.ok === false && verdict.instruction).toContain("proposed, not an accepted ruling");
+  });
+
   it("REFUSES a citation whose record cannot be read", async () => {
     const root = await newProject();
     const id = await cite(root, "About to be corrupted.");

@@ -1,16 +1,10 @@
-import type { Ruling, RulingAttribution } from "../models/ruling.js";
-import { RULING_CANONICAL_ID_REGEX, type OwnerTaskLike } from "../models/types.js";
-import type { RulingScanCompleteness } from "./ruling-loader.js";
-import {
-  classifyLifecycle,
-  claimsAcceptance,
-  conflictAlternatives,
-  isEffectivelyAccepted,
-  lifecycleOf,
-  type LifecycleReason,
-  payloadDigest as payloadDigestOf,
-  type RulingLifecycle,
-} from "./ruling-lifecycle.js";
+// PINNED ORACLE: verbatim copy of src/core/ruling.ts at 655b03bf (the T-522 plan base; no drift to 236b9fc1).
+// Only the import paths were rewritten. Do not edit: this is what a 1.15.x reader does with a 1.16 ledger.
+/* eslint-disable */
+// @ts-nocheck
+import type { Ruling, RulingAttribution } from "../../../src/models/ruling.js";
+import { RULING_CANONICAL_ID_REGEX, type OwnerTaskLike } from "../../../src/models/types.js";
+import type { RulingScanCompleteness } from "../../../src/core/ruling-loader.js";
 
 /**
  * T-476: owner rulings -- verbatim, attributed decision records with
@@ -96,14 +90,6 @@ export type CitationResolution =
   // board, so naming one would attribute the absence to a place that is no
   // more responsible for it than this one.
   | { status: "missing"; citedId: string }
-  /**
-   * T-522: the cited record exists and is readable but is not effectively
-   * accepted -- a proposal, a withdrawal, a quarantined or a conflicted
-   * record. It binds nothing. Distinct from `missing` (never existed) and
-   * `unreadable` (exists, cannot be read): a reader can open this one and
-   * must be told that what they see is not a ruling.
-   */
-  | { status: "nonaccepted"; citedId: string; lifecycle: RulingLifecycle; reasons: readonly LifecycleReason[]; board?: "orchestrator" }
   | { status: "unreadable"; citedId: string; board?: "orchestrator" }
   | {
       status: "indeterminate"; citedId: string;
@@ -118,13 +104,6 @@ export type CitationResolution =
         // T-520: both boards claim the supersedes chain for this id. Never
         // merged -- merging would invent an ordering neither board defines.
         | "cross-board-supersession"
-        // T-522: a record CLAIMING to be an accepted successor somewhere on
-        // this chain has lost its authority (edited after acceptance, a
-        // merge conflict, a claim with no evidence). Its edge can be neither
-        // trusted nor ruled out, so "nothing supersedes this" is unverifiable
-        // for exactly the ids in `ids` -- per chain, never project-wide.
-        | "unverifiable-successor";
-      ids?: readonly string[];
       /**
        * T-520: an unverifiable state on the ORCHESTRATOR's ledger, not this
        * one. Without it a node reader is told its chain is unverifiable and
@@ -142,18 +121,6 @@ export type CitationResolution =
 export interface SuccessorIndex {
   readonly successorsByTarget: ReadonlyMap<string, readonly string[]>;
   readonly branchedTargets: ReadonlySet<string>;
-  /**
-   * T-522: edges the index saw but will not trust. Every `supersedes` and
-   * `proposesToSupersede` of a record that CLAIMS acceptance without holding
-   * it (quarantined, or any acceptance-claiming alternative of a conflicted
-   * record), plus an otherwise-authoritative edge whose TARGET is not
-   * effectively accepted. `resolveCitation` refuses to conclude "current" at
-   * any node named here. Proposed and withdrawn records contribute nothing:
-   * they never claimed to bind.
-   */
-  readonly uncertainSuccessorsByTarget: ReadonlyMap<string, readonly string[]>;
-  /** T-522: the base lifecycle of every loaded record (`superseded` is derived on top, see `lifecycleOf`). */
-  readonly baseLifecycleById: ReadonlyMap<string, RulingLifecycle>;
 }
 
 /**
@@ -164,53 +131,18 @@ export interface SuccessorIndex {
  * a state `resolveCitation` must report rather than silently pick one from.
  */
 export function buildSuccessorIndex(rulings: readonly Ruling[]): SuccessorIndex {
-  const baseLifecycleById = new Map<string, RulingLifecycle>();
-  for (const r of rulings) baseLifecycleById.set(r.id, classifyLifecycle(r).lifecycle);
-  // A dangling target (not loaded) stays authoritative so the existing
-  // dangling-target findings and `missing` resolutions keep their meaning; a
-  // LOADED target that is not effectively accepted demotes the edge.
-  const targetAccepted = (target: string): boolean => {
-    const lc = baseLifecycleById.get(target);
-    return lc === undefined || isEffectivelyAccepted(lc);
-  };
   const successorsByTarget = new Map<string, string[]>();
-  const uncertainSuccessorsByTarget = new Map<string, string[]>();
-  const add = (map: Map<string, string[]>, target: string, id: string): void => {
-    const list = map.get(target);
-    if (list) { if (!list.includes(id)) list.push(id); }
-    else map.set(target, [id]);
-  };
-  const addUncertainEdges = (alt: Ruling, id: string): void => {
-    if (!claimsAcceptance(alt)) return;
-    if (alt.supersedes) add(uncertainSuccessorsByTarget, alt.supersedes, id);
-    if (alt.proposesToSupersede) add(uncertainSuccessorsByTarget, alt.proposesToSupersede, id);
-  };
   for (const r of rulings) {
-    const lc = baseLifecycleById.get(r.id)!;
-    if (isEffectivelyAccepted(lc)) {
-      if (!r.supersedes) continue;
-      if (targetAccepted(r.supersedes)) add(successorsByTarget, r.supersedes, r.id);
-      else add(uncertainSuccessorsByTarget, r.supersedes, r.id);
-    } else if (lc === "quarantined") {
-      addUncertainEdges(r, r.id);
-    } else if (lc === "conflicted") {
-      for (const alt of conflictAlternatives(r)) {
-        if (classifyLifecycle(alt).lifecycle === "conflicted") continue;
-        addUncertainEdges(alt, r.id);
-      }
-    }
-    // proposed / withdrawn: no edge.
+    if (!r.supersedes) continue;
+    const list = successorsByTarget.get(r.supersedes);
+    if (list) list.push(r.id);
+    else successorsByTarget.set(r.supersedes, [r.id]);
   }
   const branchedTargets = new Set<string>();
   for (const [target, successors] of successorsByTarget) {
     if (successors.length > 1) branchedTargets.add(target);
   }
-  return { successorsByTarget, branchedTargets, uncertainSuccessorsByTarget, baseLifecycleById };
-}
-
-/** T-522: full lifecycle per loaded record, `superseded` included. */
-export function lifecycleMapFor(rulings: readonly Ruling[], index: SuccessorIndex): ReadonlyMap<string, RulingLifecycle> {
-  return new Map(rulings.map((r) => [r.id, lifecycleOf(r, index)]));
+  return { successorsByTarget, branchedTargets };
 }
 
 export interface CitationResolutionContext {
@@ -227,8 +159,6 @@ export interface CitationResolutionContext {
    * behavior unchanged).
    */
   readonly hasUnrecoverableEntries: boolean;
-  /** T-522: derived lifecycle per loaded record. Quarantined and conflicted records are HERE, never in `unavailableIds`. */
-  readonly lifecycleById: ReadonlyMap<string, RulingLifecycle>;
   /**
    * T-520: the ORCHESTRATOR's board, for a node that records a pointer to one.
    *
@@ -268,14 +198,12 @@ export function buildCitationResolutionContext(
   scanCompleteness: RulingScanCompleteness,
   hasUnrecoverableEntries = false,
 ): CitationResolutionContext {
-  const index = buildSuccessorIndex(rulings);
   return {
     rulingsById: new Map(rulings.map((r) => [r.id, r])),
     unavailableIds,
     scanCompleteness,
-    index,
+    index: buildSuccessorIndex(rulings),
     hasUnrecoverableEntries,
-    lifecycleById: lifecycleMapFor(rulings, index),
   };
 }
 
@@ -305,24 +233,11 @@ export function resolveCitation(citedId: string, ctx: CitationResolutionContext)
     if (ctx.upward) return resolveUpward(citedId, ctx, ctx.upward);
     return { status: "missing", citedId };
   }
-  // T-522: a record that is not effectively accepted binds nothing. Reported
-  // BEFORE any chain walk: there is no chain to walk from a proposal.
-  const citedLifecycle = ctx.lifecycleById.get(citedId) ?? "accepted-legacy";
-  if (!isEffectivelyAccepted(citedLifecycle)) {
-    return { status: "nonaccepted", citedId, lifecycle: citedLifecycle, reasons: classifyLifecycle(citedRuling).reasons };
-  }
 
   const chain: string[] = [citedId];
   const visited = new Set<string>([citedId]);
   let current = citedId;
   for (;;) {
-    // T-522: an edge onto this node that can be neither trusted nor ruled
-    // out. Checked at EVERY node, before the branch rule, so a damaged
-    // acceptance claim halfway down a chain stops the walk exactly there.
-    const uncertain = ctx.index.uncertainSuccessorsByTarget.get(current);
-    if (uncertain && uncertain.length > 0) {
-      return { status: "indeterminate", citedId, reason: "unverifiable-successor", ids: uncertain };
-    }
     if (ctx.index.branchedTargets.has(current)) {
       return {
         status: "branch",
@@ -464,20 +379,10 @@ export function citationWarningText(resolution: CitationResolution): string {
       return `ruling ${resolution.citedId} not found`;
     case "unreadable":
       return `ruling ${resolution.citedId} is unreadable`;
-    case "nonaccepted":
-      return `ruling ${resolution.citedId} is ${resolution.lifecycle} and binds nothing -- it is not an accepted ruling${
-        resolution.reasons.length > 0 ? ` (${resolution.reasons.map((r) => r.code).join(", ")})` : ""
-      }`;
     case "indeterminate":
-      if (resolution.reason === "incomplete-scan") {
-        return `chain state unverifiable: ruling scan is incomplete -- do not treat any shown ruling as current`;
-      }
-      if (resolution.reason === "unverifiable-successor") {
-        return `chain state unverifiable: ${(resolution.ids ?? []).join(", ")} claim${
-          (resolution.ids?.length ?? 0) === 1 ? "s" : ""
-        } to supersede ruling ${resolution.citedId}'s chain but the claim cannot be verified -- do not treat any shown ruling as current`;
-      }
-      return `chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current`;
+      return resolution.reason === "incomplete-scan"
+        ? `chain state unverifiable: ruling scan is incomplete -- do not treat any shown ruling as current`
+        : `chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current`;
     case "branch":
       return `ruling ${resolution.citedId} has competing successors (${resolution.competingSuccessors.join(", ")}) -- chain is ambiguous`;
     case "cycle":
@@ -518,25 +423,7 @@ export function renderCitation(resolution: CitationResolution): RenderedCitation
 
 // --- Write-path (ruling supersede) candidate-graph validation ---
 
-export type SupersedeRefusalCode =
-  | "self_link"
-  | "dangling_target"
-  | "branch"
-  | "cycle"
-  | "unverifiable_graph"
-  // T-522: the target is loaded but not effectively accepted (a proposal, a
-  // withdrawal, a quarantined or conflicted record). Nothing can supersede
-  // what never bound.
-  | "target_not_accepted"
-  // T-522: the would-be successor is loaded and is itself not acceptable as a
-  // binding record (a proposal must go through `accept`; a withdrawn or
-  // quarantined record can never become a successor).
-  | "successor_not_acceptable";
-
-export interface SupersedeCandidateOptions {
-  /** `--branch`: allow the target to gain a second VERIFIED successor. Never overrides any other refusal. */
-  readonly branch?: boolean;
-}
+export type SupersedeRefusalCode = "self_link" | "dangling_target" | "branch" | "cycle" | "unverifiable_graph";
 
 export interface SupersedeRefusal {
   readonly code: SupersedeRefusalCode;
@@ -567,7 +454,6 @@ export function validateSupersedeCandidate(
   rulings: readonly Ruling[],
   newId: string,
   oldId: string,
-  options: SupersedeCandidateOptions = {},
 ): SupersedeRefusal | null {
   if (newId === oldId) {
     return { code: "self_link", detail: `${newId} cannot supersede itself` };
@@ -575,35 +461,6 @@ export function validateSupersedeCandidate(
   const byId = new Map(rulings.map((r) => [r.id, r]));
   if (!byId.has(oldId)) {
     return { code: "dangling_target", detail: `${oldId} does not exist` };
-  }
-
-  // T-522: lifecycle gates, in this order, all before the branch rule so
-  // `--branch` can never talk past one of them.
-  const index = buildSuccessorIndex(rulings);
-  const targetLifecycle = lifecycleOf(byId.get(oldId)!, index);
-  if (!isEffectivelyAccepted(targetLifecycle)) {
-    return { code: "target_not_accepted", detail: `${oldId} is ${targetLifecycle}, not an accepted ruling; nothing can supersede it` };
-  }
-  const successor = byId.get(newId);
-  if (successor) {
-    const successorLifecycle = lifecycleOf(successor, index);
-    if (!isEffectivelyAccepted(successorLifecycle)) {
-      return {
-        code: "successor_not_acceptable",
-        detail: `${newId} is ${successorLifecycle} and cannot be recorded as a successor${
-          successorLifecycle === "proposed" ? "; use ruling accept" : ""
-        }`,
-      };
-    }
-  }
-  {
-    const uncertain = uncertainOnChain(index, oldId);
-    if (uncertain !== null) {
-      return {
-        code: "unverifiable_graph",
-        detail: `${oldId}'s chain has an unverifiable successor claim at ${uncertain.node} (${uncertain.ids.join(", ")}); repair it before writing a new edge`,
-      };
-    }
   }
 
   // Build the candidate graph: every existing supersedes edge, plus the
@@ -617,7 +474,7 @@ export function validateSupersedeCandidate(
 
   // Branch: would oldId end up with more than one successor?
   const successorsOfOld = [...candidateEdges.entries()].filter(([, target]) => target === oldId).map(([id]) => id);
-  if (successorsOfOld.length > 1 && !options.branch) {
+  if (successorsOfOld.length > 1) {
     return {
       code: "branch",
       detail: `${oldId} would have competing successors: ${successorsOfOld.join(", ")}`,
@@ -635,82 +492,6 @@ export function validateSupersedeCandidate(
     current = candidateEdges.get(current);
   }
 
-  return null;
-}
-
-/**
- * T-522: walks EVERY authoritative successor reachable from `startId` (all
- * paths, not the first successor at each node: a branched target has more
- * than one, and `--branch` deliberately allows that state) and returns the
- * first node carrying an uncertain successor claim, or null when the whole
- * reachable graph is verified. Bounded by the visited set so a cyclic graph
- * terminates.
- */
-function uncertainOnChain(index: SuccessorIndex, startId: string): { node: string; ids: readonly string[] } | null {
-  const visited = new Set<string>();
-  const queue: string[] = [startId];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    const ids = index.uncertainSuccessorsByTarget.get(current);
-    if (ids && ids.length > 0) return { node: current, ids };
-    for (const next of index.successorsByTarget.get(current) ?? []) queue.push(next);
-  }
-  return null;
-}
-
-export type AcceptRefusalCode =
-  | SupersedeRefusalCode
-  | "revision_mismatch"
-  | "dangling_item";
-
-export interface AcceptRefusal {
-  readonly code: AcceptRefusalCode;
-  readonly detail: string;
-}
-
-/**
- * T-522: validates `ruling accept` BEFORE any write. The candidate must be a
- * proposal; `revision` must equal the payload digest of what is on disk (so
- * a proposal edited after it was reviewed cannot be accepted on the strength
- * of the earlier review); every `proposedFor` id must resolve; the ruling
- * graph must be fully readable and verified along the target's chain; and
- * the edge the acceptance would copy into `supersedes` must pass the same
- * candidate-graph rules as `ruling supersede`, with `--branch` meaning what
- * it means there.
- *
- * Accept records a CLAIM of who ruled; the digest proves WHAT was accepted,
- * not WHO approved. The two-key rule is unchanged.
- */
-export function validateAcceptCandidate(
-  proposal: Ruling,
-  revision: string,
-  ctx: CitationResolutionContext,
-  itemExists: (id: string) => boolean,
-  options: SupersedeCandidateOptions = {},
-): AcceptRefusal | null {
-  const lifecycle = ctx.lifecycleById.get(proposal.id) ?? classifyLifecycle(proposal).lifecycle;
-  if (lifecycle !== "proposed") {
-    return { code: "successor_not_acceptable", detail: `${proposal.id} is ${lifecycle}, not a proposal` };
-  }
-  const digest = payloadDigestOf(proposal);
-  if (revision !== digest) {
-    return { code: "revision_mismatch", detail: `${proposal.id} changed since it was reviewed (revision ${revision} is not the current ${digest})` };
-  }
-  if (ctx.scanCompleteness !== "complete" || ctx.unavailableIds.size > 0 || ctx.hasUnrecoverableEntries) {
-    return { code: "unverifiable_graph", detail: "the ruling graph is not fully readable; accept refuses until every ruling file loads" };
-  }
-  const target = proposal.proposesToSupersede ?? null;
-  if (target !== null) {
-    const rest = [...ctx.rulingsById.values()].filter((r) => r.id !== proposal.id);
-    const refusal = validateSupersedeCandidate(rest, proposal.id, target, options);
-    if (refusal !== null) return refusal;
-  }
-  const dangling = (proposal.proposedFor ?? []).filter((id) => !itemExists(id));
-  if (dangling.length > 0) {
-    return { code: "dangling_item", detail: `proposedFor names ${dangling.join(", ")}, which do${dangling.length === 1 ? "es" : ""} not exist` };
-  }
   return null;
 }
 
