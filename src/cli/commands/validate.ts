@@ -10,6 +10,8 @@ import { validateIssueSourceRefs } from "../../core/issue-source-ref.js";
 import { checkCapabilities } from "../../core/capability.js";
 import { CatalogLoadError } from "../../core/catalog.js";
 import { capabilityCatalog } from "./capability.js";
+import { capabilityScan } from "./term.js";
+import { glossaryCatalog, checkTerms, buildTermReferenceIndex } from "../../core/glossary.js";
 import { loadRulingsSafe, loadUpwardBoardFor } from "../../core/ruling-loader.js";
 import { INTEGRITY_WARNING_TYPES } from "../../core/errors.js";
 import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
@@ -268,6 +270,54 @@ async function capabilityFindings(ctx: CommandContext): Promise<ValidationFindin
   return findings;
 }
 
+/**
+ * T-524: the glossary's findings, as validation findings.
+ *
+ * Same three-way split as the inventory and for the same reasons. STRUCTURAL
+ * is an error: a term pointing at a capability or a ruling that does not exist
+ * is a dangling reference. THIN is a warning and never an error, because a
+ * term filed with only a definition is still a term and holding it out of the
+ * ledger would be worse than carrying it. INCOMPLETE is a warning, because it
+ * is a statement about the check rather than about the entry.
+ *
+ * Synchronous, unlike the inventory's: no git subprocess is involved. It lives
+ * on the async entry point anyway, beside the inventory findings, so that the
+ * two catalogs are reported together rather than one of them appearing in a
+ * surface the other does not.
+ */
+function glossaryFindings(ctx: CommandContext): ValidationFinding[] {
+  let entries;
+  try {
+    entries = glossaryCatalog.load(ctx.root).doc.terms;
+  } catch (err: unknown) {
+    if (err instanceof CatalogLoadError) {
+      // Reported rather than thrown, for the same reason the inventory's is: a
+      // broken glossary.json must not stop the rest of validate running.
+      return [{ level: "error", code: "glossary_catalog_unreadable", message: err.message, entity: null }];
+    }
+    throw err;
+  }
+  if (entries.length === 0) return [];
+  // The capability ids come from the OTHER catalog, and a failure to read it
+  // leaves the set empty rather than throwing: this function reports on the
+  // glossary, and `capabilityFindings` already reports that file's own state.
+  // `capabilityScan` is shared with `term check` so both surfaces carry the
+  // same unreadable-is-not-absent distinction rather than each rebuilding it.
+  const report = checkTerms(entries, buildTermReferenceIndex(ctx.root, capabilityScan(ctx.root)));
+  const findings: ValidationFinding[] = [];
+  for (const entry of report.entries) {
+    for (const res of entry.results) {
+      findings.push({
+        level: res.cls === "structural" ? "error" : "warning",
+        code: res.code,
+        message: `${entry.id}: ${res.detail}`,
+        entity: entry.id,
+      });
+    }
+  }
+  return findings;
+}
+
 export function handleValidate(ctx: CommandContext): CommandResult {
   const complete = validateWithRulings(ctx);
   return {
@@ -285,6 +335,7 @@ export async function handleValidateWithSourceRefs(
   const complete = appendValidationFindings(withRulings, [
     ...sourceFindings,
     ...(await capabilityFindings(ctx)),
+    ...glossaryFindings(ctx),
   ]);
   return {
     output: formatValidation(complete, ctx.format),

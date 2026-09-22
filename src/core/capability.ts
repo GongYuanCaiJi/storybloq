@@ -21,6 +21,7 @@ import { join, relative, sep, isAbsolute } from "node:path";
 import { titleWords } from "./catalog.js";
 import { sanitizeDisplayPath, sanitizeDisplayText } from "./display-text.js";
 import { loadRulingsSafe } from "./ruling-loader.js";
+import { glossaryCatalog } from "./glossary.js";
 import { COMMANDS, MCP_TOOLS } from "../cli/commands/reference.js";
 import { entryPointViolations, normalizeEntryPoint, type Capability, type EntryPointRule } from "../models/capability.js";
 import type { ProjectState } from "./project-state.js";
@@ -391,12 +392,45 @@ interface ReferenceIndex {
   readonly rulingUnavailableIds: ReadonlySet<string>;
   readonly itemIds: ReadonlySet<string>;
   readonly termIds: ReadonlySet<string>;
+  /**
+   * True when the glossary file EXISTS but could not be loaded. Same taint
+   * doctrine as `rulingScanIncomplete` and for the same reason: an unreadable
+   * catalog cannot support the claim "this term does not exist".
+   *
+   * An ABSENT glossary is deliberately NOT tainted. Absence is a determinate
+   * answer -- there are no terms, so a reference to one is genuinely unknown
+   * -- and treating it as incomplete would downgrade every real dangling term
+   * reference to a shrug on the projects most likely to have them.
+   */
+  readonly termScanIncomplete: boolean;
   readonly cliNames: ReadonlySet<string>;
   readonly mcpNames: ReadonlySet<string>;
 }
 
+/**
+ * T-524: the glossary ids a capability's `terms` are checked against.
+ *
+ * Loaded HERE rather than taken from the caller, unlike the capability ids the
+ * glossary's own check receives as an argument. The asymmetry is the import
+ * direction: `core/glossary.ts` holds its catalog instance precisely so this
+ * module can reach it, while the capability catalog is instantiated beside its
+ * CLI surface, which core cannot import from.
+ *
+ * A failed load is reported, never thrown. This is a reference index for a
+ * CHECK; a broken glossary is something the check should say, and `validate`
+ * reports it in its own right through `glossary_catalog_unreadable`.
+ */
+function glossaryIds(root: string): { termIds: ReadonlySet<string>; termScanIncomplete: boolean } {
+  try {
+    return { termIds: new Set(glossaryCatalog.load(root).doc.terms.map((t) => t.id)), termScanIncomplete: false };
+  } catch {
+    return { termIds: new Set<string>(), termScanIncomplete: true };
+  }
+}
+
 function buildReferenceIndex(root: string, state: ProjectState | null): ReferenceIndex {
   const scan = loadRulingsSafe(root);
+  const glossary = glossaryIds(root);
   const rulingIds = new Set(scan.rulings.map((r) => r.id));
 
   const itemIds = new Set<string>();
@@ -419,11 +453,7 @@ function buildReferenceIndex(root: string, state: ProjectState | null): Referenc
     rulingScanIncomplete: scan.scanCompleteness !== "complete" || scan.hasUnrecoverableEntries,
     rulingUnavailableIds: scan.unavailableIds,
     itemIds,
-    // The glossary is T-524's file. Until it exists the inventory is checked
-    // against an EMPTY term set, which the plan states explicitly: every term
-    // reference is then unresolved, and that is the intended signal rather
-    // than a reason to skip the check.
-    termIds: new Set<string>(),
+    ...glossary,
     cliNames: new Set(COMMANDS.map((c) => c.name)),
     mcpNames: new Set(MCP_TOOLS.map((t) => t.name)),
   };
@@ -459,7 +489,12 @@ function checkReferences(entry: Capability, index: ReferenceIndex): CapabilityCh
     if (!index.itemIds.has(id)) out.push(result("capability_unknown_item", "structural", `unknown item: ${id}`));
   }
   for (const id of entry.terms ?? []) {
-    if (!index.termIds.has(id)) out.push(result("capability_unknown_term", "structural", `unknown glossary term: ${id}`));
+    if (index.termIds.has(id)) continue;
+    if (index.termScanIncomplete) {
+      out.push(result("capability_check_incomplete", "incomplete", `glossary term ${id} could not be resolved: the glossary could not be read`));
+      continue;
+    }
+    out.push(result("capability_unknown_term", "structural", `unknown glossary term: ${id}`));
   }
   for (const name of entry.surfaces.cli ?? []) {
     if (!index.cliNames.has(name)) {

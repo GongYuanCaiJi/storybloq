@@ -57,7 +57,32 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // three bytes, and a stub that named the tool and nothing else still
   // measured 56,102. Recorded so the next edit does not re-derive the trim
   // and then cut contract to stay under.
-  "SKILL.md": 57000,
+  // T-524 re-pins 57,000 -> 58,000 for the Step 2 term digest and the
+  // Glossary section, and records both measurements: 56,182 before, 57,487 as
+  // first written, 57,374 after cutting the two clauses in the new text that
+  // were rationale rather than contract ("what you do with that is judgement",
+  // and the sentence explaining WHY a thin entry warns instead of erroring),
+  // then 57,400 once the Step 2 sentence named the cap as a number so
+  // skill-glossary-anchors.test.ts could pin it against TERM_DIGEST_CAP, then
+  // 57,426 once the Glossary section wrote its two MCP calls as a tool with a
+  // parameter, as the rest of this file does, rather than in CLI flag syntax.
+  // 57,426 is the floor for this addition; what remains is the advisory rule
+  // itself (G-A), the digest's bound and its omitted-counts sentence, the
+  // one-word-one-entry refusal, and the thin warning -- each of which is a
+  // behaviour a reader would otherwise get wrong.
+  // CONSIDERED AND REJECTED, recorded so the next edit does not re-derive it:
+  // the routing table in "How to Handle Arguments" repeats "in the same
+  // directory as this skill file; if not found, tell user to run `storybloq
+  // setup --client all`" ten times, about 950 bytes, and hoisting it to one
+  // line above the list would have paid for this whole addition. It is not
+  // duplication to cut. That table is READ ONE ROW AT A TIME by an agent
+  // routing a subcommand, and the per-row parenthetical is what makes a row
+  // self-contained; hoisting it moves the recovery instruction somewhere the
+  // reader of a single row has no reason to look. T-502 paying for its health
+  // addition by trimming "two duplicated routing parentheticals" is not
+  // precedent for this: two within a row is redundancy, one per row is the
+  // pattern.
+  "SKILL.md": 58000,
   // T-460 Leg C step 1: 10,194 measured, rounded up to 11,000. Raised to
   // 12,000 by T-501, which documents `autoCompactWindow` (the three Claude
   // Code layers, when an edit takes effect, and Codex having no equivalent)
@@ -110,7 +135,14 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // regeneration. That is what makes this row a pin rather than a budget, and
   // it is a different instrument from the deliberate ratchet in
   // tool-contract-cues.test.ts, where the payload IS prose and a trim is real.
-  "reference.md": 42000,
+  // 43,410 measured at T-524: the seven `term` CLI leaves and the five
+  // storybloq_term_* tools add 2,004 bytes to the generated inventory (41,406
+  // at HEAD before the regeneration, measured, not derived). 44,000
+  // by the same one-step rule, fourth application of it on this row, and
+  // nothing was trimmed to fit for the same reason as every prior time: the
+  // file is emitted from COMMANDS/MCP_TOOLS and a hand edit would be reverted
+  // by the next regeneration.
+  "reference.md": 44000,
   "federation-setup.md": 14000,
   // Was 47000 (measured 46,936 before this issue). ISS-1240 adds the roster
   // pointer to the pen priming order: live seats come from

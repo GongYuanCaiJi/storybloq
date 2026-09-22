@@ -32,6 +32,16 @@ import {
   handleCapabilityCheck,
   type CapabilityWriteInput,
 } from "./commands/capability.js";
+import {
+  handleTermList,
+  handleTermGet,
+  handleTermMatch,
+  handleTermCheck,
+  handleTermAdd,
+  handleTermUpdate,
+  handleTermRemove,
+  type TermWriteInput,
+} from "./commands/term.js";
 
 // Shared comma/empty/trim/emptyAfterSplit combinations. See array-options.ts for
 // what each axis means and ISS-886 for why they are declared per registration.
@@ -6136,7 +6146,7 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCapabilityWrite(format, (root) =>
+            await runCatalogWrite(format, (root) =>
               handleCapabilityAdd(capabilityWriteInput(argv), format, root),
             );
           },
@@ -6172,7 +6182,7 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCapabilityWrite(format, (root) =>
+            await runCatalogWrite(format, (root) =>
               handleCapabilityUpdate({ ...capabilityWriteInput(argv), id: argv.id as string }, format, root),
             );
           },
@@ -6225,8 +6235,8 @@ function capabilityWriteInput(argv: Record<string, unknown>): CapabilityWriteInp
   };
 }
 
-/** Root discovery plus the error mapping every catalog write shares. */
-async function runCapabilityWrite(
+/** Root discovery plus the error mapping every catalog write shares: capabilities and terms both. */
+async function runCatalogWrite(
   format: ReturnType<typeof parseOutputFormat>,
   run: (root: string) => Promise<{ output: string; exitCode?: number }>,
 ): Promise<void> {
@@ -6263,4 +6273,156 @@ async function runCapabilityWrite(
     writeOutput(formatError("io_error", message, format));
     process.exitCode = ExitCode.USER_ERROR;
   }
+}
+
+/**
+ * T-524: the glossary surface.
+ *
+ * ADVISORY, AND THE REGISTRATION SHOWS IT (G-A). `match` is a read command
+ * that prints and exits; nothing here consults the glossary to decide whether
+ * to accept another command's input, and no flag anywhere else in this file
+ * takes a term.
+ *
+ * SAME COMMA POLICY AS THE INVENTORY, applied to the values this surface has.
+ * `--alias` carries a word or a short phrase written by a human, and a comma
+ * is legal inside one, so it takes the literal policy: splitting `hands, the
+ * cheap tier` into two aliases would invent one nobody wrote and then own the
+ * word. `--capability` and `--ruling` carry ids whose charsets exclude a
+ * comma, so splitting them is unambiguous.
+ */
+export function registerTermCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "term",
+    "Read and maintain the glossary: what a word means here, and what it is not",
+    (y) =>
+      y
+        .command(
+          "list",
+          "List the glossary. Advisory: nothing renames or refuses on a term.",
+          (y2) =>
+            addFormatOption(
+              y2
+                .option("core", { type: "boolean", describe: "Only the entries marked core" })
+                .option("thin", { type: "boolean", describe: "Only the entries missing a distinction or a capability link" })
+                .option("digest", { type: "boolean", describe: "The bounded one-line form /story loads: names only, core-first over the cap" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) =>
+              handleTermList(
+                {
+                  core: argv.core as boolean | undefined,
+                  thin: argv.thin as boolean | undefined,
+                  digest: argv.digest as boolean | undefined,
+                },
+                ctx,
+              ),
+            );
+          },
+        )
+        .command(
+          "get <id>",
+          "Show one term: its definition, the distinction that matters, and what it links to",
+          (y2) => addFormatOption(y2.positional("id", { type: "string", demandOption: true, describe: "Term ID (term-<slug>)" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) => handleTermGet(argv.id as string, ctx));
+          },
+        )
+        .command(
+          "match",
+          "Which glossary terms appear in a piece of text. Whole-word and case-insensitive; a match SUGGESTS a term and changes nothing.",
+          (y2) =>
+            addFormatOption(
+              y2.option("text", { type: "string", demandOption: true, describe: "The text to search, normally an item's title and description" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) => handleTermMatch(argv.text as string, ctx));
+          },
+        )
+        .command(
+          "check",
+          "Check every term's capability and ruling links, and flag the entries that are thin",
+          (y2) => addFormatOption(y2),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) => handleTermCheck(ctx));
+          },
+        )
+        .command(
+          "add",
+          "Add a term. One word belongs to one entry, so a name another entry already owns is refused.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .option("id", { type: "string", demandOption: true, describe: "Term ID (term-<slug>)" })
+                  .option("term", { type: "string", demandOption: true, describe: "The canonical term" })
+                  .option("definition", { type: "string", demandOption: true, describe: "One sentence: what it means here" })
+                  .option("distinction", { type: "string", describe: "One sentence: what it is NOT, or what it differs from" })
+                  .option("core", { type: "boolean", describe: "Eligible for the digest when the glossary is over its cap" })
+                  .option("added-by", { type: "string", describe: "Who filed it" }),
+                {
+                  alias: { ...LITERAL_DROP_BLANK, describe: "Another name for this term (repeatable; a comma is legal in a phrase, so repeat the flag)" },
+                  capability: { ...SPLIT_LIST, describe: "Capability ID this term belongs to (repeatable)" },
+                  ruling: { ...SPLIT_LIST, describe: "Ruling ID that settled this term (repeatable)" },
+                },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) => handleTermAdd(termWriteInput(argv), format, root));
+          },
+        )
+        .command(
+          "update <id>",
+          "Edit a term. Supplied list flags replace the stored lists.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .positional("id", { type: "string", demandOption: true, describe: "Term ID" })
+                  .option("term", { type: "string", describe: "The canonical term" })
+                  .option("definition", { type: "string", describe: "One sentence: what it means here" })
+                  .option("distinction", { type: "string", describe: "One sentence: what it is NOT" })
+                  .option("core", { type: "boolean", describe: "Mark or unmark as core" })
+                  .option("added-by", { type: "string", describe: "Who filed it" }),
+                {
+                  alias: { ...LITERAL_DROP_BLANK, describe: "Aliases, REPLACING the current list (repeatable; a comma is legal in a phrase, so repeat the flag)" },
+                  capability: { ...SPLIT_LIST, describe: "Capability IDs, replacing the current list (repeatable)" },
+                  ruling: { ...SPLIT_LIST, describe: "Ruling IDs, replacing the current list (repeatable)" },
+                },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) => handleTermUpdate({ ...termWriteInput(argv), id: argv.id as string }, format, root));
+          },
+        )
+        .command(
+          "remove <id>",
+          "Remove a term. Refused while any capability references it: the other file is never edited to make this possible.",
+          (y2) => addFormatOption(y2.positional("id", { type: "string", demandOption: true, describe: "Term ID" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) => handleTermRemove(argv.id as string, format, root));
+          },
+        ),
+  );
+}
+
+/** Flag-to-input mapping shared by `term add` and `term update`. */
+function termWriteInput(argv: Record<string, unknown>): TermWriteInput {
+  return {
+    id: argv.id as string,
+    term: argv.term as string | undefined,
+    aliases: argv.alias as string[] | undefined,
+    definition: argv.definition as string | undefined,
+    distinction: argv.distinction as string | undefined,
+    capabilities: argv.capability as string[] | undefined,
+    rulings: argv.ruling as string[] | undefined,
+    core: argv.core as boolean | undefined,
+    addedBy: argv["added-by"] as string | undefined,
+  };
 }

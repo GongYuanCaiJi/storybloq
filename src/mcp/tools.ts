@@ -163,6 +163,13 @@ import {
   handleCapabilityUpdate,
   handleCapabilityCheck,
 } from "../cli/commands/capability.js";
+import {
+  handleTermList,
+  handleTermGet,
+  handleTermMatch,
+  handleTermAdd,
+  handleTermUpdate,
+} from "../cli/commands/term.js";
 import { CAPABILITY_STATUSES } from "../models/capability.js";
 import { RULING_ATTRIBUTIONS } from "../models/ruling.js";
 // T-474: no MCP list tool, same reasoning and same ruling as T-473's
@@ -1448,6 +1455,72 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
     handleCapabilityCheck({ stamp: args.stamp, stampAll: args.stampAll }, "md", ctx.root, ctx)));
+
+  // --- Glossary tools (T-524) ---
+  // Five leaves, not six: `term remove` stays CLI-only, the same ruling that
+  // keeps every destructive catalog operation off MCP.
+  // Descriptions carry only what a caller cannot infer from the name: that a
+  // match is advisory, that list has a bound, that one word belongs to one
+  // entry, and that supplied lists replace.
+
+  server.registerTool("storybloq_term_match", {
+    description:
+      "Which glossary terms appear in a title and description. Whole-word and case-insensitive. ADVISORY: a match " +
+      "suggests the canonical term and its distinction, and renames, rewrites or refuses nothing.",
+    inputSchema: {
+      text: z.string().min(1).describe("The text to search, normally an item's title and description"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTermMatch(args.text, ctx)));
+
+  server.registerTool("storybloq_term_list", {
+    description:
+      "List the glossary. digest is the bounded form: names only, every name at or under the cap and core-only " +
+      "above it, with counts for what was left out.",
+    inputSchema: {
+      core: z.boolean().optional().describe("Only entries marked core"),
+      thin: z.boolean().optional().describe("Only entries missing a distinction or a capability link"),
+      digest: z.boolean().optional().describe("Bounded names-only payload"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTermList({ core: args.core, thin: args.thin, digest: args.digest }, ctx)));
+
+  server.registerTool("storybloq_term_get", {
+    description: "Get one term: its definition, the distinction that matters, and the capabilities and rulings behind it.",
+    inputSchema: {
+      id: z.string().describe("Term ID (term-<slug>)"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleTermGet(args.id, ctx)));
+
+  server.registerTool("storybloq_term_add", {
+    description:
+      "Add a term. One word belongs to one entry, so a term or alias another entry already owns is refused naming " +
+      "that entry.",
+    inputSchema: {
+      id: z.string().describe("term-<slug>"),
+      term: z.string().min(1).describe("The canonical term"),
+      definition: z.string().min(1).describe("One sentence: what it means here"),
+      distinction: z.string().optional().describe("One sentence: what it is NOT, or what it differs from"),
+      aliases: z.array(z.string()).optional().describe("Other names for it"),
+      capabilities: z.array(z.string()).optional().describe("Capability IDs it belongs to"),
+      rulings: z.array(z.string()).optional().describe("Ruling IDs that settled it"),
+      core: z.boolean().optional().describe("Eligible for the digest when the glossary is over its cap"),
+      addedBy: z.string().optional().describe("Who filed it"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) => handleTermAdd(args, format, root)));
+
+  server.registerTool("storybloq_term_update", {
+    description: "Edit a term. Supplied lists REPLACE the stored ones.",
+    inputSchema: {
+      id: z.string().describe("Term ID"),
+      term: z.string().min(1).optional(),
+      definition: z.string().min(1).optional(),
+      distinction: z.string().optional(),
+      aliases: z.array(z.string()).optional().describe("Replaces the stored aliases"),
+      capabilities: z.array(z.string()).optional(),
+      rulings: z.array(z.string()).optional(),
+      core: z.boolean().optional(),
+      addedBy: z.string().optional(),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) => handleTermUpdate(args, format, root)));
 
   // --- Gate-ack tools (T-474) ---
   // No storybloq_gate_ack_list, same ruling and reasoning as T-473's

@@ -2,6 +2,8 @@ import { formatExport, escapeMarkdownDocumentStrict } from "../../core/output-fo
 import { CatalogLoadError } from "../../core/catalog.js";
 import { capabilityCatalog, catalogPath, catalogText } from "./capability.js";
 import type { Capability } from "../../models/capability.js";
+import { glossaryCatalog } from "../../core/glossary.js";
+import type { Term } from "../../models/glossary.js";
 import { CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
 
@@ -76,11 +78,15 @@ function capabilitySection(root: string): { md: string[]; json: unknown } {
 }
 
 /**
- * Splices the section into the JSON envelope rather than concatenating it.
+ * Splices a section into the JSON envelope rather than concatenating it.
  * `applyHandlerWarnings` in run.ts already adds a key to this same envelope the
  * same way, so a second writer doing it differently would be the drift.
+ *
+ * Takes the KEY as an argument since T-524: the glossary splices into the same
+ * envelope, and a second copy of this function differing only in one string
+ * literal is how two writers come to disagree about the envelope's shape.
  */
-function withCapabilitiesJson(output: string, capabilities: unknown): string {
+export function withSectionJson(output: string, key: string, value: unknown): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -91,7 +97,56 @@ function withCapabilitiesJson(output: string, capabilities: unknown): string {
   const envelope = parsed as Record<string, unknown>;
   const data = envelope.data;
   if (data === null || typeof data !== "object" || Array.isArray(data)) return output;
-  return JSON.stringify({ ...envelope, data: { ...(data as Record<string, unknown>), capabilities } }, null, 2);
+  return JSON.stringify({ ...envelope, data: { ...(data as Record<string, unknown>), [key]: value } }, null, 2);
+}
+
+/**
+ * T-524: the glossary in the same document.
+ *
+ * Same escaping discipline as the inventory above, and for the same reason:
+ * this is a Markdown document handed to somebody else, so every stored string
+ * goes through the sanitizing choke point and then the document-grade escape.
+ *
+ * No status to render and no freshness caveat to add: a term is true or it is
+ * wrong, and neither is something a commit makes stale. What the section does
+ * carry is the advisory line, because a reader who takes a glossary for a
+ * naming rule has read it wrong.
+ *
+ * `--phase` exports do not carry it, for the inventory's reason exactly: the
+ * glossary is project-wide and has no phase to be scoped by.
+ */
+function glossarySection(root: string): { md: string[]; json: unknown } {
+  let entries: readonly Term[];
+  try {
+    entries = glossaryCatalog.load(root).doc.terms;
+  } catch (err: unknown) {
+    if (err instanceof CatalogLoadError) {
+      return {
+        md: ["## Glossary", "", `_Not included: ${escapeMarkdownDocumentStrict(err.message)}._`],
+        json: { unavailable: err.message },
+      };
+    }
+    throw err;
+  }
+  if (entries.length === 0) {
+    return { md: ["## Glossary", "", "_No glossary yet._"], json: [] };
+  }
+  const text = (value: string): string => catalogText(value, escapeMarkdownDocumentStrict);
+  const sorted = [...entries].sort((a, b) => (a.term < b.term ? -1 : a.term > b.term ? 1 : 0));
+  const md = [
+    `## Glossary (${sorted.length})`,
+    "",
+    "_Terms are advisory: they say what a word means here, and nothing renames, rewrites or refuses on one._",
+  ];
+  for (const entry of sorted) {
+    md.push("", `### ${text(entry.term)} (${text(entry.id)})${entry.core === true ? " [core]" : ""}`);
+    md.push("", text(entry.definition));
+    if (entry.distinction) md.push("", `- Not: ${text(entry.distinction)}`);
+    if (entry.aliases?.length) md.push(`- Also called: ${entry.aliases.map((a) => text(a)).join(", ")}`);
+    if (entry.capabilities?.length) md.push(`- Capabilities: ${entry.capabilities.map((c) => text(c)).join(", ")}`);
+    if (entry.rulings?.length) md.push(`- Rulings: ${entry.rulings.map((r) => text(r)).join(", ")}`);
+  }
+  return { md, json: sorted };
 }
 
 export function handleExport(
@@ -113,7 +168,10 @@ export function handleExport(
   const output = formatExport(ctx.state, mode, phaseId, ctx.format);
   if (mode !== "all") return { output };
 
-  const section = capabilitySection(ctx.root);
-  if (ctx.format === "json") return { output: withCapabilitiesJson(output, section.json) };
-  return { output: `${output}\n\n${section.md.join("\n")}` };
+  const capabilities = capabilitySection(ctx.root);
+  const glossary = glossarySection(ctx.root);
+  if (ctx.format === "json") {
+    return { output: withSectionJson(withSectionJson(output, "capabilities", capabilities.json), "glossary", glossary.json) };
+  }
+  return { output: `${output}\n\n${capabilities.md.join("\n")}\n\n${glossary.md.join("\n")}` };
 }

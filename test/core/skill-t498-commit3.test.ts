@@ -89,11 +89,12 @@ describe("T-498 Commit 3: SKILL.md live text flip", () => {
   describe("byte budget", () => {
     // The number is duplicated from skill-mode-budget.test.ts's CEILINGS row
     // rather than imported, so it has to be re-pinned in both places. T-523
-    // moved it 56,000 -> 57,000; the reasoning lives on the CEILINGS row,
-    // which is the authoritative one.
-    it("SKILL.md stays at or under the 57,000-byte ceiling (see skill-mode-budget.test.ts)", () => {
+    // moved it 56,000 -> 57,000 and T-524 moved it 57,000 -> 58,000; the
+    // reasoning lives on the CEILINGS row, which is the authoritative one.
+    // A duplicate that has to be found by a failing suite is ISS-1288.
+    it("SKILL.md stays at or under the 58,000-byte ceiling (see skill-mode-budget.test.ts)", () => {
       const size = readFileSync(SKILL_PATH).length;
-      expect(size).toBeLessThanOrEqual(57000);
+      expect(size).toBeLessThanOrEqual(58000);
     });
   });
 });

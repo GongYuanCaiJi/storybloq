@@ -14,6 +14,8 @@ import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
 import { readDuetCoordination } from "../../core/duet-coordination.js";
 import { TICKET_ID_REGEX, TICKET_CANONICAL_ID_REGEX, ISSUE_ID_REGEX, ISSUE_CANONICAL_ID_REGEX } from "../../models/types.js";
 import { sanitizeDisplayText } from "../../core/display-text.js";
+import { glossaryCatalog } from "../../core/glossary.js";
+import { withSectionJson } from "./export.js";
 import type { ProjectState } from "../../core/project-state.js";
 import type { ResolvedNode } from "../../federation/resolver.js";
 import type { StatusRoster } from "../../core/roster-view.js";
@@ -303,19 +305,58 @@ export async function handleStatus(
   // Compact output carries no roster (T-320's pinned schema), so nothing is
   // read for it: with the Bus on, the read is up to a scan cap of probes.
   const roster = opts.compact ? undefined : await statusRoster(ctx.root, ctx.state, null);
-  return {
-    output: formatStatus(
-      ctx.state,
-      ctx.format,
-      activeSessions,
-      resumableSessions,
-      bus,
-      limitStops,
-      sessionDiagnostics,
-      expiredLeaseSessions,
-      arrangements,
-      opts.compact ?? false,
-      roster,
-    ),
-  };
+  const output = formatStatus(
+    ctx.state,
+    ctx.format,
+    activeSessions,
+    resumableSessions,
+    bus,
+    limitStops,
+    sessionDiagnostics,
+    expiredLeaseSessions,
+    arrangements,
+    opts.compact ?? false,
+    roster,
+  );
+  return { output: withGlossaryCounts(output, ctx.format, opts.compact === true, ctx.root) };
+}
+
+/**
+ * T-524: the glossary's size, in the JSON payload only.
+ *
+ * COUNTS, NEVER ENTRIES. Status is loaded at the top of every session, so the
+ * thing it may carry about a catalog is how big it is -- the signal that says
+ * whether to call `term list` at all. The names themselves are
+ * `storybloq_term_list {digest:true}`, which is bounded; a status that grew
+ * with the glossary would be the unbounded load G-C exists to prevent.
+ *
+ * Markdown is untouched. The human-facing summary is already dense, and a term
+ * count is not something a reader acts on; the agent reading JSON is.
+ *
+ * COMPACT is untouched too: T-320 pinned that payload as a REDUCED one, and a
+ * field added to it would make the reduction mean something different from
+ * what its schema says.
+ *
+ * Spliced rather than passed to `formatStatus`, using the same helper `export`
+ * uses, so the two catalog-carrying surfaces agree on the envelope's shape
+ * instead of each adding a key their own way.
+ *
+ * The FEDERATED payload above does not get the key, deliberately. That reading
+ * is a roll-up across nodes, and a bare `glossary` count in it would be read as
+ * the federation's when it could only ever be the orchestrator repo's; a node's
+ * own glossary is reported by that node's own status.
+ *
+ * Never throws. A broken or absent glossary leaves status exactly as it was:
+ * this is a count beside the real payload, and it must not be able to take the
+ * session's first read down with it. `storybloq validate` and `term check`
+ * report the file's own state.
+ */
+function withGlossaryCounts(output: string, format: string, compact: boolean, root: string): string {
+  if (format !== "json" || compact) return output;
+  try {
+    const terms = glossaryCatalog.load(root).doc.terms;
+    return withSectionJson(output, "glossary", { terms: terms.length, core: terms.filter((t) => t.core === true).length });
+  } catch {
+    return output;
+  }
 }

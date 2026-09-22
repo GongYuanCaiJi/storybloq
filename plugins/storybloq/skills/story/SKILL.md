@@ -190,7 +190,7 @@ Call these in order:
 3. **Recent handovers** -- call `storybloq_handover_latest` twice: `count: 1, priming: true` (for line one's verbatim quote) and `count: 10, brief: true` (structured records plus trajectory)
 4. **Development rules** -- read `RULES.md` if it exists in the project root
 5. **Recent commits** -- run `git log --oneline -10` (lessons: call `storybloq_lesson_digest` on demand)
-6. **Capability digest** -- `storybloq_capability_list` with `skipCheck: true`: what the project can already DO. A task matching an entry changes that capability rather than adding one
+6. **Capability digest** -- `storybloq_capability_list` with `skipCheck: true`: what the project can already DO. A task matching an entry changes that capability rather than adding one. Then `storybloq_term_list` with `digest: true` for the glossary's NAMES (bounded: all of them when there are 40 or fewer, only the ones marked `core` above 40). When `omittedCore` or `omittedNonCore` is non-zero the list is not the whole glossary, so say so and use `storybloq_term_get` for anything else you need rather than assuming a word is undefined
 7. **Tooling health** -- once per session call `storybloq_health`; relay each `advise` and its fix verbatim before the summary; nothing when all are ok or skip; never offer fixes
 
 ## Step 2b: Empty Scaffold Check
@@ -423,6 +423,14 @@ Create notes via CLI: `storybloq note create --content "..." --tags idea`
 Create notes via MCP: `storybloq_note_create` with `content`, optional `title` and `tags`.
 
 List, get, and update notes via MCP: `storybloq_note_list`, `storybloq_note_get`, `storybloq_note_update`. Delete remains CLI-only: `storybloq note delete <id>`.
+
+## Glossary
+
+The glossary answers what a word means HERE and what it is NOT: a canonical term, a one-line definition, the distinction that matters, and the capability it belongs to. Step 2 loads names only; `storybloq_term_get` with an `id` fetches one entry.
+
+**Advisory, always.** A match SUGGESTS. It renames nothing, rewrites nothing, and refuses nothing, and no gate consults it. `storybloq_term_match` with `text` set to an item's title and description tells you which terms a brief should define.
+
+**Filing one.** `storybloq term add --id term-<slug> --term "<word>" --definition "<one sentence>" --distinction "<what it is NOT>" --capability cap-<slug>`. One word belongs to one entry, so a term or alias another entry already owns is refused naming that entry. An entry with no distinction or no capability link is THIN: `term check` and `storybloq validate` warn, never error.
 
 ## Settings (/story settings)
 

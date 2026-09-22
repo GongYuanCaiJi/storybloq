@@ -410,6 +410,20 @@ function addCap(dir: string, ...extra: string[]): { code: number; out: string } 
   return addCapAs(dir, "cap-thing", ...extra);
 }
 
+function terms(dir: string): Array<Record<string, never> & {
+  id: string; term: string; aliases?: string[]; capabilities?: string[]; rulings?: string[];
+}> {
+  const raw = readFileSync(join(dir, ".story", "glossary.json"), "utf-8");
+  return (JSON.parse(raw) as { terms: never[] }).terms;
+}
+
+/** `term add` with the three required flags plus whatever a row is testing. */
+function addTerm(dir: string, ...extra: string[]): { code: number; out: string } {
+  return run(dir, "term", "add",
+    "--id", "term-pen", "--term", "pen",
+    "--definition", "The session model that owns the judgement gates.", ...extra);
+}
+
 const MATRIX: Coverage[] = [
   {
     key: "capability add --entry",
@@ -618,6 +632,62 @@ const MATRIX: Coverage[] = [
       expect(lit.code, lit.out).toBe(0);
       const litIds = (JSON.parse(lit.out) as { data: { matches: Array<{ id: string }> } }).data.matches.map((m) => m.id);
       expect(litIds).toEqual(["cap-comma"]);
+    },
+  },
+  {
+    key: "term add --alias",
+    check: (dir) => {
+      const res = addTerm(dir, "--alias", "pen tier", "--alias", "the pen, as filed");
+      expect(res.code, res.out).toBe(0);
+      // An alias is a WORD OR SHORT PHRASE a reader might write, and a phrase can
+      // contain a comma. Splitting it would mint an alias nobody wrote, which the
+      // matcher would then claim this entry owns.
+      expect(terms(dir)[0]!.aliases).toEqual(["pen tier", "the pen, as filed"]);
+    },
+  },
+  {
+    key: "term add --capability",
+    check: (dir) => {
+      const res = addTerm(dir, "--capability", "cap-orchestrate,cap-review");
+      expect(res.code, res.out).toBe(0);
+      expect(terms(dir)[0]!.capabilities).toEqual(["cap-orchestrate", "cap-review"]);
+    },
+  },
+  {
+    key: "term add --ruling",
+    check: (dir) => {
+      const res = addTerm(dir, "--ruling", "r-aaaaaaaaaaaaaaaa,r-bbbbbbbbbbbbbbbb");
+      expect(res.code, res.out).toBe(0);
+      expect(terms(dir)[0]!.rulings).toEqual(["r-aaaaaaaaaaaaaaaa", "r-bbbbbbbbbbbbbbbb"]);
+    },
+  },
+  {
+    key: "term update --alias",
+    check: (dir) => {
+      expect(addTerm(dir, "--alias", "pen tier").code, "seed").toBe(0);
+      const res = run(dir, "term", "update", "term-pen", "--alias", "the pen, as filed");
+      expect(res.code, res.out).toBe(0);
+      // The supplied list REPLACES the stored one, so the seeded alias is gone
+      // and the comma survived: one alias, not two, and not three.
+      expect(terms(dir)[0]!.aliases).toEqual(["the pen, as filed"]);
+    },
+  },
+  {
+    key: "term update --capability",
+    check: (dir) => {
+      expect(addTerm(dir, "--capability", "cap-old").code, "seed").toBe(0);
+      const res = run(dir, "term", "update", "term-pen", "--capability", "cap-orchestrate,cap-review");
+      expect(res.code, res.out).toBe(0);
+      expect(terms(dir)[0]!.capabilities).toEqual(["cap-orchestrate", "cap-review"]);
+    },
+  },
+  {
+    key: "term update --ruling",
+    check: (dir) => {
+      expect(addTerm(dir, "--ruling", "r-cccccccccccccccc").code, "seed").toBe(0);
+      const res = run(dir, "term", "update", "term-pen", "--ruling", "r-aaaaaaaaaaaaaaaa,r-bbbbbbbbbbbbbbbb");
+      expect(res.code, res.out).toBe(0);
+      expect(terms(dir)[0]!.rulings).toEqual(["r-aaaaaaaaaaaaaaaa", "r-bbbbbbbbbbbbbbbb"]);
     },
   },
   {

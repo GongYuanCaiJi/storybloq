@@ -57,6 +57,13 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **capability add** (--id, --name, --summary, --entry, --contract, --example?, --cli?, --mcp-tool?, --app?, --surface-file?, --ruling?, --item?, --term?, --status?, --format?) - Add a capability. Stamps the checkpoint at HEAD, so it records that the entry points were actually read
 - **capability update <id>** (--name?, --summary?, --entry?, --contract?, --example?, --cli?, --mcp-tool?, --app?, --surface-file?, --ruling?, --item?, --term?, --status?, --format?) - Edit a capability. Supplied list flags replace the stored lists; the checkpoint is never touched, because an edit is not an inspection
 - **capability check** (--stamp?, --stamp-all?, --format?) - Check every capability against HEAD; --stamp re-records the checkpoint after re-reading an entry. Refused for a structural finding, which a new sha would hide rather than fix
+- **term list** (--core?, --thin?, --digest?, --format?) - List the glossary: what a word means here, and what it is not. Advisory throughout, so nothing here renames, rewrites or refuses on a term
+- **term get <id>** (--format?) - Show one term: its definition, the distinction that matters, and the capabilities and rulings behind it
+- **term match** (--text, --format?) - Which glossary terms appear in a piece of text. Whole-word and case-insensitive; a match SUGGESTS a term and changes nothing
+- **term check** (--format?) - Check every term's capability and ruling links, and flag the thin entries: no distinction, or no capability link
+- **term add** (--id, --term, --definition, --distinction?, --alias?, --capability?, --ruling?, --core?, --added-by?, --format?) - Add a term. One word belongs to one entry, so a name another entry already owns is refused rather than shared
+- **term update <id>** (--term?, --definition?, --distinction?, --alias?, --capability?, --ruling?, --core?, --added-by?, --format?) - Edit a term. Supplied list flags replace the stored lists
+- **term remove <id>** (--format?) - Remove a term. Refused while a capability references it: the other file is never edited to make this possible
 - **ruling list** (--scope-tag?, --superseded?, --format?) - List owner-ruling attestation records
 - **ruling get <id>** (--format?) - Get a ruling by ID
 - **ruling create** (--text, --attribution, --date, --client-task-id?, --scope-tag?, --cites?, --format?) - Record a ruling verbatim and cite it from the tickets or issues it binds
@@ -212,6 +219,11 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_capability_add** (id, name, summary, entryPoints, contract, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Add a capability; stamps the checkpoint at HEAD, recording that its entry points were read
 - **storybloq_capability_update** (id, name?, summary?, entryPoints?, contract?, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Edit a capability; supplied lists replace stored ones and the checkpoint is never touched
 - **storybloq_capability_check** (stamp?, stampAll?) - Check every capability against HEAD; stamp re-records the checkpoint, refused for a structural or incomplete finding
+- **storybloq_term_match** (text) - Which glossary terms appear in a piece of text. Whole-word, case-insensitive and advisory: a match suggests a term and changes nothing
+- **storybloq_term_list** (core?, thin?, digest?) - List the glossary, or its bounded names-only digest (core-first over the cap)
+- **storybloq_term_get** (id) - Get one term: definition, distinction, and the capabilities and rulings behind it
+- **storybloq_term_add** (id, term, definition, distinction?, aliases?, capabilities?, rulings?, core?, addedBy?) - Add a glossary term; a name another entry already owns is refused
+- **storybloq_term_update** (id, term?, definition?, distinction?, aliases?, capabilities?, rulings?, core?, addedBy?) - Edit a glossary term; supplied lists replace the stored ones
 - **storybloq_ruling_list** (scopeTag?, superseded?) - List rulings, optionally filtered by scope tag or superseded state
 - **storybloq_ruling_get** (id) - Get a ruling by ID
 - **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?, clientTaskId?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction

@@ -293,6 +293,14 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 
 `--format json` is the round-trip-safe format for editing a ticket description, issue impact, or note/lesson content: piping a `get`'s md rendering into `update --stdin` carries the render fence itself into storage (ISS-1192), since md wraps that field's content in code-fence backticks one longer than any run already inside it. `update` strips a whole-value 4+ backtick outer fence with no info string and warns when it does; `get --format json` never has this problem, since the field is a plain JSON string.
 
+### Glossary
+
+| Command | Description |
+|---------|-------------|
+| `storybloq term list [--core] [--thin] [--digest]` · `term get` · `term match --text` | Read the glossary; `--digest` is the bounded names-only form a session load takes |
+| `storybloq term add` · `term update` · `term remove` | Maintain it; `remove` is refused while a capability references the term |
+| `storybloq term check` | Check every term's links and flag the thin entries (no distinction, or no capability link) |
+
 ### Handovers, blockers, snapshots
 
 | Command | Description |
@@ -363,13 +371,13 @@ Full-project tools are grouped below. Bus tools are registered even before Bus s
 
 ### Project queries
 
-`storybloq_status` · `storybloq_phase_list` · `storybloq_phase_current` · `storybloq_phase_tickets` · `storybloq_ticket_list` · `storybloq_ticket_get` · `storybloq_ticket_meta_get` · `storybloq_ticket_next` · `storybloq_ticket_blocked` · `storybloq_issue_list` · `storybloq_issue_get` · `storybloq_issue_meta_get` · `storybloq_note_list` · `storybloq_note_get` · `storybloq_lesson_list` · `storybloq_lesson_get` · `storybloq_lesson_digest` · `storybloq_handover_list` · `storybloq_handover_latest` · `storybloq_handover_get` · `storybloq_blocker_list` · `storybloq_validate` · `storybloq_recap` · `storybloq_recommend` · `storybloq_export`
+`storybloq_status` · `storybloq_phase_list` · `storybloq_phase_current` · `storybloq_phase_tickets` · `storybloq_ticket_list` · `storybloq_ticket_get` · `storybloq_ticket_meta_get` · `storybloq_ticket_next` · `storybloq_ticket_blocked` · `storybloq_issue_list` · `storybloq_issue_get` · `storybloq_issue_meta_get` · `storybloq_note_list` · `storybloq_note_get` · `storybloq_lesson_list` · `storybloq_lesson_get` · `storybloq_lesson_digest` · `storybloq_term_list` · `storybloq_term_get` · `storybloq_term_match` · `storybloq_handover_list` · `storybloq_handover_latest` · `storybloq_handover_get` · `storybloq_blocker_list` · `storybloq_validate` · `storybloq_recap` · `storybloq_recommend` · `storybloq_export`
 
 Some queries also refresh gitignored runtime or presence metadata. `storybloq_selftest` is a diagnostic that creates, updates, and deletes temporary records.
 
 ### Write (mutate `.story/`)
 
-`storybloq_snapshot` · `storybloq_handover_create` · `storybloq_ticket_create` · `storybloq_ticket_update` · `storybloq_ticket_meta_set` · `storybloq_ticket_meta_unset` · `storybloq_issue_create` · `storybloq_issue_update` · `storybloq_issue_meta_set` · `storybloq_issue_meta_unset` · `storybloq_note_create` · `storybloq_note_update` · `storybloq_lesson_create` · `storybloq_lesson_update` · `storybloq_lesson_reinforce` · `storybloq_phase_create`
+`storybloq_snapshot` · `storybloq_handover_create` · `storybloq_ticket_create` · `storybloq_ticket_update` · `storybloq_ticket_meta_set` · `storybloq_ticket_meta_unset` · `storybloq_issue_create` · `storybloq_issue_update` · `storybloq_issue_meta_set` · `storybloq_issue_meta_unset` · `storybloq_note_create` · `storybloq_note_update` · `storybloq_lesson_create` · `storybloq_lesson_update` · `storybloq_lesson_reinforce` · `storybloq_term_add` · `storybloq_term_update` · `storybloq_phase_create`
 
 ### Autonomous mode + review + observability
 
@@ -519,6 +527,23 @@ Full type definitions ship with the package (`exports.types`).
   "relatedTickets": []
 }
 ```
+
+**Glossary term** (one entry of `terms` in `.story/glossary.json`):
+
+```json
+{
+  "id": "term-pen",
+  "term": "pen",
+  "aliases": ["pen tier"],
+  "definition": "The session model that owns the judgement gates and files the ledger.",
+  "distinction": "Not the inspector, which reviews, and not hands, which implement.",
+  "capabilities": ["cap-orchestrate"],
+  "core": true,
+  "updatedAt": "2026-09-21T18:44:42.000Z"
+}
+```
+
+The glossary is one file, `{ "version": 1, "terms": [...] }`, unlike tickets and issues which are a file per record: it is read whole or not at all, and a single file is what lets one word belong to one entry. It is ADVISORY. A term match suggests the definition a brief should carry and never renames an item, rewrites a description or refuses a write; nothing in Storybloq consults it as a rule. Ownership is compared case-insensitively under Unicode NFKC across both `term` and `aliases`, so `term add` refuses a name another entry already owns and names that entry rather than letting two definitions share a word. An entry with no `distinction` or no `capabilities` link is THIN: `storybloq term check` and `storybloq validate` report it as a warning, never an error. `core` makes a term eligible for the digest a session load takes once the glossary is over its cap of 40 names; the digest stays capped, and core terms beyond it are counted in `omittedCore` rather than listed.
 
 Each record is its own file. Legacy records keep display-ID filenames such as `T-001.json`; newer records use canonical hash filenames such as `t-*.json` with a separate `displayId`. Both forms coexist and are updated in place. Display IDs are sequential within type, but concurrent branches can collide and need reconciliation. Use `git status --porcelain .story/` to identify files to stage. Relationships are single-canonical-owner: a ticket's `blockedBy` field points at blocker tickets, and the reverse (who-blocks-me) is derived by scanning.
 

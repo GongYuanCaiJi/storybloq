@@ -403,12 +403,37 @@ describe("tool description contract (T-460)", () => {
     // 71,000 is that floor plus deliberate headroom: a ratchet whose headroom
     // is smaller than one feature's worth of contract is a tripwire for
     // whoever arrives next rather than a budget.
+    // T-524 raises this from 71,000 to 76,000 for the five glossary tools, and
+    // records BOTH measurements the raise rests on, per T-523's floor rule.
+    // Measured: 69,567 without them (the payload as it stood), 72,748 as first
+    // written, 72,696 after trimming the two sentences that were prose rather
+    // than contract -- "a session load wants" on list, and "omitted fields are
+    // left alone" on update, which is inferable from the word update. That is
+    // a 52-byte trim on a 3,181-byte surface, and the smallness is the honest
+    // finding rather than a shortfall: these five descriptions were written
+    // under T-523's rule already, so each carries only what a caller cannot
+    // infer from the tool's name (the match is advisory, the digest has a cap
+    // with core-only above it, one word belongs to one entry, supplied lists
+    // replace). Cutting further would cut contract, which the cues above exist
+    // to prevent. Then 72,703, seven bytes back, when review found the `core`
+    // parameter claiming a core term always loads: above the cap the digest is
+    // still capped and the excess core terms are only counted, so the text now
+    // says "eligible". A true 7 bytes over a false 0. So 72,703 is the floor
+    // for this surface.
+    //
+    // The headroom is 3,297 bytes, chosen as roughly what this feature itself
+    // cost (3,136 for five tools) rather than as a round number. T-523 wrote
+    // down the rule that a ratchet whose headroom is smaller than one
+    // feature's worth of contract is a tripwire for whoever arrives next, and
+    // then left 1,473 against a 5,900-byte addition; this is the first raise
+    // to actually size the headroom by that rule.
+    //
     // Raising this is a deliberate act that belongs in a commit message, which
     // is the point. Deliberately NO lower bound: the cues above are what
     // protect against over-trimming, and a floor would fail an honest future
     // trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(71_000);
+    expect(bytes).toBeLessThan(76_000);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -446,7 +471,12 @@ describe("tool description contract (T-460)", () => {
     // leaves reach MCP, `list` included: the ruling that kept arrangement,
     // gate-ack and earmark lists CLI-only rested on their consumer being a
     // human at a terminal, and the capability inventory's consumer is the
-    // agent deciding whether a task is already built.
-    expect(result.tools.length).toBe(85);
+    // agent deciding whether a task is already built. T-524 adds
+    // storybloq_term_match/list/get/add/update (85 -> 90): FIVE, not six --
+    // `term remove` stays CLI-only under the standing ruling that keeps
+    // destructive catalog operations off MCP, and unlike the arrangement and
+    // gate-ack cases `list` does reach MCP here for the same reason the
+    // capability list did, since the agent reading a brief is the consumer.
+    expect(result.tools.length).toBe(90);
   });
 });
