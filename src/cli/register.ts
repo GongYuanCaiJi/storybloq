@@ -3135,6 +3135,53 @@ export function parsePartySpec(spec: string): ArrangementParty {
   };
 }
 
+/** N-131: `storybloq duet spawn`, the pen starts a visible worker session. */
+export function registerDuetCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "duet",
+    "Duet-mode worker sessions",
+    (y) =>
+      y
+        .command(
+          "spawn",
+          "Start a worker session in a new terminal window (the OS opens it; nothing else is required)",
+          (y2) => addFormatOption(y2
+            .option("name", { type: "string", demandOption: true, describe: "Worker session name; the address the pen messages" })
+            .option("pen", { type: "string", demandOption: true, describe: "The pen's own session name, written into the worker's role" })
+            .option("model", { type: "string", describe: "Model id or alias for `claude --model`; pin it deliberately" })
+            .option("dir", { type: "string", describe: "Directory the worker starts in (default: this project)" })
+            .option("role", { type: "string", describe: "Role file to use instead of the generated default" })
+            .option("terminal", { type: "string", describe: "macOS: open with this terminal app instead of the default handler" })
+            .option("print", { type: "boolean", default: false, describe: "Write the script and role, print the command, launch nothing" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            try {
+              const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+              if (!root) throw new CliValidationError("not_found", "No .story/ project found.");
+              const { handleDuetSpawn } = await import("./commands/duet-spawn.js");
+              const result = handleDuetSpawn({
+                name: argv.name as string,
+                pen: argv.pen as string,
+                model: argv.model as string | undefined,
+                dir: argv.dir as string | undefined,
+                role: argv.role as string | undefined,
+                terminal: argv.terminal as string | undefined,
+                print: argv.print as boolean,
+              }, format, root);
+              writeOutput(result.output);
+              process.exitCode = result.exitCode ?? ExitCode.OK;
+            } catch (error) {
+              const code = error instanceof CliValidationError ? error.code : "io_error";
+              writeOutput(formatError(code, error instanceof Error ? error.message : String(error), format));
+              process.exitCode = ExitCode.USER_ERROR;
+            }
+          },
+        )
+        .demandCommand(1, "Specify a duet subcommand"),
+    () => {},
+  );
+}
+
 export function registerArrangementCommand(yargs: Argv): Argv {
   return yargs.command(
     "arrangement",
