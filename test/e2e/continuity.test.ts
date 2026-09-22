@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { loadProject } from "../../src/core/project-loader.js";
 import { handleValidate } from "../../src/cli/commands/validate.js";
+import { handleExport } from "../../src/cli/commands/export.js";
 import { citationsForReviewTarget } from "../../src/autonomous/cited-rulings.js";
 import { guardPlanNamesCitedRulings } from "../../src/autonomous/plan-pin-guard.js";
 import { loadRulingsSafe } from "../../src/core/ruling-loader.js";
@@ -141,7 +142,6 @@ describe("continuity cases owned by later 1.16.0 tickets (RED evidence recorded 
   it.todo("7n EXISTING negative: a grep transcript in the EXISTING line is a plan-review finding; asserts the reviewer prompt line (T-526; entry: PLAN_REVIEW instruction text)");
   it.todo("8 completion: T-3 move marks cap-logging review at FINALIZE; a report without knowledgeImpact is retried; stale-reference advances and lands in the handover (T-527)");
   it.todo("9 arm 2 subset: with the capability file removed, cases 1 to 5 and 7 pass and the disclosure says no capability inventory (T-526)");
-  it.todo("10x export half of case 10: the Decisions section of `export` renders R4 under Proposed (T-522 commit 2b)");
   it.todo("14 context manifest change detection on resume, replan and CODE_REVIEW entry (T-526 P-3)");
   it.todo("15 second-handoff maintenance: a disposition per impact, follow-up durable across a second session (T-527 P-1/P-2)");
 });
@@ -176,6 +176,40 @@ describe("continuity cases 3 and 10 to 13: ruling lifecycle (T-522)", () => {
     expect(proposedAt).toBeGreaterThan(md.indexOf("## Accepted"));
     expect(md.indexOf(`### ${R4} [proposed]`)).toBeGreaterThan(proposedAt);
     expect(md).toContain(`Proposals against this ruling (not binding): ${R4}`);
+  });
+
+  it("10x export half of case 10: the Decisions section renders R4 under Proposed in both scopes; a phase export follows T-2's citation of R5 forward to R1", async () => {
+    const root = withLifecycle(copy(1));
+    const all = handleExport(await ctxFor(root), "all", null).output;
+    const decisionsAt = all.indexOf("## Decisions (");
+    expect(decisionsAt).toBeGreaterThan(-1);
+    const proposedAt = all.indexOf("## Proposed (not binding)", decisionsAt);
+    expect(proposedAt).toBeGreaterThan(all.indexOf("## Accepted", decisionsAt));
+    expect(all.indexOf(`### ${R4} [proposed]`)).toBeGreaterThan(proposedAt);
+    // A proposal for nobody: in the all export, absent from p1 (proposal filtering is per phase item).
+    const q = JSON.parse((await handleRulingPropose({ text: "Q for nobody", attribution: "owner-direct", date: "2026-09-22", scopeTags: [], clientTaskId: CALLER }, "json", root)).output).data.id as string;
+    expect(handleExport(await ctxFor(root), "all", null).output).toContain(`### ${q} [proposed]`);
+    // Phase p1 holds T-1 (cites R1) and T-2 (R4 is proposed for it, cites nothing): R4 and R1 export, R5 and Q do not.
+    const phase = handleExport(await ctxFor(root), "phase", "p1").output;
+    const phaseProposedAt = phase.indexOf("## Proposed (not binding)");
+    expect(phaseProposedAt).toBeGreaterThan(phase.indexOf("## Decisions ("));
+    expect(phase.indexOf(`### ${R4} [proposed]`)).toBeGreaterThan(phaseProposedAt);
+    expect(phase).toContain(`### ${R1} [accepted-legacy]`);
+    expect(phase).not.toContain(`### ${MAP.rulings.R5}`);
+    expect(phase).not.toContain(q);
+    // T-1 stops citing R1, R4 stops proposing against it, and T-2 cites the superseded R5: R1 can now only arrive by forward traversal from R5, and each appears once.
+    const r4Path = join(root, ".story", "rulings", `${R4}.json`);
+    writeFileSync(r4Path, JSON.stringify({ ...JSON.parse(readFileSync(r4Path, "utf-8")), proposesToSupersede: null }, null, 2));
+    const t1 = join(root, ".story", "tickets", "T-1.json");
+    writeFileSync(t1, JSON.stringify({ ...JSON.parse(readFileSync(t1, "utf-8")), citesRulings: [] }, null, 2));
+    const t = join(root, ".story", "tickets", "T-2.json");
+    writeFileSync(t, JSON.stringify({ ...JSON.parse(readFileSync(t, "utf-8")), citesRulings: [MAP.rulings.R5] }, null, 2));
+    const cited = handleExport(await ctxFor(root), "phase", "p1").output;
+    expect(cited.split(`### ${MAP.rulings.R5} [superseded]`).length).toBe(2);
+    expect(cited.split(`### ${R1} [accepted-legacy]`).length).toBe(2);
+    expect(cited.split(`### ${R1} `).length).toBe(2);
+    expect(cited).toContain(`### ${R4} [proposed]`);
+    expect(cited).not.toContain(q);
   });
 
   it("10 lifecycle isolation matrix, per operation per reader: get, incoming citation, list JSON, create-against, old reader", async () => {

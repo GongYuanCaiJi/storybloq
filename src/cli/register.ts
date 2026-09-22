@@ -128,8 +128,15 @@ import {
   handleRulingGet,
   handleRulingCreate,
   handleRulingSupersede,
+  handleRulingPropose,
+  handleRulingAccept,
+  handleRulingWithdraw,
+  RULING_LIFECYCLES,
+  type NarrativeArgs,
 } from "./commands/ruling.js";
 import { RULING_ATTRIBUTIONS } from "../models/ruling.js";
+import type { OutputFormat as RulingOutputFormat } from "../models/types.js";
+import type { CommandResult as RulingCommandResult } from "./types.js";
 import { handleLandings } from "./commands/landings.js";
 import {
   handleGateAckGet,
@@ -3430,6 +3437,53 @@ export function registerArrangementCommand(yargs: Argv): Argv {
 // ruling (T-476)
 // ---------------------------------------------------------------------------
 
+/** T-522: the four narrative fields a ruling may carry beside its verbatim text. Labelled, never merged into the quote. */
+const RULING_NARRATIVE_OPTIONS = {
+  context: { type: "string", describe: "Narrative: the situation the decision answers (recorded beside the verbatim text, never inside it)" },
+  alternatives: { type: "string", describe: "Narrative: what else was considered" },
+  consequences: { type: "string", describe: "Narrative: what follows from the decision" },
+  "reconsider-when": { type: "string", describe: "Narrative: the condition under which to revisit it" },
+} as const;
+
+function narrativeArgs(argv: Record<string, unknown>): NarrativeArgs {
+  return {
+    context: argv.context as string | undefined,
+    alternatives: argv.alternatives as string | undefined,
+    consequences: argv.consequences as string | undefined,
+    reconsiderWhen: argv["reconsider-when"] as string | undefined,
+  };
+}
+
+/** Root discovery plus the ruling write handlers' shared error rendering. */
+async function runRulingWrite(format: RulingOutputFormat, fn: (root: string) => Promise<RulingCommandResult>): Promise<void> {
+  const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+  if (!root) {
+    writeOutput(formatError("not_found", "No .story/ project found.", format));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  try {
+    const result = await fn(root);
+    writeOutput(result.output);
+    process.exitCode = result.exitCode ?? ExitCode.OK;
+  } catch (err: unknown) {
+    if (err instanceof CliValidationError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const { ProjectLoaderError } = await import("../core/errors.js");
+    if (err instanceof ProjectLoaderError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    writeOutput(formatError("io_error", message, format));
+    process.exitCode = ExitCode.USER_ERROR;
+  }
+}
+
 export function registerRulingCommand(yargs: Argv): Argv {
   return yargs.command(
     "ruling",
@@ -3443,13 +3497,18 @@ export function registerRulingCommand(yargs: Argv): Argv {
             addFormatOption(
               y2
                 .option("scope-tag", { type: "string", describe: "Filter by scope tag" })
-                .option("superseded", { type: "boolean", describe: "Filter to superseded (true) or current (false) rulings only" }),
+                .option("superseded", { type: "boolean", describe: "Filter to superseded (true) or current (false) rulings only" })
+                .option("status", {
+                  type: "string",
+                  choices: RULING_LIFECYCLES,
+                  describe: "Filter by lifecycle. `accepted` is what binds now (superseded records are their own bucket); `--format md` renders the Decisions listing",
+                }),
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runReadCommand(format, (ctx) =>
               handleRulingList(
-                { scopeTag: argv["scope-tag"] as string | undefined, superseded: argv.superseded as boolean | undefined },
+                { scopeTag: argv["scope-tag"] as string | undefined, superseded: argv.superseded as boolean | undefined, status: argv.status as string | undefined },
                 ctx,
               ),
             );
@@ -3484,7 +3543,8 @@ export function registerRulingCommand(yargs: Argv): Argv {
                       "See src/core/ruling.ts's module docblock for the full docs statement.",
                   })
                   .option("date", { type: "string", demandOption: true, describe: "Ruling date (YYYY-MM-DD)" })
-                  .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" }),
+                  .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" })
+                  .options(RULING_NARRATIVE_OPTIONS),
                 {
                   "scope-tag": { ...SPLIT_LIST, describe: "Scope tag (repeatable)" },
                   cites: {
@@ -3513,6 +3573,7 @@ export function registerRulingCommand(yargs: Argv): Argv {
                   scopeTags: (argv["scope-tag"] as string[] | undefined) ?? [],
                   cites: argv.cites as string[] | undefined,
                   clientTaskId: argv["client-task-id"] as string | undefined,
+                  ...narrativeArgs(argv),
                 },
                 format,
                 root,
@@ -3550,6 +3611,8 @@ export function registerRulingCommand(yargs: Argv): Argv {
                   .option("attribution", { type: "string", choices: RULING_ATTRIBUTIONS, describe: "Claimed source of the new ruling" })
                   .option("date", { type: "string", describe: "Date of the new ruling (YYYY-MM-DD)" })
                   .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" })
+                  .option("branch", { type: "boolean", default: false, describe: "Knowingly record a second successor for <id> (a branch: no single ruling is current until resolved)" })
+                  .options(RULING_NARRATIVE_OPTIONS)
                   .conflicts("with", "text")
                   .conflicts("with", "attribution")
                   .conflicts("with", "date"),
@@ -3574,6 +3637,8 @@ export function registerRulingCommand(yargs: Argv): Argv {
                   date: argv.date as string | undefined,
                   scopeTags: argv["scope-tag"] as string[] | undefined,
                   clientTaskId: argv["client-task-id"] as string | undefined,
+                  branch: argv.branch as boolean,
+                  ...narrativeArgs(argv),
                 },
                 format,
                 root,
@@ -3598,7 +3663,99 @@ export function registerRulingCommand(yargs: Argv): Argv {
             }
           },
         )
-        .demandCommand(1, "Specify a ruling subcommand: list, get, create, supersede")
+        .command(
+          "propose",
+          "Propose a ruling (T-522). A proposal binds nothing until `ruling accept` records who ruled; drafting a replacement revokes nothing.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .option("text", { type: "string", demandOption: true, describe: "Verbatim proposed text" })
+                  .option("attribution", { type: "string", choices: RULING_ATTRIBUTIONS, demandOption: true, describe: "Claimed source of the proposal (a CLAIM, not verified by storybloq)" })
+                  .option("date", { type: "string", demandOption: true, describe: "Proposal date (YYYY-MM-DD)" })
+                  .option("proposes-to-supersede", { type: "string", describe: "Accepted ruling this proposal would replace once accepted; refused if the target is dangling or not accepted" })
+                  .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" })
+                  .options(RULING_NARRATIVE_OPTIONS),
+                {
+                  "scope-tag": { ...SPLIT_LIST, describe: "Scope tag (repeatable)" },
+                  for: { ...SPLIT_LIST, describe: "Ticket or issue the proposal is for (repeatable). Written on the proposal only; the item gains the citation at accept, never before" },
+                },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runRulingWrite(format, (root) =>
+              handleRulingPropose(
+                {
+                  text: argv.text as string,
+                  attribution: argv.attribution as string,
+                  date: argv.date as string,
+                  scopeTags: (argv["scope-tag"] as string[] | undefined) ?? [],
+                  proposesToSupersede: argv["proposes-to-supersede"] as string | undefined,
+                  proposedFor: argv.for as string[] | undefined,
+                  clientTaskId: argv["client-task-id"] as string | undefined,
+                  ...narrativeArgs(argv),
+                },
+                format,
+                root,
+              ),
+            );
+          },
+        )
+        .command(
+          "accept <id>",
+          "Accept a proposed ruling (T-522): records a claim of authority and cites it from every item it was proposed for, in one transaction. --revision is the digest of what was reviewed (from `ruling get`), not proof of who approved.",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Proposed ruling ID" })
+                .option("revision", { type: "string", demandOption: true, describe: "payloadDigest of the proposal as reviewed; refused if the digest-covered payload changed since (narrative edits do not change it)" })
+                .option("attribution", { type: "string", choices: RULING_ATTRIBUTIONS, demandOption: true, describe: "Claimed source of the acceptance" })
+                .option("date", { type: "string", demandOption: true, describe: "Acceptance date (YYYY-MM-DD)" })
+                .option("branch", { type: "boolean", default: false, describe: "Knowingly accept a second successor for the proposal's target (a branch)" })
+                .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runRulingWrite(format, (root) =>
+              handleRulingAccept(
+                argv.id as string,
+                {
+                  revision: argv.revision as string,
+                  attribution: argv.attribution as string,
+                  date: argv.date as string,
+                  branch: argv.branch as boolean,
+                  clientTaskId: argv["client-task-id"] as string | undefined,
+                },
+                format,
+                root,
+              ),
+            );
+          },
+        )
+        .command(
+          "withdraw <id>",
+          "Withdraw a proposed ruling (T-522). Proposed records only; an accepted ruling is superseded, never withdrawn.",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Proposed ruling ID" })
+                .option("reason", { type: "string", describe: "Why it is withdrawn (recorded on the record)" })
+                .option("client-task-id", { type: "string", describe: "Explicit caller identity, if not resolvable from the session" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runRulingWrite(format, (root) =>
+              handleRulingWithdraw(
+                argv.id as string,
+                { reason: argv.reason as string | undefined, clientTaskId: argv["client-task-id"] as string | undefined },
+                format,
+                root,
+              ),
+            );
+          },
+        )
+        .demandCommand(1, "Specify a ruling subcommand: list, get, create, supersede, propose, accept, withdraw")
         .strict(),
     () => {},
   );

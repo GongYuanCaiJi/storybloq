@@ -6,6 +6,11 @@ import { glossaryCatalog } from "../../core/glossary.js";
 import type { Term } from "../../models/glossary.js";
 import { CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
+import { loadRulingsSafe } from "../../core/ruling-loader.js";
+import { buildCitationResolutionContext, buildSuccessorIndex, resolveCitation } from "../../core/ruling.js";
+import { proposalsFor } from "../../core/ruling-lifecycle.js";
+import { formatDecisionsListing, type DecisionsListingItem } from "../../core/decisions-listing.js";
+import type { Ruling } from "../../models/ruling.js";
 
 /**
  * T-523: the capability inventory in the self-contained project document.
@@ -149,6 +154,95 @@ function glossarySection(root: string): { md: string[]; json: unknown } {
   return { md, json: sorted };
 }
 
+/**
+ * T-522 plan section 6: the Decisions section. `--all` renders every record.
+ * A phase export keeps, for every citation of the phase's items: the cited
+ * record, every chain member through the effective successor, all competing
+ * successors of a branched node, any uncertain successor an indeterminate
+ * result names (with the diagnostic), and the proposals `proposedFor` the
+ * phase's items. Each kept record renders once, under its lifecycle. Loader
+ * warnings go in the section header, so a reader knows what the listing
+ * could not see.
+ */
+export function decisionsSection(
+  root: string,
+  items: readonly DecisionsListingItem[],
+  scope: "all" | "phase",
+): { md: string[]; json: unknown } {
+  const loaded = loadRulingsSafe(root);
+  const { rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries, lifecycleById } = loaded;
+  const warnings = [...loaded.warnings];
+  const index = buildSuccessorIndex(rulings);
+  const text = (value: string): string => escapeMarkdownDocumentStrict(value);
+  let kept: readonly Ruling[];
+  const diagnostics: string[] = [];
+  if (scope === "all") {
+    kept = rulings;
+  } else {
+    const byId = new Map(rulings.map((r) => [r.id, r]));
+    const rulingCtx = buildCitationResolutionContext(rulings, unavailableIds, scanCompleteness, hasUnrecoverableEntries);
+    const keep = new Set<string>();
+    const add = (id: string): void => { if (byId.has(id)) keep.add(id); };
+    // Codex (2026-09-22) finding: resolveCitation carries no traversed chain
+    // on an indeterminate result, so the known prefix (A -> B, then an
+    // uncertain C on B) was dropped. Walk the successor index from the cited
+    // record over BOTH edge kinds, cycle-safe: that reaches every chain
+    // member, every competing successor of a branched node and every
+    // uncertain successor, whatever the resolution status turns out to be.
+    const walk = (from: string): void => {
+      const frontier = [from];
+      const seen = new Set<string>();
+      while (frontier.length > 0) {
+        const id = frontier.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        add(id);
+        for (const next of index.successorsByTarget.get(id) ?? []) frontier.push(next);
+        for (const next of index.uncertainSuccessorsByTarget.get(id) ?? []) frontier.push(next);
+      }
+    };
+    for (const item of items) {
+      for (const citedId of item.citesRulings ?? []) {
+        walk(citedId);
+        const res = resolveCitation(citedId, rulingCtx);
+        switch (res.status) {
+          case "resolved":
+          case "cycle":
+            break;
+          case "branch":
+            diagnostics.push(`${item.id} cites ${citedId}: branched, competing successors ${res.competingSuccessors.join(", ")}; no single ruling is current`);
+            break;
+          case "indeterminate":
+            for (const id of res.ids ?? []) add(id);
+            diagnostics.push(`${item.id} cites ${citedId}: indeterminate (${res.reason}${res.ids?.length ? `: ${res.ids.join(", ")}` : ""})`);
+            break;
+          case "nonaccepted":
+            diagnostics.push(`${item.id} cites ${citedId}: ${res.lifecycle}, binds nothing`);
+            break;
+          case "missing":
+            diagnostics.push(`${item.id} cites ${citedId}: no such ruling`);
+            break;
+          case "unreadable":
+            diagnostics.push(`${item.id} cites ${citedId}: unreadable`);
+            break;
+        }
+      }
+      for (const proposal of proposalsFor(rulings, item.id)) keep.add(proposal.id);
+    }
+    kept = rulings.filter((r) => keep.has(r.id));
+  }
+  const md: string[] = [scope === "all" ? `## Decisions (${kept.length})` : `## Decisions (${kept.length}, cited by this phase)`];
+  for (const w of warnings) md.push(`_Ruling scan: ${text(w)}_`);
+  for (const d of diagnostics) md.push(`_Citation: ${text(d)}_`);
+  md.push("", formatDecisionsListing(kept, lifecycleById, { index }, items));
+  const json = {
+    rulings: kept.map((r) => ({ ...r, lifecycle: lifecycleById.get(r.id) ?? null })),
+    warnings,
+    diagnostics,
+  };
+  return { md, json };
+}
+
 export function handleExport(
   ctx: CommandContext,
   mode: "all" | "phase",
@@ -166,12 +260,26 @@ export function handleExport(
   }
 
   const output = formatExport(ctx.state, mode, phaseId, ctx.format);
-  if (mode !== "all") return { output };
+  const items: DecisionsListingItem[] =
+    mode === "all"
+      ? [...ctx.state.tickets, ...ctx.state.issues]
+      : [...ctx.state.tickets.filter((t) => t.phase === phaseId), ...ctx.state.issues.filter((i) => i.phase === phaseId)];
+  const decisions = decisionsSection(ctx.root, items, mode);
+  if (mode !== "all") {
+    if (ctx.format === "json") return { output: withSectionJson(output, "decisions", decisions.json) };
+    return { output: `${output}\n\n${decisions.md.join("\n")}` };
+  }
 
   const capabilities = capabilitySection(ctx.root);
   const glossary = glossarySection(ctx.root);
   if (ctx.format === "json") {
-    return { output: withSectionJson(withSectionJson(output, "capabilities", capabilities.json), "glossary", glossary.json) };
+    return {
+      output: withSectionJson(
+        withSectionJson(withSectionJson(output, "capabilities", capabilities.json), "glossary", glossary.json),
+        "decisions",
+        decisions.json,
+      ),
+    };
   }
-  return { output: `${output}\n\n${capabilities.md.join("\n")}\n\n${glossary.md.join("\n")}` };
+  return { output: `${output}\n\n${capabilities.md.join("\n")}\n\n${glossary.md.join("\n")}\n\n${decisions.md.join("\n")}` };
 }

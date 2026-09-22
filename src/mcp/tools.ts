@@ -151,6 +151,10 @@ import {
   handleRulingList,
   handleRulingCreate,
   handleRulingSupersede,
+  handleRulingPropose,
+  handleRulingAccept,
+  handleRulingWithdraw,
+  RULING_LIFECYCLES,
 } from "../cli/commands/ruling.js";
 // T-523: all six capability leaves reach MCP. The inventory's primary consumer
 // is the agent deciding whether a task is already built, so a leaf it needs is
@@ -172,6 +176,7 @@ import {
 } from "../cli/commands/term.js";
 import { CAPABILITY_STATUSES } from "../models/capability.js";
 import { RULING_ATTRIBUTIONS } from "../models/ruling.js";
+import type { RulingLifecycle } from "../core/ruling-lifecycle.js";
 // T-474: no MCP list tool, same reasoning and same ruling as T-473's
 // arrangement list -- list-shaped tools stay CLI-only.
 import {
@@ -1293,8 +1298,11 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       // unfilterable through this tool.
       scopeTag: z.string().optional(),
       superseded: z.boolean().optional().describe("true = only superseded rulings, false = only current rulings, omit for all"),
+      status: z.enum(RULING_LIFECYCLES as [RulingLifecycle, ...RulingLifecycle[]]).optional().describe(
+        "Lifecycle filter (T-522): `accepted` is what binds now; `proposed` binds nothing; `superseded` is its own bucket",
+      ),
     },
-  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleRulingList({ scopeTag: args.scopeTag, superseded: args.superseded }, ctx)));
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleRulingList({ scopeTag: args.scopeTag, superseded: args.superseded, status: args.status }, ctx)));
 
   server.registerTool("storybloq_ruling_create", {
     description:
@@ -1311,6 +1319,10 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         "unresolvable ref refuses the whole create.",
       ),
       clientTaskId: z.string().max(128).optional().describe("Caller identity, if not inferable from the environment"),
+      context: z.string().optional().describe("Narrative: the situation the decision answers; recorded beside the verbatim text, never inside it"),
+      alternatives: z.string().optional().describe("Narrative: what else was considered"),
+      consequences: z.string().optional().describe("Narrative: what follows"),
+      reconsiderWhen: z.string().optional().describe("Narrative: when to revisit"),
     },
   }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
     handleRulingCreate(
@@ -1321,6 +1333,10 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         scopeTags: args.scopeTags ?? [],
         cites: args.cites,
         clientTaskId: args.clientTaskId,
+        context: args.context,
+        alternatives: args.alternatives,
+        consequences: args.consequences,
+        reconsiderWhen: args.reconsiderWhen,
       },
       format,
       root,
@@ -1339,7 +1355,12 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       attribution: z.enum(RULING_ATTRIBUTIONS).optional(),
       date: z.string().min(1).optional(),
       scopeTags: z.array(z.string()).optional(),
+      branch: z.boolean().optional().describe("Knowingly record a second successor (a branch: no single ruling is current until resolved); omit to refuse a branch"),
       clientTaskId: z.string().max(128).optional().describe("Caller identity, if not inferable from the environment"),
+      context: z.string().optional().describe("Narrative: the situation the decision answers; recorded beside the verbatim text, never inside it"),
+      alternatives: z.string().optional().describe("Narrative: what else was considered"),
+      consequences: z.string().optional().describe("Narrative: what follows"),
+      reconsiderWhen: z.string().optional().describe("Narrative: when to revisit"),
     },
   }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
     handleRulingSupersede(
@@ -1350,11 +1371,91 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         attribution: args.attribution,
         date: args.date,
         scopeTags: args.scopeTags,
+        branch: args.branch,
         clientTaskId: args.clientTaskId,
+        context: args.context,
+        alternatives: args.alternatives,
+        consequences: args.consequences,
+        reconsiderWhen: args.reconsiderWhen,
       },
       format,
       root,
     ),
+  ));
+
+  // T-522: the proposal lifecycle. A proposal binds nothing; accept records a
+  // claim of authority; the revision is a digest of what was reviewed, not
+  // proof of who approved.
+  server.registerTool("storybloq_ruling_propose", {
+    description:
+      "Propose a ruling. A proposal binds nothing: no item cites it and no gate enforces it until `storybloq_ruling_accept` " +
+      "records who ruled. Drafting a replacement revokes nothing: the ruling it proposes to supersede stays current. " +
+      "Refuses a target that is dangling or not accepted.",
+    inputSchema: {
+      text: z.string().min(1).describe("Verbatim proposed text"),
+      attribution: z.enum(RULING_ATTRIBUTIONS).describe("Claimed source of the proposal (a CLAIM, not verified)"),
+      date: z.string().min(1).describe("Proposal date (YYYY-MM-DD)"),
+      scopeTags: z.array(z.string()).optional(),
+      proposesToSupersede: RulingIdSchema.optional().describe("Accepted ruling this would replace once accepted"),
+      proposedFor: z.array(z.string()).optional().describe("Tickets or issues the proposal is for; they gain the citation at accept, never before"),
+      clientTaskId: z.string().max(128).optional().describe("Caller identity, if not inferable from the environment"),
+      context: z.string().optional().describe("Narrative: the situation the decision answers; recorded beside the verbatim text, never inside it"),
+      alternatives: z.string().optional().describe("Narrative: what else was considered"),
+      consequences: z.string().optional().describe("Narrative: what follows"),
+      reconsiderWhen: z.string().optional().describe("Narrative: when to revisit"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleRulingPropose(
+      {
+        text: args.text,
+        attribution: args.attribution,
+        date: args.date,
+        scopeTags: args.scopeTags ?? [],
+        proposesToSupersede: args.proposesToSupersede,
+        proposedFor: args.proposedFor,
+        clientTaskId: args.clientTaskId,
+        context: args.context,
+        alternatives: args.alternatives,
+        consequences: args.consequences,
+        reconsiderWhen: args.reconsiderWhen,
+      },
+      format,
+      root,
+    ),
+  ));
+
+  server.registerTool("storybloq_ruling_accept", {
+    description:
+      "Accept a proposed ruling: records a claim of authority and adds the citation to every item it was proposed for, " +
+      "in one transaction. `revision` is the payloadDigest of what was reviewed (from storybloq_ruling_get), not proof of " +
+      "who approved; a change to the digest-covered payload (text, attribution, scope tags, targets) is refused, narrative edits do not " +
+      "invalidate the revision. A repeat after completion is a no-op only on valid local acceptance state.",
+    inputSchema: {
+      id: RulingIdSchema.describe("The proposed ruling"),
+      revision: z.string().min(1).describe("payloadDigest of the proposal as reviewed"),
+      attribution: z.enum(RULING_ATTRIBUTIONS).describe("Claimed source of the acceptance"),
+      date: z.string().min(1).describe("Acceptance date (YYYY-MM-DD)"),
+      branch: z.boolean().optional().describe("Knowingly accept a second successor for the proposal's target (a branch)"),
+      clientTaskId: z.string().max(128).optional().describe("Caller identity, if not inferable from the environment"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleRulingAccept(
+      args.id,
+      { revision: args.revision, attribution: args.attribution, date: args.date, branch: args.branch, clientTaskId: args.clientTaskId },
+      format,
+      root,
+    ),
+  ));
+
+  server.registerTool("storybloq_ruling_withdraw", {
+    description: "Withdraw a proposed ruling. Proposed records only: an accepted ruling is superseded, never withdrawn.",
+    inputSchema: {
+      id: RulingIdSchema.describe("The proposed ruling"),
+      reason: z.string().optional().describe("Why it is withdrawn, recorded on the record"),
+      clientTaskId: z.string().max(128).optional().describe("Caller identity, if not inferable from the environment"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) =>
+    handleRulingWithdraw(args.id, { reason: args.reason, clientTaskId: args.clientTaskId }, format, root),
   ));
 
   // --- Capability inventory tools (T-523) ---

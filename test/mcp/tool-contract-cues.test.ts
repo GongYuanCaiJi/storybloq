@@ -433,7 +433,11 @@ describe("tool description contract (T-460)", () => {
     // protect against over-trimming, and a floor would fail an honest future
     // trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(76_000);
+    // T-522 commit 2b: three ruling lifecycle tools plus `status` on list,
+    // `branch` on supersede and four narrative fields on create/supersede/
+    // propose, measured at 77,269 bytes; ceiling sized to headroom by T-523's
+    // rule (feature cost 4,566 bytes; headroom 2,731).
+    expect(bytes).toBeLessThan(80_000);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -477,6 +481,9 @@ describe("tool description contract (T-460)", () => {
     // destructive catalog operations off MCP, and unlike the arrangement and
     // gate-ack cases `list` does reach MCP here for the same reason the
     // capability list did, since the agent reading a brief is the consumer.
-    expect(result.tools.length).toBe(90);
+    // T-522 commit 2b adds storybloq_ruling_propose/accept/withdraw (90 -> 93):
+    // the proposal lifecycle has an agent consumer (a worker proposes, the pen
+    // accepts with the reviewed digest), so all three reach MCP.
+    expect(result.tools.length).toBe(93);
   });
 });

@@ -64,10 +64,13 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **term add** (--id, --term, --definition, --distinction?, --alias?, --capability?, --ruling?, --core?, --added-by?, --format?) - Add a term. One word belongs to one entry, so a name another entry already owns is refused rather than shared
 - **term update <id>** (--term?, --definition?, --distinction?, --alias?, --capability?, --ruling?, --core?, --added-by?, --format?) - Edit a term. Supplied list flags replace the stored lists
 - **term remove <id>** (--format?) - Remove a term. Refused while a capability references it: the other file is never edited to make this possible
-- **ruling list** (--scope-tag?, --superseded?, --format?) - List owner-ruling attestation records
-- **ruling get <id>** (--format?) - Get a ruling by ID
-- **ruling create** (--text, --attribution, --date, --client-task-id?, --scope-tag?, --cites?, --format?) - Record a ruling verbatim and cite it from the tickets or issues it binds
-- **ruling supersede <id>** (--with?, --text?, --attribution?, --date?, --client-task-id?, --scope-tag?, --format?) - Supersede a ruling: link an existing one with --with, or record a new superseding ruling
+- **ruling list** (--scope-tag?, --superseded?, --status?, --format?) - List rulings, optionally filtered by scope tag, superseded state or lifecycle status; --format md renders the Decisions listing
+- **ruling get <id>** (--format?) - Get a ruling by ID with its lifecycle, revision digest and chain status
+- **ruling create** (--text, --attribution, --date, --scope-tag?, --cites?, --client-task-id?, --context?, --alternatives?, --consequences?, --reconsider-when?, --format?) - Record a ruling verbatim; --cites adds its id to each named ticket or issue in the same transaction; narrative flags are recorded beside the text, never inside it
+- **ruling supersede <id>** (--with?, --text?, --attribution?, --date?, --scope-tag?, --client-task-id?, --branch?, --context?, --alternatives?, --consequences?, --reconsider-when?, --format?) - Supersede a ruling: link an existing one with --with, or record a new superseding ruling; --branch knowingly records a second successor
+- **ruling propose** (--text, --attribution, --date, --scope-tag?, --for?, --proposes-to-supersede?, --client-task-id?, --context?, --alternatives?, --consequences?, --reconsider-when?, --format?) - Propose a ruling (T-522). A proposal binds nothing until accepted; drafting a replacement revokes nothing. --for names the items that gain the citation at accept
+- **ruling accept <id>** (--revision, --attribution, --date, --branch?, --client-task-id?, --format?) - Accept a proposed ruling: records a claim of authority and cites it from every --for item in one transaction. --revision is the digest of what was reviewed, not proof of who approved
+- **ruling withdraw <id>** (--reason?, --client-task-id?, --format?) - Withdraw a proposed ruling; proposed records only, an accepted ruling is superseded instead
 - **duet spawn** (--name, --pen, --model?, --dir?, --role?, --permission-mode?, --terminal?, --print?, --format?) - Start a visible duet worker session from the pen (N-131): writes a launch script, role and record under .story/sessions/spawn/ and opens it in the OS terminal. Permission mode defaults to auto, inheriting bypassPermissions only when the pen itself runs in bypass
 - **arrangement compact <id>** (--client-task-id?, --format?) - Compact a duet arrangement's coordination checkpoint: resolved assignments keep their last event, overflow moves to an archive list. Pen only
 - **arrangement rotate <id>** (--client-task-id?, --format?) - Close a duet arrangement at capacity and carry its open assignments, verified session and earmarks into a fresh successor. Pen only
@@ -225,10 +228,13 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_term_get** (id) - Get one term: definition, distinction, and the capabilities and rulings behind it
 - **storybloq_term_add** (id, term, definition, distinction?, aliases?, capabilities?, rulings?, core?, addedBy?) - Add a glossary term; a name another entry already owns is refused
 - **storybloq_term_update** (id, term?, definition?, distinction?, aliases?, capabilities?, rulings?, core?, addedBy?) - Edit a glossary term; supplied lists replace the stored ones
-- **storybloq_ruling_list** (scopeTag?, superseded?) - List rulings, optionally filtered by scope tag or superseded state
+- **storybloq_ruling_list** (scopeTag?, superseded?, status?) - List rulings, optionally filtered by scope tag, superseded state or lifecycle status
 - **storybloq_ruling_get** (id) - Get a ruling by ID
-- **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?, clientTaskId?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction
-- **storybloq_ruling_supersede** (id, with?, text?, attribution?, date?, scopeTags?, clientTaskId?) - Supersede a ruling: link an existing one with `with`, or record a new superseding ruling
+- **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?, clientTaskId?, context?, alternatives?, consequences?, reconsiderWhen?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction; narrative fields sit beside the text
+- **storybloq_ruling_supersede** (id, with?, text?, attribution?, date?, scopeTags?, branch?, clientTaskId?, context?, alternatives?, consequences?, reconsiderWhen?) - Supersede a ruling: link an existing one with `with`, or record a new superseding ruling; branch knowingly records a second successor
+- **storybloq_ruling_propose** (text, attribution, date, scopeTags?, proposesToSupersede?, proposedFor?, clientTaskId?, context?, alternatives?, consequences?, reconsiderWhen?) - Propose a ruling; binds nothing until accepted, revokes nothing while proposed
+- **storybloq_ruling_accept** (id, revision, attribution, date, branch?, clientTaskId?) - Accept a proposed ruling; the revision is a digest of what was reviewed, not proof of who approved
+- **storybloq_ruling_withdraw** (id, reason?, clientTaskId?) - Withdraw a proposed ruling; proposed records only
 - **storybloq_selftest** - Integration smoke test: create/update/delete cycle
 - **storybloq_health** (format?, only?, refresh?) - Tooling check: auto-compact window, CLI version, Codex review bridge (launched and answered, not just registered), /story skill, cross-session message delivery. Works without .story/, read-only
 - **storybloq_review_lenses_prepare** (stage, diff, changedFiles, ticketDescription?, reviewRound?, priorDeferrals?, sessionId?, target?) - Prepare multi-lens review on @storybloq/lenses: activation, secrets gate, context packaging, cited-ruling delivery, complete lens prompts

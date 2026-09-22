@@ -82,7 +82,8 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // addition by trimming "two duplicated routing parentheticals" is not
   // precedent for this: two within a row is redundancy, one per row is the
   // pattern.
-  "SKILL.md": 58000,
+  // T-522 commit 2b (2026-09-22): the propose/accept/withdraw paragraph in Rulings; measured 58,595 bytes at the re-pin.
+  "SKILL.md": 60000,
   // T-460 Leg C step 1: 10,194 measured, rounded up to 11,000. Raised to
   // 12,000 by T-501, which documents `autoCompactWindow` (the three Claude
   // Code layers, when an edit takes effect, and Codex having no equivalent)
@@ -142,7 +143,8 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // nothing was trimmed to fit for the same reason as every prior time: the
   // file is emitted from COMMANDS/MCP_TOOLS and a hand edit would be reverted
   // by the next regeneration.
-  "reference.md": 44000,
+  // T-522 commit 2b: three ruling leaves, narrative and lifecycle flags, three MCP tools; measured 45,827 bytes (generated file, regrowth pin).
+  "reference.md": 47000,
   "federation-setup.md": 14000,
   // Was 47000 (measured 46,936 before this issue). ISS-1240 adds the roster
   // pointer to the pen priming order: live seats come from

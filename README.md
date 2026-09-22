@@ -301,6 +301,14 @@ All commands accept `--format json|md` (default `md`). Pipe JSON through `jq` fo
 | `storybloq term add` · `term update` · `term remove` | Maintain it; `remove` is refused while a capability references the term |
 | `storybloq term check` | Check every term's links and flag the thin entries (no distinction, or no capability link) |
 
+### Rulings
+
+| Command | Description |
+|---------|-------------|
+| `storybloq ruling list [--status <lifecycle>] [--format md]` · `ruling get` | Read rulings; `--format md` renders the Decisions listing (accepted, proposed, withdrawn, quarantined) |
+| `storybloq ruling create --text --attribution --date [--cites]` · `ruling supersede` | Record a verbatim ruling and cite it from items; supersede links the replacement |
+| `storybloq ruling propose --for` · `ruling accept --revision` · `ruling withdraw` | The proposal lifecycle: a proposal binds nothing; accept records who ruled against the reviewed digest; withdraw retires a proposal |
+
 ### Handovers, blockers, snapshots
 
 | Command | Description |
@@ -377,7 +385,7 @@ Some queries also refresh gitignored runtime or presence metadata. `storybloq_se
 
 ### Write (mutate `.story/`)
 
-`storybloq_snapshot` · `storybloq_handover_create` · `storybloq_ticket_create` · `storybloq_ticket_update` · `storybloq_ticket_meta_set` · `storybloq_ticket_meta_unset` · `storybloq_issue_create` · `storybloq_issue_update` · `storybloq_issue_meta_set` · `storybloq_issue_meta_unset` · `storybloq_note_create` · `storybloq_note_update` · `storybloq_lesson_create` · `storybloq_lesson_update` · `storybloq_lesson_reinforce` · `storybloq_term_add` · `storybloq_term_update` · `storybloq_phase_create`
+`storybloq_snapshot` · `storybloq_handover_create` · `storybloq_ticket_create` · `storybloq_ticket_update` · `storybloq_ticket_meta_set` · `storybloq_ticket_meta_unset` · `storybloq_issue_create` · `storybloq_issue_update` · `storybloq_issue_meta_set` · `storybloq_issue_meta_unset` · `storybloq_note_create` · `storybloq_note_update` · `storybloq_lesson_create` · `storybloq_lesson_update` · `storybloq_lesson_reinforce` · `storybloq_term_add` · `storybloq_term_update` · `storybloq_ruling_create` · `storybloq_ruling_supersede` · `storybloq_ruling_propose` · `storybloq_ruling_accept` · `storybloq_ruling_withdraw` · `storybloq_phase_create`
 
 ### Autonomous mode + review + observability
 

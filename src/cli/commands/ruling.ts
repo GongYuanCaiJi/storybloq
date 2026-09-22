@@ -89,7 +89,7 @@ function narrativeFrom(args: NarrativeArgs): Ruling["narrative"] | undefined {
   return Object.keys(n).length > 0 ? n : undefined;
 }
 
-const RULING_LIFECYCLES: readonly RulingLifecycle[] = ["proposed", "accepted", "withdrawn", "superseded", "quarantined", "conflicted"];
+export const RULING_LIFECYCLES: readonly RulingLifecycle[] = ["proposed", "accepted", "withdrawn", "superseded", "quarantined", "conflicted"];
 
 /**
  * T-522 plan section 8: in a team-mode project EVERY ruling write (all of

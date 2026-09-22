@@ -1063,6 +1063,32 @@ const MATRIX: Coverage[] = [
     },
   },
   {
+    key: "ruling propose --for",
+    check: (dir) => {
+      seedTickets(dir, 1);
+      seedIssue(dir);
+      const res = run(dir, "ruling", "propose",
+        "--text", "proposed text", "--attribution", "owner-direct", "--date", "2026-09-22",
+        "--client-task-id", "e2e-test-session",
+        "--for", "T-001,ISS-001", "--format", "json");
+      expect(res.code, res.out).toBe(0);
+      expect(readEntities(dir, "rulings")[0]!.proposedFor).toEqual(["T-001", "ISS-001"]);
+      // T-522: a proposal binds nothing, so neither item gains a citation before accept.
+      expect(readEntities(dir, "tickets")[0]!.citesRulings ?? []).toEqual([]);
+    },
+  },
+  {
+    key: "ruling propose --scope-tag",
+    check: (dir) => {
+      const res = run(dir, "ruling", "propose",
+        "--text", "proposed text", "--attribution", "owner-direct", "--date", "2026-09-22",
+        "--client-task-id", "e2e-test-session",
+        "--scope-tag", "alpha,beta");
+      expect(res.code, res.out).toBe(0);
+      expect(readEntities(dir, "rulings")[0]!.scopeTags).toEqual(["alpha", "beta"]);
+    },
+  },
+  {
     key: "ruling create --scope-tag",
     check: (dir) => {
       const res = run(dir, "ruling", "create",

@@ -2666,7 +2666,10 @@ describe("fixture replay", () => {
     // 20,075 measured at the 1.15 release gate (2026-09-15) with every step
     // inside its own ceiling; the sum crossed 20,000 by 75 bytes. Pinned at
     // 20,500 so the next growth still fails here rather than going unseen.
-    if (report.totals.bytes > 20_500) {
+    // T-522 commit 2b (2026-09-22): 20,579 measured, the tool_discovery step
+    // carrying the 14 tool names T-523, T-524 and T-522 added since 1.15;
+    // every step still inside its own ceiling. Pinned at 21,000, same rule.
+    if (report.totals.bytes > 21_000) {
       throw new Error(
         `totals.bytes ${report.totals.bytes} exceeds the pinned 20000 ceiling; ` +
           `per-step: ${JSON.stringify(
