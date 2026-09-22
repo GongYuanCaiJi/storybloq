@@ -126,7 +126,8 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // already over a design target, so the ceiling pins the current measured
   // size (rounded up) rather than staying a target this file no longer
   // meets. ISS-1146 is the tracked trim step.
-  "duet-mode.md": 12000,
+  // N-131 (2026-09-22): the "Spawning a worker" section added ~1.2 KB; measured 13,174 bytes at the re-pin.
+  "duet-mode.md": 14000,
   "triage-mode.md": 17000,
   "bus-mode.md": 31000,
   "session-guard-fallback.md": 117000,
