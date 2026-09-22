@@ -87,9 +87,13 @@ describe("T-498 Commit 3: SKILL.md live text flip", () => {
   });
 
   describe("byte budget", () => {
-    it("SKILL.md stays at or under the 56,000-byte ceiling (see skill-mode-budget.test.ts)", () => {
+    // The number is duplicated from skill-mode-budget.test.ts's CEILINGS row
+    // rather than imported, so it has to be re-pinned in both places. T-523
+    // moved it 56,000 -> 57,000; the reasoning lives on the CEILINGS row,
+    // which is the authoritative one.
+    it("SKILL.md stays at or under the 57,000-byte ceiling (see skill-mode-budget.test.ts)", () => {
       const size = readFileSync(SKILL_PATH).length;
-      expect(size).toBeLessThanOrEqual(56000);
+      expect(size).toBeLessThanOrEqual(57000);
     });
   });
 });

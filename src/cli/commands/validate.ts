@@ -7,6 +7,9 @@ import {
   citingEntitiesOf,
 } from "../../core/validation.js";
 import { validateIssueSourceRefs } from "../../core/issue-source-ref.js";
+import { checkCapabilities } from "../../core/capability.js";
+import { CatalogLoadError } from "../../core/catalog.js";
+import { capabilityCatalog } from "./capability.js";
 import { loadRulingsSafe, loadUpwardBoardFor } from "../../core/ruling-loader.js";
 import { INTEGRITY_WARNING_TYPES } from "../../core/errors.js";
 import { loadArrangementsSafe } from "../../core/arrangement-loader.js";
@@ -221,6 +224,50 @@ function validateWithRulings(ctx: CommandContext): ValidationResult {
   ]);
 }
 
+/**
+ * T-523: the capability inventory's findings, as validation findings.
+ *
+ * Only the async validate entry point carries these, and that is deliberate.
+ * The sync `handleValidate` is the core the E2E continuity baseline and forty
+ * test call sites use; making it async to fit a git subprocess in would change
+ * a frozen surface for a check that belongs with the other git-touching one
+ * (source-ref provenance) anyway.
+ *
+ * A STRUCTURAL result is an error: an entry point that does not exist, or a
+ * ruling id that resolves to nothing, is a dangling reference of exactly the
+ * kind the rest of this file already errors on. A FRESHNESS result is a
+ * warning: a stale entry is still true about a commit, it is just no longer
+ * known to be true about this one. An INCOMPLETE result is a warning too,
+ * because it is a statement about the check rather than about the entry.
+ */
+async function capabilityFindings(ctx: CommandContext): Promise<ValidationFinding[]> {
+  let entries;
+  try {
+    entries = capabilityCatalog.load(ctx.root).doc.capabilities;
+  } catch (err: unknown) {
+    if (err instanceof CatalogLoadError) {
+      // The catalog exists and cannot be trusted. Reported rather than thrown:
+      // a broken capabilities.json must not stop the rest of validate running.
+      return [{ level: "error", code: "capability_catalog_unreadable", message: err.message, entity: null }];
+    }
+    throw err;
+  }
+  if (entries.length === 0) return [];
+  const report = await checkCapabilities(ctx.root, entries, ctx.state, {});
+  const findings: ValidationFinding[] = [];
+  for (const entry of report.entries) {
+    for (const res of entry.results) {
+      findings.push({
+        level: res.cls === "structural" ? "error" : "warning",
+        code: res.code,
+        message: `${entry.id}: ${res.detail}`,
+        entity: entry.id,
+      });
+    }
+  }
+  return findings;
+}
+
 export function handleValidate(ctx: CommandContext): CommandResult {
   const complete = validateWithRulings(ctx);
   return {
@@ -235,7 +282,10 @@ export async function handleValidateWithSourceRefs(
 ): Promise<CommandResult> {
   const withRulings = validateWithRulings(ctx);
   const sourceFindings = await validateIssueSourceRefs(ctx.root, ctx.state.activeIssues);
-  const complete = appendValidationFindings(withRulings, sourceFindings);
+  const complete = appendValidationFindings(withRulings, [
+    ...sourceFindings,
+    ...(await capabilityFindings(ctx)),
+  ]);
   return {
     output: formatValidation(complete, ctx.format),
     exitCode: complete.valid ? ExitCode.OK : ExitCode.VALIDATION_ERROR,

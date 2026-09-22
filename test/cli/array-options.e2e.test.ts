@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { discoverArrayRegistrations, registrationKey } from "./array-registration-inventory.js";
 import { E2ECliFixture, runE2ECli, CLI_PATH } from "../helpers/e2e-cli.js";
+import { git as fixtureGit } from "../helpers/git-fixture.js";
 
 // ISS-886 regression suite. Runs against the BUILT bundle: `npm run build` must
 // have produced a current dist/cli.js before this file can pass (same dependency
@@ -361,7 +362,264 @@ function seedNodes(dir: string, ...names: string[]): void {
   }
 }
 
+/**
+ * T-523: a project that `capability add` can actually write into. The
+ * checkpoint is stamped at HEAD, so these rows need a real commit, not just a
+ * `.story/` directory. Standalone temp repo (ISS-1220), never a linked
+ * worktree: a fixture's git config writes reach the shared `.git/config`.
+ */
+function gitify(dir: string): void {
+  mkdirSync(join(dir, "src", "core"), { recursive: true });
+  writeFileSync(join(dir, "src", "core", "thing.ts"), "export const a = 1;\n");
+  writeFileSync(join(dir, "src", "core", "other.ts"), "export const b = 2;\n");
+  writeFileSync(join(dir, "src", "core", "a,b.ts"), "export const c = 3;\n");
+  // The fixture helper scrubs the environment, so a developer's global git
+  // config (signing, hooks, templates) cannot change what these rows see.
+  for (const args of [
+    ["init", "-q"],
+    ["config", "user.email", "t@example.invalid"],
+    ["config", "user.name", "T"],
+    ["add", "-A"],
+    ["commit", "-q", "-m", "base"],
+  ]) fixtureGit(dir, args);
+}
+
+function capabilities(dir: string): Array<Record<string, never> & {
+  id: string; entryPoints: string[]; surfaces: Record<string, string[]>;
+  rulings?: string[]; items?: string[]; terms?: string[];
+}> {
+  const raw = readFileSync(join(dir, ".story", "capabilities.json"), "utf-8");
+  return (JSON.parse(raw) as { capabilities: never[] }).capabilities;
+}
+
+/** `capability add` with the five required flags plus whatever a row is testing. */
+/**
+ * The id is an explicit parameter rather than something a caller can append,
+ * because yargs turns a REPEATED string option into an array: passing
+ * `--id cap-other` as an extra produced `id: ["cap-thing", "cap-other"]`,
+ * which the schema rejects, and the fixture then failed before the behaviour
+ * under test ever ran.
+ */
+function addCapAs(dir: string, id: string, ...extra: string[]): { code: number; out: string } {
+  return run(dir, "capability", "add",
+    "--id", id, "--name", "Thing", "--summary", "Does the thing.",
+    "--contract", "Returns the thing.", ...extra);
+}
+
+function addCap(dir: string, ...extra: string[]): { code: number; out: string } {
+  return addCapAs(dir, "cap-thing", ...extra);
+}
+
 const MATRIX: Coverage[] = [
+  {
+    key: "capability add --entry",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--entry", "src/core/other.ts");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.entryPoints).toEqual(["src/core/thing.ts", "src/core/other.ts"]);
+      // A comma is legal in a filename, so this flag is LITERAL: splitting it
+      // would store two pointers naming nothing, and a wrong entry point can
+      // never go stale, so the entry would report `current` forever about a
+      // file it is not watching.
+      const lit = addCapAs(dir, "cap-comma", "--entry", "src/core/a,b.ts");
+      expect(lit.code, lit.out).toBe(0);
+      expect(capabilities(dir)[1]!.entryPoints).toEqual(["src/core/a,b.ts"]);
+    },
+  },
+  {
+    key: "capability add --cli",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--cli", "capability add,capability get");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.cli).toEqual(["capability add", "capability get"]);
+    },
+  },
+  {
+    key: "capability add --mcp-tool",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--mcp-tool", "storybloq_capability_add,storybloq_capability_get");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.mcp).toEqual(["storybloq_capability_add", "storybloq_capability_get"]);
+    },
+  },
+  {
+    key: "capability add --app",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--app", "Sidebar,Inspector");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.app).toEqual(["Sidebar", "Inspector"]);
+    },
+  },
+  {
+    key: "capability add --surface-file",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--surface-file", "REVIEW.md", "--surface-file", "RULES.md");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.files).toEqual(["REVIEW.md", "RULES.md"]);
+      // Literal, for the same reason as --entry: this names a tracked file.
+      const lit = addCapAs(dir, "cap-comma", "--entry", "src/core/thing.ts", "--surface-file", "a,b.md");
+      expect(lit.code, lit.out).toBe(0);
+      expect(capabilities(dir)[1]!.surfaces.files).toEqual(["a,b.md"]);
+    },
+  },
+  {
+    key: "capability add --ruling",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--ruling", "r-aaaaaaaaaaaaaaaa,r-bbbbbbbbbbbbbbbb");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.rulings).toEqual(["r-aaaaaaaaaaaaaaaa", "r-bbbbbbbbbbbbbbbb"]);
+    },
+  },
+  {
+    key: "capability add --item",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--item", "T-001,T-002");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.items).toEqual(["T-001", "T-002"]);
+    },
+  },
+  {
+    key: "capability add --term",
+    check: (dir) => {
+      gitify(dir);
+      const res = addCap(dir, "--entry", "src/core/thing.ts", "--term", "term-pen,term-hands");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.terms).toEqual(["term-pen", "term-hands"]);
+    },
+  },
+  {
+    key: "capability update --entry",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--entry", "src/core/thing.ts", "--entry", "src/core/other.ts");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.entryPoints).toEqual(["src/core/thing.ts", "src/core/other.ts"]);
+      const lit = run(dir, "capability", "update", "cap-thing", "--entry", "src/core/a,b.ts");
+      expect(lit.code, lit.out).toBe(0);
+      expect(capabilities(dir)[0]!.entryPoints).toEqual(["src/core/a,b.ts"]);
+    },
+  },
+  {
+    key: "capability update --cli",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--cli", "capability add,capability get");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.cli).toEqual(["capability add", "capability get"]);
+    },
+  },
+  {
+    key: "capability update --mcp-tool",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--mcp-tool", "storybloq_capability_add,storybloq_capability_get");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.mcp).toEqual(["storybloq_capability_add", "storybloq_capability_get"]);
+    },
+  },
+  {
+    key: "capability update --app",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--app", "Sidebar,Inspector");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.app).toEqual(["Sidebar", "Inspector"]);
+    },
+  },
+  {
+    key: "capability update --surface-file",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--surface-file", "REVIEW.md", "--surface-file", "RULES.md");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.files).toEqual(["REVIEW.md", "RULES.md"]);
+      const lit = run(dir, "capability", "update", "cap-thing", "--surface-file", "a,b.md");
+      expect(lit.code, lit.out).toBe(0);
+      expect(capabilities(dir)[0]!.surfaces.files).toEqual(["a,b.md"]);
+    },
+  },
+  {
+    key: "capability update --ruling",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--ruling", "r-aaaaaaaaaaaaaaaa,r-bbbbbbbbbbbbbbbb");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.rulings).toEqual(["r-aaaaaaaaaaaaaaaa", "r-bbbbbbbbbbbbbbbb"]);
+    },
+  },
+  {
+    key: "capability update --item",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--item", "T-001,T-002");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.items).toEqual(["T-001", "T-002"]);
+    },
+  },
+  {
+    key: "capability update --term",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "update", "cap-thing", "--term", "term-pen,term-hands");
+      expect(res.code, res.out).toBe(0);
+      expect(capabilities(dir)[0]!.terms).toEqual(["term-pen", "term-hands"]);
+    },
+  },
+  {
+    key: "capability check --stamp",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      expect(addCapAs(dir, "cap-other", "--entry", "src/core/other.ts").code, "seed").toBe(0);
+      const before = capabilities(dir).map((c) => (c as unknown as { checkedAt: { sha: string } }).checkedAt.sha);
+      writeFileSync(join(dir, "src", "core", "thing.ts"), "export const a = 9;\n");
+      writeFileSync(join(dir, "src", "core", "other.ts"), "export const b = 9;\n");
+      fixtureGit(dir, ["commit", "-qam", "change"]);
+      const res = run(dir, "capability", "check", "--stamp", "cap-thing,cap-other");
+      expect(res.code, res.out).toBe(0);
+      const after = capabilities(dir).map((c) => (c as unknown as { checkedAt: { sha: string } }).checkedAt.sha);
+      // Both ids in one comma-joined value, so a failure to split would stamp
+      // neither: the whole string is not an id.
+      expect(after[0]).not.toBe(before[0]);
+      expect(after[1]).not.toBe(before[1]);
+    },
+  },
+  {
+    key: "capability match --path",
+    check: (dir) => {
+      gitify(dir);
+      expect(addCap(dir, "--entry", "src/core/thing.ts").code, "seed").toBe(0);
+      expect(addCapAs(dir, "cap-other", "--entry", "src/core/other.ts").code, "seed").toBe(0);
+      const res = run(dir, "capability", "match", "--path", "src/core/thing.ts", "--path", "src/core/other.ts", "--format", "json");
+      expect(res.code, res.out).toBe(0);
+      const ids = (JSON.parse(res.out) as { data: { matches: Array<{ id: string }> } }).data.matches.map((m) => m.id);
+      expect(ids.sort()).toEqual(["cap-other", "cap-thing"]);
+      // Literal: a query for a path containing a comma must ask about that one
+      // path. An entry sits AT that path, so only the literal reading finds
+      // it: split, the query becomes `src/core/a` and `b.ts`, and neither is,
+      // contains or sits under `src/core/a,b.ts`.
+      expect(addCapAs(dir, "cap-comma", "--entry", "src/core/a,b.ts").code, "seed").toBe(0);
+      const lit = run(dir, "capability", "match", "--path", "src/core/a,b.ts", "--format", "json");
+      expect(lit.code, lit.out).toBe(0);
+      const litIds = (JSON.parse(lit.out) as { data: { matches: Array<{ id: string }> } }).data.matches.map((m) => m.id);
+      expect(litIds).toEqual(["cap-comma"]);
+    },
+  },
   {
     key: "ticket create --blocked-by",
     check: (dir) => {

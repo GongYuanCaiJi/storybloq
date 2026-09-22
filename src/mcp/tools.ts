@@ -152,6 +152,18 @@ import {
   handleRulingCreate,
   handleRulingSupersede,
 } from "../cli/commands/ruling.js";
+// T-523: all six capability leaves reach MCP. The inventory's primary consumer
+// is the agent deciding whether a task is already built, so a leaf it needs is
+// not a terminal-only surface.
+import {
+  handleCapabilityList,
+  handleCapabilityGet,
+  handleCapabilityMatch,
+  handleCapabilityAdd,
+  handleCapabilityUpdate,
+  handleCapabilityCheck,
+} from "../cli/commands/capability.js";
+import { CAPABILITY_STATUSES } from "../models/capability.js";
 import { RULING_ATTRIBUTIONS } from "../models/ruling.js";
 // T-474: no MCP list tool, same reasoning and same ruling as T-473's
 // arrangement list -- list-shaped tools stay CLI-only.
@@ -1337,6 +1349,105 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
       root,
     ),
   ));
+
+  // --- Capability inventory tools (T-523) ---
+  // All six leaves reach MCP, `list` included. The ruling that kept
+  // arrangement and gate-ack lists CLI-only rested on their consumer being a
+  // human at a terminal; the inventory's consumer is the agent deciding
+  // whether a task is already built.
+  // Descriptions here are trimmed to the contract a caller cannot infer from
+  // the name: the bound on match, the computed status on list, the HEAD stamp
+  // on add, the untouched checkpoint on update, the stamp refusal on check.
+  // The rest is in `storybloq capability --help` and the entries themselves.
+
+  server.registerTool("storybloq_capability_match", {
+    description:
+      "Find capabilities a task may already be covered by, from its paths, title or phase. Call BEFORE planning " +
+      "new work. Bounded to the inventory and says so: no match never means no implementation exists.",
+    inputSchema: {
+      paths: z.array(z.string()).optional().describe("Repo-relative paths the task touches"),
+      title: z.string().optional().describe("Task title or one-line description"),
+      phaseId: z.string().optional().describe("Phase whose items' capabilities to include"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
+    handleCapabilityMatch({ paths: args.paths, title: args.title, phaseId: args.phaseId }, ctx)));
+
+  server.registerTool("storybloq_capability_list", {
+    description:
+      "List the inventory with each entry's EFFECTIVE status: the stored flag folded with a freshness check " +
+      "against HEAD, so an entry whose files moved reads as review on sight. skipCheck skips the freshness half " +
+      "only (structural findings still count) and says so.",
+    inputSchema: {
+      status: z.enum(CAPABILITY_STATUSES).optional().describe("Filter by effective status"),
+      skipCheck: z.boolean().optional().describe("Skip the freshness check"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
+    handleCapabilityList({ status: args.status, skipCheck: args.skipCheck }, ctx)));
+
+  server.registerTool("storybloq_capability_get", {
+    description: "Get one capability: contract, entry points, surfaces, the rulings and items behind it, and its findings.",
+    inputSchema: {
+      id: z.string().describe("Capability ID (cap-<slug>)"),
+      skipCheck: z.boolean().optional().describe("Skip the freshness check"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
+    handleCapabilityGet(args.id, { skipCheck: args.skipCheck }, ctx)));
+
+  server.registerTool("storybloq_capability_add", {
+    description:
+      "Add a capability. Stamps the checkpoint at HEAD, recording that you have READ the entry points: add the " +
+      "entry when the reading is done, not when the ticket is filed.",
+    inputSchema: {
+      id: z.string().describe("cap-<slug>"),
+      name: z.string().min(1).describe("Short human name"),
+      summary: z.string().min(1).describe("One or two sentences: what this can do"),
+      entryPoints: z.array(z.string()).min(1).describe("Repo-relative files or directories where it lives"),
+      contract: z.string().min(1).describe("What it guarantees, in the terms a caller needs"),
+      example: z.string().optional().describe("One concrete invocation or call site"),
+      cli: z.array(z.string()).optional().describe("CLI command names"),
+      mcp: z.array(z.string()).optional().describe("MCP tool names"),
+      app: z.array(z.string()).optional().describe("Mac app surfaces"),
+      files: z.array(z.string()).optional().describe("Tracked files that are themselves the surface"),
+      rulings: z.array(z.string()).optional().describe("Ruling IDs that decided this"),
+      items: z.array(z.string()).optional().describe("Ticket or issue IDs that built this"),
+      terms: z.array(z.string()).optional().describe("Glossary term IDs"),
+      status: z.enum(CAPABILITY_STATUSES).optional().describe("Stored flag (default: current)"),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) => handleCapabilityAdd(args, format, root)));
+
+  server.registerTool("storybloq_capability_update", {
+    description:
+      "Edit a capability. Supplied lists REPLACE the stored ones; omitted fields are left alone. Never touches " +
+      "the checkpoint, so an edit cannot clear a freshness finding: use storybloq_capability_check with stamp.",
+    inputSchema: {
+      id: z.string().describe("Capability ID"),
+      name: z.string().min(1).optional(),
+      summary: z.string().min(1).optional(),
+      entryPoints: z.array(z.string()).min(1).optional().describe("Replaces the stored entry points"),
+      contract: z.string().min(1).optional(),
+      example: z.string().optional(),
+      cli: z.array(z.string()).optional(),
+      mcp: z.array(z.string()).optional(),
+      app: z.array(z.string()).optional(),
+      files: z.array(z.string()).optional(),
+      rulings: z.array(z.string()).optional(),
+      items: z.array(z.string()).optional(),
+      terms: z.array(z.string()).optional(),
+      status: z.enum(CAPABILITY_STATUSES).optional(),
+    },
+  }, (args) => runMcpWriteTool(pinnedRoot, (root, format) => handleCapabilityUpdate(args, format, root)));
+
+  server.registerTool("storybloq_capability_check", {
+    description:
+      "Check every capability against HEAD. stamp/stampAll re-records the checkpoint after re-reading an entry; " +
+      "refused for a STRUCTURAL finding, which a new sha would hide rather than fix, and for one the check could " +
+      "not finish.",
+    inputSchema: {
+      stamp: z.array(z.string()).optional().describe("Capability IDs to re-stamp after re-reading them"),
+      stampAll: z.boolean().optional().describe("Re-stamp every entry whose only findings are freshness findings"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
+    handleCapabilityCheck({ stamp: args.stamp, stampAll: args.stampAll }, "md", ctx.root, ctx)));
 
   // --- Gate-ack tools (T-474) ---
   // No storybloq_gate_ack_list, same ruling and reasoning as T-473's

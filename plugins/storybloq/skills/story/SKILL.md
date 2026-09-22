@@ -190,7 +190,8 @@ Call these in order:
 3. **Recent handovers** -- call `storybloq_handover_latest` twice: `count: 1, priming: true` (for line one's verbatim quote) and `count: 10, brief: true` (structured records plus trajectory)
 4. **Development rules** -- read `RULES.md` if it exists in the project root
 5. **Recent commits** -- run `git log --oneline -10` (lessons: call `storybloq_lesson_digest` on demand)
-6. **Tooling health** -- once per session call `storybloq_health`; relay each `advise` and its fix verbatim before the summary; nothing when all are ok or skip; never offer fixes
+6. **Capability digest** -- `storybloq_capability_list` with `skipCheck: true`: what the project can already DO. A task matching an entry changes that capability rather than adding one
+7. **Tooling health** -- once per session call `storybloq_health`; relay each `advise` and its fix verbatim before the summary; nothing when all are ok or skip; never offer fixes
 
 ## Step 2b: Empty Scaffold Check
 

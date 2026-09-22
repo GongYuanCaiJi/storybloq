@@ -51,6 +51,12 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **lesson update <id>** (--title?, --content?, --context?, --clear-tags?, --status?, --stdin?, --tags?, --format?) - Update a lesson
 - **lesson reinforce <id>** (--format?) - Reinforce a lesson: increment count and update lastValidated
 - **lesson delete <id>** (--hard?, --format?) - Delete a lesson
+- **capability list** (--status?, --skip-check?, --format?) - List the capability inventory with each entry's EFFECTIVE status: the stored flag folded together with a freshness check against HEAD. --status filters on the effective status, not the stored one
+- **capability get <id>** (--skip-check?, --format?) - Show one capability: contract, entry points, surfaces, the rulings and items behind it, and its findings
+- **capability match** (--path?, --title?, --phase?, --format?) - Find capabilities a task may already be covered by, from its paths, title or phase. Bounded to the inventory and says so: no match never means no implementation exists
+- **capability add** (--id, --name, --summary, --entry, --contract, --example?, --cli?, --mcp-tool?, --app?, --surface-file?, --ruling?, --item?, --term?, --status?, --format?) - Add a capability. Stamps the checkpoint at HEAD, so it records that the entry points were actually read
+- **capability update <id>** (--name?, --summary?, --entry?, --contract?, --example?, --cli?, --mcp-tool?, --app?, --surface-file?, --ruling?, --item?, --term?, --status?, --format?) - Edit a capability. Supplied list flags replace the stored lists; the checkpoint is never touched, because an edit is not an inspection
+- **capability check** (--stamp?, --stamp-all?, --format?) - Check every capability against HEAD; --stamp re-records the checkpoint after re-reading an entry. Refused for a structural finding, which a new sha would hide rather than fix
 - **ruling list** (--scope-tag?, --superseded?, --format?) - List owner-ruling attestation records
 - **ruling get <id>** (--format?) - Get a ruling by ID
 - **ruling create** (--text, --attribution, --date, --client-task-id?, --scope-tag?, --cites?, --format?) - Record a ruling verbatim and cite it from the tickets or issues it binds
@@ -200,6 +206,12 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_lesson_create** (title, content, context, source, tags?, supersedes?) - Create lesson
 - **storybloq_lesson_update** (id, title?, content?, context?, tags?, status?) - Update lesson
 - **storybloq_lesson_reinforce** (id) - Reinforce lesson: increment count and update lastValidated
+- **storybloq_capability_match** (paths?, title?, phaseId?) - Find capabilities a task may already be covered by. Bounded to the inventory: no match never means no implementation exists
+- **storybloq_capability_list** (status?, skipCheck?) - List the capability inventory with each entry's effective status (stored flag folded with a freshness check against HEAD)
+- **storybloq_capability_get** (id, skipCheck?) - Get one capability: contract, entry points, surfaces, rulings, items and findings
+- **storybloq_capability_add** (id, name, summary, entryPoints, contract, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Add a capability; stamps the checkpoint at HEAD, recording that its entry points were read
+- **storybloq_capability_update** (id, name?, summary?, entryPoints?, contract?, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Edit a capability; supplied lists replace stored ones and the checkpoint is never touched
+- **storybloq_capability_check** (stamp?, stampAll?) - Check every capability against HEAD; stamp re-records the checkpoint, refused for a structural or incomplete finding
 - **storybloq_ruling_list** (scopeTag?, superseded?) - List rulings, optionally filtered by scope tag or superseded state
 - **storybloq_ruling_get** (id) - Get a ruling by ID
 - **storybloq_ruling_create** (text, attribution, date, scopeTags?, cites?, clientTaskId?) - Record a ruling verbatim; cites adds its id to each named ticket or issue in the same transaction

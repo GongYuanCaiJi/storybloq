@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { handleExport } from "../../../src/cli/commands/export.js";
 import { formatExport } from "../../../src/core/output-formatter.js";
 import { CliValidationError } from "../../../src/cli/helpers.js";
@@ -278,5 +281,82 @@ describe("ISS-756: export excludes tombstoned items", () => {
     expect(parsed.data.issues.map((i) => i.id)).toEqual(["ISS-001"]);
     expect(parsed.data.notes.map((n) => n.id)).toEqual(["N-001"]);
     expect(parsed.data.lessons.map((l) => l.id)).toEqual(["L-001"]);
+  });
+});
+
+describe("export: the capability section is a DOCUMENT sink (T-523)", () => {
+  const roots: string[] = [];
+  afterEach(() => {
+    for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true });
+  });
+
+  function rootWithCatalog(cap: Record<string, unknown>): string {
+    const root = mkdtempSync(join(tmpdir(), "export-cap-"));
+    roots.push(root);
+    mkdirSync(join(root, ".story"), { recursive: true });
+    writeFileSync(
+      join(root, ".story", "capabilities.json"),
+      JSON.stringify({
+        version: 1,
+        capabilities: [
+          {
+            id: "cap-core",
+            name: "Core",
+            summary: "Summary.",
+            surfaces: {},
+            entryPoints: ["src/core"],
+            contract: "Contract.",
+            checkedAt: { sha: "3a768cb3", date: "2026-09-20" },
+            status: "current",
+            ...cap,
+          },
+        ],
+      }),
+    );
+    return root;
+  }
+
+  function exportedMd(root: string): string {
+    const ctx = makeCtx();
+    return handleExport({ ...ctx, root }, "all", null).output;
+  }
+
+  it("neutralizes raw HTML in a capability field", () => {
+    // An export is handed to somebody else and opened in a Markdown viewer.
+    // escapeMarkdownInline guards line-leading markers only, so this rendered
+    // as a live image tag before the fix.
+    const md = exportedMd(rootWithCatalog({ contract: '<img src=x onerror="alert(1)">' }));
+    expect(md).not.toContain("<img");
+    expect(md).toContain("&lt;img");
+  });
+
+  it("neutralizes a Markdown link whose text and destination disagree", () => {
+    const md = exportedMd(rootWithCatalog({ summary: "[storybloq docs](https://evil.example/phish)" }));
+    expect(md).not.toContain("](https://evil.example/phish)");
+    expect(md).toContain("\\[storybloq docs\\]");
+  });
+
+  it("breaks a BARE autolink too, which the non-strict escape leaves clickable", () => {
+    const md = exportedMd(rootWithCatalog({ example: "see https://evil.example/drive-by" }));
+    expect(md).not.toContain("https://evil.example/drive-by");
+    // Present and broken, not dropped: absence alone would also pass if the
+    // field were never rendered at all.
+    expect(md).toContain("- Example: see https&#58;//evil.example/drive-by");
+  });
+
+  it("escapes an entry point, which is free-form enough to carry a payload", () => {
+    // Entry points reject `..`, absolute paths and backslashes, and none of
+    // those rules touch a bracket or an angle bracket.
+    const md = exportedMd(rootWithCatalog({ entryPoints: ["src/<script>alert(1)</script>.ts"] }));
+    expect(md).not.toContain("<script>");
+    expect(md).toContain("- Entry points: src/&lt;script&gt;alert\\(1\\)&lt;/script&gt;.ts");
+  });
+
+  it("still renders the ordinary fields legibly, so the escaping is not a blanket mangle", () => {
+    const md = exportedMd(rootWithCatalog({}));
+    expect(md).toContain("Core");
+    expect(md).toContain("cap-core");
+    expect(md).toContain("3a768cb3");
+    expect(md).toContain("2026-09-20");
   });
 });

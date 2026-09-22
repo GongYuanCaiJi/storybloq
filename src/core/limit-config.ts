@@ -87,7 +87,13 @@ export function readBoundedFile(path: string, maxBytes = CONFIG_MAX_BYTES): stri
  */
 export type BoundedRead =
   | { readonly kind: "absent" }
-  | { readonly kind: "ok"; readonly text: string }
+  /**
+   * `target` is the path `realpathSync` produced and `openSync` actually
+   * opened, which is NOT always the path the caller passed. A caller that
+   * checked containment on its own resolution of the pathname resolved it a
+   * second time, independently, so only this value says what was really read.
+   */
+  | { readonly kind: "ok"; readonly text: string; readonly target: string }
   | { readonly kind: "indeterminate"; readonly reason: string };
 
 export function readBoundedFileDetailed(path: string, maxBytes = CONFIG_MAX_BYTES): BoundedRead {
@@ -113,7 +119,7 @@ export function readBoundedFileDetailed(path: string, maxBytes = CONFIG_MAX_BYTE
       if (n <= 0) break;
       read += n;
     }
-    return { kind: "ok", text: buf.subarray(0, read).toString("utf-8") };
+    return { kind: "ok", text: buf.subarray(0, read).toString("utf-8"), target };
   } catch (err: unknown) {
     const code = (err as { code?: string } | null)?.code;
     return { kind: "indeterminate", reason: code ?? "unreadable" };

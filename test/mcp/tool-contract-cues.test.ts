@@ -390,13 +390,25 @@ describe("tool description contract (T-460)", () => {
     // same trap as three. So the budget is raised from 64,000 to 64,500 as a
     // deliberate act, restoring ~458 bytes of real headroom and keeping both
     // descriptions readable.
-    // This ceiling leaves ~458 bytes of headroom and fails once an edit gives
-    // back more than that. Raising it is a deliberate act that belongs in a
-    // commit message, which is the point. Deliberately NO lower bound: the cues
-    // above are what protect against over-trimming, and a floor would fail an
-    // honest future trim for being too good.
+    // T-523 raises this from 64,500 to 71,000 for the six capability tools,
+    // and records a FLOOR rather than only a number, because the last raise's
+    // ~458 bytes of headroom is what put the next edit in this position. The
+    // measurements, in order: 69,985 as first written, then 69,527 after
+    // trimming every description to only the contract a caller cannot infer
+    // from the tool's name. That trim kept exactly five things -- the bound on
+    // match, the computed status on list, the HEAD stamp on add, the untouched
+    // checkpoint on update, and the stamp refusal on check -- and cutting
+    // further would cut contract rather than prose, which is what the cues
+    // above exist to prevent. So ~69,527 is the floor for this surface, and
+    // 71,000 is that floor plus deliberate headroom: a ratchet whose headroom
+    // is smaller than one feature's worth of contract is a tripwire for
+    // whoever arrives next rather than a budget.
+    // Raising this is a deliberate act that belongs in a commit message, which
+    // is the point. Deliberately NO lower bound: the cues above are what
+    // protect against over-trimming, and a floor would fail an honest future
+    // trim for being too good.
     const bytes = Buffer.byteLength(await emittedPayload(), "utf8");
-    expect(bytes).toBeLessThan(64_500);
+    expect(bytes).toBeLessThan(71_000);
   });
 
   it("still advertises every tool, so the trim cut prose and not surface", async () => {
@@ -429,7 +441,12 @@ describe("tool description contract (T-460)", () => {
     // degraded set for the same reason: a user with no `.story/` yet is
     // exactly the one running a stale CLI with no review bridge. No _list
     // tool; the six check ids are a closed enum in the schema.
-    // T-507 adds storybloq_roster_get (78 -> 79), f2c12b23.
-    expect(result.tools.length).toBe(79);
+    // T-507 adds storybloq_roster_get (78 -> 79), f2c12b23. T-523 adds
+    // storybloq_capability_match/list/get/add/update/check (79 -> 85). All six
+    // leaves reach MCP, `list` included: the ruling that kept arrangement,
+    // gate-ack and earmark lists CLI-only rested on their consumer being a
+    // human at a terminal, and the capability inventory's consumer is the
+    // agent deciding whether a task is already built.
+    expect(result.tools.length).toBe(85);
   });
 });

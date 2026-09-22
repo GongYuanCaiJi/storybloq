@@ -65,10 +65,20 @@ describe("T-502 default health adapters", () => {
       expect(readFileThreeValued(link, 1024).kind).toBe("absent");
     });
 
+    /**
+     * These two assert the THREE-VALUED contract (kind, and the text on ok)
+     * rather than deep-equalling the whole record. `BoundedRead`'s ok variant
+     * gained a `target` field in T-523, and a whole-object equality here turns
+     * every additive field on a shared return type into a failure in a health
+     * test that does not consume it. The fields this adapter exists to provide
+     * are still pinned exactly.
+     */
     it("reads a regular file", () => {
       const p = join(projectDir, "a.json");
       writeFileSync(p, "{\"a\":1}");
-      expect(readFileThreeValued(p, 1024)).toEqual({ kind: "ok", text: "{\"a\":1}" });
+      const res = readFileThreeValued(p, 1024);
+      expect(res.kind).toBe("ok");
+      expect(res.kind === "ok" ? res.text : null).toBe("{\"a\":1}");
     });
 
     it("follows a legitimate symlink, matching readBoundedFile's documented contract", () => {
@@ -76,7 +86,9 @@ describe("T-502 default health adapters", () => {
       writeFileSync(target, "{}");
       const link = join(projectDir, "link.json");
       symlinkSync(target, link);
-      expect(readFileThreeValued(link, 1024)).toEqual({ kind: "ok", text: "{}" });
+      const res = readFileThreeValued(link, 1024);
+      expect(res.kind).toBe("ok");
+      expect(res.kind === "ok" ? res.text : null).toBe("{}");
     });
 
     it("reports a symlink loop as indeterminate, not absent", () => {

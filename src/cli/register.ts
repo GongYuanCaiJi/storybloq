@@ -23,6 +23,15 @@ import {
   CliValidationError,
 } from "./helpers.js";
 import { arrayOption, arrayOptions, arrayPositional } from "./array-options.js";
+import {
+  handleCapabilityList,
+  handleCapabilityGet,
+  handleCapabilityMatch,
+  handleCapabilityAdd,
+  handleCapabilityUpdate,
+  handleCapabilityCheck,
+  type CapabilityWriteInput,
+} from "./commands/capability.js";
 
 // Shared comma/empty/trim/emptyAfterSplit combinations. See array-options.ts for
 // what each axis means and ISS-886 for why they are declared per registration.
@@ -5953,4 +5962,256 @@ export function registerFeedbackCommand(yargs: Argv): Argv {
       }
     },
   );
+}
+
+/**
+ * T-523: the capability inventory surface.
+ *
+ * The write leaves discover the root themselves rather than going through
+ * `runReadCommand`, matching `ruling create`: the catalog transaction takes
+ * the project lock itself, so a wrapper that loaded the whole project first
+ * would read a state it then has to discard.
+ */
+/**
+ * PATH-VALUED FLAGS TAKE THE LITERAL-COMMA POLICY, id-valued flags split.
+ *
+ * `--entry`, `--surface-file` and `match --path` carry filesystem paths, and a
+ * comma is a legal character in a filename. Splitting one would turn
+ * `src/a,b.ts` into two pointers that name nothing, and it would do it
+ * silently: a wrong entry point cannot go stale, so the inventory would keep
+ * reporting `current` about a file it is not watching. `location` on issues
+ * already uses LITERAL_DROP_BLANK for exactly this reason, so this follows the
+ * shipped policy rather than inventing one.
+ *
+ * `--cli`, `--mcp-tool`, `--app`, `--ruling`, `--item`, `--term` and `check --stamp`
+ * carry command names and ids whose charsets exclude a comma, so splitting
+ * them is unambiguous and stays.
+ */
+export function registerCapabilityCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "capability",
+    "Inspect and maintain the capability inventory",
+    (y) =>
+      y
+        .command(
+          "list",
+          "List capabilities with their effective status",
+          (y2) =>
+            addFormatOption(
+              y2
+                .option("status", { type: "string", choices: ["current", "review"], describe: "Filter by EFFECTIVE status, not the stored flag" })
+                .option("skip-check", { type: "boolean", describe: "Skip the freshness check; statuses printed still include structural findings" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) =>
+              handleCapabilityList(
+                { status: argv.status as string | undefined, skipCheck: argv["skip-check"] as boolean | undefined },
+                ctx,
+              ),
+            );
+          },
+        )
+        .command(
+          "get <id>",
+          "Show one capability, its contract, its entry points and its findings",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Capability ID (cap-<slug>)" })
+                .option("skip-check", { type: "boolean", describe: "Skip the freshness check" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) =>
+              handleCapabilityGet(argv.id as string, { skipCheck: argv["skip-check"] as boolean | undefined }, ctx),
+            );
+          },
+        )
+        .command(
+          "match",
+          "Find the capabilities a task may already be covered by. Searches the INVENTORY only: no match is never evidence that no implementation exists.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .option("title", { type: "string", describe: "Task title or one-line description" })
+                  .option("phase", { type: "string", describe: "Phase ID whose items' capabilities should be included" }),
+                { path: { ...LITERAL_DROP_BLANK, describe: "Repo-relative path the task touches (repeatable; a comma is legal in a path, so repeat the flag)" } },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runReadCommand(format, (ctx) =>
+              handleCapabilityMatch(
+                {
+                  paths: argv.path as string[] | undefined,
+                  title: argv.title as string | undefined,
+                  phaseId: argv.phase as string | undefined,
+                },
+                ctx,
+              ),
+            );
+          },
+        )
+        .command(
+          "add",
+          "Add a capability. Stamps the checkpoint at HEAD, so run it when you have actually read the entry points.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .option("id", { type: "string", demandOption: true, describe: "Capability ID (cap-<slug>)" })
+                  .option("name", { type: "string", demandOption: true, describe: "Short human name" })
+                  .option("summary", { type: "string", demandOption: true, describe: "One or two sentences: what this can do" })
+                  .option("contract", { type: "string", demandOption: true, describe: "What it guarantees, in the terms a caller needs" })
+                  .option("example", { type: "string", describe: "One concrete invocation or call site" })
+                  .option("status", { type: "string", choices: ["current", "review"], describe: "Stored status flag (default: current)" }),
+                {
+                  entry: { ...LITERAL_DROP_BLANK, describe: "Repo-relative entry point, file or directory (repeatable, at least one; a comma is legal in a path, so repeat the flag)" },
+                  cli: { ...SPLIT_LIST, describe: "CLI command name this is reachable through (repeatable)" },
+                  // Not `--mcp`: src/cli/index.ts starts the MCP server whenever
+                  // that token appears anywhere in argv, so the natural name is
+                  // reserved by the entry point.
+                  "mcp-tool": {
+                    ...SPLIT_LIST,
+                    describe: "MCP tool name this is reachable through (repeatable). Not --mcp: that flag starts the MCP server, which then waits on stdin",
+                  },
+                  app: { ...SPLIT_LIST, describe: "Mac app surface this is reachable through (repeatable)" },
+                  "surface-file": { ...LITERAL_DROP_BLANK, describe: "Tracked file that is itself the surface (repeatable; a comma is legal in a path, so repeat the flag)" },
+                  ruling: { ...SPLIT_LIST, describe: "Ruling ID that decided this (repeatable)" },
+                  item: { ...SPLIT_LIST, describe: "Ticket or issue ID that built this (repeatable)" },
+                  term: { ...SPLIT_LIST, describe: "Glossary term ID this defines or uses (repeatable)" },
+                },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCapabilityWrite(format, (root) =>
+              handleCapabilityAdd(capabilityWriteInput(argv), format, root),
+            );
+          },
+        )
+        .command(
+          "update <id>",
+          "Edit a capability. Never touches the checkpoint: an edit is not an inspection.",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2
+                  .positional("id", { type: "string", demandOption: true, describe: "Capability ID" })
+                  .option("name", { type: "string", describe: "Short human name" })
+                  .option("summary", { type: "string", describe: "One or two sentences: what this can do" })
+                  .option("contract", { type: "string", describe: "What it guarantees" })
+                  .option("example", { type: "string", describe: "One concrete invocation or call site" })
+                  .option("status", { type: "string", choices: ["current", "review"], describe: "Stored status flag" }),
+                {
+                  entry: { ...LITERAL_DROP_BLANK, describe: "Entry points, REPLACING the current list (repeatable; a comma is legal in a path, so repeat the flag)" },
+                  cli: { ...SPLIT_LIST, describe: "CLI commands, replacing the current list (repeatable)" },
+                  // Not `--mcp`, for the reason given on `capability add`.
+                  "mcp-tool": {
+                    ...SPLIT_LIST,
+                    describe: "MCP tools, replacing the current list (repeatable). Not --mcp: that flag starts the MCP server, which then waits on stdin",
+                  },
+                  app: { ...SPLIT_LIST, describe: "App surfaces, replacing the current list (repeatable)" },
+                  "surface-file": { ...LITERAL_DROP_BLANK, describe: "Surface files, replacing the current list (repeatable; a comma is legal in a path, so repeat the flag)" },
+                  ruling: { ...SPLIT_LIST, describe: "Ruling IDs, replacing the current list (repeatable)" },
+                  item: { ...SPLIT_LIST, describe: "Item IDs, replacing the current list (repeatable)" },
+                  term: { ...SPLIT_LIST, describe: "Term IDs, replacing the current list (repeatable)" },
+                },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCapabilityWrite(format, (root) =>
+              handleCapabilityUpdate({ ...capabilityWriteInput(argv), id: argv.id as string }, format, root),
+            );
+          },
+        )
+        .command(
+          "check",
+          "Check every capability against HEAD, and optionally re-stamp the ones that are only stale",
+          (y2) =>
+            addFormatOption(
+              arrayOptions(
+                y2.option("stamp-all", { type: "boolean", describe: "Re-stamp every entry whose only findings are freshness findings" }),
+                { stamp: { ...SPLIT_LIST, describe: "Capability ID to re-stamp after re-reading it (repeatable)" } },
+              ),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            // `check` needs both a root for the write and ctx.state for item
+            // resolution, so it runs through the read pipeline and does its
+            // write from inside the handler.
+            await runReadCommand(format, (ctx) =>
+              handleCapabilityCheck(
+                { stamp: argv.stamp as string[] | undefined, stampAll: argv["stamp-all"] as boolean | undefined },
+                format,
+                ctx.root,
+                ctx,
+              ),
+            );
+          },
+        ),
+  );
+}
+
+/** Flag-to-input mapping shared by `capability add` and `capability update`. */
+function capabilityWriteInput(argv: Record<string, unknown>): CapabilityWriteInput {
+  return {
+    id: argv.id as string,
+    name: argv.name as string | undefined,
+    summary: argv.summary as string | undefined,
+    entryPoints: argv.entry as string[] | undefined,
+    contract: argv.contract as string | undefined,
+    example: argv.example as string | undefined,
+    cli: argv.cli as string[] | undefined,
+    mcp: argv["mcp-tool"] as string[] | undefined,
+    app: argv.app as string[] | undefined,
+    files: argv["surface-file"] as string[] | undefined,
+    rulings: argv.ruling as string[] | undefined,
+    items: argv.item as string[] | undefined,
+    terms: argv.term as string[] | undefined,
+    status: argv.status as string | undefined,
+  };
+}
+
+/** Root discovery plus the error mapping every catalog write shares. */
+async function runCapabilityWrite(
+  format: ReturnType<typeof parseOutputFormat>,
+  run: (root: string) => Promise<{ output: string; exitCode?: number }>,
+): Promise<void> {
+  const { formatError, ExitCode } = await import("../core/output-formatter.js");
+  const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+  if (!root) {
+    writeOutput(formatError("not_found", "No .story/ project found.", format));
+    process.exitCode = ExitCode.USER_ERROR;
+    return;
+  }
+  try {
+    const result = await run(root);
+    writeOutput(result.output);
+    process.exitCode = result.exitCode ?? ExitCode.OK;
+  } catch (err: unknown) {
+    if (err instanceof CliValidationError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const { CatalogLoadError } = await import("../core/catalog.js");
+    if (err instanceof CatalogLoadError) {
+      writeOutput(formatError("io_error", err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const { ProjectLoaderError } = await import("../core/errors.js");
+    if (err instanceof ProjectLoaderError) {
+      writeOutput(formatError(err.code, err.message, format));
+      process.exitCode = ExitCode.USER_ERROR;
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    writeOutput(formatError("io_error", message, format));
+    process.exitCode = ExitCode.USER_ERROR;
+  }
 }

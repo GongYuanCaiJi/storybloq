@@ -42,7 +42,22 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // accumulating edit could silently reoccupy. Measured, not estimated.
   // T-320 commit 3's step 1 wording (55,954 measured) stays under this
   // ceiling by keeping the field inventory in reference.md, not SKILL.md.
-  "SKILL.md": 56000,
+  // T-523 re-pins 56,000 -> 57,000 for the Step 2 capability digest. The
+  // three bytes between 55,997 measured and the old 56,000 were ARITHMETIC,
+  // not a budget: this table's rule is the measured size rounded up to the
+  // next 1,000, and at 55,997 that rounding happened to land almost exactly
+  // on the file. 57,000 is likewise a pin and not a target, so the next
+  // person to land near it re-pins rather than compressing contract to fit.
+  // This is a re-pin by the convention that created the row (setup-flow.md
+  // and duet-mode.md above did the same), not a ratchet raise like the
+  // deliberate one in tool-contract-cues.test.ts; the comment says which
+  // kind it is because the two are different instruments.
+  // The digest line was trimmed BEFORE this re-pin, to 184 bytes carrying
+  // only the tool call and why a reader needs it: no compression reaches
+  // three bytes, and a stub that named the tool and nothing else still
+  // measured 56,102. Recorded so the next edit does not re-derive the trim
+  // and then cut contract to stay under.
+  "SKILL.md": 57000,
   // T-460 Leg C step 1: 10,194 measured, rounded up to 11,000. Raised to
   // 12,000 by T-501, which documents `autoCompactWindow` (the three Claude
   // Code layers, when an edit takes effect, and Codex having no equivalent)
@@ -86,7 +101,16 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // storybloq_roster_get (T-507 commit B) and the bundled bridge in the health
   // docs (T-509) grew the generated inventory past 38,000. 39,000 leaves the
   // same one-step headroom as before.
-  "reference.md": 39000,
+  // 41,396 measured at T-523: the six `capability` CLI leaves and the six
+  // storybloq_capability_* tools add 2,631 bytes to the generated inventory.
+  // 42,000 by the same one-step rule, third application of it on this row.
+  // Nothing was trimmed to fit and nothing could be: this file is emitted by
+  // `scripts/regen-reference.mts` from COMMANDS/MCP_TOOLS, so its size is the
+  // surface's size and hand-editing it would only be reverted by the next
+  // regeneration. That is what makes this row a pin rather than a budget, and
+  // it is a different instrument from the deliberate ratchet in
+  // tool-contract-cues.test.ts, where the payload IS prose and a trim is real.
+  "reference.md": 42000,
   "federation-setup.md": 14000,
   // Was 47000 (measured 46,936 before this issue). ISS-1240 adds the roster
   // pointer to the pen priming order: live seats come from
