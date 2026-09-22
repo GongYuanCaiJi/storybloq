@@ -161,7 +161,10 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // size (rounded up) rather than staying a target this file no longer
   // meets. ISS-1146 is the tracked trim step.
   // N-131 (2026-09-22): the "Spawning a worker" section added ~1.2 KB; measured 13,174 bytes at the re-pin.
-  "duet-mode.md": 14000,
+  // T-530 (2026-09-22): the section grew to cover the automatic handshake, the
+  // federation --dir wording and --recover; 13,345 at HEAD before the ticket,
+  // 15,249 measured after. 16,000 by the same one-step rule.
+  "duet-mode.md": 16000,
   "triage-mode.md": 17000,
   "bus-mode.md": 31000,
   "session-guard-fallback.md": 117000,

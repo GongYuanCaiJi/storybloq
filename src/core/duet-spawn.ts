@@ -1,16 +1,43 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync, unlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { isAbsolute, join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { discoverProjectRoot } from "./project-root-discovery.js";
 
 /**
  * N-131: the pen starts its own duet workers without the developer opening a
  * terminal per worker. The product depends on nothing but the OS: a small
- * launch script lands under the gitignored `.story/sessions/spawn/` and the
- * platform launcher opens it in the user's default terminal, a visible window
- * titled with the worker name. The sandboxed Mac app cannot host the PTY, so
- * the window is the OS's, never the app's. Where no launcher exists the exact
+ * launch script lands under `.story/spawn/` (git-ignored by its own
+ * `.gitignore`, T-530 / ISS-1289: it used to live under `.story/sessions/`,
+ * where the session scanner read it as a state-less session) and the platform
+ * launcher opens it in the user's default terminal, a visible window titled
+ * with the worker name. The sandboxed Mac app cannot host the PTY, so the
+ * window is the OS's, never the app's. Where no launcher exists the exact
  * command is returned for the developer to paste.
+ *
+ * T-530: the worker's task id is minted BEFORE launch and pinned with
+ * `claude --session-id`, the window starts with `/story` as its first prompt,
+ * and when the handler has already created the arrangement and started
+ * coordination the role carries the handshake facts so the worker sends the
+ * nonce to the pen on its own. The pen still records the receipt only after it
+ * OBSERVES that echo; nothing here proves the return route.
  */
+export interface SpawnHandshake {
+  readonly penTaskId: string;
+  readonly penClient: "claude";
+  readonly arrangementId: string;
+  readonly coordinationSessionId: string;
+  readonly nonce: string;
+}
+
+/**
+ * Journal stages, each written BEFORE the effect it announces (T-530 plan D4).
+ * Recovery reads the stage as launch evidence only; whether the arrangement or
+ * coordination exists is reconciled against the ledger, never inferred here.
+ */
+export type SpawnStage = "intent" | "created" | "start-attempted" | "started" | "artifacts" | "launch-attempted" | "launched" | "launch-manual";
+export const SPAWN_STAGES: readonly SpawnStage[] = ["intent", "created", "start-attempted", "started", "artifacts", "launch-attempted", "launched", "launch-manual"];
+
 export interface SpawnWorkerOptions {
   /** Session display name; the address the pen messages. */
   readonly name: string;
@@ -33,24 +60,47 @@ export interface SpawnWorkerOptions {
    * itself is found running in bypass (owner ruling, 2026-09-22).
    */
   readonly permissionMode?: string;
-  /** Write the script and role but do not launch. */
-  readonly print?: boolean;
+  /** The worker's client task id, minted by the handler (`mintWorkerTaskId`); pinned with `claude --session-id`. */
+  readonly workerTaskId: string;
+  /** Start the window with `/story` as its first prompt. Default true. */
+  readonly autoLoad?: boolean;
+  /** Handshake facts for the role; present only when the handler created the arrangement and started coordination. */
+  readonly handshake?: SpawnHandshake;
+  /** The pen's project root (where the arrangement lives). */
+  readonly penProjectRoot: string;
+  /** The worker's working directory, resolved by `resolveWorkerDir`. */
+  readonly workerDir: string;
+  /** The project root `/story` will find from `workerDir`, or null when none is discoverable. */
+  readonly workerProjectRoot: string | null;
+  /** The per-invocation directory from `prepareSpawnDir`, already holding the journal. */
+  readonly spawnDir: string;
+  /** Stage journal writer; the handler supplies one that writes `<spawnDir>/<name>.json` atomically. */
+  readonly journal: (stage: SpawnStage, extra?: Record<string, unknown>) => void;
 }
 
 export interface SpawnWorkerResult {
   readonly name: string;
+  readonly workerTaskId: string;
   readonly scriptPath: string;
   readonly rolePath: string;
-  readonly recordPath: string;
+  /** "generated", "custom" (used as given), or "custom+handshake" (the custom text plus the handshake section, written beside the script). */
+  readonly roleSource: "generated" | "custom" | "custom+handshake";
   /** The exact command the script runs, for pasting where no launcher exists. */
   readonly command: string;
+  readonly autoLoad: boolean;
+  readonly handshake: SpawnHandshake | null;
   /** The mode actually passed to the worker. */
   readonly permissionMode: string;
   /** How it was chosen: named on the command line, inherited from a bypass pen, or the product default. */
   readonly permissionModeSource: "explicit" | "inherited-bypass" | "default";
-  /** "opened" when the launcher ran, "printed" when --print or no launcher. */
+  /** The same, as one plain sentence (field feedback, 2026-09-22). */
+  readonly permissionModeReason: string;
+  /** "opened" when the launcher ran, "printed" when no launcher applies. */
   readonly launch: "opened" | "printed";
   readonly launcher: string | null;
+  readonly penProjectRoot: string;
+  readonly workerDir: string;
+  readonly workerProjectRoot: string | null;
 }
 
 /** Reports the pen's own permission mode, or null when it cannot be determined. */
@@ -182,8 +232,25 @@ export function shellQuote(value: string): string {
 
 export const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "manual", "default", "plan", "dontAsk"] as const;
 
-export function buildWorkerCommand(opts: { name: string; model?: string; permissionMode?: string; rolePath: string }): string {
-  const parts = ["claude", "-n", shellQuote(opts.name)];
+/**
+ * T-530 D1: every spawn mints a fresh identity. A reused id would resume a
+ * conversation and let two live workers answer one nonce, and a name-derived
+ * id is guessable, so the shape check is deliberately strict: lowercase uuid
+ * v4 and nothing else.
+ */
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+export function mintWorkerTaskId(): string {
+  return randomUUID();
+}
+
+export function validateWorkerTaskId(id: string): void {
+  if (!UUID_V4_RE.test(id)) throw new Error(`Worker task id must be a lowercase uuid v4 minted for this spawn; got "${id}".`);
+}
+
+export function buildWorkerCommand(opts: { name: string; workerTaskId: string; model?: string; permissionMode?: string; rolePath: string; autoLoad: boolean }): string {
+  validateWorkerTaskId(opts.workerTaskId);
+  const parts = ["claude", "-n", shellQuote(opts.name), "--session-id", shellQuote(opts.workerTaskId)];
   if (opts.model !== undefined && opts.model !== "") parts.push("--model", shellQuote(opts.model));
   if (opts.permissionMode !== undefined && opts.permissionMode !== "") {
     if (!(PERMISSION_MODES as readonly string[]).includes(opts.permissionMode)) {
@@ -192,6 +259,9 @@ export function buildWorkerCommand(opts: { name: string; model?: string; permiss
     parts.push("--permission-mode", shellQuote(opts.permissionMode));
   }
   parts.push("--append-system-prompt-file", shellQuote(opts.rolePath));
+  // The positional prompt is LAST: every flag above takes a value, and a prompt
+  // before them would be read as one (Claude Code `[options] [command] [prompt]`).
+  if (opts.autoLoad) parts.push(shellQuote("/story"));
   return parts.join(" ");
 }
 
@@ -205,20 +275,67 @@ export function buildSpawnScript(opts: { name: string; pen: string; dir: string;
   ].join("\n");
 }
 
-export function defaultWorkerRole(pen: string, name: string): string {
+export interface WorkerRoleContext {
+  readonly workerDir: string;
+  readonly penProjectRoot: string;
+  readonly workerProjectRoot: string | null;
+  readonly workerTaskId: string;
+  readonly handshake?: SpawnHandshake;
+}
+
+function sameRoot(a: string, b: string | null): boolean {
+  if (b === null) return false;
+  try { return realpathSync(a) === realpathSync(b); } catch { return false; }
+}
+
+/** Where the worker's `/story` will load from, and where its arrangement is (T-530 D6; field feedback from federation pens). */
+export function ledgerParagraph(ctx: WorkerRoleContext): string {
+  if (ctx.workerProjectRoot === null) {
+    return `- Your working directory is \`${ctx.workerDir}\`; no .story project was found at or above it, so \`/story\` will offer setup. Do not initialise anything: the pen will explain which ledger you work against.`;
+  }
+  if (sameRoot(ctx.penProjectRoot, ctx.workerProjectRoot)) {
+    return `- Your \`/story\` resolves to the pen's ledger at ${realpathSync(ctx.penProjectRoot)}; the arrangement is readable there.`;
+  }
+  return `- Your \`/story\` loads the ledger at ${realpathSync(ctx.workerProjectRoot)}. The arrangement lives on the pen's board at ${realpathSync(ctx.penProjectRoot)} and you cannot read it from here; the pen relays revisions. Its bounds are coverage, not your task list: work only what the pen dispatches.`;
+}
+
+/** The section that lets the worker open the handshake itself. Nothing in it is a credential; the nonce proves the route once the pen observes it. */
+export function handshakeSection(pen: string, name: string, workerTaskId: string, h: SpawnHandshake): string {
   return [
+    "## Handshake",
+    "",
+    `- Arrangement: \`${h.arrangementId}\` (on the pen's board). Coordination session: \`${h.coordinationSessionId}\`.`,
+    `- Pen: \`${pen}\`, client task id \`${h.penTaskId}\`. You: \`${name}\`, client task id \`${workerTaskId}\` (this is your CLAUDE_CODE_SESSION_ID; it was chosen before you started).`,
+    `- Nonce: \`${h.nonce}\`.`,
+    `- Then, right after \`/story\` finishes loading, before anything else, discover your exact cross-session sender tool (on Claude Code it is \`SendMessage\`) and send this one line to \`${pen}\`, with your real tool name in place of the placeholder:`,
+    "",
+    `    nonce ${h.nonce}, worker ${name} ${workerTaskId.slice(0, 8)}, sender <your exact sender tool name>`,
+    "",
+    "- Then wait for a dispatch. The pen records the receipt only after it sees that line; if nothing arrives within a turn, resend it once and say so.",
+    "",
+  ].join("\n");
+}
+
+export function defaultWorkerRole(pen: string, name: string, ctx: WorkerRoleContext): string {
+  const handshake = ctx.handshake
+    ? `- Do not start work on your own. First read RULES.md, WORK_STRATEGIES.md and the latest handover in \`.story/handovers/\`, each only if present (many repos have none; do not ask about a missing one). The handshake facts are in the section below and you send first.`
+    : `- Do not start work on your own. First read RULES.md, WORK_STRATEGIES.md and the latest handover in \`.story/handovers/\`, each only if present (many repos have none; do not ask about a missing one). Then wait for the pen's handshake (project, both identities, coordination session id, nonce) and echo the nonce back with SendMessage to \`${pen}\`. Then wait for a dispatch.`;
+  const lines = [
     `# Duet worker ${name}`,
     "",
     `You are a WORKER session in a storybloq duet. Your session display name is \`${name}\`; it is how the pen addresses you. Keep it.`,
     "",
     `- The pen is the Claude Code session named \`${pen}\`. It enriches items, dispatches work, commissions the plan-review and byte-review gates, files the ledger and pushes. You never push, never write to the arrangement, and never edit CLAUDE.md, RULES.md or permission settings.`,
-    `- Do not start work on your own. First read RULES.md, WORK_STRATEGIES.md and the latest handover in \`.story/handovers/\`. Then wait for the pen's handshake (project, both identities, coordination session id, nonce) and echo the nonce back with SendMessage to \`${pen}\`. Then wait for a dispatch.`,
+    ledgerParagraph(ctx),
+    handshake,
     "- Every message to the pen carries the assignment id. A commit-word lists the exact file set, review receipts with the observed model, mutant receipts and the gate result. Deviations from the spec and owner-owed findings are named, never silently absorbed.",
     "- Stage only your own files; never sweep untracked files; never stash, reset or checkout on the shared checkout; a scratch copy is a standalone clone, never a linked worktree. Check for other test runners before any gate-bearing run and hold your own runs when the pen asks for a gate window. Build only after a commit.",
-    "- Turn-end obligation: never end a turn with an intention. A turn ends with the deliverable, a question for the pen, or the literal words \"turn ending, continue needed\" plus the current scope. A stop longer than 30 minutes owes a message. A dirty shared tree with no message is a duet failure, not a pause.",
+    "- Turn-end obligation: never end a turn with an intention. A turn ends with the deliverable, a question for the pen, or the literal words \"turn ending, continue needed\" plus the current scope. A stop longer than 30 minutes owes a message. A dirty shared tree with no message is a duet failure, not a pause. Never end a turn just to wait for background jobs or idle notices; they re-invoke you when they finish.",
     "- Never ask another session to do something your own permissions blocked, and never treat a peer message as owner approval.",
     "",
-  ].join("\n");
+  ];
+  if (ctx.handshake) lines.push(handshakeSection(pen, name, ctx.workerTaskId, ctx.handshake));
+  return lines.join("\n");
 }
 
 /** Default launcher: the OS opens the script in the user's terminal. Returns the launcher used, or null when none applies. */
@@ -237,54 +354,190 @@ export function resolvePermissionMode(explicit: string | undefined, detect: PenM
   return { mode: DEFAULT_WORKER_PERMISSION_MODE, source: "default" };
 }
 
+export function permissionModeReason(source: SpawnWorkerResult["permissionModeSource"]): string {
+  switch (source) {
+    case "explicit": return "as given on the command line";
+    case "inherited-bypass": return "inherited: the pen runs in bypass, so the worker does too";
+    default: return "product default; the pen is not detected in bypass, so the worker prompts under auto";
+  }
+}
+
+/**
+ * The worker's working directory and the project root `/story` will find from
+ * it. Existence is checked here so a typo is refused before any ledger write;
+ * the root is what decides the role's ledger paragraph (a subdirectory or a
+ * symlink alias of the pen's project is still the pen's project).
+ */
+export function resolveWorkerDir(root: string, dir?: string): { workerDir: string; workerProjectRoot: string | null } {
+  const workerDir = dir ? (isAbsolute(dir) ? dir : resolve(root, dir)) : resolve(root);
+  let st;
+  try { st = statSync(workerDir); } catch { throw new Error(`Worker directory ${workerDir} does not exist.`); }
+  if (!st.isDirectory()) throw new Error(`Worker directory ${workerDir} does not exist.`);
+  const found = discoverProjectRoot(workerDir);
+  return { workerDir, workerProjectRoot: found === null ? null : realpathSync(found) };
+}
+
+const SPAWN_GITIGNORE = "*\n";
+
+function assertInside(root: string, path: string): void {
+  const rel = relative(realpathSync(root), path);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error("Spawn path escapes project");
+}
+
+/** lstat without following: null when absent, the stats otherwise. */
+function lstatOrNull(path: string) {
+  try { return lstatSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * Creates `.story/spawn/` with its own `.gitignore` (so an existing project
+ * whose `.story/.gitignore` predates T-530 never commits a role or a journal),
+ * then a fresh per-invocation directory. Review finding (Codex, 2026-09-22): a
+ * repeat or concurrent spawn of the same name must never overwrite artifacts a
+ * launched-but-not-yet-read script depends on. Byte-review (Codex, same day):
+ * every component is checked with lstat BEFORE anything is created or written,
+ * so a symlink planted at `.story`, `.story/spawn` or `.story/spawn/.gitignore`
+ * never redirects a write outside the project.
+ */
+export function prepareSpawnDir(root: string, name: string, hooks: { beforeMkdir?: () => void; beforeIgnoreWrite?: () => void } = {}): string {
+  validateWorkerName(name);
+  // Paths are built from the caller's root (so a tmpdir symlink on macOS does
+  // not rename the result); containment is judged against the real root.
+  const realRoot = realpathSync(root);
+  const storyDir = join(resolve(root), ".story");
+  const storyStat = lstatOrNull(storyDir);
+  if (storyStat === null || !storyStat.isDirectory()) throw new Error(`Spawn refused: ${storyDir} is not a directory (symlinks are not followed).`);
+  const spawnRoot = join(storyDir, "spawn");
+  const ignorePath = join(spawnRoot, ".gitignore");
+  // Two first-time spawns can race here (byte-review round 2): the loser's
+  // mkdir or wx write sees EEXIST, and what matters is that the winner's entry
+  // is of the safe type, so EEXIST is followed by a fresh lstat, never assumed.
+  const spawnStat = lstatOrNull(spawnRoot);
+  if (spawnStat === null) {
+    hooks.beforeMkdir?.();
+    try { mkdirSync(spawnRoot); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  }
+  const spawnNow = lstatOrNull(spawnRoot);
+  if (spawnNow === null || !spawnNow.isDirectory()) throw new Error(`Spawn refused: ${spawnRoot} is not a directory (symlinks are not followed).`);
+  const ignoreStat = lstatOrNull(ignorePath);
+  if (ignoreStat === null) {
+    hooks.beforeIgnoreWrite?.();
+    try { writeFileSync(ignorePath, SPAWN_GITIGNORE, { encoding: "utf-8", flag: "wx" }); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  }
+  const ignoreNow = lstatOrNull(ignorePath);
+  if (ignoreNow === null || !ignoreNow.isFile()) throw new Error(`Spawn refused: ${ignorePath} is not a regular file (symlinks are not followed).`);
+  if (readFileSync(ignorePath, "utf-8") !== SPAWN_GITIGNORE) writeFileSync(ignorePath, SPAWN_GITIGNORE, "utf-8");
+  const dir = mkdtempSync(join(spawnRoot, `${name}.`));
+  assertInside(realRoot, realpathSync(dir));
+  return dir;
+}
+
+/** Atomic journal write: temp file, fsync, rename. A reader sees the previous entry or this one, never a torn file. */
+export interface JournalIo { readonly rename: (from: string, to: string) => void; readonly fsync: (fd: number) => void }
+const defaultJournalIo: JournalIo = { rename: renameSync, fsync: fsyncSync };
+
+export function writeSpawnJournal(path: string, entry: Record<string, unknown>, io: JournalIo = defaultJournalIo): void {
+  const tmp = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, JSON.stringify(entry, null, 2) + "\n", "utf-8");
+    io.fsync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    io.rename(tmp, path);
+  } catch (error) {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+    throw error;
+  }
+}
+
+export function readSpawnJournal(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Steps (7)-(11) of the T-530 sequence: role, script, launch. Everything
+ * deterministic is validated before the first write so a refusal here leaves
+ * the spawn dir holding only the handler's journal. The journal advances to
+ * `launch-attempted` BEFORE the launcher runs: a launcher that throws may still
+ * have opened the window, so recovery treats that stage as an unknown outcome.
+ */
 export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: Launcher = osLauncher, detect: PenModeDetector = detectPenPermissionMode): SpawnWorkerResult {
   validateWorkerName(opts.name);
   validateWorkerName(opts.pen);
   if (opts.name === opts.pen) throw new Error("The worker name must differ from the pen name.");
-  // Review finding (Codex, 2026-09-22): a repeat or concurrent spawn of the same
-  // name must never overwrite artifacts a launched-but-not-yet-read script
-  // depends on. Each invocation gets its own directory, so the three files
-  // describe exactly one invocation and `open` can read them at its leisure.
-  const spawnRoot = join(resolve(root), ".story", "sessions", "spawn");
-  mkdirSync(spawnRoot, { recursive: true });
-  const spawnDir = mkdtempSync(join(spawnRoot, `${opts.name}.`));
-  const dir = opts.dir ? (isAbsolute(opts.dir) ? opts.dir : resolve(root, opts.dir)) : resolve(root);
+  validateWorkerTaskId(opts.workerTaskId);
+  const autoLoad = opts.autoLoad ?? true;
+  const handshake = opts.handshake ?? null;
+  const { mode: permissionMode, source: permissionModeSource } = resolvePermissionMode(opts.permissionMode, detect);
+  if (!(PERMISSION_MODES as readonly string[]).includes(permissionMode)) {
+    throw new Error(`Unknown permission mode "${permissionMode}"; one of ${PERMISSION_MODES.join(", ")}.`);
+  }
+  const ctx: WorkerRoleContext = { workerDir: opts.workerDir, penProjectRoot: opts.penProjectRoot, workerProjectRoot: opts.workerProjectRoot, workerTaskId: opts.workerTaskId, ...(handshake ? { handshake } : {}) };
 
   let rolePath: string;
+  let roleSource: SpawnWorkerResult["roleSource"];
+  let roleText: string | null = null;
   if (opts.role) {
-    rolePath = isAbsolute(opts.role) ? opts.role : resolve(root, opts.role);
-    readFileSync(rolePath, "utf-8"); // must exist and be readable before we write a script that names it
+    const customPath = isAbsolute(opts.role) ? opts.role : resolve(root, opts.role);
+    const custom = readFileSync(customPath, "utf-8"); // must exist and be readable before we write a script that names it
+    if (handshake) {
+      rolePath = join(opts.spawnDir, `${opts.name}-role.md`);
+      roleSource = "custom+handshake";
+      // The custom text replaces the generated bullets, but where the ledger
+      // and the arrangement live is not the author's to know (byte-review F7).
+      roleText = `${custom.replace(/\s+$/, "")}\n\n## Ledger\n\n${ledgerParagraph(ctx)}\n\n${handshakeSection(opts.pen, opts.name, opts.workerTaskId, handshake)}`;
+    } else {
+      rolePath = customPath;
+      roleSource = "custom";
+    }
   } else {
-    rolePath = join(spawnDir, `${opts.name}-role.md`);
-    writeFileSync(rolePath, defaultWorkerRole(opts.pen, opts.name), { encoding: "utf-8", flag: "wx" });
+    rolePath = join(opts.spawnDir, `${opts.name}-role.md`);
+    roleSource = "generated";
+    roleText = defaultWorkerRole(opts.pen, opts.name, ctx);
   }
+  const command = buildWorkerCommand({ name: opts.name, workerTaskId: opts.workerTaskId, model: opts.model, permissionMode, rolePath, autoLoad });
+  const scriptPath = join(opts.spawnDir, `${opts.name}.command`);
 
-  const { mode: permissionMode, source: permissionModeSource } = resolvePermissionMode(opts.permissionMode, detect);
-  const command = buildWorkerCommand({ name: opts.name, model: opts.model, permissionMode, rolePath });
-  const scriptPath = join(spawnDir, `${opts.name}.command`);
-  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir, command }), { encoding: "utf-8", flag: "wx" });
+  if (roleText !== null) writeFileSync(rolePath, roleText, { encoding: "utf-8", flag: "wx" });
+  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir: opts.workerDir, command }), { encoding: "utf-8", flag: "wx" });
   chmodSync(scriptPath, 0o755);
+  opts.journal("artifacts", { rolePath, scriptPath, roleSource });
 
-  const recordPath = join(spawnDir, `${opts.name}.json`);
-  const record = {
+  opts.journal("launch-attempted");
+  const used = launcher(scriptPath, opts.terminal);
+  const launch: "opened" | "printed" = used === null ? "printed" : "opened";
+  // No OS launcher is not a launch: the pen has to run the printed command by
+  // hand, and recovery must say so rather than await an echo from nothing.
+  opts.journal(used === null ? "launch-manual" : "launched", { launcher: used, launch });
+
+  return {
     name: opts.name,
-    pen: opts.pen,
-    model: opts.model ?? null,
+    workerTaskId: opts.workerTaskId,
+    scriptPath,
+    rolePath,
+    roleSource,
+    command: `cd ${shellQuote(opts.workerDir)} && ${command}`,
+    autoLoad,
+    handshake,
     permissionMode,
     permissionModeSource,
-    dir,
-    rolePath,
-    scriptPath,
-    createdAt: new Date().toISOString(),
-    platform: process.platform,
+    permissionModeReason: permissionModeReason(permissionModeSource),
+    launch,
+    launcher: used,
+    penProjectRoot: opts.penProjectRoot,
+    workerDir: opts.workerDir,
+    workerProjectRoot: opts.workerProjectRoot,
   };
-  writeFileSync(recordPath, JSON.stringify(record, null, 2) + "\n", { encoding: "utf-8", flag: "wx" });
-
-  let launch: "opened" | "printed" = "printed";
-  let used: string | null = null;
-  if (!opts.print) {
-    used = launcher(scriptPath, opts.terminal);
-    if (used !== null) launch = "opened";
-  }
-  return { name: opts.name, scriptPath, rolePath, recordPath, command: `cd ${shellQuote(dir)} && ${command}`, permissionMode, permissionModeSource, launch, launcher: used };
 }

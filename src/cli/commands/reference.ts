@@ -392,9 +392,9 @@ export const COMMANDS: readonly CommandEntry[] = [
   },
   {
     name: "duet spawn",
-    description: "Start a visible duet worker session from the pen (N-131): writes a launch script, role and record under .story/sessions/spawn/ and opens it in the OS terminal. Permission mode defaults to auto, inheriting bypassPermissions only when the pen itself runs in bypass",
-    usage: "storybloq duet spawn --name <value> --pen <value> [--model <value>] [--dir <value>] [--role <value>] [--permission-mode <mode>] [--terminal <app>] [--print] [--format <json|md>]",
-    flags: ["--name", "--pen", "--model", "--dir", "--role", "--permission-mode", "--terminal", "--print", "--format"],
+    description: "Start a visible duet worker session from the pen (N-131, T-530): mints the worker's task id, creates the arrangement and starts coordination (--arrangement auto, the default for a Claude pen; needs --bounds), writes the role with the handshake facts under .story/spawn/ and opens the window with /story as its first prompt, so the worker sends the nonce to the pen itself. Permission mode defaults to auto, inheriting bypassPermissions only when the pen itself runs in bypass. Requirements are conditional: --name and --pen for any launch or --print; --bounds for the automatic arrangement (the default for a Claude pen with a task id); none of them for --recover, which lists interrupted spawns read-only",
+    usage: "storybloq duet spawn [--name <value>] [--pen <value>] [--bounds <refs>] [--arrangement auto|none] [--model <value>] [--dir <value>] [--role <value>] [--permission-mode <mode>] [--terminal <app>] [--auto-load=false] [--pen-task-id <id>] [--print] [--recover] [--format <json|md>]",
+    flags: ["--name", "--pen", "--bounds", "--arrangement", "--model", "--dir", "--role", "--permission-mode", "--terminal", "--auto-load", "--pen-task-id", "--print", "--recover", "--format"],
   },
   {
     name: "arrangement compact",

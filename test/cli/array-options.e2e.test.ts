@@ -975,6 +975,20 @@ const MATRIX: Coverage[] = [
     },
   },
   {
+    key: "duet spawn --bounds",
+    check: (dir) => {
+      seedTickets(dir, 2);
+      // --print creates no arrangement and writes nothing (T-530 D3); the split
+      // list still has to reach the handler, which echoes it in the dry run.
+      const res = run(dir, "duet", "spawn", "--name", "w", "--pen", "p", "--print",
+        "--pen-task-id", "11111111-2222-4333-8444-555555555555",
+        "--bounds", "T-001,T-002");
+      expect(res.code, res.out).toBe(0);
+      expect(res.out).toContain("Bounds: T-001, T-002");
+      expect(res.out).toContain("no arrangement created, no files written");
+    },
+  },
+  {
     key: "arrangement create --party",
     check: (dir) => {
       seedTickets(dir, 1);

@@ -3152,7 +3152,7 @@ export function parsePartySpec(spec: string): ArrangementParty {
   };
 }
 
-/** N-131: `storybloq duet spawn`, the pen starts a visible worker session. */
+/** N-131 / T-530: `storybloq duet spawn`, the pen starts a visible worker session that handshakes by itself. */
 export function registerDuetCommand(yargs: Argv): Argv {
   return yargs.command(
     "duet",
@@ -3161,31 +3161,49 @@ export function registerDuetCommand(yargs: Argv): Argv {
       y
         .command(
           "spawn",
-          "Start a worker session in a new terminal window (the OS opens it; nothing else is required)",
-          (y2) => addFormatOption(y2
-            .option("name", { type: "string", demandOption: true, describe: "Worker session name; the address the pen messages" })
-            .option("pen", { type: "string", demandOption: true, describe: "The pen's own session name, written into the worker's role" })
-            .option("model", { type: "string", describe: "Model id or alias for `claude --model`; pin it deliberately" })
-            .option("dir", { type: "string", describe: "Directory the worker starts in (default: this project)" })
-            .option("role", { type: "string", describe: "Role file to use instead of the generated default" })
-            .option("permission-mode", { type: "string", describe: "claude --permission-mode for the worker; omitted: auto, or bypassPermissions when the pen itself runs in bypass" })
-            .option("terminal", { type: "string", describe: "macOS: open with this terminal app instead of the default handler" })
-            .option("print", { type: "boolean", default: false, describe: "Write the script and role, print the command, launch nothing" })),
+          "Start a worker session in a new terminal window with its arrangement created and its handshake armed (the OS opens it; nothing else is required)",
+          (y2) => arrayOption(
+            addFormatOption(y2
+              .option("name", { type: "string", describe: "Worker session name; the address the pen messages (required unless --recover)" })
+              .option("pen", { type: "string", describe: "The pen's own session name, written into the worker's role (required unless --recover)" })
+              .option("arrangement", { type: "string", choices: ["auto", "none"], describe: "auto (default for a Claude pen with a task id): create the arrangement, start coordination and put the nonce in the role; none: manual handshake" })
+              .option("model", { type: "string", describe: "Model id or alias for `claude --model`; pin it deliberately" })
+              .option("dir", { type: "string", describe: "Directory the worker starts in (default: this project); a federation node checkout is the common case" })
+              .option("role", { type: "string", describe: "Role file to use instead of the generated default (the handshake section is appended when an arrangement is created)" })
+              .option("permission-mode", { type: "string", describe: "claude --permission-mode for the worker; omitted: auto, or bypassPermissions when the pen itself runs in bypass" })
+              .option("terminal", { type: "string", describe: "macOS: open with this terminal app instead of the default handler" })
+              .option("auto-load", { type: "boolean", default: true, describe: "Start the window with /story as its first prompt; --no-auto-load leaves the prompt empty" })
+              .option("pen-task-id", { type: "string", describe: "The pen's client task id when the environment does not carry it (CLAUDE_CODE_SESSION_ID)" })
+              .option("print", { type: "boolean", default: false, describe: "Print the command and the role it would write; creates nothing and writes nothing" })
+              .option("recover", { type: "boolean", default: false, describe: "List interrupted spawns under .story/spawn/ with their reconciled state; launches nothing" })
+              .check((argv) => {
+                if (argv.recover) return true;
+                if (!argv.name || !argv.pen) throw new CliValidationError("invalid_input", "--name and --pen are required (or pass --recover to list interrupted spawns)");
+                return true;
+              })),
+            "bounds",
+            { ...SPLIT_LIST, describe: "Ticket/issue refs the arrangement covers (repeatable); required for the automatic handshake" },
+          ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             try {
               const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
               if (!root) throw new CliValidationError("not_found", "No .story/ project found.");
               const { handleDuetSpawn } = await import("./commands/duet-spawn.js");
-              const result = handleDuetSpawn({
-                name: argv.name as string,
-                pen: argv.pen as string,
+              const result = await handleDuetSpawn({
+                name: argv.name as string | undefined,
+                pen: argv.pen as string | undefined,
                 model: argv.model as string | undefined,
                 dir: argv.dir as string | undefined,
                 role: argv.role as string | undefined,
                 permissionMode: argv["permission-mode"] as string | undefined,
                 terminal: argv.terminal as string | undefined,
                 print: argv.print as boolean,
+                arrangement: argv.arrangement as "auto" | "none" | undefined,
+                bounds: argv.bounds as string[] | undefined,
+                autoLoad: argv["auto-load"] as boolean,
+                penTaskId: argv["pen-task-id"] as string | undefined,
+                recover: argv.recover as boolean,
               }, format, root);
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
