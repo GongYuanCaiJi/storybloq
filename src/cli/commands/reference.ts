@@ -313,6 +313,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--note", "--issue", "--format"],
   },
   {
+    name: "capability restore",
+    description: "Restore one capability entry to its projection at --from, refused unless it still matches its projection at --expect. Rewrites only that entry, never deletes",
+    usage: "storybloq capability restore <id> --from <oid> --expect <oid> [--format <json|md>]",
+    flags: ["--from", "--expect", "--format"],
+  },
+  {
     name: "term list",
     description: "List the glossary: what a word means here, and what it is not. Advisory throughout, so nothing here renames, rewrites or refuses on a term",
     usage: "storybloq term list [--core] [--thin] [--digest] [--format <json|md>]",
@@ -353,6 +359,18 @@ export const COMMANDS: readonly CommandEntry[] = [
     description: "Record owed work on a term as a pending note, rendered pending first until term update --clear-pending",
     usage: "storybloq term defer <id> --note <value> [--format <json|md>]",
     flags: ["--note", "--format"],
+  },
+  {
+    name: "term restore",
+    description: "Restore one term to its projection at --from, refused unless it still matches its projection at --expect. Rewrites only that term, never deletes",
+    usage: "storybloq term restore <id> --from <oid> --expect <oid> [--format <json|md>]",
+    flags: ["--from", "--expect", "--format"],
+  },
+  {
+    name: "ledger restore",
+    description: "Restore one ruling, note or issue file to its bytes at --from, refused unless it still matches its projection at --expect. Never deletes; an accepted ruling is never rewritten",
+    usage: "storybloq ledger restore <path> --from <oid> --expect <oid> [--format <json|md>]",
+    flags: ["--from", "--expect", "--format"],
   },
   {
     name: "brief",

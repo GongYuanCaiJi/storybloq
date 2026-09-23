@@ -31,6 +31,7 @@ import {
   handleCapabilityUpdate,
   handleCapabilityCheck,
   handleCapabilityDefer,
+  handleCapabilityRestore,
   type CapabilityWriteInput,
 } from "./commands/capability.js";
 import {
@@ -42,9 +43,11 @@ import {
   handleTermUpdate,
   handleTermRemove,
   handleTermDefer,
+  handleTermRestore,
   type TermWriteInput,
 } from "./commands/term.js";
 import { handleBrief, handleBriefRebase } from "./commands/brief.js";
+import { handleLedgerRestore } from "./commands/ledger.js";
 
 // Shared comma/empty/trim/emptyAfterSplit combinations. See array-options.ts for
 // what each axis means and ISS-886 for why they are declared per registration.
@@ -6419,7 +6422,27 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
               ),
             );
           },
+        )
+        .command(
+          "restore <id>",
+          "Restore one capability entry to its projection at --from, refused unless it still matches its projection at --expect",
+          (y2) => addRestoreOptions(y2.positional("id", { type: "string", demandOption: true, describe: "Capability ID" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) =>
+              handleCapabilityRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root),
+            );
+          },
         ),
+  );
+}
+
+/** `--from` and `--expect`, shared by the three restore commands (T-526, D4). */
+function addRestoreOptions<T>(y: Argv<T>) {
+  return addFormatOption(
+    y
+      .option("from", { type: "string", demandOption: true, describe: "Commit whose projection of the record is restored" })
+      .option("expect", { type: "string", demandOption: true, describe: "Commit whose projection the record must still match; refused otherwise" }),
   );
 }
 
@@ -6626,6 +6649,17 @@ export function registerTermCommand(yargs: Argv): Argv {
           },
         )
         .command(
+          "restore <id>",
+          "Restore one term to its projection at --from, refused unless it still matches its projection at --expect",
+          (y2) => addRestoreOptions(y2.positional("id", { type: "string", demandOption: true, describe: "Term ID" })),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) =>
+              handleTermRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root),
+            );
+          },
+        )
+        .command(
           "remove <id>",
           "Remove a term. Refused while any capability references it: the other file is never edited to make this possible.",
           (y2) => addFormatOption(y2.positional("id", { type: "string", demandOption: true, describe: "Term ID" })),
@@ -6650,6 +6684,31 @@ function termWriteInput(argv: Record<string, unknown>): TermWriteInput {
     core: argv.core as boolean | undefined,
     addedBy: argv["added-by"] as string | undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// ledger (T-526, D4)
+// ---------------------------------------------------------------------------
+
+export function registerLedgerCommand(yargs: Argv): Argv {
+  return yargs.command("ledger", "Single-record ledger operations", (y) =>
+    y
+      .command(
+        "restore <path>",
+        "Restore one ruling, note or issue file to its bytes at --from, refused unless it still matches its projection at --expect",
+        (y2) =>
+          addRestoreOptions(
+            y2.positional("path", { type: "string", demandOption: true, describe: "Repo-relative path: .story/<rulings|notes|issues>/<id>.json" }),
+          ),
+        async (argv) => {
+          const format = parseOutputFormat(argv.format);
+          await runCatalogWrite(format, (root) =>
+            handleLedgerRestore({ path: argv.path as string, from: argv.from as string, expect: argv.expect as string }, format, root),
+          );
+        },
+      )
+      .demandCommand(1, "Specify a ledger subcommand: restore"),
+  );
 }
 
 // ---------------------------------------------------------------------------

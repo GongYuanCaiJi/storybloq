@@ -170,6 +170,9 @@ export const ERROR_CODES = [
   // T-507: a command run outside any .story/ ledger (a function-hooks caller runs
   // in every cwd and caches this answer per cwd).
   "no_project",
+  // T-526 (D4): a restore refused before its write (expect-mismatch, conflict,
+  // absent-source, invariant, accepted-ruling).
+  "restore_unsafe",
 ] as const;
 export type ErrorCode = (typeof ERROR_CODES)[number];
 

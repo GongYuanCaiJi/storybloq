@@ -91,6 +91,13 @@ export interface LedgerSnapshot {
   tickets(): SnapshotDirectoryRead<Ticket>;
   /** The rulings family in `loadRulingsSafe`'s own shape, so every consumer of that scan reads a snapshot unchanged. */
   rulingsScan(): LoadRulingsResult;
+  /**
+   * The committed BYTES of one path, for a caller that must write them back
+   * exactly (a restore). Present whenever the blob was fetched, including a
+   * blob that failed its schema, so `status` still says whether it parsed.
+   * A path never fetched (absent, a symlink, over its size bound) has none.
+   */
+  bytes(path: string): Buffer | null;
 }
 
 export const CAPABILITIES_PATH = ".story/capabilities.json";
@@ -212,7 +219,7 @@ function parseBatch(stdout: Buffer): Map<string, Buffer | null> {
   return out;
 }
 
-type ParsedFile = { readonly status: SnapshotFileStatus; readonly value?: unknown };
+type ParsedFile = { readonly status: SnapshotFileStatus; readonly value?: unknown; readonly bytes?: Buffer };
 
 /**
  * JSON and schema failures are described by a fixed phrase and the issue CODE
@@ -265,6 +272,7 @@ function unavailableSnapshot(oid: string, reason: string): LedgerSnapshot {
     notes: () => emptyDir,
     issues: () => emptyDir,
     tickets: () => emptyDir,
+    bytes: () => null,
     rulingsScan: () => ({
       rulings: [],
       warnings: [`ledger snapshot unavailable: ${reason}`],
@@ -324,7 +332,7 @@ export async function readLedgerSnapshot(root: string, oid: string, git: Snapsho
         files.set(entry.path, { status: { kind: "unreadable", reason: `exceeds ${boundFor(family)} bytes` } });
         continue;
       }
-      files.set(entry.path, parseWith(bytes, schemaFor(family)));
+      files.set(entry.path, { ...parseWith(bytes, schemaFor(family)), bytes });
     }
   }
 
@@ -373,6 +381,7 @@ export async function readLedgerSnapshot(root: string, oid: string, git: Snapsho
     notes: () => directory<Note>("notes"),
     issues: () => directory<Issue>("issues"),
     tickets: () => directory<Ticket>("tickets"),
+    bytes: (path) => files.get(path)?.bytes ?? null,
     rulingsScan: (): LoadRulingsResult => {
       const read = directory<Ruling>("rulings", rulingAccept);
       const unavailableIds = new Set<string>();

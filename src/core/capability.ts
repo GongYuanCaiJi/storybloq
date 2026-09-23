@@ -577,6 +577,16 @@ function checkReferences(entry: Capability, index: ReferenceIndex): CapabilityCh
   return out;
 }
 
+/**
+ * T-526 (D4): the reference half of the check for ONE entry, against the
+ * working tree. `capability restore` refuses an entry whose links would
+ * dangle, and it must reach exactly the rules `check` applies rather than a
+ * second copy of them.
+ */
+export function capabilityReferenceProblems(root: string, state: ProjectState | null, entry: Capability): CapabilityCheckResult[] {
+  return checkReferences(entry, buildReferenceIndex(root, state));
+}
+
 // --- freshness ---
 
 interface FreshnessGroup {

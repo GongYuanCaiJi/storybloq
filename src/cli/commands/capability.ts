@@ -54,6 +54,7 @@ import {
   formatError,
   ExitCode,
 } from "../../core/output-formatter.js";
+import { restoreRecord, RestoreInputError, RestoreUnsafe, type RestoreResult, type RestoreTarget } from "../../core/ledger-restore.js";
 import { CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import type { OutputFormat } from "../../models/types.js";
@@ -850,4 +851,46 @@ export async function handleCapabilityCheck(
       ],
     }),
   };
+}
+
+// --- restore (T-526, D4) ---
+
+export interface RestoreInput {
+  readonly from: string;
+  readonly expect: string;
+}
+
+/**
+ * The one rendering of a restore, shared by `capability restore`, `term
+ * restore` and `ledger restore`. It lives here rather than in `ledger.ts`
+ * because this file owns the capability catalog the core needs, and `term.ts`
+ * already imports from it: keeping the helper here keeps the import graph
+ * acyclic.
+ *
+ * A refusal is the named outcome `restore_unsafe`, returned through
+ * `formatError` like every other refusal on this surface. The envelope has no
+ * details field, so the reason and invariant travel in the message, in the
+ * fixed order `RestoreUnsafe` writes.
+ */
+export async function restoreCommand(target: RestoreTarget, input: RestoreInput, format: OutputFormat, root: string): Promise<CommandResult> {
+  let result: RestoreResult;
+  try {
+    result = await restoreRecord(root, target, input.from, input.expect, { capabilityCatalog });
+  } catch (err) {
+    if (err instanceof RestoreUnsafe) {
+      return { output: formatError("restore_unsafe", err.message, format), exitCode: ExitCode.USER_ERROR, errorCode: "restore_unsafe" };
+    }
+    if (err instanceof RestoreInputError) throw new CliValidationError("invalid_input", err.message);
+    throw err;
+  }
+  if (format === "json") return { output: JSON.stringify(successEnvelope({ outcome: result.outcome, target: result.target }), null, 2) };
+  if (result.outcome === "unchanged") {
+    return { output: `${catalogText(result.target)} is unchanged: it already equals its projection at ${catalogText(input.from)}. Nothing was written.` };
+  }
+  return { output: `Restored ${catalogText(result.target)} to its projection at ${catalogText(input.from)}.` };
+}
+
+/** T-526 (D4): restore one capability entry to its projection at `--from`, if it still matches `--expect`. */
+export async function handleCapabilityRestore(input: RestoreInput & { readonly id: string }, format: OutputFormat, root: string): Promise<CommandResult> {
+  return restoreCommand({ kind: "capability", id: input.id }, input, format, root);
 }

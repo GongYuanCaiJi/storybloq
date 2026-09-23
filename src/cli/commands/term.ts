@@ -28,7 +28,7 @@ import { hasPendingNote, PendingNoteSchema } from "../../models/capability.js";
 import { summarizeZodIssues, describeSchemaIssues } from "../../core/zod-issues.js";
 import { sanitizeDisplayText } from "../../core/display-text.js";
 import { successEnvelope, escapeMarkdownInline, formatError, ExitCode } from "../../core/output-formatter.js";
-import { capabilityCatalog, catalogText } from "./capability.js";
+import { capabilityCatalog, catalogText, restoreCommand, type RestoreInput } from "./capability.js";
 import { CliValidationError } from "../helpers.js";
 import type { CommandContext, CommandResult } from "../types.js";
 import type { OutputFormat } from "../../models/types.js";
@@ -500,6 +500,11 @@ export async function handleTermRemove(id: string, format: OutputFormat, root: s
     if (format === "json") return { output: JSON.stringify(successEnvelope({ removed: id, glossarySize: doc.terms.length }), null, 2) };
     return { output: `Removed ${catalogText(id)}. Glossary: ${doc.terms.length}.` };
   });
+}
+
+/** T-526 (D4): restore one term to its projection at `--from`, if it still matches `--expect`. */
+export async function handleTermRestore(input: RestoreInput & { readonly id: string }, format: OutputFormat, root: string): Promise<CommandResult> {
+  return restoreCommand({ kind: "term", id: input.id }, input, format, root);
 }
 
 /** Exported for `validate` and `export`, which read the file without going through a handler. */
