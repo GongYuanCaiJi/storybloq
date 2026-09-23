@@ -148,10 +148,15 @@ async function snapshotAt(root: string, flag: string, oid: string, git?: Snapsho
 }
 
 /** A record at one side of the comparison: absent, or present with its value. */
-type Side<T> = { readonly present: false } | { readonly present: true; readonly value: T };
-const ABSENT = { present: false } as const;
+export type Side<T> = { readonly present: false } | { readonly present: true; readonly value: T };
+export const ABSENT = { present: false } as const;
 
-function catalogEntryAt<T extends { id: string }>(snapshot: LedgerSnapshot, kind: "capability" | "term", id: string, flag: string): Side<T> {
+/**
+ * The catalog entry by id at a snapshot. An unreadable catalog throws
+ * `RestoreInputError`: it is never read as the entry being absent. T-527's
+ * knowledge review walks history with this same lookup.
+ */
+export function catalogEntryAt<T extends { id: string }>(snapshot: LedgerSnapshot, kind: "capability" | "term", id: string, flag: string): Side<T> {
   const read = kind === "capability" ? snapshot.capabilities() : snapshot.terms();
   if (read.kind === "absent") return ABSENT;
   if (read.kind !== "ok") {
@@ -180,7 +185,12 @@ function recordAt(snapshot: LedgerSnapshot, path: string, flag: string): Side<{ 
   return { present: true, value: { bytes, json } };
 }
 
-function projection(side: Side<unknown>): string | null {
+/**
+ * The ONE projection: RFC 8785 canonical JSON of the record, null when absent.
+ * Restore's --expect compare and T-527's provenance walk both use it, so "the
+ * record changed" means the same thing to each.
+ */
+export function projectionOf(side: Side<unknown>): string | null {
   return side.present ? (canonicalize(side.value) ?? null) : null;
 }
 
@@ -195,7 +205,7 @@ function checkCommon(label: string, current: Side<unknown>, expected: Side<unkno
   if ((current.present && hasConflicts(current.value)) || (source.present && hasConflicts(source.value))) {
     throw new RestoreUnsafe(label, "conflict", null, "the record carries unresolved _conflicts; resolve them before restoring");
   }
-  if (projection(current) !== projection(expected)) {
+  if (projectionOf(current) !== projectionOf(expected)) {
     throw new RestoreUnsafe(
       label,
       "expect-mismatch",
@@ -260,7 +270,7 @@ async function restoreCapability(
       throw new RestoreUnsafe(label, "invariant", "schema", "the restored catalog does not satisfy the capability catalog schema");
     }
 
-    if (projection(current) === projection(source)) {
+    if (projectionOf(current) === projectionOf(source)) {
       result = { outcome: "unchanged", target: label };
       return;
     }
@@ -311,7 +321,7 @@ async function restoreTerm(
       throw new RestoreUnsafe(label, "invariant", "dangling-reference", dangling.map((r) => r.detail).join("; "));
     }
 
-    if (projection(current) === projection(source)) {
+    if (projectionOf(current) === projectionOf(source)) {
       result = { outcome: "unchanged", target: label };
       return;
     }
@@ -395,7 +405,7 @@ async function restoreSingleRecord(
         throw new RestoreUnsafe(label, "invariant", "utf-8", "the record at --from is not valid UTF-8, so it cannot be restored byte for byte");
       }
 
-      if (projection(current) === projection(sourceJson)) {
+      if (projectionOf(current) === projectionOf(sourceJson)) {
         result = { outcome: "unchanged", target: label };
         return;
       }

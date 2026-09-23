@@ -3,6 +3,7 @@ import { z } from "zod";
 import { CLIENT_TASK_ID_PATTERN, type OwnerTask } from "./client-profile.js";
 import { CROCKFORD_CLASS, ArrangementIdSchema, TicketRefSchema } from "../models/types.js";
 import { ArrangementGateSchema } from "../models/arrangement.js";
+import { CATALOG_SLUG_PATTERN } from "../models/capability.js";
 import type { ClaimEpoch } from "./claim-reconciliation.js";
 
 /** Combined ticket + issue ID regex for targetWork validation (sequential + canonical). ISS-703: canonical char class derived from CROCKFORD_CLASS. */
@@ -2860,6 +2861,124 @@ export function parseSessionState(raw: unknown): z.SafeParseReturnType<unknown, 
 
 /** ISS-400: Named type for verification counters, derived from the Zod schema. */
 export type VerificationCounters = NonNullable<FullSessionState["verificationCounters"]>;
+
+// ---------------------------------------------------------------------------
+// T-527 (plan 3.5): the knowledge-impact report
+// ---------------------------------------------------------------------------
+
+export const KNOWLEDGE_OUTCOMES = ["none", "impacts", "uncertain"] as const;
+export const KNOWLEDGE_IMPACT_KINDS = [
+  "stale-reference",
+  "capability-added",
+  "capability-changed",
+  "capability-removed",
+  "term-drift",
+  "ruling-conflict",
+] as const;
+export const KNOWLEDGE_DISPOSITIONS = ["applied", "pending", "needs-decision"] as const;
+export type KnowledgeImpactKind = (typeof KNOWLEDGE_IMPACT_KINDS)[number];
+export type KnowledgeDisposition = (typeof KNOWLEDGE_DISPOSITIONS)[number];
+
+/** A full commit id: the report names commits exactly, never by a prefix git might later find ambiguous. */
+const FullCommitSchema = z.string().regex(/^[0-9a-f]{40}$/, "a full 40-character commit id");
+const NonBlankSchema = z.string().refine((v) => v.trim().length > 0, "must not be blank");
+/** The four record families an impact can name: a capability, a term, a ruling, or a note (either id form). */
+export const KNOWLEDGE_RECORD_REGEX = new RegExp(
+  `^(cap-${CATALOG_SLUG_PATTERN}|term-${CATALOG_SLUG_PATTERN}|r-${CROCKFORD_CLASS}{16}|N-\\d+|n-${CROCKFORD_CLASS}{16})$`,
+);
+
+const ImpactEvidenceSchema = z
+  .object({
+    record: z.string(),
+    issueId: z.string().optional(),
+    proposalId: z.string().optional(),
+  })
+  .strict();
+
+export const KnowledgeImpactItemSchema = z
+  .object({
+    record: z.string().regex(KNOWLEDGE_RECORD_REGEX, "record must be a cap-, term-, r- or note id"),
+    kind: z.enum(KNOWLEDGE_IMPACT_KINDS),
+    proposed: NonBlankSchema,
+    disposition: z.enum(KNOWLEDGE_DISPOSITIONS),
+    evidence: ImpactEvidenceSchema,
+  })
+  .strict()
+  .superRefine((impact, ctx) => {
+    if (impact.evidence.record !== impact.record) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence", "record"], message: "evidence.record must equal the impact's record" });
+    }
+    // The evidence is discriminated by disposition: applied names the record,
+    // pending may add the filed issue, needs-decision names the proposal.
+    const { issueId, proposalId } = impact.evidence;
+    if (impact.disposition !== "pending" && issueId !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence", "issueId"], message: "issueId belongs to a pending disposition only" });
+    }
+    if (impact.disposition === "needs-decision" && proposalId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence", "proposalId"], message: "a needs-decision disposition names its proposal" });
+    }
+    if (impact.disposition !== "needs-decision" && proposalId !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["evidence", "proposalId"], message: "proposalId belongs to a needs-decision disposition only" });
+    }
+  });
+export type KnowledgeImpactItem = z.infer<typeof KnowledgeImpactItemSchema>;
+
+export const KnowledgeImpactSchema = z
+  .object({
+    implementationCommit: FullCommitSchema,
+    /** Ledger-only commits made in this stage, oldest first; may be empty. */
+    maintenanceCommits: z.array(FullCommitSchema),
+    /** What was inspected: ids or a named lookup. Never empty, so "none" always says what it looked at. */
+    checked: z.array(NonBlankSchema).min(1, "checked must name what was inspected"),
+    outcome: z.enum(KNOWLEDGE_OUTCOMES),
+    reason: NonBlankSchema.optional(),
+    impacts: z.array(KnowledgeImpactItemSchema).optional(),
+  })
+  .strict()
+  .superRefine((report, ctx) => {
+    if (report.outcome === "impacts") {
+      if (report.impacts === undefined || report.impacts.length === 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["impacts"], message: "outcome impacts needs at least one impact" });
+      }
+      return;
+    }
+    if (report.reason === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: `outcome ${report.outcome} needs a reason` });
+    }
+    if (report.impacts !== undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["impacts"], message: `outcome ${report.outcome} carries no impacts` });
+    }
+  });
+export type KnowledgeImpact = z.infer<typeof KnowledgeImpactSchema>;
+
+/**
+ * T-527 (plan 3.3): the evidence shown at KNOWLEDGE_REVIEW, cached per attempt
+ * and implementation commit. Display only: validation reads git, never this.
+ * Both identities are INSIDE the file, so a file renamed or left over from
+ * another attempt is detected and regenerated rather than trusted.
+ */
+export const KnowledgeEvidenceCacheSchema = z
+  .object({
+    version: z.literal(1),
+    itemAttemptId: z.string().min(1),
+    implementationCommit: FullCommitSchema,
+    changedPaths: z.union([
+      z.object({
+        paths: z.array(z.object({ status: z.string(), path: z.string(), oldPath: z.string().optional() })),
+        disclosure: z.string(),
+      }),
+      z.object({ unavailable: z.string() }),
+    ]),
+    capabilities: z.array(
+      z.object({ id: z.string(), name: z.string(), effectiveStatus: z.string(), reasons: z.array(z.string()) }),
+    ),
+    stale: z.array(z.object({ id: z.string(), reason: z.string(), failures: z.array(z.string()), pendingNote: z.string().nullable() })),
+    terms: z.array(z.object({ id: z.string(), term: z.string(), effectiveStatus: z.string() })),
+    rulings: z.array(z.object({ id: z.string(), lifecycle: z.string() })),
+    truncated: z.object({ capabilities: z.boolean(), stale: z.boolean(), terms: z.boolean() }),
+  })
+  .strict();
+export type KnowledgeEvidenceCache = z.infer<typeof KnowledgeEvidenceCacheSchema>;
 
 // ---------------------------------------------------------------------------
 // Guide input (from MCP tool call)

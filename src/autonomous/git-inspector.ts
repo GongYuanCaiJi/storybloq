@@ -575,3 +575,117 @@ export async function gitPathDirty(cwd: string, path: string): Promise<GitResult
     (out) => out.split("\n").some((l) => l.trim().length > 0),
   );
 }
+
+// ---------------------------------------------------------------------------
+// T-527: knowledge review. Path-only reads of history; nothing here writes.
+// ---------------------------------------------------------------------------
+
+export interface ChangedPath {
+  /** Git's status letter: A, M, D, T, R or C (a rename or copy score is dropped). */
+  readonly status: string;
+  readonly path: string;
+  /** The source path of a rename or copy, so both endpoints are known. */
+  readonly oldPath?: string;
+}
+
+/**
+ * Committed changes between two commits, rename endpoints included. `-z`
+ * keeps an unusual path (a space, a newline, a quote) byte-exact, where the
+ * default output would quote it.
+ */
+export async function gitChangedPaths(cwd: string, from: string, to: string): Promise<GitResult<ChangedPath[]>> {
+  if (!SAFE_REF.test(from) || !SAFE_REF.test(to)) {
+    return { ok: false, reason: "git_error", message: "invalid ref format" };
+  }
+  return git(cwd, ["diff", "--name-status", "-z", "-M", from, to], (out) => {
+    const fields = out.split("\0");
+    const changed: ChangedPath[] = [];
+    let i = 0;
+    while (i < fields.length && fields[i] !== "") {
+      const status = fields[i]!.charAt(0);
+      if (status === "R" || status === "C") {
+        const oldPath = fields[i + 1];
+        const path = fields[i + 2];
+        if (oldPath === undefined || path === undefined) throw new Error("truncated rename record");
+        changed.push({ status, path, oldPath });
+        i += 3;
+      } else {
+        const path = fields[i + 1];
+        if (path === undefined) throw new Error("truncated change record");
+        changed.push({ status, path });
+        i += 2;
+      }
+    }
+    return changed;
+  });
+}
+
+/**
+ * Whether the working tree's `.story/` differs from HEAD: a modified, staged,
+ * deleted or untracked path. Plain porcelain on purpose: ignored paths
+ * (`.story/sessions/`, `.story/snapshots/`) are session state, not ledger,
+ * which is why `gitPathDirty` (which reports ignored files) is not used here.
+ */
+export async function gitStoryDirty(cwd: string): Promise<GitResult<boolean>> {
+  return git(cwd, ["status", "--porcelain", "-z", "--untracked-files=all", "--", ".story/"], (out) => out.length > 0);
+}
+
+/**
+ * Commits in `from..to`, oldest first. `firstParent` walks only the mainline
+ * (what HEAD's own history did); without it every reachable commit is listed,
+ * including those on a merged side branch.
+ */
+export async function gitRevList(
+  cwd: string, from: string, to: string, opts: { firstParent: boolean; mergesOnly?: boolean },
+): Promise<GitResult<string[]>> {
+  if (!SAFE_REF.test(from) || !SAFE_REF.test(to)) {
+    return { ok: false, reason: "git_error", message: "invalid ref format" };
+  }
+  const args = [
+    "rev-list", "--reverse",
+    ...(opts.firstParent ? ["--first-parent"] : []),
+    ...(opts.mergesOnly ? ["--merges"] : []),
+    `${from}..${to}`,
+  ];
+  return git(cwd, args, (out) => out.split("\n").map((l) => l.trim()).filter((l) => l.length > 0));
+}
+
+/**
+ * Paths one commit changed against its FIRST parent. For a merge that is what
+ * the merge brought into the mainline, so code arriving through a merged side
+ * branch is seen at the merge itself.
+ *
+ * `--diff-merges=first-parent`, not `-m --first-parent`: `diff-tree` does not
+ * honour `--first-parent`, so `-m` diffs a merge against EVERY parent and
+ * would report the mainline's own earlier changes as the merge's.
+ */
+export async function gitCommitPaths(cwd: string, commit: string): Promise<GitResult<string[]>> {
+  if (!SAFE_REF.test(commit)) {
+    return { ok: false, reason: "git_error", message: "invalid ref format" };
+  }
+  return git(cwd, ["diff-tree", "--no-commit-id", "-r", "--root", "--name-only", "-z", "--diff-merges=first-parent", commit], (out) =>
+    out.split("\0").filter((p) => p.length > 0),
+  );
+}
+
+/** A commit's first parent, or null for a root commit. */
+export async function gitFirstParent(cwd: string, commit: string): Promise<GitResult<string | null>> {
+  if (!SAFE_REF.test(commit)) {
+    return { ok: false, reason: "git_error", message: "invalid ref format" };
+  }
+  return git(cwd, ["rev-list", "--parents", "-n", "1", commit], (out) => out.trim().split(" ")[1] ?? null);
+}
+
+/** The tree id of `.story` at a commit, or null when the commit has no `.story` directory. */
+export async function gitStoryTree(cwd: string, commit: string): Promise<GitResult<string | null>> {
+  if (!SAFE_REF.test(commit)) {
+    return { ok: false, reason: "git_error", message: "invalid ref format" };
+  }
+  return git(cwd, ["ls-tree", "-z", commit, "--", ".story"], (out) => {
+    const line = out.split("\0").find((l) => l.length > 0);
+    if (line === undefined) return null;
+    const meta = line.slice(0, line.indexOf("\t")).split(" ");
+    if (meta[1] !== "tree" || meta[2] === undefined) throw new Error(".story is not a directory at this commit");
+    return meta[2];
+  });
+}
