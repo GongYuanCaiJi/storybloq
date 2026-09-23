@@ -529,6 +529,7 @@
     "BUILD",
     "VERIFY",
     "FINALIZE",
+    "KNOWLEDGE_REVIEW",
     "COMPACT",
     "HANDOVER",
     "COMPLETE",

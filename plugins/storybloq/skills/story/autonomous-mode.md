@@ -11,7 +11,7 @@ This file is referenced from SKILL.md for `/story auto` / `$story auto`, review,
 1. Call `storybloq_autonomous_guide` with `{ "sessionId": null, "action": "start", "clientTaskId": "<known-current-task-id>" }` (omit `clientTaskId` only when unavailable)
 2. The guide returns an instruction with ticket candidates and exact JSON for the next call
 3. Follow every instruction exactly. Call the guide back after each step.
-4. The guide advances through: PICK_TICKET -> PLAN -> PLAN_REVIEW -> IMPLEMENT -> CODE_REVIEW -> FINALIZE -> COMPLETE -> loop
+4. The guide advances through: PICK_TICKET -> PLAN -> PLAN_REVIEW -> IMPLEMENT -> CODE_REVIEW -> FINALIZE -> KNOWLEDGE_REVIEW -> COMPLETE -> loop
 5. Continue until the guide returns SESSION_END
 
 **Ticket review depth:** Optional ticket metadata `reviewRisk` accepts `low`, `medium`, or `high` and sets the minimum PLAN_REVIEW depth to one, two, or three rounds. Set it with `storybloq ticket meta set T-001 reviewRisk '"high"'` or `storybloq_ticket_meta_set`. Legacy `risk` metadata remains compatible. Malformed explicit values fail closed to high, and risk metadata never skips a review stage.
@@ -54,6 +54,16 @@ Every PLAN entry (the pick, a plan-mode start, a replan and drift recovery) writ
 The plan must carry an EXISTING line, `EXISTING: <reference> ; reuse | extend | replace ; <reason>` or `EXISTING: none found within <modules inspected>; ...`. A bare `EXISTING: none` is sent back.
 
 If a ruling the brief delivered is revised, superseded, withdrawn or newly accepted mid-session, the guide says "governing context changed" and the plan must name that id before it is accepted; CODE_REVIEW sends the item back to PLAN until it is. When a manifest cannot be verified the guide reports "recovery required"; after checking, `storybloq brief --rebase <sessionId> <item> --reason "<why>"` adopts the provisional context. `storybloq brief <id>` prints the same brief on demand.
+
+## Knowledge review
+
+After FINALIZE commits an item, KNOWLEDGE_REVIEW asks what it did to the project's knowledge: capabilities, glossary terms, notes and rulings. The instruction's evidence (changed paths, stale capability entries first, matched capabilities and terms, cited rulings) is display only; every check reads git. Report `knowledge_reviewed` with `knowledgeImpact`: `outcome` `none` or `uncertain` with a `reason`, or `impacts`, each with a disposition:
+
+- `applied`: the record is updated and its check is current.
+- `pending`: a marker (`capability defer` / `term defer`, the note naming the id), or for a note an open issue that names it.
+- `needs-decision`: a ruling conflict, filed as a proposal (`storybloq_ruling_propose`); the accepted ruling is never rewritten.
+
+Ledger changes go in `.story/`-only commits listed in `maintenanceCommits`, with nothing under `.story/` left uncommitted. Code committed after the item needs `knowledge_rebase` first. A report the ledger does not back is retried with the reason; a branch reset past the item is `knowledge_diverged`. The item completes only when the review is accepted. Each accepted review is stored once (a replayed report changes nothing), shown on COMPLETE, and written into the handover's "Knowledge impact" section and `storybloq session-report`. Compaction, a usage-limit stop and drift resume into the stage like any other.
 
 ## Precedence: task-aware active-session guard
 

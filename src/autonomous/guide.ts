@@ -316,6 +316,10 @@ export const RECOVERY_MAPPING: Readonly<Record<string, { state: string; resetPla
   TEST:           { state: "IMPLEMENT",   resetPlan: false, resetCode: true  },
   CODE_REVIEW:    { state: "PLAN",        resetPlan: true,  resetCode: true  },
   FINALIZE:       { state: "IMPLEMENT",   resetPlan: false, resetCode: true  },
+  // T-527: the item is committed and the review owed stays owed; a reset that
+  // took the implementation commit off HEAD's history surfaces as
+  // knowledge_diverged on the next report, never as a new baseline.
+  KNOWLEDGE_REVIEW: { state: "KNOWLEDGE_REVIEW", resetPlan: false, resetCode: false },
   LESSON_CAPTURE: { state: "PICK_TICKET", resetPlan: false, resetCode: false },
   ISSUE_FIX:      { state: "ISSUE_FIX",   resetPlan: false, resetCode: false },  // T-208: self-recover to avoid dangling currentIssue
   ISSUE_SWEEP:    { state: "PICK_TICKET", resetPlan: false, resetCode: false },
@@ -3513,6 +3517,8 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
       ...CLEARED_LIMIT_FIELDS,
       finalizeCheckpoint: null,
       finalizedItem: null,
+      // T-527: a pending review is kept whatever the drift did; anything else is cleared.
+      knowledgeReview: info.state.knowledgeReview?.status === "pending" ? info.state.knowledgeReview : null,
       landingDecision: null,
       reviews: recoveryReviews,
       ticket: recoveryTicket,
@@ -3656,6 +3662,31 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         ].join("\n"),
         reminders: ["Re-implement and verify before re-submitting for code review."],
       });
+    }
+
+    // T-527: KNOWLEDGE_REVIEW drift dispatch -- the stage's own instruction,
+    // after the drift preamble. The review record survived the drift write.
+    if (mapping.state === "KNOWLEDGE_REVIEW") {
+      const reviewStage = getStage("KNOWLEDGE_REVIEW");
+      if (reviewStage) {
+        const ctx = new StageContext(root, info.dir, driftWritten, resolveRecipeFromState(driftWritten));
+        const enterResult = await reviewStage.enter(ctx);
+        if (isStageAdvance(enterResult)) {
+          return processAdvance(ctx, reviewStage, enterResult);
+        }
+        return guideResult(ctx.state, "KNOWLEDGE_REVIEW", {
+          instruction: [
+            `# ${resumeHeading} -- HEAD Mismatch`,
+            "",
+            `${driftPreamble}Recovered to **KNOWLEDGE_REVIEW**. The review is still owed.`,
+            "",
+            "---",
+            "",
+            enterResult.instruction,
+          ].join("\n"),
+          reminders: enterResult.reminders ?? [],
+        });
+      }
     }
 
     // T-208: ISSUE_FIX drift dispatch -- call stage.enter() for issue-specific instruction

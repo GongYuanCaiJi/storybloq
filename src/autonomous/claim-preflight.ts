@@ -34,6 +34,11 @@ const DEFAULT_CLAIM_STALENESS_HOURS = 24;
  * completion guard (clearClaimOnComplete) is the mechanism, and it refuses any
  * completion the caller cannot prove is theirs. The one case neither covers is a
  * second actor sharing the same git identity, which is ISS-895.
+ *
+ * T-527: KNOWLEDGE_REVIEW is deliberately absent for the same reason. It runs
+ * after FINALIZE's `committed` write has completed the item and stripped the
+ * claim, and it works from `state.knowledgeReview` alone, never from a claimed
+ * ticket, so there is no claim left for it to reconcile.
  */
 const RECONCILED_STATES: ReadonlySet<string> = new Set([
   // PLAN is included for the revise loop: PLAN_REVIEW can send the session back

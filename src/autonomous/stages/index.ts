@@ -13,6 +13,7 @@ import { CodeReviewStage } from "./code-review.js";
 import { BuildStage } from "./build.js";
 import { VerifyStage } from "./verify.js";
 import { FinalizeStage } from "./finalize.js";
+import { KnowledgeReviewStage } from "./knowledge-review.js";
 import { CompleteStage } from "./complete.js";
 import { LessonCaptureStage } from "./lesson-capture.js";
 import { IssueFixStage } from "./issue-fix.js";
@@ -30,6 +31,8 @@ registerStage(new CodeReviewStage());
 registerStage(new BuildStage());
 registerStage(new VerifyStage());
 registerStage(new FinalizeStage());
+// T-527: not in any recipe's pipeline; reached only by goto from FINALIZE or COMPLETE.
+registerStage(new KnowledgeReviewStage());
 registerStage(new CompleteStage());
 registerStage(new LessonCaptureStage());
 registerStage(new IssueFixStage());

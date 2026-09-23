@@ -251,7 +251,8 @@ describe("FINALIZE pre-commit-ack gate (T-474)", () => {
 
     const ctx = new StageContext(root, sessionDir, makeState(ticketId), makeRecipe());
     const result = await stage.report(ctx, { completedAction: "commit_done", commitHash: A40 });
-    expect(result.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(result).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     expect(ctx.state.finalizeCheckpoint).toBe("committed");
   });
 
@@ -470,11 +471,12 @@ describe("FINALIZE pre-commit-ack gate (T-474)", () => {
     } as Partial<FullSessionState>);
     const ctx = new StageContext(root, sessionDir, state, makeRecipe());
     const result = await stage.report(ctx, { completedAction: "commit_done", commitHash: A40 });
-    // Issue-fix mode's own routing (ISS-084, unrelated to the gate) always
-    // returns goto/COMPLETE rather than a bare advance -- the point here is
-    // only that the gate did NOT hold (contrast with the previous test).
+    // Issue-fix mode's own routing (ISS-084, unrelated to the gate) returns a
+    // goto rather than a bare advance, and T-527 sends the committed issue to
+    // its knowledge review first -- the point here is only that the gate did
+    // NOT hold (contrast with the previous test).
     expect(result.action).toBe("goto");
-    if (result.action === "goto") expect(result.target).toBe("COMPLETE");
+    if (result.action === "goto") expect(result.target).toBe("KNOWLEDGE_REVIEW");
     expect(ctx.state.finalizeCheckpoint).toBe("committed");
   });
 

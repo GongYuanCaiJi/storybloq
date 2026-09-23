@@ -125,7 +125,8 @@ describe("T-187: per-ticket timing in completedTickets", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "def456", overrideAttribution: true });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     const written = JSON.parse(
       readFileSync(join(sessionDir, "state.json"), "utf-8"),
     ) as FullSessionState;
@@ -257,7 +258,8 @@ describe("T-450 7a: FINALIZE records the item it committed", () => {
     const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "def456", overrideAttribution: true });
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
 
     const written = JSON.parse(
       readFileSync(join(sessionDir, "state.json"), "utf-8"),

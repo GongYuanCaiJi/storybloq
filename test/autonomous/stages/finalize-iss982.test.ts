@@ -183,7 +183,8 @@ describe("ISS-982: FINALIZE commit-attribution check", () => {
     const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
     const result = await stage.enter(ctx);
 
-    expect((result as { action?: string }).action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect((result as { action?: string })).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     const written = readState(sessionDir);
     expect(written.finalizeCheckpoint).toBe("committed");
     expect(written.completedTickets[0]?.commitHash).toBe(A40);
@@ -230,7 +231,8 @@ describe("ISS-982: FINALIZE commit-attribution check", () => {
     const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: A40, overrideAttribution: true });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     const written = readState(sessionDir);
     expect(written.finalizeCheckpoint).toBe("committed");
     expect(written.commitAttributionAudits?.[0]).toMatchObject({
@@ -291,7 +293,8 @@ describe("ISS-982: FINALIZE commit-attribution check", () => {
     const ctx = new StageContext(testRoot, sessionDir, state, makeRecipe());
     const advance = await stage.report(ctx, { completedAction: "files_staged" });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
   });
 
   it("5b. handleStage ISS-046 fallback: committer mismatches claim epoch -> refused, no commit recorded", async () => {

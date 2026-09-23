@@ -138,7 +138,8 @@ describe("ISS-378: FINALIZE commit-hash HEAD-drift validation", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "aaaaaaa", overrideAttribution: true });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     expect(mockedGitResolveCommit).not.toHaveBeenCalled();
     expect(mockedGitRevListAncestryPath).not.toHaveBeenCalled();
 
@@ -156,7 +157,8 @@ describe("ISS-378: FINALIZE commit-hash HEAD-drift validation", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "abc", overrideAttribution: true });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     expect(mockedGitResolveCommit).not.toHaveBeenCalled();
     expect(mockedGitRevListAncestryPath).not.toHaveBeenCalled();
 
@@ -171,7 +173,8 @@ describe("ISS-378: FINALIZE commit-hash HEAD-drift validation", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "AAAAAAA", overrideAttribution: true });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     expect(mockedGitResolveCommit).not.toHaveBeenCalled();
     expect(mockedGitRevListAncestryPath).not.toHaveBeenCalled();
 
@@ -191,7 +194,8 @@ describe("ISS-378: FINALIZE commit-hash HEAD-drift validation", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "aaaaaaa" });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     expect(mockedGitRevListAncestryPath).toHaveBeenCalledWith(testRoot, B40, E40, ".story/tickets/T-001.json");
 
     const written = JSON.parse(readFileSync(join(sessionDir, "state.json"), "utf-8")) as FullSessionState;
@@ -221,7 +225,8 @@ describe("ISS-378: FINALIZE commit-hash HEAD-drift validation", () => {
 
     const advance = await stage.report(ctx, { completedAction: "commit_done", commitHash: "aaaaaaa" });
 
-    expect(advance.action).toBe("advance");
+    // T-527: a committed ticket owes a knowledge review, so the exit is KNOWLEDGE_REVIEW.
+    expect(advance).toEqual({ action: "goto", target: "KNOWLEDGE_REVIEW" });
     const written = JSON.parse(readFileSync(join(sessionDir, "state.json"), "utf-8")) as FullSessionState;
     expect(written.completedTickets[0]?.commitHash).toBe(A40);
   });

@@ -87,6 +87,7 @@ export type WorkflowState =
   | "BUILD"
   | "VERIFY"
   | "FINALIZE"
+  | "KNOWLEDGE_REVIEW"
   | "COMPACT"
   | "HANDOVER"
   | "COMPLETE"
@@ -111,6 +112,7 @@ const WORKING_STATES: ReadonlySet<string> = new Set([
   "BUILD",
   "VERIFY",
   "FINALIZE",
+  "KNOWLEDGE_REVIEW",
   "COMPACT",
   "LESSON_CAPTURE",
   "ISSUE_FIX",
@@ -386,7 +388,7 @@ export const WORKFLOW_STATES = [
   "INIT", "LOAD_CONTEXT", "PICK_TICKET",
   "PLAN", "PLAN_REVIEW",
   "IMPLEMENT", "WRITE_TESTS", "TEST", "CODE_REVIEW", "BUILD", "VERIFY",
-  "FINALIZE", "COMPACT",
+  "FINALIZE", "KNOWLEDGE_REVIEW", "COMPACT",
   "HANDOVER", "COMPLETE", "LESSON_CAPTURE", "ISSUE_FIX", "ISSUE_SWEEP", "SESSION_END",
 ] as const;
 
@@ -1235,6 +1237,52 @@ export const SessionStateSchema = z.object({
       commitHash: z.string().min(1),
     }),
   ]).nullable().default(null),
+
+  /**
+   * T-527 (plan 3.1): the knowledge review the item FINALIZE just committed
+   * still owes. Written in the SAME write as `finalizedItem`, so the owed
+   * review and the commit it is about cannot be separated by a crash, and null
+   * for the `none` shape, which has no item to review.
+   *
+   * `implementationCommit` is the verified commit (`finalizedItem.commitHash`)
+   * and never moves: it is the ledger baseline the report is checked against.
+   * `checkpoint` starts equal to it and is the only field `knowledge_rebase`
+   * moves, appending the old value to `checkpoints`.
+   *
+   * NOT nulled beside `finalizedItem`. COMPLETE clears `finalizedItem`, and the
+   * accepted record stays until the next FINALIZE overwrites it; a HEAD-drift
+   * recovery keeps a pending record, because the review is owed whatever the
+   * drift did (a reset surfaces as `knowledge_diverged` on the next report).
+   * A state written before this field parses as null and skips the stage.
+   */
+  knowledgeReview: z.object({
+    itemId: z.string().min(1),
+    kind: z.enum(["ticket", "issue"]),
+    itemAttemptId: z.string().min(1),
+    implementationCommit: z.string().min(1),
+    checkpoint: z.string().min(1),
+    status: z.enum(["pending", "accepted"]),
+    checkpoints: z.array(z.string()).optional(),
+  }).nullable().default(null),
+
+  /**
+   * T-527 (plan 3.5): accepted knowledge-impact reports, one per
+   * `(itemAttemptId, implementationCommit)`. Replaced, never duplicated, when
+   * the same key is accepted twice (`upsertKnowledgeImpact`). The report is
+   * the validated one; `KnowledgeImpactSchema` is declared below this schema.
+   */
+  knowledgeImpacts: z.array(z.object({
+    itemId: z.string(),
+    kind: z.enum(["ticket", "issue"]),
+    itemAttemptId: z.string(),
+    implementationCommit: z.string(),
+    headAtAcceptance: z.string(),
+    maintenanceCommits: z.array(z.string()),
+    externalMaintenance: z.array(z.object({ id: z.string(), commit: z.string() })),
+    checkpoints: z.array(z.string()),
+    acceptedAt: z.string(),
+    report: z.lazy(() => KnowledgeImpactSchema),
+  })).default([]),
 
   // Git state.
   //
@@ -2976,6 +3024,8 @@ export const KnowledgeEvidenceCacheSchema = z
     terms: z.array(z.object({ id: z.string(), term: z.string(), effectiveStatus: z.string() })),
     rulings: z.array(z.object({ id: z.string(), lifecycle: z.string() })),
     truncated: z.object({ capabilities: z.boolean(), stale: z.boolean(), terms: z.boolean() }),
+    /** What the evidence could not cover: an unreadable family, an incomplete check, an item absent at the commit. */
+    disclosure: z.array(z.string()).default([]),
   })
   .strict();
 export type KnowledgeEvidenceCache = z.infer<typeof KnowledgeEvidenceCacheSchema>;
@@ -3050,6 +3100,12 @@ export interface GuideReportInput {
   readonly implementerTier?: string;
   readonly implementerSource?: "explicit-pin" | "session-default";
   readonly implementerEvidence?: "observed" | "configured";
+  /**
+   * T-527: the knowledge-impact report on `knowledge_reviewed`. `unknown` at
+   * the boundary; KNOWLEDGE_REVIEW parses it with `KnowledgeImpactSchema`, so a
+   * malformed report is a retry naming the field rather than a rejected call.
+   */
+  readonly knowledgeImpact?: unknown;
 }
 
 /**

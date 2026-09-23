@@ -2323,6 +2323,9 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
         implementerSource: z.enum(["explicit-pin", "session-default"]).optional(),
         implementerEvidence: z.enum(["observed", "configured"]).optional(),
         notes: z.string().optional(),
+        // T-527: an open object here; KNOWLEDGE_REVIEW validates it strictly,
+        // so a malformed report is a retry naming the field, not a -32602.
+        knowledgeImpact: z.record(z.unknown()).optional().describe("For knowledge_reviewed"),
       }).optional().describe("Required for report action"),
     },
   }, (args) => {

@@ -5,7 +5,7 @@
  * todo with the owning ticket; that ticket records the RED evidence.
  */
 import { afterEach, describe, expect, it } from "vitest";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -30,7 +30,10 @@ import { PlanStage } from "../../src/autonomous/stages/plan.js";
 import { PickTicketStage } from "../../src/autonomous/stages/pick-ticket.js";
 import { CodeReviewStage } from "../../src/autonomous/stages/code-review.js";
 import { resolveRecipe } from "../../src/autonomous/recipes/loader.js";
-import { prepareForCompact, readSession, writeSessionSync } from "../../src/autonomous/session.js";
+import { createSession, prepareForCompact, readSession, sessionDir, writeSessionSync } from "../../src/autonomous/session.js";
+import { deriveWorkspaceId, type FullSessionState } from "../../src/autonomous/session-types.js";
+import { handleCapabilityDefer } from "../../src/cli/commands/capability.js";
+import { handleIssueCreate } from "../../src/cli/commands/issue.js";
 import type { CommandContext } from "../../src/cli/types.js";
 import { materialize, hashTree, TASKS } from "../../scripts/continuity-lib.js";
 import { killSidecarsInRoot } from "../autonomous/_sidecar-cleanup.js";
@@ -140,9 +143,7 @@ describe("continuity cases 4 and 5: compatibility (green today, pinned)", () => 
 });
 
 describe("continuity cases owned by later 1.16.0 tickets (RED evidence recorded by each owner)", () => {
-  it.todo("8 completion: T-3 move marks cap-logging review at FINALIZE; a report without knowledgeImpact is retried; stale-reference advances and lands in the handover (T-527)");
   it.todo("9 arm 2 subset: with the capability file removed, cases 1 to 5 and 7 pass and the disclosure says no capability inventory (T-526)");
-  it.todo("15 second-handoff maintenance: a disposition per impact, follow-up durable across a second session (T-527 P-1/P-2)");
 });
 
 /** Starts a plan-mode session on T-2 through the real guide; returns the session id, its dir, and the PLAN text. */
@@ -358,6 +359,152 @@ describe("continuity cases 1, 2, 6, 7, 7n and 14: the context brief (T-526)", ()
     expect(text).toContain("HEAD changed while COMPACT was pending");
     expect(text).toContain("## Context brief");
     expect(existsSync(join(dir, "context-manifests", "T-2-2.json"))).toBe(true);
+  });
+});
+
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+function gitIn(root: string, args: string[]): string {
+  return execFileSync("git", args, { cwd: root, env: GIT_ENV, encoding: "utf-8" }).trim();
+}
+function commitAll(root: string, message: string): string {
+  gitIn(root, ["add", "-A"]);
+  gitIn(root, ["commit", "-q", "--no-gpg-sign", "-m", message]);
+  return gitIn(root, ["rev-parse", "HEAD"]);
+}
+
+/**
+ * T-3 implemented and committed through the guide: the move of
+ * src/platform/logging/ to packages/logging/ with its imports, the ticket
+ * complete, then FINALIZE's commit_done. Returns the KNOWLEDGE_REVIEW text.
+ */
+async function commitT3(root: string): Promise<{ sid: string; dir: string; impl: string; text: string }> {
+  const base = gitIn(root, ["rev-parse", "HEAD"]);
+  mkdirSync(join(root, "packages"), { recursive: true });
+  gitIn(root, ["mv", "src/platform/logging", "packages/logging"]);
+  for (const f of ["src/http/handler.ts", "src/http/router.ts", "src/http/router.test.ts"]) {
+    const path = join(root, f);
+    writeFileSync(path, readFileSync(path, "utf-8").replaceAll("../platform/logging/", "../../packages/logging/"));
+  }
+  const ticket = join(root, ".story", "tickets", "T-3.json");
+  writeFileSync(ticket, JSON.stringify({ ...JSON.parse(readFileSync(ticket, "utf-8")), status: "complete", completedDate: "2026-09-22" }, null, 2));
+  const impl = commitAll(root, "T-3: move AppLogger into packages/logging");
+
+  const session = createSession(root, "coding", deriveWorkspaceId(root));
+  const dir = sessionDir(root, session.sessionId);
+  mkdirSync(dir, { recursive: true });
+  writeSessionSync(dir, {
+    ...session,
+    state: "FINALIZE",
+    finalizeCheckpoint: "precommit_passed",
+    ticket: { id: "T-3", title: "Move AppLogger into packages/logging", risk: "low" },
+    claimEpoch: null,
+    itemAttempt: { id: "att-T-3", workItemId: "T-3", kind: "ticket", startedAt: new Date().toISOString(), generation: 1 },
+    config: { ...session.config, maxTicketsPerSession: 1 },
+    git: { ...session.git, branch: "main", mergeBase: base, expectedHead: base, initHead: base, itemBaseHead: base },
+  } as FullSessionState);
+  // No claim epoch in this fixture, so attribution is overridden as the ISS-063 tests do.
+  const text = await report(root, session.sessionId, { completedAction: "commit_done", commitHash: impl, overrideAttribution: true });
+  return { sid: session.sessionId, dir, impl, text };
+}
+
+function handoverAdded(root: string, before: readonly string[]): string {
+  const added = readdirSync(join(root, ".story", "handovers")).filter((f) => !before.includes(f));
+  expect(added).toHaveLength(1);
+  return readFileSync(join(root, ".story", "handovers", added[0]!), "utf-8");
+}
+
+describe("continuity cases 8 and 15: knowledge review at completion (T-527)", () => {
+  it("8 completion: the T-3 move owes cap-logging a review; a report without knowledgeImpact is retried; the maintained stale-reference advances and lands in the handover", async () => {
+    const root = copy(3, "T-3", true);
+    const handoversBefore = readdirSync(join(root, ".story", "handovers"));
+    const { sid, dir, impl, text } = await commitT3(root);
+    expect(text).toContain("# Knowledge review: T-3");
+    expect(text).toMatch(/Stale capability entries[^\n]*\n- cap-logging:/);
+    expect(readSession(dir)?.state).toBe("KNOWLEDGE_REVIEW");
+
+    expect(await report(root, sid, { completedAction: "knowledge_reviewed" })).toContain("knowledgeImpact is missing or invalid");
+    expect(readSession(dir)?.state).toBe("KNOWLEDGE_REVIEW");
+
+    // The maintenance, in its own ledger-only commit: cap-logging follows the move.
+    const capsFile = join(root, ".story", "capabilities.json");
+    const caps = JSON.parse(readFileSync(capsFile, "utf-8")) as { capabilities: Record<string, unknown>[] };
+    caps.capabilities = caps.capabilities.map((c) => c.id !== "cap-logging" ? c : {
+      ...c,
+      surfaces: { files: ["packages/logging/AppLogger.ts"] },
+      entryPoints: ["packages/logging/"],
+      contract: String(c.contract).replace("src/platform/logging/AppLogger.ts", "packages/logging/AppLogger.ts"),
+      checkedAt: { sha: impl, date: "2026-09-22" },
+    });
+    writeFileSync(capsFile, JSON.stringify(caps, null, 2) + "\n");
+    const m1 = commitAll(root, "ledger: cap-logging follows the move");
+
+    const accepted = await report(root, sid, {
+      completedAction: "knowledge_reviewed",
+      knowledgeImpact: {
+        implementationCommit: impl,
+        maintenanceCommits: [m1],
+        checked: ["cap-logging"],
+        outcome: "impacts",
+        impacts: [{ record: "cap-logging", kind: "stale-reference", proposed: "entry points follow the move", disposition: "applied", evidence: { record: "cap-logging" } }],
+      },
+    });
+    expect(accepted).toContain("Knowledge review accepted for **T-3**: 1 impact: 1 applied.");
+    expect(readSession(dir)?.state).toBe("HANDOVER");
+
+    await report(root, sid, { completedAction: "handover_written", handoverContent: "# Session\n\nMoved AppLogger.\n" });
+    const handover = handoverAdded(root, handoversBefore);
+    expect(handover).toContain("## Knowledge impact");
+    expect(handover).toContain(`### T-3 (ticket, committed at ${impl.slice(0, 12)})`);
+    expect(handover).toContain("  - cap-logging (stale-reference): applied. entry points follow the move");
+    expect(handover).toContain(`- Maintenance commits: ${m1.slice(0, 12)}`);
+  });
+
+  it("15 second-handoff maintenance: a disposition per impact, and the follow-up is durable in a second session", async () => {
+    const root = copy(3, "T-3", true);
+    const handoversBefore = readdirSync(join(root, ".story", "handovers"));
+    const { sid, impl } = await commitT3(root);
+
+    // Neither record is fixed now: cap-logging is marked, N-1 gets a follow-up issue.
+    const note = "cap-logging entry points still name the old logging directory, moved by T-3";
+    await handleCapabilityDefer({ id: "cap-logging", note }, "json", root);
+    // The fixture has no issues yet, so git kept no .story/issues/ (ISS-1297).
+    mkdirSync(join(root, ".story", "issues"), { recursive: true });
+    const created = await handleIssueCreate(
+      { title: "N-1 names the old AppLogger path", severity: "low", impact: "N-1 still says AppLogger lives in src/platform/logging/; T-3 moved it to packages/logging/.", components: [], relatedTickets: [], location: [] },
+      "json",
+      root,
+    );
+    const issue = (JSON.parse(created.output ?? "{}") as { data: { id: string; displayId?: string } }).data;
+    const m1 = commitAll(root, "ledger: mark cap-logging, file the N-1 follow-up");
+
+    const accepted = await report(root, sid, {
+      completedAction: "knowledge_reviewed",
+      knowledgeImpact: {
+        implementationCommit: impl,
+        maintenanceCommits: [m1],
+        checked: ["cap-logging", "N-1"],
+        outcome: "impacts",
+        impacts: [
+          { record: "cap-logging", kind: "stale-reference", proposed: "entry points follow the move", disposition: "pending", evidence: { record: "cap-logging" } },
+          { record: "N-1", kind: "stale-reference", proposed: "the note names the new path", disposition: "pending", evidence: { record: "N-1", issueId: issue.id } },
+        ],
+      },
+    });
+    expect(accepted).toContain("Knowledge review accepted for **T-3**: 2 impacts: 2 pending.");
+
+    await report(root, sid, { completedAction: "handover_written", handoverContent: "# Session\n\nMoved AppLogger; follow-ups filed.\n" });
+    const handover = handoverAdded(root, handoversBefore);
+    expect(handover).toContain("  - cap-logging (stale-reference): pending. entry points follow the move");
+    expect(handover).toContain(`  - N-1 (stale-reference): pending, follow-up ${issue.id}. the note names the new path`);
+
+    // A second session: the marker reaches the next brief that matches cap-logging, and the issue is still open.
+    commitAll(root, "session 1 handover");
+    const { dir: dir2 } = await startPlan(root);
+    const brief = readFileSync(join(dir2, "context-brief.md"), "utf-8");
+    expect(brief).toContain("(cap-logging)");
+    expect(brief).toContain(`review: ${note}`);
+    const { state } = await loadProject(root);
+    expect(state.issues.find((i) => i.id === issue.id)?.status).toBe("open");
   });
 });
 

@@ -404,7 +404,8 @@ function firstLine(text: string, max = 240): string {
 
 // --- capabilities ---
 
-const STALE_CODES = new Set(["capability_missing_path", "capability_path_escape", "capability_symlinked_path", "capability_changed"]);
+/** Check codes that make an entry unusable as a match: the rename and deletion signal. */
+export const STALE_CODES: ReadonlySet<string> = new Set(["capability_missing_path", "capability_path_escape", "capability_symlinked_path", "capability_changed"]);
 
 function capabilityConfidence(cap: Capability, reasons: readonly string[], words: readonly string[]): "match" | typeof NO_CONFIDENT_MATCH {
   if (reasons.some((r) => !r.startsWith("title:"))) return "match";

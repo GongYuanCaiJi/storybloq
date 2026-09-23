@@ -16,8 +16,9 @@ const TRANSITIONS: Record<WorkflowState, readonly (WorkflowState | "*")[]> = {
   CODE_REVIEW:   ["VERIFY", "BUILD", "FINALIZE", "IMPLEMENT", "PLAN", "CODE_REVIEW", "SESSION_END", "ISSUE_FIX", "HANDOVER"], // approve → VERIFY/BUILD/FINALIZE, reject → IMPLEMENT/PLAN, stay for next round; SESSION_END for tiered exit; T-208: ISSUE_FIX for issue-fix reviews; HANDOVER for skip
   VERIFY:        ["BUILD", "FINALIZE", "IMPLEMENT", "VERIFY", "HANDOVER"],  // pass → BUILD/FINALIZE, fail → IMPLEMENT, retry; HANDOVER: ISS-965 terminal routing (completion observed)
   BUILD:         ["FINALIZE", "IMPLEMENT", "BUILD", "HANDOVER"],  // pass → FINALIZE, fail → IMPLEMENT, retry; HANDOVER: ISS-965 terminal routing (completion observed)
-  FINALIZE:      ["COMPLETE", "PICK_TICKET"],  // ISS-084: issues now route through COMPLETE too; PICK_TICKET kept for in-flight session compat
-  COMPLETE:      ["PICK_TICKET", "HANDOVER", "ISSUE_SWEEP", "SESSION_END"],
+  FINALIZE:      ["COMPLETE", "PICK_TICKET", "KNOWLEDGE_REVIEW"],  // ISS-084: issues now route through COMPLETE too; PICK_TICKET kept for in-flight session compat; T-527: KNOWLEDGE_REVIEW while a review is pending
+  KNOWLEDGE_REVIEW: ["COMPLETE", "KNOWLEDGE_REVIEW", "HANDOVER"],  // T-527: accepted → COMPLETE, retry self; HANDOVER for ISS-965 terminal routing
+  COMPLETE:      ["PICK_TICKET", "HANDOVER", "ISSUE_SWEEP", "SESSION_END", "KNOWLEDGE_REVIEW"],  // T-527: KNOWLEDGE_REVIEW when entered with a review still pending
   ISSUE_FIX:     ["FINALIZE", "PICK_TICKET", "ISSUE_FIX", "CODE_REVIEW"],  // T-153: fix done → FINALIZE, cancel → PICK_TICKET, retry self; T-208: optional code review
   LESSON_CAPTURE: ["ISSUE_SWEEP", "HANDOVER", "LESSON_CAPTURE"],  // advance → ISSUE_SWEEP, retry self, done → HANDOVER
   ISSUE_SWEEP:   ["ISSUE_SWEEP", "HANDOVER", "PICK_TICKET"],  // retry (next issue), done → HANDOVER, loop → PICK_TICKET

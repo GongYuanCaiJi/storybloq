@@ -7,6 +7,8 @@ import { isNonActionableDisposition } from "../../core/issue-disposition.js";
 import { findFirstPostComplete, type NextStageResult } from "./registry.js";
 import { isTargetedMode, getRemainingTargets, buildTargetedCandidatesText, buildTargetedPickInstruction, buildTargetedStuckHandover } from "../target-work.js";
 import { detectBranchAffinity, buildAffinityAnnotation } from "../branch-affinity.js";
+import { knowledgeReviewPending } from "./knowledge-routing.js";
+import { acceptedKnowledgeLine } from "../knowledge-impact-summary.js";
 
 /**
  * COMPLETE stage -- Ticket completed, decide next action.
@@ -29,6 +31,20 @@ export class CompleteStage implements WorkflowStage {
   readonly id = "COMPLETE";
 
   async enter(ctx: StageContext): Promise<StageAdvance> {
+    // T-527: BEFORE the write below, which clears the item's attempt and
+    // implementer. A review still pending is owed before the item completes.
+    if (knowledgeReviewPending(ctx.state)) {
+      return { action: "goto", target: "KNOWLEDGE_REVIEW" };
+    }
+    // T-527: the review accepted just before this entry leads the next
+    // instruction, whichever route the item takes from here.
+    const knowledgeLine = acceptedKnowledgeLine(ctx.state);
+    const next = await this.completeItem(ctx);
+    if (knowledgeLine === null || !("result" in next) || next.result === undefined) return next;
+    return { ...next, result: { ...next.result, instruction: `${knowledgeLine}\n\n${next.result.instruction}` } } as StageAdvance;
+  }
+
+  private async completeItem(ctx: StageContext): Promise<StageAdvance> {
     const pressure = evaluatePressure(ctx.state);
     ctx.writeState({
       contextPressure: { ...ctx.state.contextPressure, level: pressure },

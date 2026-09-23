@@ -68,6 +68,10 @@ const POSTURE_BY_STATE = {
   BUILD: "claim-bearing",
   VERIFY: "claim-bearing",
   FINALIZE: "own-completion-window",
+  // T-527: reached only after FINALIZE's `committed` write, which completed the
+  // item and stripped this session's claim, so the claim lifecycle is over
+  // exactly as at COMPLETE.
+  KNOWLEDGE_REVIEW: "post-completion-boundary",
   // The candidate flow is non-COMPACT only, and a terminal session is refused
   // by the handshake's own C3 gate before this module is reached. Both are
   // rows rather than omissions so the `satisfies` pin stays total.

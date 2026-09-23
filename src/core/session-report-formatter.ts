@@ -1,12 +1,13 @@
 import { computeSessionRounds, type SessionRound } from "./review-stats.js";
 import { displayIdOf } from "./resolver.js";
 /**
- * Session report formatter -- renders 7-section structured analysis.
+ * Session report formatter -- renders 8-section structured analysis.
  * All sections always present; missing data uses "Not available" placeholders.
  */
 import { analyzeSessionDiagnostics } from "../autonomous/session-diagnostics.js";
 import { effectiveReviewEffort, effortDisclosureLine, isReviewEffort } from "../autonomous/review-effort.js";
 import { deriveJoinAvailability } from "../autonomous/review-identity.js";
+import { knowledgeImpactSection } from "../autonomous/knowledge-impact-summary.js";
 import type { FullSessionState, EventEntry } from "../autonomous/session-types.js";
 import type { OutputFormat } from "../models/types.js";
 import { safeJson, MAX_DISPLAY_SERIALIZED_LENGTH } from "./safe-json.js";
@@ -119,6 +120,8 @@ export function formatSessionReport(
       data: {
         summary: buildSummaryData(state),
         ticketProgression: state.completedTickets,
+        // T-527: every accepted knowledge review, unbounded; the Markdown section is the bounded view.
+        knowledgeImpacts: state.knowledgeImpacts ?? [],
         reviewStats: state.reviews,
         events: events.events.slice(-50),
         malformedEventCount: events.malformedCount,
@@ -140,6 +143,9 @@ export function formatSessionReport(
 
   // 2. Ticket Progression
   sections.push(buildTicketSection(state));
+
+  // 2b. Knowledge Impact (T-527), beside the items it reviews
+  sections.push(buildKnowledgeSection(state));
 
   // 3. Review Stats
   sections.push(buildReviewSection(state));
@@ -190,6 +196,12 @@ function buildSummarySection(state: FullSessionState): string {
     `- **Guide calls:** ${state.guideCallCount}`,
     `- **Tickets completed:** ${state.completedTickets.length}`,
   ].join("\n");
+}
+
+/** T-527: the shared renderer escapes and bounds every value itself. */
+function buildKnowledgeSection(state: FullSessionState): string {
+  const lines = knowledgeImpactSection(state, "## Knowledge Impact");
+  return lines.length > 0 ? lines.join("\n") : "## Knowledge Impact\n\nNo knowledge reviews accepted.";
 }
 
 function buildTicketSection(state: FullSessionState): string {

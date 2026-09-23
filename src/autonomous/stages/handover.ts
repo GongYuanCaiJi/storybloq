@@ -8,6 +8,11 @@ import { removeResumeMarker } from "../resume-marker.js";
 import { formatCompactReport } from "../../core/session-report-formatter.js";
 import { loadProject } from "../../core/project-loader.js";
 import { nextTickets } from "../../core/queries.js";
+import { knowledgeImpactSection } from "../knowledge-impact-summary.js";
+
+/** T-527: said in both instructions when the session accepted a knowledge review. */
+const KNOWLEDGE_SECTION_NOTE =
+  "A **Knowledge impact** section recording the accepted knowledge reviews is appended to the handover automatically; do not repeat it.";
 
 /**
  * HANDOVER stage - the agent writes a session handover document.
@@ -23,6 +28,7 @@ export class HandoverStage implements WorkflowStage {
     const ticketsDone = ctx.state.completedTickets.length;
     const issuesDone = (ctx.state.resolvedIssues ?? []).length;
     const rotation = ctx.state.contextRotation;
+    const knowledgeNote = (ctx.state.knowledgeImpacts ?? []).length > 0 ? KNOWLEDGE_SECTION_NOTE : null;
     if (rotation) {
       const remaining = rotation.remainingTargets
         .map((id) => ctx.state.targetWorkDisplayIds[id] ?? id)
@@ -37,6 +43,7 @@ export class HandoverStage implements WorkflowStage {
           "",
           "Compaction was not confirmed, and Storybloq cannot invoke the client's compaction command. End this bounded session at the clean item boundary and write a handover for the next task.",
           "",
+          ...(knowledgeNote ? [knowledgeNote, ""] : []),
           'Call me with completedAction: "handover_written" and include the content in handoverContent.',
         ].join("\n"),
         reminders: [
@@ -52,6 +59,7 @@ export class HandoverStage implements WorkflowStage {
         "",
         "Write a session handover summarizing what was accomplished, decisions made, and what's next.",
         "",
+        ...(knowledgeNote ? [knowledgeNote, ""] : []),
         'Call me with completedAction: "handover_written" and include the content in handoverContent.',
       ].join("\n"),
       reminders: [
@@ -62,10 +70,14 @@ export class HandoverStage implements WorkflowStage {
   }
 
   async report(ctx: StageContext, report: GuideReportInput): Promise<StageAdvance> {
-    const content = report.handoverContent;
-    if (!content) {
+    const written = report.handoverContent;
+    if (!written) {
       return { action: "retry", instruction: "Missing handoverContent. Write the handover and include it in the report." };
     }
+    // T-527: the accepted knowledge reviews, from state rather than from what
+    // the agent wrote, so the handover always records what was accepted.
+    const knowledge = knowledgeImpactSection(ctx.state, "## Knowledge impact");
+    const content = knowledge.length > 0 ? `${written.trimEnd()}\n\n${knowledge.join("\n")}\n` : written;
 
     // Create handover via existing handler
     let handoverFailed = false;

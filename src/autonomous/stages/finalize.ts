@@ -10,6 +10,7 @@ import { resolveOrReadFrozenGateStatus, renderUnresolvedHold, renderGateAckHold 
 import { findGateAck } from "../../core/gate-ack-loader.js";
 import { PRECOMMIT_ACK_GATE_NAME, type GateAckPin } from "../../models/gate-ack.js";
 import { arrangementGateRiskWarnings } from "../../core/arrangement-bounds.js";
+import { pendingKnowledgeReview, routeAfterFinalize } from "./knowledge-routing.js";
 
 /**
  * The commit from which the CURRENT item must produce a new, validated commit
@@ -252,9 +253,10 @@ export class FinalizeStage implements WorkflowStage {
   readonly id = "FINALIZE";
 
   async enter(ctx: StageContext): Promise<StageResult | StageAdvance> {
-    // ISS-031: Already committed (re-entry guard)
+    // ISS-031: Already committed (re-entry guard). T-527: a review recorded by
+    // that commit's write is still owed, so a re-entry routes to it.
     if (ctx.state.finalizeCheckpoint === "committed") {
-      return { action: "advance" };
+      return routeAfterFinalize(ctx, { action: "advance" });
     }
 
     const busBlockers = await busShipBlockers(ctx);
@@ -363,7 +365,7 @@ export class FinalizeStage implements WorkflowStage {
 
     // ISS-031: Already committed -- advance regardless of action (re-entry guard)
     if (checkpoint === "committed") {
-      return { action: "advance" };
+      return routeAfterFinalize(ctx, { action: "advance" });
     }
 
     const busBlockers = await busShipBlockers(ctx);
@@ -806,6 +808,9 @@ export class FinalizeStage implements WorkflowStage {
         // T-450 step 7a: recorded in the SAME write that clears currentIssue
         // below, because after this write nothing else identifies the item.
         finalizedItem: { kind: "issue", id: currentIssue.id, commitHash: normalizedHash },
+        // T-527: the review this commit owes, in the same write, so a crash
+        // can never leave the commit recorded and the review lost.
+        knowledgeReview: pendingKnowledgeReview(ctx.state, { kind: "issue", id: currentIssue.id }, normalizedHash),
         resolvedIssues: [...(ctx.state.resolvedIssues ?? []), currentIssue.id],
         resolvedIssueDisplayIds: {
           ...(ctx.state.resolvedIssueDisplayIds ?? {}),
@@ -848,7 +853,7 @@ export class FinalizeStage implements WorkflowStage {
 
       ctx.appendEvent("commit", { commitHash: normalizedHash, issueId: currentIssue.id, attributionOverrideRequested: overrideRequested });
 
-      return { action: "goto", target: "COMPLETE" };
+      return routeAfterFinalize(ctx, { action: "goto", target: "COMPLETE" });
     }
 
     // Normal ticket-fix mode
@@ -880,6 +885,10 @@ export class FinalizeStage implements WorkflowStage {
       finalizedItem: completedTicket
         ? { kind: "ticket" as const, id: completedTicket.id, commitHash: normalizedHash }
         : { kind: "none" as const, commitHash: normalizedHash },
+      // T-527: same write as above; the `none` shape has no item to review.
+      knowledgeReview: completedTicket
+        ? pendingKnowledgeReview(ctx.state, { kind: "ticket", id: completedTicket.id }, normalizedHash)
+        : null,
       completedTickets: completedTicket
         ? [...ctx.state.completedTickets, completedTicket]
         : ctx.state.completedTickets,
@@ -906,7 +915,7 @@ export class FinalizeStage implements WorkflowStage {
 
     ctx.appendEvent("commit", { commitHash: normalizedHash, ticketId: completedTicket?.id, attributionOverrideRequested: overrideRequested });
 
-    return { action: "advance" };
+    return routeAfterFinalize(ctx, { action: "advance" });
   }
 }
 

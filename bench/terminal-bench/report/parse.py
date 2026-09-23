@@ -227,7 +227,7 @@ def parse_claude_sessions(sessions_root: Path) -> ClaudeUsage:
 # Round 38: sourced from the authoritative schema, storybloq/src/autonomous/session-types.ts's
 # WORKFLOW_STATES array and SessionStateSchema's status enum -- not guide.ts's RECOVERY_MAPPING,
 # which is a narrower, unrelated table and was missing INIT/LOAD_CONTEXT/BUILD/VERIFY/COMPACT.
-GUIDE_STATES = {"INIT", "LOAD_CONTEXT", "PICK_TICKET", "PLAN", "PLAN_REVIEW", "IMPLEMENT", "WRITE_TESTS", "TEST", "CODE_REVIEW", "BUILD", "VERIFY", "FINALIZE", "COMPACT", "HANDOVER", "COMPLETE", "LESSON_CAPTURE", "ISSUE_FIX", "ISSUE_SWEEP", "SESSION_END"}
+GUIDE_STATES = {"INIT", "LOAD_CONTEXT", "PICK_TICKET", "PLAN", "PLAN_REVIEW", "IMPLEMENT", "WRITE_TESTS", "TEST", "CODE_REVIEW", "BUILD", "VERIFY", "FINALIZE", "KNOWLEDGE_REVIEW", "COMPACT", "HANDOVER", "COMPLETE", "LESSON_CAPTURE", "ISSUE_FIX", "ISSUE_SWEEP", "SESSION_END"}
 GUIDE_STATUSES = {"active", "completed", "superseded"}
 
 

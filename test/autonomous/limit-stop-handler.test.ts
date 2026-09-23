@@ -424,6 +424,34 @@ describe("handleSessionLimitStop autonomous sessions", () => {
     expect(parked.preCompactState).toBe("FINALIZE");
   });
 
+  it("T-527: a KNOWLEDGE_REVIEW stop is an ordinary headless park that keeps the pending review", async () => {
+    // KNOWLEDGE_REVIEW has no guide-driven commit, so none of FINALIZE's
+    // notify-only handling applies to it.
+    const review = {
+      itemId: "T-001", kind: "ticket", itemAttemptId: "att-T-001",
+      implementationCommit: "abc123", checkpoint: "abc123", status: "pending",
+    };
+    const { sessDir } = makeOwnedSession(root, {
+      state: "KNOWLEDGE_REVIEW",
+      ticket: undefined,
+      finalizeCheckpoint: "committed",
+      knowledgeReview: review,
+    } as Partial<FullSessionState>);
+    await handleSessionLimitStop({ clientTaskId: TASK_ID, cwd: root, errorType: "rate_limit" });
+
+    const rec = record();
+    expect(rec?.status).toBe("stopped");
+    expect(rec?.sessionType).toBe("autonomous");
+    expect(rec?.mode).toBe("headless");
+    expect(rec?.reasonCode).toBeNull();
+
+    const parked = readState(sessDir);
+    expect(parked.state).toBe("COMPACT");
+    expect(parked.interruptionKind).toBe("limit");
+    expect(parked.preCompactState).toBe("KNOWLEDGE_REVIEW");
+    expect(parked.knowledgeReview).toEqual(review);
+  });
+
   it("dedupes a duplicate StopFailure within the window into one record", async () => {
     const now = Date.now();
     makeOwnedSession(root);
