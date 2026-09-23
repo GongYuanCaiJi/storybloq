@@ -2,7 +2,7 @@ import { chmodSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, op
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { discoverProjectRoot } from "./project-root-discovery.js";
+import { discoverProjectRoot, PROJECT_ROOT_ENV_VAR, LEGACY_PROJECT_ROOT_ENV_VAR } from "./project-root-discovery.js";
 
 /**
  * N-131: the pen starts its own duet workers without the developer opening a
@@ -43,7 +43,7 @@ export interface SpawnWorkerOptions {
   readonly name: string;
   /** The pen's own session name, written into the worker's role. */
   readonly pen: string;
-  /** Model id or alias passed to `claude --model`; omitted means the client default (record the choice deliberately). */
+  /** Model id or alias passed to `claude --model`; absent or empty means the hands tier (`DEFAULT_WORKER_MODEL`), never the client default (ISS-1303). */
   readonly model?: string;
   /** Working directory the worker starts in. Default: the project root. */
   readonly dir?: string;
@@ -95,6 +95,10 @@ export interface SpawnWorkerResult {
   readonly permissionModeSource: "explicit" | "inherited-bypass" | "default";
   /** The same, as one plain sentence (field feedback, 2026-09-22). */
   readonly permissionModeReason: string;
+  /** ISS-1303: the model actually passed to the worker, how it was chosen, and why, as one plain sentence. */
+  readonly model: string;
+  readonly modelSource: "explicit" | "default";
+  readonly modelReason: string;
   /** "opened" when the launcher ran, "printed" when no launcher applies. */
   readonly launch: "opened" | "printed";
   readonly launcher: string | null;
@@ -107,6 +111,22 @@ export interface SpawnWorkerResult {
 export type PenModeDetector = () => string | null;
 
 export const DEFAULT_WORKER_PERMISSION_MODE = "auto";
+
+/**
+ * ISS-1303: a worker left to the client default inherits whatever the
+ * developer's session runs, usually the pen's own (most expensive) tier. The
+ * hands tier is pinned instead, and the output says it was a default.
+ */
+export const DEFAULT_WORKER_MODEL = "opus";
+
+export function resolveWorkerModel(explicit: string | undefined): { model: string; source: SpawnWorkerResult["modelSource"] } {
+  if (explicit !== undefined && explicit !== "") return { model: explicit, source: "explicit" };
+  return { model: DEFAULT_WORKER_MODEL, source: "default" };
+}
+
+export function workerModelReason(source: SpawnWorkerResult["modelSource"]): string {
+  return source === "explicit" ? "as given on the command line" : "default hands tier; pass --model to pin another";
+}
 
 /** One ancestor process: its parent pid and its flattened command line, or null when unreadable. */
 export type ProcessReader = (pid: number) => { ppid: number; command: string } | null;
@@ -251,7 +271,7 @@ export function validateWorkerTaskId(id: string): void {
 export function buildWorkerCommand(opts: { name: string; workerTaskId: string; model?: string; permissionMode?: string; rolePath: string; autoLoad: boolean }): string {
   validateWorkerTaskId(opts.workerTaskId);
   const parts = ["claude", "-n", shellQuote(opts.name), "--session-id", shellQuote(opts.workerTaskId)];
-  if (opts.model !== undefined && opts.model !== "") parts.push("--model", shellQuote(opts.model));
+  parts.push("--model", shellQuote(resolveWorkerModel(opts.model).model));
   if (opts.permissionMode !== undefined && opts.permissionMode !== "") {
     if (!(PERMISSION_MODES as readonly string[]).includes(opts.permissionMode)) {
       throw new Error(`Unknown permission mode "${opts.permissionMode}"; one of ${PERMISSION_MODES.join(", ")}.`);
@@ -265,11 +285,31 @@ export function buildWorkerCommand(opts: { name: string; workerTaskId: string; m
   return parts.join(" ");
 }
 
-export function buildSpawnScript(opts: { name: string; pen: string; dir: string; command: string }): string {
+/**
+ * ISS-1305: the root the launch pins with STORYBLOQ_PROJECT_ROOT. Only a
+ * working directory with no ledger of its own gets one (the pen's board, so
+ * the worker's `/story` loads the arrangement's ledger instead of offering
+ * setup); a directory with a ledger keeps its own discovery, so its launch
+ * clears both project-root variables rather than inherit one from wherever
+ * it was started (a shell profile, or a pen that itself runs under one).
+ */
+export function launchProjectRoot(penProjectRoot: string, workerProjectRoot: string | null): string | null {
+  return workerProjectRoot === null ? realpathSync(penProjectRoot) : null;
+}
+
+/** The pasted command's environment: the board's root assigned inline, or both variables removed (`env -u`). */
+export function launchEnvPrefix(projectRoot: string | null): string {
+  return projectRoot === null
+    ? `env -u ${PROJECT_ROOT_ENV_VAR} -u ${LEGACY_PROJECT_ROOT_ENV_VAR} `
+    : `${PROJECT_ROOT_ENV_VAR}=${shellQuote(projectRoot)} `;
+}
+
+export function buildSpawnScript(opts: { name: string; pen: string; dir: string; command: string; projectRoot?: string | null }): string {
   return [
     "#!/bin/sh",
     `# storybloq duet spawn: worker ${opts.name} for pen ${opts.pen}. Generated; safe to delete.`,
     `cd ${shellQuote(opts.dir)} || exit 1`,
+    opts.projectRoot ? `export ${PROJECT_ROOT_ENV_VAR}=${shellQuote(opts.projectRoot)}` : `unset ${PROJECT_ROOT_ENV_VAR} ${LEGACY_PROJECT_ROOT_ENV_VAR}`,
     `exec ${opts.command}`,
     "",
   ].join("\n");
@@ -291,7 +331,8 @@ function sameRoot(a: string, b: string | null): boolean {
 /** Where the worker's `/story` will load from, and where its arrangement is (T-530 D6; field feedback from federation pens). */
 export function ledgerParagraph(ctx: WorkerRoleContext): string {
   if (ctx.workerProjectRoot === null) {
-    return `- Your working directory is \`${ctx.workerDir}\`; no .story project was found at or above it, so \`/story\` will offer setup. Do not initialise anything: the pen will explain which ledger you work against.`;
+    // ISS-1305: true because the launch exports the board's root (launchProjectRoot).
+    return `- Your \`/story\` loads the board at ${realpathSync(ctx.penProjectRoot)}; your working directory is \`${ctx.workerDir}\`, which carries no ledger. The launch points \`/story\` at that board (${PROJECT_ROOT_ENV_VAR}), so never run the setup flow or initialise anything in the working directory; the arrangement is readable on the board.`;
   }
   if (sameRoot(ctx.penProjectRoot, ctx.workerProjectRoot)) {
     return `- Your \`/story\` resolves to the pen's ledger at ${realpathSync(ctx.penProjectRoot)}; the arrangement is readable there.`;
@@ -367,13 +408,22 @@ export function permissionModeReason(source: SpawnWorkerResult["permissionModeSo
  * it. Existence is checked here so a typo is refused before any ledger write;
  * the root is what decides the role's ledger paragraph (a subdirectory or a
  * symlink alias of the pen's project is still the pen's project).
+ *
+ * ISS-1305: a directory with no ledger is allowed, since the launch points it
+ * at the pen's board; what is refused is a pen whose own project does not
+ * resolve, because then there is no board to point at.
  */
 export function resolveWorkerDir(root: string, dir?: string): { workerDir: string; workerProjectRoot: string | null } {
+  if (!existsSync(join(root, ".story", "config.json"))) {
+    throw new Error(`Spawn refused: the pen's project cannot be resolved (no .story/config.json at ${resolve(root)}). Run duet spawn from the pen's project.`);
+  }
   const workerDir = dir ? (isAbsolute(dir) ? dir : resolve(root, dir)) : resolve(root);
   let st;
   try { st = statSync(workerDir); } catch { throw new Error(`Worker directory ${workerDir} does not exist.`); }
   if (!st.isDirectory()) throw new Error(`Worker directory ${workerDir} does not exist.`);
-  const found = discoverProjectRoot(workerDir);
+  // What the WORKER will find, walking from its directory: the launch never
+  // hands it this process's project-root variables (launchProjectRoot).
+  const found = discoverProjectRoot(workerDir, { ignoreEnv: true });
   return { workerDir, workerProjectRoot: found === null ? null : realpathSync(found) };
 }
 
@@ -481,6 +531,7 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
   const autoLoad = opts.autoLoad ?? true;
   const handshake = opts.handshake ?? null;
   const { mode: permissionMode, source: permissionModeSource } = resolvePermissionMode(opts.permissionMode, detect);
+  const { model, source: modelSource } = resolveWorkerModel(opts.model);
   if (!(PERMISSION_MODES as readonly string[]).includes(permissionMode)) {
     throw new Error(`Unknown permission mode "${permissionMode}"; one of ${PERMISSION_MODES.join(", ")}.`);
   }
@@ -507,11 +558,12 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     roleSource = "generated";
     roleText = defaultWorkerRole(opts.pen, opts.name, ctx);
   }
-  const command = buildWorkerCommand({ name: opts.name, workerTaskId: opts.workerTaskId, model: opts.model, permissionMode, rolePath, autoLoad });
+  const command = buildWorkerCommand({ name: opts.name, workerTaskId: opts.workerTaskId, model, permissionMode, rolePath, autoLoad });
   const scriptPath = join(opts.spawnDir, `${opts.name}.command`);
+  const projectRoot = launchProjectRoot(opts.penProjectRoot, opts.workerProjectRoot);
 
   if (roleText !== null) writeFileSync(rolePath, roleText, { encoding: "utf-8", flag: "wx" });
-  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir: opts.workerDir, command }), { encoding: "utf-8", flag: "wx" });
+  writeFileSync(scriptPath, buildSpawnScript({ name: opts.name, pen: opts.pen, dir: opts.workerDir, command, projectRoot }), { encoding: "utf-8", flag: "wx" });
   chmodSync(scriptPath, 0o755);
   opts.journal("artifacts", { rolePath, scriptPath, roleSource });
 
@@ -528,12 +580,15 @@ export function spawnWorker(root: string, opts: SpawnWorkerOptions, launcher: La
     scriptPath,
     rolePath,
     roleSource,
-    command: `cd ${shellQuote(opts.workerDir)} && ${command}`,
+    command: `cd ${shellQuote(opts.workerDir)} && ${launchEnvPrefix(projectRoot)}${command}`,
     autoLoad,
     handshake,
     permissionMode,
     permissionModeSource,
     permissionModeReason: permissionModeReason(permissionModeSource),
+    model,
+    modelSource,
+    modelReason: workerModelReason(modelSource),
     launch,
     launcher: used,
     penProjectRoot: opts.penProjectRoot,

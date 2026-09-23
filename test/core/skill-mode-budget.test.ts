@@ -154,7 +154,10 @@ const CEILINGS: Readonly<Record<string, number>> = {
   // --clear-pending flags and storybloq_context_brief; measured 47,265 bytes
   // on the merged tree (46,751 before T-530 landed). Generated file; 48,000
   // by the same one-step rule.
-  "reference.md": 48000,
+  // ISS-1303 / ISS-1305: the duet spawn entry documents the --model default
+  // and the no-ledger --dir launch; 47,992 at HEAD before the regeneration,
+  // 48,120 measured after. Generated file; 49,000 by the same one-step rule.
+  "reference.md": 49000,
   "federation-setup.md": 14000,
   // Was 47000 (measured 46,936 before this issue). ISS-1240 adds the roster
   // pointer to the pen priming order: live seats come from

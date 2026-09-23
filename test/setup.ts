@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { compareConfig, snapshotConfigAt, snapshotProductionConfig, type ConfigSnapshot } from "./helpers/git-config-tripwire.js";
 import { clearIsolationViolation, recordedIsolationViolation } from "./helpers/git-fixture.js";
+import { PROJECT_ROOT_ENV_VAR, LEGACY_PROJECT_ROOT_ENV_VAR } from "../src/core/project-root-shared.js";
 
 const CLIENT_IDENTITY_ENV = [
   "STORYBLOQ_CLIENT",
@@ -51,14 +52,33 @@ function clearAmbientGitRepository(): void {
   for (const key of GIT_REPOSITORY_ENV) delete process.env[key];
 }
 
+/**
+ * ISS-1305 (D9): a duet worker spawned in a directory with no ledger runs
+ * with STORYBLOQ_PROJECT_ROOT set to the pen's board, and every process it
+ * starts inherits it, this suite included. Discovery honours that variable
+ * before any walk, so every discovering handler, and every built-CLI e2e
+ * (whose env is this process's), would resolve the pen's REAL board from a
+ * fixture and write real ledger files. Cleared at the source like the
+ * variables above, before and after each test; a test that needs one sets it
+ * in its own body.
+ */
+const PROJECT_ROOT_ENV = [PROJECT_ROOT_ENV_VAR, LEGACY_PROJECT_ROOT_ENV_VAR] as const;
+
+function clearAmbientProjectRoot(): void {
+  for (const key of PROJECT_ROOT_ENV) delete process.env[key];
+}
+
 // Test behavior must not depend on whether Vitest was launched by Claude Code,
 // Codex, or a plain shell. Individual tests opt into client identity explicitly.
 clearAmbientClientIdentity();
 clearAmbientGitRepository();
+clearAmbientProjectRoot();
 beforeEach(clearAmbientClientIdentity);
 afterEach(clearAmbientClientIdentity);
 beforeEach(clearAmbientGitRepository);
 afterEach(clearAmbientGitRepository);
+beforeEach(clearAmbientProjectRoot);
+afterEach(clearAmbientProjectRoot);
 
 /**
  * ISS-1220: watch the real repository's git config for the duration of this

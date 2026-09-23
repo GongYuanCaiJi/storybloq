@@ -29,6 +29,20 @@ import { randomUUID } from "node:crypto";
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const PLUGIN_SRC = join(PKG_ROOT, "plugins", "storybloq");
 
+/**
+ * ISS-1302: a copy is current when its version marker equals the running
+ * version AND its fingerprint sidecar matches the bundle it would be copied
+ * from; a marker alone at the same version is a pre-sidecar copy and is
+ * refreshed once.
+ */
+async function markSkillCurrent(home: string, version: string): Promise<void> {
+  const { skillSourceFingerprint, SKILL_FINGERPRINT_FILE } = await import("../../src/core/skill-version-marker.js");
+  const { resolveSkillSourceDir } = await import("../../src/cli/commands/setup-skill.js");
+  const dir = join(home, ".claude", "skills", "story");
+  await writeFile(join(dir, ".storybloq-version"), `${version}\n`, "utf-8");
+  await writeFile(join(dir, SKILL_FINGERPRINT_FILE), `${skillSourceFingerprint(resolveSkillSourceDir())}\n`, "utf-8");
+}
+
 async function fakeBin(dir: string): Promise<string> {
   await mkdir(dir, { recursive: true });
   const bin = join(dir, "storybloq");
@@ -725,7 +739,7 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     await installMods({ bin: oldBin });
     expect(readModsBin()).toBe(oldBin);
     // The skill is current: the stale branch must not be what moves the path.
-    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+    await markSkillCurrent(tempDir, "1.1.6");
 
     const newBin = await fakeBin(join(tempDir, "nvm", "v22", "bin"));
     process.env.PATH = dirname(newBin);
@@ -741,7 +755,7 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     const { installMods, modsDir } = await import("../../src/core/mods-install.js");
     const bin = await fakeBin(join(tempDir, "nvm", "v20", "bin"));
     await installMods({ bin });
-    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+    await markSkillCurrent(tempDir, "1.1.6");
     process.env.PATH = dirname(bin);
     const { stat } = await import("node:fs/promises");
     const before = new Map<string, number>();
@@ -760,7 +774,7 @@ describe("the version-marker refresh re-resolves the binary (pen hold 1, T-507)"
     await installMods({ bin });
     await rm(join(modsDir(), "hooks", MODS_BIN_FILE));
     expect(readModsBin()).toBeUndefined();
-    await writeFile(join(tempDir, ".claude", "skills", "story", ".storybloq-version"), "1.1.6\n", "utf-8");
+    await markSkillCurrent(tempDir, "1.1.6");
     process.env.PATH = dirname(bin);
     const { autoRefreshSkillIfStale } = await import("../../src/core/skill-version-marker.js");
     expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);

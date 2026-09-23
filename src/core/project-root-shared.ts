@@ -30,6 +30,14 @@ export interface DiscoverProjectRootOptions {
    * a soft `null` instead.
    */
   onUnreadableStoryDir?: (candidate: string) => void;
+  /**
+   * Walk from `startDir` even when a project-root variable is set. For a
+   * caller asking what ANOTHER process, launched without this one's
+   * environment, will find there (ISS-1305: `duet spawn` classifying a
+   * worker's directory from inside a session that itself runs under the
+   * override).
+   */
+  ignoreEnv?: boolean;
 }
 
 type RootCheck =
@@ -47,7 +55,7 @@ export function discoverProjectRootShared(
   startDir?: string,
   options?: DiscoverProjectRootOptions,
 ): string | null {
-  const envRoot = process.env[PROJECT_ROOT_ENV_VAR] ?? process.env[LEGACY_PROJECT_ROOT_ENV_VAR];
+  const envRoot = options?.ignoreEnv ? undefined : process.env[PROJECT_ROOT_ENV_VAR] ?? process.env[LEGACY_PROJECT_ROOT_ENV_VAR];
   if (envRoot) {
     const result = checkRoot(resolve(envRoot), options);
     return result.kind === "found" ? result.root : null;

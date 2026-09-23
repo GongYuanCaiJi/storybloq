@@ -10,6 +10,7 @@ import { loadArrangementsSafe } from "../../../src/core/arrangement-loader.js";
 import { coordinateDuet, readDuetCoordination } from "../../../src/core/duet-coordination.js";
 import { readSpawnJournal, writeSpawnJournal, type Launcher } from "../../../src/core/duet-spawn.js";
 import { CliValidationError } from "../../../src/cli/helpers.js";
+import { COMMANDS } from "../../../src/cli/commands/reference.js";
 
 const PEN = "11111111-2222-4333-8444-555555555555";
 const dirs: string[] = [];
@@ -70,7 +71,8 @@ describe("T-530: storybloq duet spawn creates the arrangement, starts coordinati
     expect(a!.id).toBe(data.arrangement.id);
     expect(a!.parties).toEqual([
       { role: "pen", client: "claude", identityAnchor: PEN },
-      { role: "worker", client: "claude", identityAnchor: data.workerTaskId },
+      // ISS-1303: the party records the model the worker actually runs, the default included.
+      { role: "worker", client: "claude", identityAnchor: data.workerTaskId, modelTier: "opus" },
     ]);
     expect(a!.bounds).toEqual(["T-001"]);
     expect(a!.unreachability.onIrreversibleWork).toBe("hold");
@@ -168,7 +170,6 @@ describe("T-530: storybloq duet spawn creates the arrangement, starts coordinati
       [{ permissionMode: "yolo" }, /Unknown permission mode/],
       [{ role: "missing.md" }, /ENOENT|no such file/i],
       [{ dir: join(dir, "nope") }, /does not exist/],
-      [{ dir: other }, /no \.story project found at or above/],
       [{ bounds: ["T-999"] }, /T-999/],
     ];
     for (const [over, re] of cases) {
@@ -176,17 +177,18 @@ describe("T-530: storybloq duet spawn creates the arrangement, starts coordinati
     }
     expect(arrangements(dir)).toEqual([]);
     expect(journals(dir)).toEqual([]);
-    // a directory with no ledger is fine for a manual handshake
+    // a directory with no ledger is fine for a manual handshake too (ISS-1305)
     const res = await handleDuetSpawn({ name: "w", pen: "p", dir: other, arrangement: "none", penTaskId: PEN }, "md", dir, deps());
     expect(res.exitCode).toBe(0);
-    expect(role(res.output)).toContain("no .story project was found");
+    expect(role(res.output)).toContain("which carries no ledger");
   });
 
   it("--print mutates nothing and writes nothing: it shows the command and the role it would write", async () => {
     const dir = await newProject();
     const res = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, print: true }, "md", dir, deps({ launcher: () => { throw new Error("must not launch"); } }));
     expect(res.exitCode).toBe(0);
-    expect(res.output).toContain("claude -n 'w' --session-id '<minted at launch>'");
+    // a launch with its own ledger clears any inherited project-root variable (ISS-1305)
+    expect(res.output).toContain("&& env -u STORYBLOQ_PROJECT_ROOT -u CLAUDESTORY_PROJECT_ROOT claude -n 'w' --session-id '<minted at launch>'");
     expect(res.output).toContain("'/story'");
     expect(res.output).toContain("no arrangement created, no files written");
     expect(res.output).toContain("Bounds: T-001");
@@ -453,5 +455,93 @@ describe("T-530: storybloq duet spawn creates the arrangement, starts coordinati
   it("refusals are CliValidationError so the CLI reports them as user errors", async () => {
     const dir = await newProject();
     await expect(handleDuetSpawn({ name: "w", pen: "p", penTaskId: PEN }, "md", dir, deps())).rejects.toBeInstanceOf(CliValidationError);
+  });
+});
+
+describe("ISS-1303: the worker's model is pinned and the output says why", () => {
+  it("absent --model: the launch carries --model opus, the output prints the reason line, JSON carries model and source", async () => {
+    const dir = await newProject();
+    const md = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN }, "md", dir, deps());
+    expect(md.output).toContain("Model: opus (default hands tier; pass --model to pin another)");
+    expect(md.output).toContain(" --model 'opus' ");
+    const lines = md.output.split("\n");
+    expect(lines.indexOf("Model: opus (default hands tier; pass --model to pin another)")).toBe(lines.findIndex((l) => l.startsWith("Permission mode: ")) - 1);
+    const json = jsonData((await handleDuetSpawn({ name: "w2", pen: "p", bounds: ["T-001"], penTaskId: PEN }, "json", dir, deps())).output);
+    expect(json.model).toBe("opus");
+    expect(json.modelSource).toBe("default");
+    expect(json.modelReason).toBe("default hands tier; pass --model to pin another");
+  });
+
+  it("explicit --model sonnet passes through to the command, the reason line and the arrangement's worker party", async () => {
+    const dir = await newProject();
+    const md = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, model: "sonnet" }, "md", dir, deps());
+    expect(md.output).toContain("Model: sonnet (as given on the command line)");
+    expect(md.output).toContain(" --model 'sonnet' ");
+    expect(md.output).not.toContain("--model 'opus'");
+    expect(arrangements(dir)[0]!.parties[1]).toMatchObject({ role: "worker", modelTier: "sonnet" });
+  });
+
+  it("--print shows the resolved model in the command, the Model line and the JSON", async () => {
+    const dir = await newProject();
+    const md = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, print: true }, "md", dir, deps());
+    expect(md.output).toContain("--session-id '<minted at launch>' --model 'opus' --permission-mode");
+    expect(md.output).toContain("Model: opus (default hands tier; pass --model to pin another)");
+    const json = jsonData((await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, print: true, model: "sonnet" }, "json", dir, deps())).output);
+    expect(json.command).toContain("--model 'sonnet'");
+    expect(json).toMatchObject({ model: "sonnet", modelSource: "explicit", modelReason: "as given on the command line" });
+    expect(existsSync(join(dir, ".story", "spawn"))).toBe(false);
+  });
+
+  it("the reference entry documents the default", () => {
+    const entry = COMMANDS.find((c) => c.name === "duet spawn")!;
+    expect(entry.description).toMatch(/--model defaults to opus \(the hands tier\)/);
+  });
+});
+
+describe("ISS-1305: --dir may name a directory with no ledger when the pen's project resolves", () => {
+  function bareDir(): string {
+    const d = mkdtempSync(join(tmpdir(), "duet-spawn-worktree-"));
+    dirs.push(d);
+    return d;
+  }
+
+  it("a worktree without .story spawns in auto mode: the role names both paths, the script cds into the worktree and exports the pen's root", async () => {
+    const dir = await newProject();
+    const wt = bareDir();
+    const res = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, dir: wt }, "md", dir, deps());
+    expect(res.exitCode).toBe(0);
+    const text = role(res.output);
+    expect(text).toContain(`loads the board at ${realpathSync(dir)}`);
+    expect(text).toContain(`\`${wt}\`, which carries no ledger`);
+    expect(text).toContain("## Handshake");
+    expect(res.output).toContain(`Worker ledger: the pen's board at ${realpathSync(dir)}; ${wt} carries no ledger`);
+    expect(res.output).toContain(`cd '${wt}' && STORYBLOQ_PROJECT_ROOT='${realpathSync(dir)}' claude -n 'w'`);
+    const script = readFileSync(/Script: (.+)/.exec(res.output)![1]!, "utf-8");
+    expect(script).toContain(`cd '${wt}' || exit 1\nexport STORYBLOQ_PROJECT_ROOT='${realpathSync(dir)}'\n`);
+    expect(arrangements(dir)).toHaveLength(1);
+    const json = jsonData((await handleDuetSpawn({ name: "w2", pen: "p", bounds: ["T-001"], penTaskId: PEN, dir: wt }, "json", dir, deps())).output);
+    expect(json.workerDir).toBe(wt);
+    expect(json.workerProjectRoot).toBeNull();
+  });
+
+  it("--print previews the same launch and role for a worktree without .story", async () => {
+    const dir = await newProject();
+    const wt = bareDir();
+    const res = await handleDuetSpawn({ name: "w", pen: "p", bounds: ["T-001"], penTaskId: PEN, dir: wt, print: true }, "md", dir, deps());
+    expect(res.output).toContain(`cd '${wt}' && STORYBLOQ_PROJECT_ROOT='${realpathSync(dir)}' claude -n 'w'`);
+    expect(res.output).toContain("which carries no ledger");
+    expect(existsSync(join(dir, ".story", "spawn"))).toBe(false);
+  });
+
+  it("an unresolvable pen project is refused before anything is written, for a launch and for --print", async () => {
+    const noProject = bareDir();
+    const wt = bareDir();
+    let opened = 0;
+    const d = deps({ launcher: () => { opened++; return "x"; } });
+    await expect(handleDuetSpawn({ name: "w", pen: "p", dir: wt, arrangement: "none", penTaskId: PEN }, "md", noProject, d)).rejects.toThrow(/the pen's project cannot be resolved/);
+    await expect(handleDuetSpawn({ name: "w", pen: "p", dir: wt, arrangement: "none", penTaskId: PEN, print: true }, "md", noProject, d)).rejects.toThrow(/the pen's project cannot be resolved/);
+    await expect(handleDuetSpawn({ name: "w", pen: "p", arrangement: "none", penTaskId: PEN }, "md", noProject, d)).rejects.toBeInstanceOf(CliValidationError);
+    expect(opened).toBe(0);
+    expect(readdirSync(noProject)).toEqual([]);
   });
 });

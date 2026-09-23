@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { readFile, writeFile, mkdir, rm, chmod } from "node:fs/promises";
+import { readFile, writeFile, mkdir, rm, chmod, rename } from "node:fs/promises";
 import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -816,5 +816,150 @@ describe("the Mods refresh writes the function-hooks switch (ISS-1233)", () => {
     expect(await autoRefreshSkillIfStale("1.1.6")).toBe(true);
 
     expect(await readFile(settingsPath, "utf-8"), err.join("")).toBe(original);
+  });
+});
+
+// ISS-1302: the package version does not move on a rebuild (the build injects
+// package.json's version), so a copy refreshed only on a version change kept a
+// day-old procedure after `duet spawn` shipped. The copy now follows a content
+// fingerprint of the bundle, recorded in a sidecar beside the version marker;
+// the version rules (upgrade refreshes, no downgrade, prerelease fails closed)
+// are unchanged and the fingerprint decides only at an equal plain version.
+describe("ISS-1302: the installed copy follows a content fingerprint of the bundled skill", () => {
+  let tempDir: string;
+  let bundle: string;
+  let originalHome: string | undefined;
+  let originalPath: string | undefined;
+  let originalCodexHome: string | undefined;
+  let err: string[];
+  let stderrSpy: { mockRestore: () => void } | null = null;
+  const skillDir = () => join(tempDir, ".claude", "skills", "story");
+
+  beforeEach(async () => {
+    tempDir = join(tmpdir(), `storybloq-fingerprint-${randomUUID()}`);
+    bundle = join(tempDir, "bundle");
+    await mkdir(join(bundle, "design"), { recursive: true });
+    await writeFile(join(bundle, "SKILL.md"), "# bundle v1\n", "utf-8");
+    await writeFile(join(bundle, "duet-mode.md"), "spawn text\n", "utf-8");
+    await writeFile(join(bundle, "design", "design.md"), "design\n", "utf-8");
+    originalHome = process.env.HOME;
+    originalPath = process.env.PATH;
+    originalCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = tempDir;
+    process.env.CODEX_HOME = join(tempDir, ".codex");
+    // No storybloq on PATH: the refresh copies the skill and records the
+    // markers; the hook reconciles it gates on a resolved binary stay out.
+    const empty = join(tempDir, "empty-bin");
+    await mkdir(empty, { recursive: true });
+    process.env.PATH = empty;
+    const { vi } = await import("vitest");
+    vi.resetModules();
+    vi.doMock("../../src/cli/commands/setup-skill.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../src/cli/commands/setup-skill.js")>();
+      return { ...actual, resolveSkillSourceDir: () => bundle };
+    });
+    err = [];
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => { err.push(String(chunk)); return true; }) as never);
+  });
+
+  afterEach(async () => {
+    stderrSpy?.mockRestore();
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = originalCodexHome;
+    await rm(tempDir, { recursive: true, force: true });
+    const { vi } = await import("vitest");
+    vi.doUnmock("../../src/cli/commands/setup-skill.js");
+    vi.resetModules();
+  });
+
+  /** A copy exactly as the running CLI would have written it for the current bundle. */
+  async function installCurrent(version: string): Promise<void> {
+    const { skillSourceFingerprint, SKILL_FINGERPRINT_FILE } = await import("../../src/core/skill-version-marker.js");
+    await mkdir(join(skillDir(), "design"), { recursive: true });
+    await writeFile(join(skillDir(), "SKILL.md"), await readFile(join(bundle, "SKILL.md")));
+    await writeFile(join(skillDir(), "duet-mode.md"), await readFile(join(bundle, "duet-mode.md")));
+    await writeFile(join(skillDir(), "design", "design.md"), await readFile(join(bundle, "design", "design.md")));
+    await writeFile(join(skillDir(), ".storybloq-version"), `${version}\n`, "utf-8");
+    await writeFile(join(skillDir(), SKILL_FINGERPRINT_FILE), `${skillSourceFingerprint(bundle)}\n`, "utf-8");
+  }
+
+  async function mtimes(): Promise<Map<string, number>> {
+    const { stat, readdir } = await import("node:fs/promises");
+    const out = new Map<string, number>();
+    for (const rel of await readdir(skillDir(), { recursive: true })) out.set(String(rel), (await stat(join(skillDir(), String(rel)))).mtimeMs);
+    return out;
+  }
+
+  it("shouldRefresh: at an equal plain version the fingerprint decides; every version rule is unchanged", () => {
+    const a = "sha256:" + "a".repeat(64);
+    const b = "sha256:" + "b".repeat(64);
+    expect(shouldRefresh("1.1.6", "1.1.6", { installed: a, bundled: b })).toBe(true);
+    expect(shouldRefresh("1.1.6", "1.1.6", { installed: a, bundled: a })).toBe(false);
+    expect(shouldRefresh("1.1.6", "1.1.6", { installed: null, bundled: a })).toBe(true); // a copy from before the sidecar: once
+    expect(shouldRefresh("1.1.6", "1.1.6", { installed: a, bundled: null })).toBe(false); // an unreadable bundle proves nothing
+    expect(shouldRefresh("1.1.6", "1.1.6")).toBe(false); // no content known: the version alone decides, as before
+    expect(shouldRefresh("1.1.0", "1.2.0", { installed: a, bundled: b })).toBe(false); // never a downgrade
+    expect(shouldRefresh("1.2.0-beta", "1.2.0", { installed: a, bundled: b })).toBe(false); // prerelease fails closed
+    expect(shouldRefresh("1.2.0", "1.1.6", { installed: a, bundled: a })).toBe(true); // an upgrade still refreshes
+  });
+
+  it("the fingerprint covers every bundled file by path and bytes", async () => {
+    const { skillSourceFingerprint } = await import("../../src/core/skill-version-marker.js");
+    const first = skillSourceFingerprint(bundle);
+    expect(first).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(skillSourceFingerprint(bundle)).toBe(first);
+    await writeFile(join(bundle, "design", "design.md"), "desigm\n", "utf-8");
+    const bumped = skillSourceFingerprint(bundle);
+    expect(bumped).not.toBe(first);
+    await writeFile(join(bundle, "design", "design.md"), "design\n", "utf-8");
+    expect(skillSourceFingerprint(bundle)).toBe(first);
+    await rename(join(bundle, "duet-mode.md"), join(bundle, "duet-mode2.md"));
+    expect(skillSourceFingerprint(bundle)).not.toBe(first);
+    expect(skillSourceFingerprint(join(tempDir, "missing"))).toBeNull();
+  });
+
+  it("bump one byte of a bundled file: the next invocation refreshes the copy at the same version and says why; the one after rewrites nothing", async () => {
+    await installCurrent("1.1.6");
+    const { autoRefreshSkillIfStale, skillSourceFingerprint, SKILL_FINGERPRINT_FILE } = await import("../../src/core/skill-version-marker.js");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false); // current copy: nothing to do
+    await writeFile(join(bundle, "SKILL.md"), "# bundle v2\n", "utf-8");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(true);
+    expect(await readFile(join(skillDir(), "SKILL.md"), "utf-8")).toBe("# bundle v2\n");
+    expect((await readFile(join(skillDir(), SKILL_FINGERPRINT_FILE), "utf-8")).trim()).toBe(skillSourceFingerprint(bundle));
+    expect(await readFile(join(skillDir(), ".storybloq-version"), "utf-8")).toBe("1.1.6\n"); // old readers still see one version line
+    expect(err.join("")).toContain("refreshed skill files at ~/.claude/skills/story/ to match CLI v1.1.6 (same version, bundled skill changed)");
+    const before = await mtimes();
+    err.length = 0;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+    expect(await mtimes()).toEqual(before);
+    expect(err.join("")).not.toContain("refreshed skill files");
+  });
+
+  it("a copy with no sidecar, or a malformed one, at the same version is refreshed once and then left alone", async () => {
+    await installCurrent("1.1.6");
+    const { autoRefreshSkillIfStale, skillSourceFingerprint, SKILL_FINGERPRINT_FILE } = await import("../../src/core/skill-version-marker.js");
+    await rm(join(skillDir(), SKILL_FINGERPRINT_FILE));
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(true);
+    expect((await readFile(join(skillDir(), SKILL_FINGERPRINT_FILE), "utf-8")).trim()).toBe(skillSourceFingerprint(bundle));
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+    await writeFile(join(skillDir(), SKILL_FINGERPRINT_FILE), "not a fingerprint\n", "utf-8");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(true);
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+  });
+
+  it("an older CLI never refreshes over a newer copy whatever the bundle holds; a version advance keeps its own wording", async () => {
+    await installCurrent("1.2.0");
+    await writeFile(join(bundle, "SKILL.md"), "# older bundle\n", "utf-8");
+    const { autoRefreshSkillIfStale } = await import("../../src/core/skill-version-marker.js");
+    expect(await autoRefreshSkillIfStale("1.1.6")).toBe(false);
+    expect(await readFile(join(skillDir(), "SKILL.md"), "utf-8")).toBe("# bundle v1\n");
+    expect(await autoRefreshSkillIfStale("1.3.0")).toBe(true);
+    expect(err.join("")).toContain("to match CLI v1.3.0\n");
+    expect(err.join("")).not.toContain("same version");
   });
 });

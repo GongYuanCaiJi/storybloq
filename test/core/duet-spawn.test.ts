@@ -8,6 +8,7 @@ import {
   spawnWorker, buildWorkerCommand, shellQuote, defaultWorkerRole, validateWorkerName, resolvePermissionMode, detectPenPermissionMode,
   detectPenPermissionModeWith, classifyClaudeCommand, psProcessReader, parsePsLine, prepareSpawnDir, writeSpawnJournal, readSpawnJournal,
   mintWorkerTaskId, validateWorkerTaskId, resolveWorkerDir, permissionModeReason, ledgerParagraph,
+  resolveWorkerModel, workerModelReason, DEFAULT_WORKER_MODEL,
   type Launcher, type ProcessReader, type SpawnHandshake, type SpawnStage,
 } from "../../src/core/duet-spawn.js";
 import { initProject, STORY_GITIGNORE_ENTRIES } from "../../src/core/init.js";
@@ -17,6 +18,8 @@ import { evaluateSessionGuard, completenessFromDiagnostics } from "../../src/cor
 function project(): string {
   const root = mkdtempSync(join(tmpdir(), "duet-spawn-"));
   mkdirSync(join(root, ".story"), { recursive: true });
+  // ISS-1305: the pen's project must resolve (the same test discoverProjectRoot uses).
+  writeFileSync(join(root, ".story", "config.json"), "{}\n");
   return root;
 }
 
@@ -65,7 +68,7 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     expect(r.autoLoad).toBe(true);
     expect(r.handshake).toBeNull();
     expect(r.roleSource).toBe("generated");
-    expect(r.command).toBe(`cd '${root}' && claude -n 'cpm-w2' --session-id '${p.workerTaskId}' --model 'opus' --permission-mode 'auto' --append-system-prompt-file '${r.rolePath}' '/story'`);
+    expect(r.command).toBe(`cd '${root}' && env -u STORYBLOQ_PROJECT_ROOT -u CLAUDESTORY_PROJECT_ROOT claude -n 'cpm-w2' --session-id '${p.workerTaskId}' --model 'opus' --permission-mode 'auto' --append-system-prompt-file '${r.rolePath}' '/story'`);
     // the journal advanced through artifacts, launch-attempted and launched, in that order, and never carried a nonce
     expect(p.stages).toEqual(["artifacts", "launch-attempted", "launched"]);
     expect(readSpawnJournal(p.journalPath)).toMatchObject({ stage: "launched", launcher: "fake-open" });
@@ -86,12 +89,12 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     execFileSync(r.scriptPath, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
     const lines = readFileSync(log, "utf-8").trim().split("\n");
     expect(realpathSync(lines[0]!)).toBe(realpathSync(root));
-    expect(lines.slice(1)).toEqual(["-n", "w1", "--session-id", p.workerTaskId, "--permission-mode", "auto", "--append-system-prompt-file", r.rolePath, "/story"]);
+    expect(lines.slice(1)).toEqual(["-n", "w1", "--session-id", p.workerTaskId, "--model", "opus", "--permission-mode", "auto", "--append-system-prompt-file", r.rolePath, "/story"]);
     // --no-auto-load drops the prompt and nothing else moves
     const q = prep(root, "w1b");
     const r2 = spawnWorker(root, { name: "w1b", pen: "p1", autoLoad: false, ...q }, () => null, noPen);
     execFileSync(r2.scriptPath, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
-    expect(readFileSync(log, "utf-8").trim().split("\n").slice(1)).toEqual(["-n", "w1b", "--session-id", q.workerTaskId, "--permission-mode", "auto", "--append-system-prompt-file", r2.rolePath]);
+    expect(readFileSync(log, "utf-8").trim().split("\n").slice(1)).toEqual(["-n", "w1b", "--session-id", q.workerTaskId, "--model", "opus", "--permission-mode", "auto", "--append-system-prompt-file", r2.rolePath]);
     expect(r2.autoLoad).toBe(false);
   });
 
@@ -212,7 +215,7 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     expect(text.startsWith("custom role\n\n## Ledger\n\n")).toBe(true);
     expect(text).toContain("## Handshake");
     expect(text).toContain(HANDSHAKE.nonce);
-    expect(text).toContain("no .story project was found"); // bare fixture: no config.json above the spawn dir
+    expect(text).toContain("resolves to the pen's ledger");
     expect(readFileSync(role, "utf-8")).toBe("custom role");
     expect(readFileSync(combined.scriptPath, "utf-8")).toContain(`--append-system-prompt-file '${combined.rolePath}'`);
     const m = prep(root, "w3");
@@ -229,8 +232,9 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     expect(() => validateWorkerName("ok-1.a_b")).not.toThrow();
     expect(shellQuote("it's")).toBe(`'it'\\''s'`);
     const id = mintWorkerTaskId();
-    expect(buildWorkerCommand({ name: "n", workerTaskId: id, rolePath: "/r x.md", autoLoad: true })).toBe(`claude -n 'n' --session-id '${id}' --append-system-prompt-file '/r x.md' '/story'`);
-    expect(buildWorkerCommand({ name: "n", workerTaskId: id, model: "", rolePath: "/r", autoLoad: false })).toBe(`claude -n 'n' --session-id '${id}' --append-system-prompt-file '/r'`);
+    // ISS-1303: an absent or empty model is the hands tier, never the client default.
+    expect(buildWorkerCommand({ name: "n", workerTaskId: id, rolePath: "/r x.md", autoLoad: true })).toBe(`claude -n 'n' --session-id '${id}' --model 'opus' --append-system-prompt-file '/r x.md' '/story'`);
+    expect(buildWorkerCommand({ name: "n", workerTaskId: id, model: "", rolePath: "/r", autoLoad: false })).toBe(`claude -n 'n' --session-id '${id}' --model 'opus' --append-system-prompt-file '/r'`);
   });
 
   // ISS-1289: the spawn dir used to live under .story/sessions/, where the
@@ -352,7 +356,7 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     writeFileSync(join(bin, "claude"), `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\n`);
     execFileSync("chmod", ["755", join(bin, "claude")]);
     execFileSync(r.scriptPath, { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
-    expect(readFileSync(log, "utf-8").trim().split("\n")).toEqual(["-n", "w", "--session-id", p.workerTaskId, "--permission-mode", "bypassPermissions", "--append-system-prompt-file", r.rolePath, "/story"]);
+    expect(readFileSync(log, "utf-8").trim().split("\n")).toEqual(["-n", "w", "--session-id", p.workerTaskId, "--model", "opus", "--permission-mode", "bypassPermissions", "--append-system-prompt-file", r.rolePath, "/story"]);
     const q = prep(root, "w2");
     expect(() => spawnWorker(root, { name: "w2", pen: "p", permissionMode: "yolo", ...q }, () => null)).toThrow(/Unknown permission mode/);
     const s = prep(root, "w3");
@@ -551,5 +555,168 @@ describe("N-131 / T-530: storybloq duet spawn", () => {
     expect(detectPenPermissionModeWith(tree({}), 100)).toBeNull();
     expect(detectPenPermissionModeWith(tree({ 100: { ppid: 99, command: "sh" }, 99: { ppid: 0, command: "launchd" } }), 100)).toBeNull();
     expect(resolvePermissionMode(undefined, () => detectPenPermissionModeWith(ambiguous, 100)).mode).toBe("auto");
+  });
+});
+
+/**
+ * A stub `claude` that records its working directory, the two project-root
+ * variables it saw (lines 1 and 2), and its argv (from line 3). `run` executes
+ * the launch script, `paste` the pasted command through sh; `inherit` is what
+ * the environment starting the launch already carries.
+ */
+function stubClaude(dir: string): {
+  run: (script: string, inherit?: Record<string, string>) => string[];
+  paste: (command: string, inherit?: Record<string, string>) => string[];
+} {
+  const bin = join(dir, "stub-bin");
+  mkdirSync(bin, { recursive: true });
+  const log = join(dir, "stub.log");
+  writeFileSync(join(bin, "claude"), `#!/bin/sh\npwd > '${log}'\nprintf 'root=%s\\n' "$STORYBLOQ_PROJECT_ROOT" >> '${log}'\nprintf 'legacy=%s\\n' "$CLAUDESTORY_PROJECT_ROOT" >> '${log}'\nprintf '%s\\n' "$@" >> '${log}'\n`);
+  execFileSync("chmod", ["755", join(bin, "claude")]);
+  const env = (inherit: Record<string, string>): NodeJS.ProcessEnv => {
+    const e: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    delete e.STORYBLOQ_PROJECT_ROOT;
+    delete e.CLAUDESTORY_PROJECT_ROOT;
+    return { ...e, ...inherit };
+  };
+  const read = () => readFileSync(log, "utf-8").trim().split("\n");
+  return {
+    run: (script, inherit = {}) => { execFileSync(script, { env: env(inherit) }); return read(); },
+    paste: (command, inherit = {}) => { execFileSync("/bin/sh", ["-c", command], { env: env(inherit) }); return read(); },
+  };
+}
+
+/** What a shell profile, or a pen itself launched against a board, may already export. */
+const DECOY = { STORYBLOQ_PROJECT_ROOT: "/decoy/board", CLAUDESTORY_PROJECT_ROOT: "/decoy/legacy" };
+
+describe("ISS-1303: the worker's model is pinned, never inherited", () => {
+  it("absent or empty --model resolves to the hands tier with its reason; an explicit model passes through with its own", () => {
+    expect(DEFAULT_WORKER_MODEL).toBe("opus");
+    expect(resolveWorkerModel(undefined)).toEqual({ model: "opus", source: "default" });
+    expect(resolveWorkerModel("")).toEqual({ model: "opus", source: "default" });
+    expect(resolveWorkerModel("sonnet")).toEqual({ model: "sonnet", source: "explicit" });
+    expect(workerModelReason("default")).toBe("default hands tier; pass --model to pin another");
+    expect(workerModelReason("explicit")).toBe("as given on the command line");
+  });
+
+  it("a spawn without --model launches with --model opus and reports why; --model sonnet reaches the argv as given", () => {
+    const root = project();
+    const p = prep(root, "w");
+    const r = spawnWorker(root, { name: "w", pen: "p", ...p }, () => null, noPen);
+    expect(readFileSync(r.scriptPath, "utf-8")).toContain(`--session-id '${p.workerTaskId}' --model 'opus' --permission-mode`);
+    expect(r.command).toContain(" --model 'opus' ");
+    expect(r.model).toBe("opus");
+    expect(r.modelSource).toBe("default");
+    expect(r.modelReason).toBe("default hands tier; pass --model to pin another");
+    const q = prep(root, "w2");
+    const s = spawnWorker(root, { name: "w2", pen: "p", model: "sonnet", ...q }, () => null, noPen);
+    const argv = stubClaude(root).run(s.scriptPath);
+    expect(argv.slice(3, 8)).toEqual(["-n", "w2", "--session-id", q.workerTaskId, "--model"]);
+    expect(argv[8]).toBe("sonnet");
+    expect(argv.filter((a) => a === "--model")).toHaveLength(1);
+    expect(s.modelSource).toBe("explicit");
+    expect(s.modelReason).toBe("as given on the command line");
+  });
+});
+
+describe("ISS-1305: a working directory with no ledger works against the pen's board", () => {
+  async function penAndBare() {
+    const pen = mkdtempSync(join(tmpdir(), "duet-pen-"));
+    await initProject(pen, { name: "pen" });
+    const bare = mkdtempSync(join(tmpdir(), "duet-worktree-"));
+    return { pen, bare };
+  }
+
+  it("resolves a directory with no .story to the third case, and the role names the board and the working directory", async () => {
+    const { pen, bare } = await penAndBare();
+    expect(resolveWorkerDir(pen, bare)).toEqual({ workerDir: bare, workerProjectRoot: null });
+    const para = ledgerParagraph({ workerDir: bare, penProjectRoot: pen, workerProjectRoot: null, workerTaskId: mintWorkerTaskId() });
+    expect(para).toContain(`Your \`/story\` loads the board at ${realpathSync(pen)}`);
+    expect(para).toContain(`your working directory is \`${bare}\`, which carries no ledger`);
+    expect(para).toContain("never run the setup flow");
+    expect(para).not.toContain("will offer setup");
+    const p = prep(pen, "w", bare);
+    const r = spawnWorker(pen, { name: "w", pen: "p", dir: bare, handshake: HANDSHAKE, ...p }, () => null, noPen);
+    const role = readFileSync(r.rolePath, "utf-8");
+    expect(role).toContain(`loads the board at ${realpathSync(pen)}`);
+    expect(role).toContain(`\`${bare}\`, which carries no ledger`);
+  });
+
+  it("the launch cds into the worktree and points /story at the pen's board through STORYBLOQ_PROJECT_ROOT, in the script and the pasted command", async () => {
+    const { pen, bare } = await penAndBare();
+    const p = prep(pen, "w", bare);
+    const r = spawnWorker(pen, { name: "w", pen: "p", dir: bare, ...p }, () => null, noPen);
+    const script = readFileSync(r.scriptPath, "utf-8");
+    expect(script).toContain(`cd '${bare}' || exit 1\nexport STORYBLOQ_PROJECT_ROOT='${realpathSync(pen)}'\nexec claude -n 'w'`);
+    expect(r.command.startsWith(`cd '${bare}' && STORYBLOQ_PROJECT_ROOT='${realpathSync(pen)}' claude -n 'w' `)).toBe(true);
+    const stub = stubClaude(pen);
+    const seen = stub.run(r.scriptPath);
+    expect(realpathSync(seen[0]!)).toBe(realpathSync(bare));
+    expect(seen[1]).toBe(`root=${realpathSync(pen)}`);
+    // An inherited override never wins over the board: the launch assigns its
+    // own, which discovery reads before the legacy name.
+    expect(stub.run(r.scriptPath, DECOY)[1]).toBe(`root=${realpathSync(pen)}`);
+    const pasted = stub.paste(r.command, DECOY);
+    expect(realpathSync(pasted[0]!)).toBe(realpathSync(bare));
+    expect(pasted[1]).toBe(`root=${realpathSync(pen)}`);
+  });
+
+  it("the same-project and other-project launches clear both project-root variables, in the script and the pasted command, even when the launching environment carries them", async () => {
+    const { pen } = await penAndBare();
+    const other = mkdtempSync(join(tmpdir(), "duet-node-"));
+    await initProject(other, { name: "node" });
+    mkdirSync(join(pen, "sub"));
+    for (const [name, dir] of [["ws", join(pen, "sub")], ["wo", other]] as const) {
+      const p = prep(pen, name, dir);
+      const r = spawnWorker(pen, { name, pen: "p", dir, ...p }, () => null, noPen);
+      const script = readFileSync(r.scriptPath, "utf-8");
+      expect(script).toContain(`cd '${dir}' || exit 1\nunset STORYBLOQ_PROJECT_ROOT CLAUDESTORY_PROJECT_ROOT\nexec claude -n '${name}'`);
+      expect(script).not.toContain("export STORYBLOQ_PROJECT_ROOT");
+      expect(r.command.startsWith(`cd '${dir}' && env -u STORYBLOQ_PROJECT_ROOT -u CLAUDESTORY_PROJECT_ROOT claude -n '${name}' `)).toBe(true);
+      const stub = stubClaude(pen);
+      expect(stub.run(r.scriptPath, DECOY).slice(1, 3), name).toEqual(["root=", "legacy="]);
+      const pasted = stub.paste(r.command, DECOY);
+      expect(realpathSync(pasted[0]!), name).toBe(realpathSync(dir));
+      expect(pasted.slice(1, 3), name).toEqual(["root=", "legacy="]);
+    }
+  });
+
+  it("classifies the working directory by what the worker will find there, never by this process's project-root variables", async () => {
+    const { pen, bare } = await penAndBare();
+    const other = mkdtempSync(join(tmpdir(), "duet-node-"));
+    await initProject(other, { name: "node" });
+    mkdirSync(join(pen, "sub"));
+    // The realistic case: the pen itself runs against its board through the
+    // override, and a stale legacy value sits beside it.
+    const cases = [{ STORYBLOQ_PROJECT_ROOT: pen }, { CLAUDESTORY_PROJECT_ROOT: other }, { STORYBLOQ_PROJECT_ROOT: other, CLAUDESTORY_PROJECT_ROOT: pen }];
+    for (const [i, inherited] of cases.entries()) {
+      const saved = { s: process.env.STORYBLOQ_PROJECT_ROOT, c: process.env.CLAUDESTORY_PROJECT_ROOT };
+      Object.assign(process.env, inherited);
+      try {
+        const label = JSON.stringify(inherited);
+        expect(resolveWorkerDir(pen, bare), label).toEqual({ workerDir: bare, workerProjectRoot: null });
+        expect(resolveWorkerDir(pen, other), label).toEqual({ workerDir: other, workerProjectRoot: realpathSync(other) });
+        expect(resolveWorkerDir(pen, join(pen, "sub")), label).toEqual({ workerDir: join(pen, "sub"), workerProjectRoot: realpathSync(pen) });
+        // and so the no-ledger launch still points the worker at the board
+        const p = prep(pen, `wb${i}`, bare);
+        expect(p.workerProjectRoot, label).toBeNull();
+        const r = spawnWorker(pen, { name: `wb${i}`, pen: "p", dir: bare, ...p }, () => null, noPen);
+        expect(readFileSync(r.scriptPath, "utf-8"), label).toContain(`export STORYBLOQ_PROJECT_ROOT='${realpathSync(pen)}'`);
+      } finally {
+        for (const [k, v] of [["STORYBLOQ_PROJECT_ROOT", saved.s], ["CLAUDESTORY_PROJECT_ROOT", saved.c]] as const) {
+          if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+      }
+    }
+  });
+
+  it("refuses only when the pen's own project cannot be resolved", () => {
+    const noProject = mkdtempSync(join(tmpdir(), "duet-nopen-"));
+    const bare = mkdtempSync(join(tmpdir(), "duet-worktree-"));
+    expect(() => resolveWorkerDir(noProject, bare)).toThrow(/the pen's project cannot be resolved/);
+    expect(() => resolveWorkerDir(noProject)).toThrow(/the pen's project cannot be resolved/);
+    // a .story directory without config.json is not a project either
+    mkdirSync(join(noProject, ".story"));
+    expect(() => resolveWorkerDir(noProject, bare)).toThrow(/the pen's project cannot be resolved/);
   });
 });

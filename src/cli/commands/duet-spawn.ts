@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import {
   spawnWorker, prepareSpawnDir, writeSpawnJournal, readSpawnJournal, mintWorkerTaskId, resolveWorkerDir, resolvePermissionMode,
   permissionModeReason, buildWorkerCommand, defaultWorkerRole, validateWorkerName, detectPenPermissionMode, osLauncher, PERMISSION_MODES, shellQuote,
-  handshakeSection, ledgerParagraph, SPAWN_STAGES,
+  handshakeSection, ledgerParagraph, SPAWN_STAGES, resolveWorkerModel, workerModelReason, launchProjectRoot, launchEnvPrefix,
   type Launcher, type PenModeDetector, type SpawnHandshake, type SpawnStage, type SpawnWorkerResult,
 } from "../../core/duet-spawn.js";
 import { ExitCode } from "../../core/output-formatter.js";
@@ -111,7 +111,9 @@ async function validate(args: DuetSpawnArgs, root: string, penTaskId: string | n
   if (decision.mode === "auto") {
     const bounds = args.bounds ?? [];
     if (bounds.length === 0) refuse("--bounds is required for the automatic handshake; pass --arrangement none for a manual one");
-    if (resolved.workerProjectRoot === null) refuse(`no .story project found at or above ${resolved.workerDir}; the worker's /story would have nothing to load. Pass --arrangement none to spawn it anyway.`);
+    // ISS-1305: a --dir with no ledger is no refusal; the launch points the
+    // worker's /story at this board (resolveWorkerDir already refused a pen
+    // whose own project does not resolve).
     const { state } = await loadProject(root);
     for (const ref of bounds) {
       if (ref.includes(":")) continue; // node-qualified refs resolve inside arrangement create
@@ -159,7 +161,8 @@ export async function handleDuetSpawn(args: DuetSpawnArgs, format: OutputFormat,
         bounds,
         parties: [
           { role: "pen", client: "claude", identityAnchor: penTaskId! },
-          { role: "worker", client: "claude", identityAnchor: workerTaskId, ...(args.model ? { modelTier: args.model } : {}) },
+          // ISS-1303: the model the worker actually runs, the default included.
+          { role: "worker", client: "claude", identityAnchor: workerTaskId, modelTier: resolveWorkerModel(args.model).model },
         ],
         onIrreversibleWork: "hold",
       }, "json", root);
@@ -324,12 +327,14 @@ function render(r: SpawnResultView, format: OutputFormat): string {
     "    " + r.command,
     "",
     `Worker task id: ${r.workerTaskId}`,
+    `Model: ${r.model} (${r.modelReason})`,
     `Permission mode: ${r.permissionMode} (${r.permissionModeReason})`,
     `Role: ${r.rolePath}`,
     `Script: ${r.scriptPath}`,
     `Journal: ${r.journalPath}`,
   ];
-  if (r.workerProjectRoot !== null && r.workerProjectRoot !== realpathOrSelf(r.penProjectRoot)) lines.push(`Worker ledger: ${r.workerProjectRoot}`);
+  if (r.workerProjectRoot === null) lines.push(`Worker ledger: the pen's board at ${realpathOrSelf(r.penProjectRoot)}; ${r.workerDir} carries no ledger`);
+  else if (r.workerProjectRoot !== realpathOrSelf(r.penProjectRoot)) lines.push(`Worker ledger: ${r.workerProjectRoot}`);
   if (r.arrangement.mode === "auto" && r.handshake) {
     lines.push(`Arrangement: ${r.arrangement.id}, coordination ${r.arrangement.coordinationSessionId}, nonce issued; bounds ${r.arrangement.bounds.join(", ")}`);
     lines.push("", r.autoLoad
@@ -354,10 +359,11 @@ function realpathOrSelf(p: string): string {
 
 function renderPrint(args: DuetSpawnArgs, root: string, v: Awaited<ReturnType<typeof validate>>, name: string, pen: string, autoLoad: boolean, penTaskId: string | null, detect: PenModeDetector, bounds: string[], format: OutputFormat): CommandResult {
   const { mode, source } = resolvePermissionMode(args.permissionMode, detect);
+  const { model, source: modelSource } = resolveWorkerModel(args.model);
   const auto = v.decision.mode === "auto";
   const placeholderHandshake: SpawnHandshake | undefined = auto ? { penTaskId: penTaskId!, penClient: "claude", arrangementId: "<created at launch>", coordinationSessionId: "<started at launch>", nonce: "<nonce issued at launch>" } : undefined;
   const rolePath = `<${name}-role.md, written at launch>`;
-  const command = `cd ${shellQuote(v.workerDir)} && claude -n ${shellQuote(name)} --session-id '<minted at launch>'${args.model ? ` --model ${shellQuote(args.model)}` : ""} --permission-mode ${shellQuote(mode)} --append-system-prompt-file '${rolePath}'${autoLoad ? " '/story'" : ""}`;
+  const command = `cd ${shellQuote(v.workerDir)} && ${launchEnvPrefix(launchProjectRoot(root, v.workerProjectRoot))}claude -n ${shellQuote(name)} --session-id '<minted at launch>' --model ${shellQuote(model)} --permission-mode ${shellQuote(mode)} --append-system-prompt-file '${rolePath}'${autoLoad ? " '/story'" : ""}`;
   const ctx = { workerDir: v.workerDir, penProjectRoot: root, workerProjectRoot: v.workerProjectRoot, workerTaskId: "<minted at launch>", ...(placeholderHandshake ? { handshake: placeholderHandshake } : {}) };
   let role: string;
   if (args.role) {
@@ -367,7 +373,7 @@ function renderPrint(args: DuetSpawnArgs, root: string, v: Awaited<ReturnType<ty
     role = defaultWorkerRole(pen, name, ctx);
   }
   const data = {
-    name, workerTaskId: "<minted at launch>", command, permissionMode: mode, permissionModeSource: source, permissionModeReason: permissionModeReason(source), autoLoad, launch: "printed" as const, launcher: null,
+    name, workerTaskId: "<minted at launch>", command, model, modelSource, modelReason: workerModelReason(modelSource), permissionMode: mode, permissionModeSource: source, permissionModeReason: permissionModeReason(source), autoLoad, launch: "printed" as const, launcher: null,
     arrangement: auto ? { mode: "auto" as const, status: "skipped (--print)", bounds } : { mode: "none" as const, reason: v.decision.reason ?? "" },
     workerDir: v.workerDir, workerProjectRoot: v.workerProjectRoot, role,
   };
@@ -377,6 +383,7 @@ function renderPrint(args: DuetSpawnArgs, root: string, v: Awaited<ReturnType<ty
     "",
     "    " + command,
     "",
+    `Model: ${model} (${workerModelReason(modelSource)})`,
     `Permission mode: ${mode} (${permissionModeReason(source)})`,
     auto ? `Arrangement: auto (skipped in --print). Bounds: ${bounds.join(", ")}` : `Arrangement: none (${v.decision.reason})`,
     "",

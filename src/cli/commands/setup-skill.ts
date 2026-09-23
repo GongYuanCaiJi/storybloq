@@ -1635,12 +1635,14 @@ async function handleSetupClaude(options: SetupSkillOptions = {}): Promise<void>
   // ISS-570 G3: write a version marker so subsequent CLI invocations can
   // detect when the skill dir is stale after a 'npm install -g ...' bump
   // and auto-refresh without making the user re-run setup-skill manually.
+  // ISS-1302: with the bundle's fingerprint beside it, so the next command
+  // does not rewrite the copy this setup just wrote.
   try {
-    const { writeSkillMarker } = await import("../../core/skill-version-marker.js");
+    const { writeSkillMarker, skillSourceFingerprint } = await import("../../core/skill-version-marker.js");
     const pkgJson = JSON.parse(
       await readFile(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf-8")
     ) as { version?: string };
-    if (pkgJson.version) writeSkillMarker(pkgJson.version, "claude");
+    if (pkgJson.version) writeSkillMarker(pkgJson.version, "claude", skillSourceFingerprint(srcSkillDir));
   } catch {
     // Marker write is best-effort; skill still works without it.
   }
@@ -2413,10 +2415,13 @@ async function handleSetupCodex(options: SetupSkillOptions = {}): Promise<void> 
   const { skipHooks = false, skipSkill = false } = options;
 
   let compatRefreshSucceeded = false;
+  // ISS-1302: the bundle the copies below are written from, for the markers.
+  let markerSrcDir: string | null = null;
   if (!skipSkill) {
     let srcSkillDir: string;
     try {
       srcSkillDir = resolveSkillSourceDir();
+      markerSrcDir = srcSkillDir;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       process.stderr.write(`Error: ${message}\n`);
@@ -2452,13 +2457,15 @@ async function handleSetupCodex(options: SetupSkillOptions = {}): Promise<void> 
 
   if (!skipSkill) {
     try {
-      const { writeSkillMarker } = await import("../../core/skill-version-marker.js");
+      const { writeSkillMarker, skillSourceFingerprint } = await import("../../core/skill-version-marker.js");
       const pkgJson = JSON.parse(
         await readFile(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf-8")
       ) as { version?: string };
       if (pkgJson.version) {
-        writeSkillMarker(pkgJson.version, "codex");
-        if (compatRefreshSucceeded) writeSkillMarker(pkgJson.version, "codexCompat");
+        // ISS-1302: the bundle fingerprint rides with every marker setup writes.
+        const fingerprint = markerSrcDir === null ? null : skillSourceFingerprint(markerSrcDir);
+        writeSkillMarker(pkgJson.version, "codex", fingerprint);
+        if (compatRefreshSucceeded) writeSkillMarker(pkgJson.version, "codexCompat", fingerprint);
       }
     } catch {
       // Marker write is best-effort; skill still works without it.

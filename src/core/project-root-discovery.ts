@@ -11,8 +11,8 @@ export {
  * Discovers the project root by walking up from `startDir` (default: cwd)
  * looking for `.story/config.json`.
  *
- * STORYBLOQ_PROJECT_ROOT env var overrides walk-up discovery.
- * CLAUDESTORY_PROJECT_ROOT is retained as a deprecated fallback.
+ * STORYBLOQ_PROJECT_ROOT env var overrides walk-up discovery (unless
+ * `ignoreEnv`). CLAUDESTORY_PROJECT_ROOT is retained as a deprecated fallback.
  * Returns the canonical absolute path, or null if not found.
  * Throws ProjectLoaderError if .story/ exists but is unreadable.
  *
@@ -20,8 +20,9 @@ export {
  * `node:fs`/`node:path` so the presence hook entry can reuse it; this wrapper
  * adds the throwing policy that CLI/MCP callers expect.
  */
-export function discoverProjectRoot(startDir?: string): string | null {
+export function discoverProjectRoot(startDir?: string, opts: { ignoreEnv?: boolean } = {}): string | null {
   return discoverProjectRootShared(startDir, {
+    ignoreEnv: opts.ignoreEnv,
     onUnreadableStoryDir: (candidate) => {
       throw new ProjectLoaderError(
         "io_error",

@@ -15,17 +15,30 @@
  * invocation, we compare that marker to the running CLI version; if
  * they differ, we re-copy the skill files silently and write a single
  * stderr line noting what happened.
+ *
+ * ISS-1302: a rebuild does not move the version (the build injects
+ * package.json's), so the marker alone kept a copy from before a skill change
+ * current for as long as the version held. A sidecar beside it,
+ * `.storybloq-skill-fingerprint`, records a content fingerprint of the bundle
+ * the copy was written from, and at an equal plain version that fingerprint
+ * decides. The marker stays one version line so an older CLI and the health
+ * check keep reading it as they always have.
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { compareVersionStrings } from "./team-capabilities.js";
 import { readBoundedFile } from "./limit-config.js";
 
 /** T-502: exported so the health check's default adapter reads the same file name. */
 export const SKILL_MARKER_FILE = ".storybloq-version";
 const MARKER_FILE = SKILL_MARKER_FILE;
+
+/** ISS-1302: the bundle fingerprint sidecar, one `sha256:<hex>` line beside the version marker. */
+export const SKILL_FINGERPRINT_FILE = ".storybloq-skill-fingerprint";
+const FINGERPRINT_SHAPE = /^sha256:[0-9a-f]{64}$/;
 
 export type SkillInstallTarget = "claude" | "codex" | "codexCompat";
 
@@ -100,13 +113,69 @@ export function readSkillMarker(target: SkillInstallTarget = "claude"): string |
   }
 }
 
-/** Write the CLI version marker. Best-effort; errors are swallowed. */
-export function writeSkillMarker(version: string, target: SkillInstallTarget = "claude"): void {
+/**
+ * ISS-1302: the fingerprint of a skill source dir. It covers exactly what the
+ * refresh copies (every regular file, symlinks skipped), each by its relative
+ * path and its bytes, in sorted path order, so a renamed, added, removed or
+ * edited file all move it. null when the dir cannot be read.
+ */
+export function skillSourceFingerprint(dir: string): string | null {
+  try {
+    const files: string[] = [];
+    for (const entry of readdirSync(dir, { withFileTypes: true, recursive: true })) {
+      if (!entry.isFile()) continue;
+      const parent = (entry as { parentPath?: string; path?: string }).parentPath
+        ?? (entry as { path?: string }).path ?? dir;
+      files.push(relative(dir, join(parent, entry.name)).split(sep).join("/"));
+    }
+    files.sort();
+    const hash = createHash("sha256");
+    for (const rel of files) {
+      const bytes = readFileSync(join(dir, rel));
+      hash.update(rel);
+      hash.update("\0");
+      hash.update(String(bytes.length));
+      hash.update("\0");
+      hash.update(bytes);
+    }
+    return `sha256:${hash.digest("hex")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** ISS-1302: the fingerprint recorded beside the marker. null when missing or malformed. */
+export function readSkillFingerprint(target: SkillInstallTarget = "claude"): string | null {
+  try {
+    const p = join(skillDir(target), SKILL_FINGERPRINT_FILE);
+    if (!existsSync(p)) return null;
+    const text = readBoundedFile(p, SKILL_MARKER_MAX_BYTES)?.trim() ?? "";
+    return FINGERPRINT_SHAPE.test(text) ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the CLI version marker and, beside it, the fingerprint of the bundle
+ * the copy was written from (ISS-1302). A null fingerprint removes the
+ * sidecar, so it never describes another copy than the marker does.
+ * Best-effort; errors are swallowed.
+ */
+export function writeSkillMarker(version: string, target: SkillInstallTarget, fingerprint: string | null): void {
   try {
     mkdirSync(skillDir(target), { recursive: true });
     writeFileSync(markerPath(target), version + "\n", "utf-8");
   } catch {
     // Marker write is best-effort.
+    return;
+  }
+  try {
+    const sidecar = join(skillDir(target), SKILL_FINGERPRINT_FILE);
+    if (fingerprint === null) rmSync(sidecar, { force: true });
+    else writeFileSync(sidecar, fingerprint + "\n", "utf-8");
+  } catch {
+    // Sidecar write is best-effort: a missing one refreshes once.
   }
 }
 
@@ -122,8 +191,20 @@ export function writeSkillMarker(version: string, target: SkillInstallTarget = "
  * an intentionally-installed newer prerelease), and an equal core refreshes
  * only when the marker itself carried a prerelease/build suffix (a release
  * finalizing its own prerelease).
+ *
+ * ISS-1302: at an equal core with a plain marker, `content` decides: the copy
+ * refreshes when its recorded fingerprint differs from the bundle's, a
+ * missing or malformed record included (a copy from before the sidecar,
+ * once). A bundle whose fingerprint could not be computed proves nothing and
+ * never refreshes. Every version rule above is unchanged, so an older CLI
+ * still never writes over a newer copy.
  */
-export function shouldRefresh(runningVersion: string, marker: string | null): boolean {
+export interface SkillContentFingerprints {
+  readonly installed: string | null;
+  readonly bundled: string | null;
+}
+
+export function shouldRefresh(runningVersion: string, marker: string | null, content?: SkillContentFingerprints): boolean {
   const PLAIN = /^\d+\.\d+\.\d+$/;
   const CORE_MATCH = /^(\d+\.\d+\.\d+)([-+].*)?$/;
   if (marker === null) return true; // no marker: today's behavior, unchanged
@@ -135,15 +216,36 @@ export function shouldRefresh(runningVersion: string, marker: string | null): bo
   const cmp = compareVersionStrings(runningVersion, core); // safe: both sides are plain x.y.z here
   if (cmp > 0) return true; // running strictly newer than the marker's core: refresh
   if (cmp < 0) return false; // running strictly older than the marker's core: never refresh
-  return hadSuffix; // same core: refresh only if the marker was itself a prerelease finalizing to this exact release
+  if (hadSuffix) return true; // same core: a prerelease marker finalizing to this exact release
+  if (content === undefined || content.bundled === null) return false; // no content known: the version alone decides
+  return content.installed !== content.bundled; // same version: the copy follows the bundle's content
 }
 
-/** True when the skill dir exists AND the marker is stale or missing. */
-export function isSkillStale(runningVersion: string, target: SkillInstallTarget = "claude"): boolean {
+/**
+ * True when the skill dir exists AND the marker is stale or missing. With the
+ * bundle's fingerprint (ISS-1302), a same-version copy written from another
+ * bundle is stale too; without it the version alone decides.
+ */
+export function isSkillStale(
+  runningVersion: string,
+  target: SkillInstallTarget = "claude",
+  bundledFingerprint?: string | null,
+): boolean {
   if (!runningVersion || runningVersion === "0.0.0-dev") return false;
   if (!existsSync(join(skillDir(target), "SKILL.md"))) return false; // no skill dir = not stale, just uninstalled
   const marker = readSkillMarker(target);
-  return shouldRefresh(runningVersion, marker);
+  if (bundledFingerprint === undefined) return shouldRefresh(runningVersion, marker);
+  return shouldRefresh(runningVersion, marker, { installed: readSkillFingerprint(target), bundled: bundledFingerprint });
+}
+
+/** ISS-1302: the running bundle's fingerprint, or null when it cannot be resolved or read. */
+async function bundledSkillFingerprint(): Promise<string | null> {
+  try {
+    const { resolveSkillSourceDir } = await import("../cli/commands/setup-skill.js");
+    return skillSourceFingerprint(resolveSkillSourceDir());
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -273,7 +375,11 @@ export async function autoRefreshSkillIfStale(
   // passes false so the version refresh does not install limit hooks the user
   // explicitly opted out of.
   const reconcileLimitHooks = opts.reconcileLimitHooks !== false;
-  const staleTargets = skillTargets().filter((target) => isSkillStale(runningVersion, target.id));
+  // ISS-1302: the bundle is fingerprinted once per invocation, and only when
+  // a copy is installed for it to be compared with.
+  const installed = skillTargets().some((target) => existsSync(join(target.dir, "SKILL.md")));
+  const bundled = installed ? await bundledSkillFingerprint() : null;
+  const staleTargets = skillTargets().filter((target) => isSkillStale(runningVersion, target.id, bundled));
   if (staleTargets.length === 0) {
     await refreshModsIfBinMoved();
     return false;
@@ -287,12 +393,14 @@ export async function autoRefreshSkillIfStale(
     let refreshedCodex = false;
 
     for (const target of staleTargets) {
+      // Stale only by content: the version alone would have left it alone.
+      const sameVersion = !isSkillStale(runningVersion, target.id);
       await copyDirRecursive(src, target.dir);
-      writeSkillMarker(runningVersion, target.id);
+      writeSkillMarker(runningVersion, target.id, bundled);
       refreshedClaude = refreshedClaude || target.client === "claude";
       refreshedCodex = refreshedCodex || target.client === "codex";
       process.stderr.write(
-        `storybloq: refreshed skill files at ${target.displayPath} to match CLI v${runningVersion}\n`,
+        `storybloq: refreshed skill files at ${target.displayPath} to match CLI v${runningVersion}${sameVersion ? " (same version, bundled skill changed)" : ""}\n`,
       );
     }
 
