@@ -398,11 +398,12 @@ function capabilities(dir: string): Array<Record<string, never> & {
  * because yargs turns a REPEATED string option into an array: passing
  * `--id cap-other` as an extra produced `id: ["cap-thing", "cap-other"]`,
  * which the schema rejects, and the fixture then failed before the behaviour
- * under test ever ran.
+ * under test ever ran. The name follows the id because a capability name is
+ * unique too (T-529): a second entry reusing one is refused.
  */
 function addCapAs(dir: string, id: string, ...extra: string[]): { code: number; out: string } {
   return run(dir, "capability", "add",
-    "--id", id, "--name", "Thing", "--summary", "Does the thing.",
+    "--id", id, "--name", id === "cap-thing" ? "Thing" : `Thing ${id}`, "--summary", "Does the thing.",
     "--contract", "Returns the thing.", ...extra);
 }
 

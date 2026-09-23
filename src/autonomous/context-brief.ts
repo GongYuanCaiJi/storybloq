@@ -21,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { checkCapabilities, matchCapabilities, queryPathRefusal, type CapabilityCheckReport } from "../core/capability.js";
 import { CatalogLoadError, titleWords, TITLE_STOP_WORDS } from "../core/catalog.js";
+import { catalogConflictScope } from "../core/catalog-conflicts.js";
 import { glossaryCatalog, matchTerms } from "../core/glossary.js";
 import { loadProject } from "../core/project-loader.js";
 import type { ProjectState } from "../core/project-state.js";
@@ -589,16 +590,25 @@ export async function buildContextBrief(root: string, itemRef: string, opts: Bui
   // Capabilities: one check, then the stale set out of the match.
   let capabilitiesFamily: FamilyState = { state: "ok" };
   let entries: readonly Capability[] = [];
+  let conflictRecords: unknown;
   try {
     const loaded = capabilityCatalog.load(root);
     if (!loaded.present) capabilitiesFamily = { state: "missing" };
     entries = loaded.doc.capabilities;
+    conflictRecords = loaded.doc._conflicts;
   } catch (err) {
     capabilitiesFamily = { state: "unreadable", errorClass: errorClass(err) };
   }
+  // T-529: an entry the file's own conflict records name reads `review` and is
+  // never suggested; it is listed as excluded instead.
+  const conflictScope = catalogConflictScope({ _conflicts: conflictRecords }, entries.map((e) => e.id));
   let report: CapabilityCheckReport | null = null;
   if (entries.length > 0) {
-    report = await checkCapabilities(root, entries, state, opts.checkOptions ?? {});
+    report = await checkCapabilities(root, entries, state, {
+      ...(opts.checkOptions ?? {}),
+      conflictedIds: conflictScope.conflictedIds,
+      problemIds: conflictScope.problemIds,
+    });
     if (report.deadlineHit || report.unchecked.length > 0) {
       capabilitiesFamily = { state: "check-incomplete", count: new Set(report.unchecked).size };
     }
@@ -610,7 +620,7 @@ export async function buildContextBrief(root: string, itemRef: string, opts: Bui
     if (hit) staleIds.set(e.id, hit.detail);
   }
   const criteria = { paths, title: item.title, ...(item.phaseId !== null && { phaseId: item.phaseId }) };
-  const matched = entries.length > 0 ? matchCapabilities(entries, criteria, state, staleIds).matches : [];
+  const matched = entries.length > 0 ? matchCapabilities(entries, criteria, state, new Map([...staleIds, ...conflictScope.excluded])).matches : [];
   const matchedCaps = matched.map((m) => m.capability);
   const capabilities: BriefCapability[] = matchedCaps.map((cap) => {
     const reasons = capabilityReasons(cap, paths, words, item.phaseId, state);

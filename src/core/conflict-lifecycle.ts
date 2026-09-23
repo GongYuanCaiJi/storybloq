@@ -37,12 +37,27 @@ function stableStringify(value: unknown): string {
 }
 
 /**
- * "Which field does this conflict occupy." Same string as the merge driver's
- * historical dedup key. Used only for fresh-supersedes-stale and the final
- * carried-survivor dedup.
+ * "Which field does this conflict occupy." Used only for fresh-supersedes-stale
+ * and the final carried-survivor dedup.
+ *
+ * T-529: a catalog record is addressed by the entry it names (`entityId`), not
+ * by the array index in its `fieldPath`, which is the merge-time position and
+ * goes stale as soon as an entry is inserted or removed ahead of it. So for a
+ * record carrying `entityId` the slot uses the path INSIDE the element, and an
+ * `invariant` record's slot is its rule and key. Without that, a fresh record
+ * for one capability at index 1 would supersede a carried record for a
+ * different capability that used to sit at index 1. A record carrying none of
+ * the catalog fields keeps its old slot string byte for byte; one carrying any
+ * of them gets three more NUL-separated fields, so the two forms can never
+ * compare equal. A slot is process-local and never persisted (nothing stores
+ * or compares it across runs), which is what makes the longer form safe.
  */
 export function slotKey(c: Record<string, unknown>): string {
-  return `${c.fieldPath}\0${c.kind}\0${c.group ?? ""}`;
+  const scoped = typeof c.entityId === "string";
+  const path = scoped ? String(c.fieldPath).replace(/^\/[^/]*\/[^/]*/, "") : c.fieldPath;
+  const slot = `${path}\0${c.kind}\0${c.group ?? ""}`;
+  if (!scoped && c.rule === undefined && c.key === undefined) return slot;
+  return `${slot}\0${scoped ? c.entityId : ""}\0${c.rule ?? ""}\0${c.key ?? ""}`;
 }
 
 /**
@@ -52,6 +67,11 @@ export function slotKey(c: Record<string, unknown>): string {
  * same slot because the recorded values differ.
  */
 export function instanceKey(c: Record<string, unknown>): string {
+  // T-529: the catalog fields are part of the identity (two invariant records
+  // differ only in them). They are omitted when absent, and `stableStringify`
+  // drops an undefined key, so every record without them keeps its old key
+  // byte for byte. A null would NOT be dropped, which is why no writer ever
+  // records one.
   return stableStringify({
     fieldPath: c.fieldPath,
     field: c.field,
@@ -60,6 +80,10 @@ export function instanceKey(c: Record<string, unknown>): string {
     base: c.base,
     ours: c.ours,
     theirs: c.theirs,
+    entityId: c.entityId,
+    rule: c.rule,
+    key: c.key,
+    entityIds: c.entityIds,
   });
 }
 

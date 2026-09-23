@@ -35,6 +35,7 @@
 import { readLedgerSnapshot, CAPABILITIES_PATH, GLOSSARY_PATH, type LedgerSnapshot } from "../core/ledger-snapshot.js";
 import { ABSENT, catalogEntryAt, projectionOf, RestoreInputError, type Side } from "../core/ledger-restore.js";
 import { checkCapabilities } from "../core/capability.js";
+import { catalogConflictScope } from "../core/catalog-conflicts.js";
 import { buildTermReferenceIndexFromSnapshot, checkTerms } from "../core/glossary.js";
 import { isEffectivelyAccepted } from "../core/ruling-lifecycle.js";
 import { sanitizeDisplayText } from "../core/display-text.js";
@@ -516,7 +517,15 @@ function explain(ctx: Ctx, family: Family, id: string, how: "whole" | "stamp-or-
 }
 
 async function currentCapability(ctx: Ctx, entry: Capability): Promise<string | null> {
-  const report = await checkCapabilities(ctx.root, [entry], null, { snapshot: ctx.atHead, headOid: ctx.head });
+  // T-529: an entry the file's conflict records name at HEAD is not effectively current.
+  const caps = ctx.atHead.capabilities();
+  const scope = catalogConflictScope(caps.kind === "ok" ? caps : {}, [entry.id]);
+  const report = await checkCapabilities(ctx.root, [entry], null, {
+    snapshot: ctx.atHead,
+    headOid: ctx.head,
+    conflictedIds: scope.conflictedIds,
+    problemIds: scope.problemIds,
+  });
   const checked = report.entries[0];
   if (checked !== undefined && checked.effectiveStatus === "current") return null;
   const why = (checked?.results ?? []).map((r) => r.detail).join("; ");

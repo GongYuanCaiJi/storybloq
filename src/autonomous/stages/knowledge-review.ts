@@ -44,6 +44,7 @@ import { atomicWriteSync } from "../status-writer.js";
 import { CAPABILITIES_CAP, STALE_CAP, STALE_CODES, TERMS_CAP } from "../context-brief.js";
 import { readLedgerSnapshot, type LedgerSnapshot } from "../../core/ledger-snapshot.js";
 import { checkCapabilities, matchCapabilities, queryPathRefusal } from "../../core/capability.js";
+import { catalogConflictScope } from "../../core/catalog-conflicts.js";
 import { buildTermReferenceIndexFromSnapshot, checkTerms, matchTerms } from "../../core/glossary.js";
 import { buildCitationResolutionContext } from "../../core/ruling.js";
 import { escapeMarkdownInline } from "../../core/output-formatter.js";
@@ -174,7 +175,14 @@ export async function buildKnowledgeEvidence(
   let staleTotal = 0;
   const caps = baseline.capabilities();
   if (caps.kind === "ok" && caps.entries.length > 0 && keys.length > 0) {
-    const report = await checkCapabilities(root, caps.entries, null, { snapshot: baseline, headOid: review.implementationCommit });
+    // T-529: an entry the file's own conflict records name is never shown as settled.
+    const scope = catalogConflictScope(caps, caps.entries.map((e) => e.id));
+    const report = await checkCapabilities(root, caps.entries, null, {
+      snapshot: baseline,
+      headOid: review.implementationCommit,
+      conflictedIds: scope.conflictedIds,
+      problemIds: scope.problemIds,
+    });
     if (report.deadlineHit || report.unchecked.length > 0) {
       disclosure.push(`capability freshness incomplete for ${new Set(report.unchecked).size} entr(ies)`);
     }
@@ -184,7 +192,7 @@ export async function buildKnowledgeEvidence(
       const hit = e.results.find((r) => STALE_CODES.has(r.code));
       if (hit) staleIds.set(e.id, hit.detail);
     }
-    const matched = matchCapabilities(caps.entries, { paths: keys }, null, staleIds).matches;
+    const matched = matchCapabilities(caps.entries, { paths: keys }, null, new Map([...staleIds, ...scope.excluded])).matches;
     capabilitiesTotal = matched.length;
     capabilities = matched.slice(0, CAPABILITIES_CAP).map((m) => ({
       id: m.capability.id,

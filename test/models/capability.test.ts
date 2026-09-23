@@ -309,12 +309,14 @@ describe("CapabilityCatalogSchema: capability ids are unique", () => {
     // The FIRST of the pair is the broken one. Downstream code keys results by
     // id, so a later entry with the same id used to overwrite its findings and
     // the broken entry reported current. The document is now refused instead.
+    // T-529: capability names are unique too, so each entry has its own name
+    // and the repeated id is the only thing wrong.
     const doc = {
       version: 1,
       capabilities: [
-        baseCapability({ id: "cap-dup", entryPoints: ["src/does/not/exist.ts"] }),
-        baseCapability({ id: "cap-other" }),
-        baseCapability({ id: "cap-dup" }),
+        baseCapability({ id: "cap-dup", name: "Dup first", entryPoints: ["src/does/not/exist.ts"] }),
+        baseCapability({ id: "cap-other", name: "Other" }),
+        baseCapability({ id: "cap-dup", name: "Dup second" }),
       ],
     };
     const res = CapabilityCatalogSchema.safeParse(doc);
@@ -326,7 +328,7 @@ describe("CapabilityCatalogSchema: capability ids are unique", () => {
   });
 
   it("accepts distinct ids", () => {
-    const doc = { version: 1, capabilities: [baseCapability({ id: "cap-a" }), baseCapability({ id: "cap-b" })] };
+    const doc = { version: 1, capabilities: [baseCapability({ id: "cap-a", name: "A" }), baseCapability({ id: "cap-b", name: "B" })] };
     expect(CapabilityCatalogSchema.safeParse(doc).success).toBe(true);
   });
 });

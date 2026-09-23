@@ -1,5 +1,8 @@
 import { resolve } from "node:path";
-import { hasConflicts } from "../../core/conflicts.js";
+import { hasConflicts, CATALOG_CONFLICT_IDS, type CatalogConflictSource, type CatalogConflictType } from "../../core/conflicts.js";
+import { CatalogLoadError } from "../../core/catalog.js";
+import { glossaryCatalog } from "../../core/glossary.js";
+import { capabilityCatalog } from "./capability.js";
 import { resolveConflicts, isEntityLevel, type ResolveOptions, type ResolveResult } from "../../core/resolve.js";
 import { resolveDocConflicts } from "../../core/resolve-doc.js";
 import { loadArrangementsSafe, writeArrangementUnlocked } from "../../core/arrangement-loader.js";
@@ -11,6 +14,7 @@ import type { Arrangement } from "../../models/arrangement.js";
 import type { Ruling } from "../../models/ruling.js";
 import { loadRulingsSafe, writeRulingUnlocked } from "../../core/ruling-loader.js";
 import type { CommandResult } from "../types.js";
+import { sanitizeDisplayText, MAX_PROSE_LENGTH } from "../../core/display-text.js";
 
 export type ConflictTarget =
   | { kind: "config" }
@@ -58,6 +62,64 @@ export function resolveConflictTarget(
     }
   }
   return { kind: "missing" };
+}
+
+/**
+ * T-529: a catalog file named as a conflict target, by its report id or its
+ * short name. Checked BEFORE `resolveConflictTarget`: no ledger id can take
+ * one of these four forms, and keeping catalogs out of that lookup keeps them
+ * out of every entity path that consumes it.
+ */
+export function catalogTargetOf(id: string): CatalogConflictType | null {
+  if (id === "capabilities" || id === CATALOG_CONFLICT_IDS.capabilities) return "capabilities";
+  if (id === "glossary" || id === CATALOG_CONFLICT_IDS.glossary) return "glossary";
+  return null;
+}
+
+/**
+ * Reads one catalog's own `_conflicts` for the report. A catalog that cannot
+ * be read is reported as a warning, never thrown: one broken file must not
+ * hide every other conflict, and it must not read as clean either.
+ */
+function loadCatalogConflicts(root: string, type: CatalogConflictType): { source?: CatalogConflictSource; warning?: string } {
+  const catalog = type === "capabilities" ? capabilityCatalog : glossaryCatalog;
+  try {
+    const { doc } = catalog.load(root);
+    return { source: { type, _conflicts: (doc as { _conflicts?: unknown })._conflicts } };
+  } catch (err: unknown) {
+    if (err instanceof CatalogLoadError) return { warning: err.message };
+    throw err;
+  }
+}
+
+function loadCatalogConflictSources(root: string): { catalogs: CatalogConflictSource[]; warnings: string[] } {
+  const catalogs: CatalogConflictSource[] = [];
+  const warnings: string[] = [];
+  for (const type of ["capabilities", "glossary"] as const) {
+    const { source, warning } = loadCatalogConflicts(root, type);
+    if (source) catalogs.push(source);
+    if (warning) warnings.push(warning);
+  }
+  return { catalogs, warnings };
+}
+
+/**
+ * T-529: every catalog line printed to a terminal is built from a file a merge
+ * wrote from someone's branch (ids, paths, group names, payloads, and the
+ * parse errors that quote them), so each one is sanitized whole. No length cap
+ * on a record line: a truncated payload would misstate what the resolve takes.
+ */
+function catalogDisplayLine(line: string): string {
+  return sanitizeDisplayText(line, Number.MAX_SAFE_INTEGER);
+}
+
+function catalogWarningsSection(warnings: readonly string[]): string[] {
+  if (warnings.length === 0) return [];
+  return [
+    "",
+    `Catalog scan incomplete: ${warnings.map((w) => sanitizeDisplayText(w, MAX_PROSE_LENGTH)).join("; ")}. An unreadable catalog cannot be confirmed clean. ` +
+    "Run `storybloq validate` for details.",
+  ];
 }
 
 const DAMAGE_WARNING_TYPES = new Set(["schema_error", "parse_error"]);
@@ -109,12 +171,19 @@ export async function handleConflictsList(
   const { state, warnings } = await loadProject(resolve(root));
   const arrangementScan = loadArrangementsSafe(root);
   const rulingScan = loadRulingsSafe(root);
-  const report = hasConflicts(state, arrangementScan.arrangements, rulingScan.rulings);
+  const catalogScan = loadCatalogConflictSources(root);
+  const report = hasConflicts(state, arrangementScan.arrangements, rulingScan.rulings, catalogScan.catalogs);
 
   if (format === "json") {
     return {
       output: JSON.stringify(
-        { ok: true, data: report, arrangementWarnings: arrangementScan.warnings, rulingWarnings: rulingScan.warnings },
+        {
+          ok: true,
+          data: report,
+          arrangementWarnings: arrangementScan.warnings,
+          rulingWarnings: rulingScan.warnings,
+          catalogWarnings: catalogScan.warnings,
+        },
         null,
         2,
       ),
@@ -128,6 +197,7 @@ export async function handleConflictsList(
         ...diagnosticsSection(warnings),
         ...arrangementWarningsSection(arrangementScan.warnings),
         ...rulingWarningsSection(rulingScan.warnings),
+        ...catalogWarningsSection(catalogScan.warnings),
       ].join("\n"),
     };
   }
@@ -146,9 +216,16 @@ export async function handleConflictsList(
     "Run `storybloq conflicts show <id>`, then `storybloq resolve <id> --use ours|theirs`. " +
     "For config.json/roadmap.json use `storybloq resolve config` / `storybloq resolve roadmap`.",
   );
+  if (report.items.some((i) => i.type === "capabilities" || i.type === "glossary")) {
+    lines.push(
+      "For capabilities.json/glossary.json run `storybloq conflicts show <file>`; " +
+      "ordinary writes to a conflicted catalog are refused until it is resolved.",
+    );
+  }
   lines.push(...diagnosticsSection(warnings));
   lines.push(...arrangementWarningsSection(arrangementScan.warnings));
   lines.push(...rulingWarningsSection(rulingScan.warnings));
+  lines.push(...catalogWarningsSection(catalogScan.warnings));
   return { output: lines.join("\n") };
 }
 
@@ -198,11 +275,72 @@ function renderConflicts(displayId: string, conflicts: Array<Record<string, unkn
   return lines.join("\n");
 }
 
+/**
+ * T-529: a catalog's records. A record for one entry is headed by that entry's
+ * id, because the index in its `fieldPath` is where the entry sat when the
+ * merge ran and may no longer be where it sits. `invariant` records are
+ * numbered 1, 2, ... in file order; that ordinal is what `resolve --invariant
+ * <n>` takes, and it renumbers after each resolution.
+ */
+function renderCatalogConflicts(label: string, conflicts: Array<Record<string, unknown>>): string {
+  const lines = [`## Conflicts for ${label}`, ""];
+  let invariant = 0;
+  for (const c of conflicts) {
+    if (c.kind === "invariant") {
+      invariant += 1;
+      const ids = Array.isArray(c.entityIds) ? c.entityIds.map((v) => JSON.stringify(String(v))).join(", ") : "(none)";
+      lines.push(`### Invariant ${invariant}: ${String(c.rule)} ${JSON.stringify(String(c.key))} [invariant]`);
+      lines.push(`- Entries: ${ids}`);
+      lines.push("");
+      continue;
+    }
+    if (typeof c.entityId === "string") {
+      const inside = String(c.fieldPath).replace(/^\/[^/]*\/[^/]*/, "");
+      const group = c.group ? ` (group: ${String(c.group)})` : "";
+      lines.push(`### ${JSON.stringify(c.entityId)}${inside === "" ? "" : ` ${inside}`} [${String(c.kind)}]${group}`);
+      lines.push(`- Base:   ${JSON.stringify(c.base)}`);
+      lines.push(`- Ours:   ${JSON.stringify(c.ours)}`);
+      lines.push(`- Theirs: ${JSON.stringify(c.theirs)}`);
+      lines.push("");
+      continue;
+    }
+    lines.push(...renderConflicts(label, [c]).split("\n").slice(2));
+  }
+  return lines.map(catalogDisplayLine).join("\n");
+}
+
+async function showCatalogConflicts(root: string, type: CatalogConflictType, format: "md" | "json"): Promise<CommandResult> {
+  const label = CATALOG_CONFLICT_IDS[type];
+  const { source, warning } = loadCatalogConflicts(root, type);
+  if (warning !== undefined) {
+    return {
+      output: format === "json" ? JSON.stringify({ ok: false, error: warning }, null, 2) : sanitizeDisplayText(warning, MAX_PROSE_LENGTH),
+      exitCode: 1,
+    };
+  }
+  const conflicts = Array.isArray(source?._conflicts) ? (source._conflicts as Array<Record<string, unknown>>) : [];
+  if (conflicts.length === 0) {
+    return {
+      output:
+        format === "json"
+          ? JSON.stringify({ ok: true, data: { id: label, conflicts: [] } }, null, 2)
+          : `${label} has no conflicts.`,
+    };
+  }
+  if (format === "json") {
+    return { output: JSON.stringify({ ok: true, data: { id: label, conflicts } }, null, 2) };
+  }
+  return { output: renderCatalogConflicts(label, conflicts) };
+}
+
 export async function handleConflictsShow(
   id: string,
   root: string,
   format: "md" | "json",
 ): Promise<CommandResult> {
+  const catalogTarget = catalogTargetOf(id);
+  if (catalogTarget !== null) return showCatalogConflicts(root, catalogTarget, format);
+
   const { loadProject } = await import("../../core/project-loader.js");
   const { state } = await loadProject(resolve(root));
   const arrangementScan = loadArrangementsSafe(root);

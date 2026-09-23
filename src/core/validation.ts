@@ -1,7 +1,7 @@
 import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { CROSS_NODE_REF_CAPTURE_REGEX } from "../models/ticket.js";
-import { hasConflicts } from "./conflicts.js";
+import { hasConflicts, type ConflictedItem } from "./conflicts.js";
 import { displayIdOf } from "./resolver.js";
 import { isTeamModeConfig } from "./team-capabilities.js";
 import { isTicketEarmarkStale, isIssueEarmarkStale } from "./earmarks.js";
@@ -81,6 +81,23 @@ export interface ValidationAux {
    * never sets this, regardless of its heading content.
    */
   readonly handoverNewestMarkedWithoutCarriedForward?: boolean;
+}
+
+/**
+ * The one `unresolved_conflicts` finding, shared by the ledger scan below and
+ * the catalog findings the async `validate` entry point adds (T-529), so a
+ * conflicted catalog is reported in the same words as a conflicted ticket.
+ */
+export function unresolvedConflictFinding(item: ConflictedItem): ValidationFinding {
+  const next = item.type === "capabilities" || item.type === "glossary"
+    ? `; ordinary writes to ${item.id} are refused until they are resolved.`
+    : `, then \`storybloq resolve <id> --use ours|theirs\` (for config.json/roadmap.json use \`storybloq resolve config\` or \`storybloq resolve roadmap\`).`;
+  return {
+    level: "error",
+    code: "unresolved_conflicts",
+    message: `${item.id} has ${item.conflictCount} unresolved conflict(s). Run \`storybloq conflicts show ${item.id}\`${next}`,
+    entity: item.id,
+  };
 }
 
 // --- Main Validation ---
@@ -525,14 +542,7 @@ export function validateProject(
   // T-522: a conflicted ruling binds nothing until resolved; it is reported
   // here with every other unresolved conflict so one `validate` names them all.
   const conflicts = hasConflicts(state, undefined, aux.rulings);
-  for (const item of conflicts.items) {
-    findings.push({
-      level: "error",
-      code: "unresolved_conflicts",
-      message: `${item.id} has ${item.conflictCount} unresolved conflict(s). Run \`storybloq conflicts show ${item.id}\`, then \`storybloq resolve <id> --use ours|theirs\` (for config.json/roadmap.json use \`storybloq resolve config\` or \`storybloq resolve roadmap\`).`,
-      entity: item.id,
-    });
-  }
+  for (const item of conflicts.items) findings.push(unresolvedConflictFinding(item));
 
   if (aux.rulings !== undefined) {
     validateRulings(

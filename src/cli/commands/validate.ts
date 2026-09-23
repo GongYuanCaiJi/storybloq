@@ -5,11 +5,13 @@ import {
   type ValidationFinding,
   type ValidationResult,
   citingEntitiesOf,
+  unresolvedConflictFinding,
 } from "../../core/validation.js";
+import { catalogConflictItems } from "../../core/conflicts.js";
 import { validateIssueSourceRefs } from "../../core/issue-source-ref.js";
 import { checkCapabilities } from "../../core/capability.js";
 import { CatalogLoadError } from "../../core/catalog.js";
-import { capabilityCatalog } from "./capability.js";
+import { capabilityCatalog, capabilityConflictScope } from "./capability.js";
 import { capabilityScan } from "./term.js";
 import { glossaryCatalog, checkTerms, buildTermReferenceIndex } from "../../core/glossary.js";
 import { loadRulingsSafe, loadUpwardBoardFor } from "../../core/ruling-loader.js";
@@ -243,9 +245,9 @@ function validateWithRulings(ctx: CommandContext): ValidationResult {
  * because it is a statement about the check rather than about the entry.
  */
 async function capabilityFindings(ctx: CommandContext): Promise<ValidationFinding[]> {
-  let entries;
+  let doc;
   try {
-    entries = capabilityCatalog.load(ctx.root).doc.capabilities;
+    doc = capabilityCatalog.load(ctx.root).doc;
   } catch (err: unknown) {
     if (err instanceof CatalogLoadError) {
       // The catalog exists and cannot be trusted. Reported rather than thrown:
@@ -254,9 +256,18 @@ async function capabilityFindings(ctx: CommandContext): Promise<ValidationFindin
     }
     throw err;
   }
-  if (entries.length === 0) return [];
-  const report = await checkCapabilities(ctx.root, entries, ctx.state, {});
-  const findings: ValidationFinding[] = [];
+  // T-529: the file's own open conflict records, reported like any other
+  // unresolved conflict, and handed to the check so each entry they name
+  // carries its own structural result.
+  const findings: ValidationFinding[] = catalogConflictItems([{ type: "capabilities", _conflicts: doc._conflicts }])
+    .map(unresolvedConflictFinding);
+  const entries = doc.capabilities;
+  if (entries.length === 0) return findings;
+  const scope = capabilityConflictScope(doc);
+  const report = await checkCapabilities(ctx.root, entries, ctx.state, {
+    conflictedIds: scope.conflictedIds,
+    problemIds: scope.problemIds,
+  });
   for (const entry of report.entries) {
     for (const res of entry.results) {
       findings.push({
@@ -286,9 +297,9 @@ async function capabilityFindings(ctx: CommandContext): Promise<ValidationFindin
  * surface the other does not.
  */
 function glossaryFindings(ctx: CommandContext): ValidationFinding[] {
-  let entries;
+  let doc;
   try {
-    entries = glossaryCatalog.load(ctx.root).doc.terms;
+    doc = glossaryCatalog.load(ctx.root).doc;
   } catch (err: unknown) {
     if (err instanceof CatalogLoadError) {
       // Reported rather than thrown, for the same reason the inventory's is: a
@@ -297,14 +308,18 @@ function glossaryFindings(ctx: CommandContext): ValidationFinding[] {
     }
     throw err;
   }
-  if (entries.length === 0) return [];
+  // T-529: the glossary's own open conflict records.
+  const conflictFindings = catalogConflictItems([{ type: "glossary", _conflicts: doc._conflicts }])
+    .map(unresolvedConflictFinding);
+  const entries = doc.terms;
+  if (entries.length === 0) return conflictFindings;
   // The capability ids come from the OTHER catalog, and a failure to read it
   // leaves the set empty rather than throwing: this function reports on the
   // glossary, and `capabilityFindings` already reports that file's own state.
   // `capabilityScan` is shared with `term check` so both surfaces carry the
   // same unreadable-is-not-absent distinction rather than each rebuilding it.
   const report = checkTerms(entries, buildTermReferenceIndex(ctx.root, capabilityScan(ctx.root)));
-  const findings: ValidationFinding[] = [];
+  const findings: ValidationFinding[] = conflictFindings;
   for (const entry of report.entries) {
     for (const res of entry.results) {
       findings.push({

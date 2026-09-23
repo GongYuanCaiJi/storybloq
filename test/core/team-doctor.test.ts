@@ -350,3 +350,68 @@ describe("T-522 commit 3: team doctor advises on the 1.16 rulings gaps", () => {
     expect(defaultChecks).toContain(checkRulingLifecycleReadiness);
   });
 });
+
+describe("T-529: team doctor warns when the catalogs would merge as text", () => {
+  async function repoWithBlock(block: string): Promise<string> {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { execFileSync } = await import("node:child_process");
+    const root = mkdtempSync(join(tmpdir(), "doctor-catalogs-"));
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    mkdirSync(join(root, ".story"), { recursive: true });
+    writeFileSync(join(root, ".story", ".gitattributes"), block);
+    return root;
+  }
+  const OLD = "# storybloq-merge-begin\ntickets/*.json merge=storybloq-json\n# storybloq-merge-end\n";
+  const NEW = "# storybloq-merge-begin\ncapabilities.json merge=storybloq-json\nglossary.json merge=storybloq-json\n# storybloq-merge-end\n";
+  const teamWithDriver = { ...teamConfig, team: { enabled: true, minCliVersion: "1.4.4", mergeDriverVersion: 1 } } as Config;
+
+  it("a team project with the driver installed and a pre-T-529 block gets one warning naming both files, repaired by team setup", async () => {
+    const doctor = await import("../../src/core/team-doctor.js");
+    const root = await repoWithBlock(OLD);
+    const findings = doctor.checkCatalogMergeAttributes(state({ config: teamWithDriver }), teamCtx({ root }));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ severity: "warning", code: "gitattributes_no_catalogs", repair: { command: ["storybloq", "team", "setup"] } });
+    expect(findings[0]!.message).toContain("capabilities.json and glossary.json");
+  });
+
+  it("silent once both lines are present", async () => {
+    const doctor = await import("../../src/core/team-doctor.js");
+    const root = await repoWithBlock(NEW);
+    expect(doctor.checkCatalogMergeAttributes(state({ config: teamWithDriver }), teamCtx({ root }))).toEqual([]);
+  });
+
+  it("a team project that never ran team setup is sent to it too: the merge-driver check is silent there", async () => {
+    const doctor = await import("../../src/core/team-doctor.js");
+    const { mkdtempSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const { execFileSync } = await import("node:child_process");
+    const root = mkdtempSync(join(tmpdir(), "doctor-catalogs-"));
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    const noDriver = { ...teamConfig, team: { enabled: true, minCliVersion: "1.4.4" } } as Config;
+    const result = await runDoctor(state({ config: noDriver }), teamCtx({ root }));
+    expect(result.findings.filter((f) => f.code === "gitattributes_no_catalogs")).toMatchObject([
+      { severity: "warning", repair: { command: ["storybloq", "team", "setup"] } },
+    ]);
+    expect(result.findings.some((f) => f.code === "merge_driver_missing")).toBe(false);
+  });
+
+  it("silent for a project that is not team-enabled, and outside a git work tree", async () => {
+    const doctor = await import("../../src/core/team-doctor.js");
+    const root = await repoWithBlock(OLD);
+    expect(doctor.checkCatalogMergeAttributes(state({ config: minimalConfig }), teamCtx({ root }))).toEqual([]);
+    const { mkdtempSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const notGit = mkdtempSync(join(tmpdir(), "doctor-catalogs-nogit-"));
+    expect(doctor.checkCatalogMergeAttributes(state({ config: teamWithDriver }), teamCtx({ root: notGit }))).toEqual([]);
+    expect(doctor.checkCatalogMergeAttributes(state({ config: teamWithDriver }), teamCtx({ root: join(notGit, "missing") }))).toEqual([]);
+  });
+
+  it("is part of the default checks", async () => {
+    const doctor = await import("../../src/core/team-doctor.js");
+    expect(doctor.defaultChecks).toContain(doctor.checkCatalogMergeAttributes);
+  });
+});

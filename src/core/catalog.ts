@@ -20,6 +20,8 @@ import { readdirSafe, verifyContainment, verifyDirIdentity, type DirIdentity } f
 import { readBoundedFileDetailed } from "./limit-config.js";
 import { sanitizeDisplayPath, sanitizeDisplayText, MAX_PROSE_LENGTH } from "./display-text.js";
 import { withProjectLock, withConflictResolutionLock, atomicWrite } from "./project-loader.js";
+import { ProjectLoaderError } from "./errors.js";
+import { openConflictRefusal } from "./catalog-conflicts.js";
 
 /**
  * The read bound and the WRITE bound are the same number, following
@@ -601,17 +603,30 @@ function jsonProjection(value: unknown, memo: WeakMap<object, unknown>): unknown
    * path refuses to open a state carrying conflicts; the repair path is the
    * variant that accepts one, which is the entire difference between a
    * mutation and a resolution.
+   *
+   * T-529: "a state carrying conflicts" includes THIS file's own
+   * `_conflicts`. The project lock's check sees only the ledger entities, so
+   * before T-529 an ordinary write (an add, an update, a defer, a stamp) went
+   * through a conflicted catalog and could change an entry a record
+   * describes. While any record is open the ordinary path refuses, naming the
+   * entries and the command that shows them; the repair path is the only
+   * writer until the file is clear.
    */
   async function transact(
     root: string,
     fn: (doc: TDoc) => TDoc,
     acquire: (root: string, handler: () => Promise<void>) => Promise<void>,
+    repair: boolean,
   ): Promise<TDoc> {
     let next!: TDoc;
     await acquire(root, async () => {
       // Loaded INSIDE the lock: a document read before acquisition can be
       // invalidated by a concurrent write before the lock is actually held.
       const current = load(root);
+      if (!repair) {
+        const refusal = openConflictRefusal(def.file, current.doc as { readonly _conflicts?: unknown });
+        if (refusal !== null) throw new ProjectLoaderError("conflict", refusal);
+      }
       // Parsed here so the value this function RETURNS is the canonical,
       // defaults-applied document. `writeUnlocked` validates again, including
       // the serialized bytes, and that second pass is the one that matters;
@@ -632,9 +647,9 @@ function jsonProjection(value: unknown, memo: WeakMap<object, unknown>): unknown
     key: def.key,
     load,
     mutate: (root, fn) =>
-      transact(root, fn, (r, handler) => withProjectLock(r, { strict: true }, async () => { await handler(); })),
+      transact(root, fn, (r, handler) => withProjectLock(r, { strict: true }, async () => { await handler(); }), false),
     mutateForRepair: (root, fn) =>
-      transact(root, fn, (r, handler) => withConflictResolutionLock(r, async () => { await handler(); })),
+      transact(root, fn, (r, handler) => withConflictResolutionLock(r, async () => { await handler(); }), true),
     writeUnlocked,
   };
 }

@@ -1,14 +1,27 @@
-import { getMergeRules, getCoupledGroups, type EntityType, type MergeRule } from "./field-classification.js";
+import { getMergeRules, getCoupledGroups, type CoupledGroup, type EntityType, type MergeRule } from "./field-classification.js";
 import { carryForward, mergeConflictSets, attachConflicts } from "./conflict-lifecycle.js";
+import { recordCoversViolation, type CatalogInvariantViolation } from "../models/catalog-invariant.js";
+import { capabilityNameViolations } from "../models/capability.js";
+import { termOwnerViolations } from "../models/glossary.js";
 
+/**
+ * The compile-time shape of a conflict record. `ConflictEntrySchema` in
+ * models/types.ts is the persisted shape; the two change together (T-529).
+ */
 export interface ConflictEntry {
   fieldPath: string;
   field?: string;
-  kind: "field" | "coupled" | "delete-edit" | "array-element";
+  kind: "field" | "coupled" | "delete-edit" | "array-element" | "invariant";
   base: unknown;
   ours: unknown;
   theirs: unknown;
   group?: string;
+  /** T-529: the catalog entry a record belongs to, by its stable id. Omitted, never null. */
+  entityId?: string;
+  /** T-529 `invariant` records: the rule, the normalised value, and every entry claiming it. */
+  rule?: "term-owner" | "capability-name";
+  key?: string;
+  entityIds?: string[];
 }
 
 function toPointer(fieldName: string): string {
@@ -572,9 +585,23 @@ function orderKeys(arr: unknown[], keyField: string): string[] {
   return arr.map((item) => (item as Record<string, unknown>)[keyField] as string);
 }
 
+type ElementMerger = (
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+  path: string,
+  conflicts: ConflictEntry[],
+) => Record<string, unknown>;
+
 interface KeyedArrayOpts {
   elementMerge?: boolean;
   blockerMode?: boolean;
+  /**
+   * T-529: merges an element both sides changed, in place of `elementMerge`'s
+   * `deepMergeObjects`. The catalogs pass one that honours coupled groups; a
+   * rule table alone activates nothing on this branch.
+   */
+  elementMerger?: ElementMerger;
 }
 
 interface Addition {
@@ -786,6 +813,11 @@ function keyedArrayMerge(
     if (opts.blockerMode) {
       const merged = mergeBlockerElement(baseEl, oursEl, theirsEl, `${parentPointer}/${result.length}`, conflicts);
       result.push(merged);
+      continue;
+    }
+
+    if (opts.elementMerger) {
+      result.push(opts.elementMerger(baseEl, oursEl, theirsEl, `${parentPointer}/${result.length}`, conflicts));
       continue;
     }
 
@@ -1016,6 +1048,180 @@ export function mergeRoadmap(
   // ORIGINAL unstripped inputs) instead of silently dropping them. See the
   // `clean` note in threeWayMerge: carried-only merges still exit 0.
   const carried = carryForward(base, ours, theirs);
+  attachConflicts(merged, mergeConflictSets(carried, conflicts));
+
+  return { merged, conflicts, clean: conflicts.length === 0 };
+}
+
+/** The members of one coupled group an element holds, absent members omitted (never set to undefined). */
+function groupSnapshot(el: Record<string, unknown>, members: readonly string[]): Record<string, unknown> {
+  const snapshot: Record<string, unknown> = {};
+  for (const member of members) {
+    if (member in el && el[member] !== undefined) snapshot[member] = el[member];
+  }
+  return snapshot;
+}
+
+function withoutMembers(el: Record<string, unknown>, members: ReadonlySet<string>): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(el)) {
+    if (!members.has(key)) copy[key] = value;
+  }
+  return copy;
+}
+
+/**
+ * T-529: merges one catalog entry both sides changed. Each coupled group is
+ * ONE unit: taken whole from the side that changed it, or, when both changed
+ * it and the two differ, OURS whole plus exactly one `coupled` record whose
+ * three payloads are objects keyed by member (a member a side lacks is absent
+ * from its payload, which is what lets a resolution delete it). Every other
+ * field merges field by field. Key order follows `deepMergeObjects`: base,
+ * then ours-only, then theirs-only.
+ */
+function mergeCatalogElement(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+  path: string,
+  conflicts: ConflictEntry[],
+  groups: readonly CoupledGroup[],
+): Record<string, unknown> {
+  const memberSet = new Set(groups.flatMap((g) => g.members));
+  const groupValues: Record<string, unknown> = {};
+  for (const group of groups) {
+    const b = groupSnapshot(base, group.members);
+    const o = groupSnapshot(ours, group.members);
+    const t = groupSnapshot(theirs, group.members);
+    const oursChanged = !deepEqual(b, o);
+    const theirsChanged = !deepEqual(b, t);
+    if (oursChanged && theirsChanged && !deepEqual(o, t)) {
+      conflicts.push({ fieldPath: path, kind: "coupled", group: group.group, base: b, ours: o, theirs: t });
+      Object.assign(groupValues, o);
+    } else {
+      Object.assign(groupValues, theirsChanged ? t : o);
+    }
+  }
+  const rest = deepMergeObjects(
+    withoutMembers(base, memberSet),
+    withoutMembers(ours, memberSet),
+    withoutMembers(theirs, memberSet),
+    path,
+    conflicts,
+  );
+
+  const merged: Record<string, unknown> = {};
+  const oursOnly = Object.keys(ours).filter((k) => !(k in base));
+  const theirsOnly = Object.keys(theirs).filter((k) => !(k in base) && !(k in ours));
+  for (const key of [...Object.keys(base), ...oursOnly, ...theirsOnly]) {
+    const source = memberSet.has(key) ? groupValues : rest;
+    if (key in source) merged[key] = source[key];
+  }
+  return merged;
+}
+
+/** The catalog files the driver merges, by their array key. */
+export type CatalogKey = "capabilities" | "terms";
+
+function catalogViolations(key: CatalogKey, entries: readonly unknown[]): CatalogInvariantViolation[] {
+  return key === "capabilities" ? capabilityNameViolations(entries) : termOwnerViolations(entries);
+}
+
+/**
+ * T-529: the structural merge for `.story/capabilities.json` (key
+ * "capabilities") and `.story/glossary.json` (key "terms"), in the shape of
+ * `mergeRoadmap`. Entries merge by id; a capability's verification group
+ * merges as one unit (see `mergeCatalogElement`).
+ *
+ * Every record raised for an entry carries that entry's `entityId`, because
+ * the index in its `fieldPath` is only where the entry sat in this merge's
+ * output and goes stale at the next insert; resolution locates by id.
+ *
+ * After carry-forward, a post-merge pass looks for the cross-entry collisions
+ * the document schema refuses (a word two terms own, a name two capabilities
+ * use). Each one no carried record already covers becomes one `invariant`
+ * record, and the merge is not clean. Running the pass after carry-forward
+ * is what keeps a collision an earlier merge recorded from being recorded
+ * twice.
+ */
+export function mergeCatalog(
+  base: Record<string, unknown>,
+  ours: Record<string, unknown>,
+  theirs: Record<string, unknown>,
+  key: CatalogKey,
+): MergeResult {
+  const b = stripConflicts(base);
+  const o = stripConflicts(ours);
+  const t = stripConflicts(theirs);
+  const conflicts: ConflictEntry[] = [];
+  const merged: Record<string, unknown> = {};
+
+  const bVersion = b.version;
+  const oVersion = o.version;
+  const tVersion = t.version;
+  if (deepEqual(bVersion, oVersion) && deepEqual(bVersion, tVersion)) merged.version = bVersion;
+  else if (deepEqual(oVersion, tVersion)) merged.version = oVersion;
+  else if (deepEqual(bVersion, oVersion)) merged.version = tVersion;
+  else if (deepEqual(bVersion, tVersion)) merged.version = oVersion;
+  else {
+    merged.version = oVersion;
+    conflicts.push({ fieldPath: "/version", field: "version", kind: "field", base: bVersion, ours: oVersion, theirs: tVersion });
+  }
+
+  for (const src of [b, o, t]) {
+    if (src[key] !== undefined && !Array.isArray(src[key])) throw new Error(`${key} must be an array`);
+  }
+  const groups = getCoupledGroups(key === "capabilities" ? "capability" : "term");
+  const firstEntryRecord = conflicts.length;
+  const entries = keyedArrayMerge(
+    Array.isArray(b[key]) ? (b[key] as unknown[]) : [],
+    Array.isArray(o[key]) ? (o[key] as unknown[]) : [],
+    Array.isArray(t[key]) ? (t[key] as unknown[]) : [],
+    "id",
+    `/${key}`,
+    conflicts,
+    { elementMerge: true, elementMerger: (be, oe, te, path, into) => mergeCatalogElement(be, oe, te, path, into, groups) },
+  );
+  merged[key] = entries;
+
+  const entryPath = new RegExp(`^/${key}/(\\d+)(?:/|$)`);
+  for (const record of conflicts.slice(firstEntryRecord)) {
+    const match = entryPath.exec(record.fieldPath);
+    if (!match) continue;
+    const id = (entries[Number(match[1])] as Record<string, unknown> | undefined)?.id;
+    if (typeof id === "string") record.entityId = id;
+  }
+
+  const handledKeys = new Set(["version", key, "_conflicts"]);
+  const extraKeys = new Set([...Object.keys(b), ...Object.keys(o), ...Object.keys(t)].filter((k) => !handledKeys.has(k)));
+  for (const extra of extraKeys) {
+    const bVal = b[extra];
+    const oVal = o[extra];
+    const tVal = t[extra];
+    if (deepEqual(bVal, oVal) && deepEqual(bVal, tVal)) { merged[extra] = bVal; continue; }
+    if (deepEqual(oVal, tVal)) { merged[extra] = oVal; continue; }
+    if (deepEqual(bVal, oVal)) { merged[extra] = tVal; continue; }
+    if (deepEqual(bVal, tVal)) { merged[extra] = oVal; continue; }
+    merged[extra] = oVal;
+    conflicts.push({ fieldPath: toPointer(extra), field: extra, kind: "field", base: bVal, ours: oVal, theirs: tVal });
+  }
+
+  // ISS-750: carry committed-but-unresolved entries forward (computed from the
+  // ORIGINAL unstripped inputs). See the `clean` note in threeWayMerge.
+  const carried = carryForward(base, ours, theirs);
+  for (const violation of catalogViolations(key, entries)) {
+    if (carried.some((record) => recordCoversViolation(record, violation))) continue;
+    conflicts.push({
+      fieldPath: `/${key}`,
+      kind: "invariant",
+      rule: violation.rule,
+      key: violation.key,
+      entityIds: [...violation.entityIds],
+      base: undefined,
+      ours: undefined,
+      theirs: undefined,
+    });
+  }
   attachConflicts(merged, mergeConflictSets(carried, conflicts));
 
   return { merged, conflicts, clean: conflicts.length === 0 };

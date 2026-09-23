@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  ConflictEntrySchema,
   DateSchema,
   RulingIdSchema,
   TICKET_ID_REGEX,
@@ -7,6 +8,7 @@ import {
   ISSUE_ID_REGEX,
   ISSUE_CANONICAL_ID_REGEX,
 } from "./types.js";
+import { groupViolations, isViolationRecorded, type CatalogInvariantViolation } from "./catalog-invariant.js";
 
 /**
  * T-523: the capability inventory. One entry answers "what can this project
@@ -259,6 +261,63 @@ export const CapabilitySchema = z
   });
 
 /**
+ * T-529: the form two capability names are compared in. NFKC, lower case,
+ * trim: a compatibility form, a case difference or edge whitespace is the same
+ * name to a reader, and two capabilities a reader cannot tell apart by name
+ * is the ambiguity the rule exists to refuse. Local rather than the
+ * glossary's key, because the glossary model imports this one.
+ */
+export function normalizeCapabilityName(name: string): string {
+  return name.normalize("NFKC").toLowerCase().trim();
+}
+
+interface CapabilityNameCollision {
+  readonly index: number;
+  readonly name: string;
+  readonly key: string;
+  readonly ownerIndex: number;
+}
+
+/**
+ * THE capability-name rule, in one place: the document refine reports these,
+ * the merge driver records them as `invariant` conflicts, and the resolver
+ * compares them before and after a repair. Tolerant of an unvalidated entry,
+ * because the merge driver walks a merged document no schema has seen.
+ */
+function capabilityNameCollisions(capabilities: readonly unknown[]): CapabilityNameCollision[] {
+  const owners = new Map<string, number>();
+  const collisions: CapabilityNameCollision[] = [];
+  capabilities.forEach((entry, index) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return;
+    const name = (entry as Record<string, unknown>).name;
+    if (typeof name !== "string") return;
+    const key = normalizeCapabilityName(name);
+    const owner = owners.get(key);
+    if (owner === undefined) owners.set(key, index);
+    else collisions.push({ index, name, key, ownerIndex: owner });
+  });
+  return collisions;
+}
+
+function capabilityIdAt(capabilities: readonly unknown[], index: number): string | undefined {
+  const entry = capabilities[index];
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const id = (entry as Record<string, unknown>).id;
+  return typeof id === "string" ? id : undefined;
+}
+
+/** T-529: every capability name used by more than one entry, naming all of them. */
+export function capabilityNameViolations(capabilities: readonly unknown[]): CatalogInvariantViolation[] {
+  const pairs: Array<{ key: string; ids: string[] }> = [];
+  for (const collision of capabilityNameCollisions(capabilities)) {
+    const ownerId = capabilityIdAt(capabilities, collision.ownerIndex);
+    const id = capabilityIdAt(capabilities, collision.index);
+    if (ownerId !== undefined && id !== undefined) pairs.push({ key: collision.key, ids: [ownerId, id] });
+  }
+  return groupViolations("capability-name", pairs);
+}
+
+/**
  * The file document. `version` is a literal rather than a number so a future
  * version 2 file fails the parse and surfaces as a CatalogLoadError, instead
  * of passing through and being rewritten by an older CLI that does not
@@ -268,6 +327,8 @@ export const CapabilityCatalogSchema = z
   .object({
     version: z.literal(1),
     capabilities: z.array(CapabilitySchema).default([]),
+    /** T-529: unresolved merge conflicts, written only by the merge driver. */
+    _conflicts: z.array(ConflictEntrySchema).optional(),
   })
   .passthrough()
   /**
@@ -277,6 +338,13 @@ export const CapabilityCatalogSchema = z
    * overwrote the first's, and a broken entry sharing an id with a valid one
    * reported `current`. A hand edit or a merge can produce one, so the load
    * refuses it rather than trusting every writer to have prevented it.
+   *
+   * T-529: names are unique too, compared by `normalizeCapabilityName`, so a
+   * reader, a title match and a brief never show two capabilities under one
+   * name. A merge can produce a collision neither side wrote; the merge driver
+   * records it as an `invariant` conflict, and a collision the document's own
+   * `_conflicts` records in full is tolerated here so `resolve` can open the
+   * file and repair it. An unrecorded one is refused on load and on write.
    */
   .superRefine((doc, ctx) => {
     const seen = new Map<string, number>();
@@ -292,6 +360,19 @@ export const CapabilityCatalogSchema = z
         seen.set(cap.id, index);
       }
     });
+    const recorded = new Set(
+      capabilityNameViolations(doc.capabilities)
+        .filter((violation) => isViolationRecorded(doc._conflicts, violation))
+        .map((violation) => violation.key),
+    );
+    for (const collision of capabilityNameCollisions(doc.capabilities)) {
+      if (recorded.has(collision.key)) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["capabilities", collision.index, "name"],
+        message: `Capability name ${collision.name} is already used by capabilities.${collision.ownerIndex}; one name belongs to one capability`,
+      });
+    }
   });
 
 export type Capability = z.infer<typeof CapabilitySchema>;

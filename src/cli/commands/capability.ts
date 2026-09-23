@@ -36,11 +36,13 @@ import {
   type CapabilityMatchResult,
 } from "../../core/capability.js";
 import { defineCatalog, CatalogLoadError } from "../../core/catalog.js";
+import { catalogConflictScope, type CatalogConflictScope } from "../../core/catalog-conflicts.js";
 import {
   CapabilityCatalogSchema,
   CapabilitySchema,
   CAPABILITY_STATUSES,
   hasPendingNote,
+  normalizeCapabilityName,
   PendingNoteSchema,
   type Capability,
   type CapabilityCatalog,
@@ -152,6 +154,27 @@ function pendingFirst<T extends { cap: Capability }>(rows: readonly T[]): T[] {
   return [...rows.filter((r) => hasPendingNote(r.cap)), ...rows.filter((r) => !hasPendingNote(r.cap))];
 }
 
+/**
+ * T-529: a name another entry already uses, compared the way the document
+ * schema compares them (`normalizeCapabilityName`). Checked inside the
+ * transaction, against the document the write will change, so the refusal
+ * names the other entry instead of reaching the caller as a schema location.
+ */
+function nameRefusal(current: readonly Capability[], entry: Capability, format: OutputFormat): CapabilityRefusal | null {
+  const key = normalizeCapabilityName(entry.name);
+  const owner = current.find((c) => c.id !== entry.id && normalizeCapabilityName(c.name) === key);
+  if (owner === undefined) return null;
+  return new CapabilityRefusal({
+    output: formatError(
+      "invalid_input",
+      `Capability name ${catalogText(entry.name)} is already used by ${catalogText(owner.id)}. One name belongs to one capability: choose another name, or update that entry.`,
+      format,
+    ),
+    exitCode: ExitCode.USER_ERROR,
+    errorCode: "invalid_input",
+  });
+}
+
 function parseEntry(candidate: unknown): Capability {
   const parsed = CapabilitySchema.safeParse(candidate);
   if (!parsed.success) {
@@ -198,8 +221,23 @@ async function reportFor(
   ctx: CommandContext,
   entries: readonly Capability[],
   skipFreshness: boolean,
+  scope: CatalogConflictScope,
 ): Promise<CapabilityCheckReport> {
-  return checkCapabilities(ctx.root, entries, ctx.state, { skipFreshness });
+  return checkCapabilities(ctx.root, entries, ctx.state, {
+    skipFreshness,
+    conflictedIds: scope.conflictedIds,
+    problemIds: scope.problemIds,
+  });
+}
+
+/**
+ * T-529: which entries the file's own open conflict records name. Every read
+ * handler hands this to the check (a named entry gets a structural result, so
+ * it reads `review` and cannot be stamped) and `match` excludes those entries,
+ * listing them, so a conflicted entry is never offered as settled.
+ */
+export function capabilityConflictScope(doc: CapabilityCatalog): CatalogConflictScope {
+  return catalogConflictScope(doc, doc.capabilities.map((c) => c.id));
 }
 
 function statusOf(report: CapabilityCheckReport, id: string): CapabilityCheckEntry | undefined {
@@ -320,7 +358,7 @@ export async function handleCapabilityList(
   const status = statusFrom(filters.status);
   const skip = filters.skipCheck === true;
   const { doc, present } = capabilityCatalog.load(ctx.root);
-  const report = await reportFor(ctx, doc.capabilities, skip);
+  const report = await reportFor(ctx, doc.capabilities, skip, capabilityConflictScope(doc));
 
   // Filtering runs on the EFFECTIVE status, not the stored one. `--status
   // review` that only matched the manual flag would hide exactly the entries
@@ -390,7 +428,7 @@ export async function handleCapabilityGet(
       errorCode: "not_found",
     };
   }
-  const report = await reportFor(ctx, [cap], skip);
+  const report = await reportFor(ctx, [cap], skip, capabilityConflictScope(doc));
   const checked = statusOf(report, id);
   if (ctx.format === "json") {
     return {
@@ -430,7 +468,7 @@ export async function handleCapabilityMatch(
     throw new CliValidationError("invalid_input", `match refused: ${refusals.join("; ")}`);
   }
   const { doc } = capabilityCatalog.load(ctx.root);
-  const res: CapabilityMatchResult = matchCapabilities(doc.capabilities, criteria, ctx.state);
+  const res: CapabilityMatchResult = matchCapabilities(doc.capabilities, criteria, ctx.state, capabilityConflictScope(doc).excluded);
 
   if (ctx.format === "json") {
     return {
@@ -483,9 +521,10 @@ export interface CapabilityDeferInput {
  * defer is usually that the entry is already wrong (its path was renamed or
  * deleted) and a check would refuse the very write that records that.
  *
- * Not refused on a conflict record: no catalog conflict-record mechanism
- * exists yet (T-529 owns it). An unreadable file refuses through `mutate`'s
- * own load.
+ * Refused while the file carries any open conflict record (T-529): the
+ * ordinary `mutate` refuses a conflicted catalog, naming the entries, so
+ * `resolve` is the only writer until the file is clear. An unreadable file
+ * refuses through `mutate`'s own load.
  */
 export async function handleCapabilityDefer(
   input: CapabilityDeferInput,
@@ -556,29 +595,33 @@ export async function handleCapabilityAdd(
   // absent entry outside the lock and the second would silently replace the
   // first.
   let duplicate = false;
-  const doc = await capabilityCatalog.mutate(root, (current) => {
-    if (current.capabilities.some((c) => c.id === entry.id)) {
-      duplicate = true;
-      return current;
+  return refusing(async () => {
+    const doc = await capabilityCatalog.mutate(root, (current) => {
+      if (current.capabilities.some((c) => c.id === entry.id)) {
+        duplicate = true;
+        return current;
+      }
+      const refusal = nameRefusal(current.capabilities, entry, format);
+      if (refusal !== null) throw refusal;
+      return { ...current, capabilities: [...current.capabilities, entry] };
+    });
+    if (duplicate) {
+      return {
+        output: formatError("invalid_input", `Capability ${catalogText(entry.id)} already exists. Use \`capability update\` to change it.`, format),
+        exitCode: ExitCode.USER_ERROR,
+        errorCode: "invalid_input",
+      };
     }
-    return { ...current, capabilities: [...current.capabilities, entry] };
-  });
-  if (duplicate) {
+    if (format === "json") {
+      return { output: JSON.stringify(successEnvelope({ capability: entry, inventorySize: doc.capabilities.length }), null, 2) };
+    }
     return {
-      output: formatError("invalid_input", `Capability ${catalogText(entry.id)} already exists. Use \`capability update\` to change it.`, format),
-      exitCode: ExitCode.USER_ERROR,
-      errorCode: "invalid_input",
+      output: [
+        `Added ${catalogText(entry.id)} (${catalogText(entry.name)}), checkpoint ${catalogText(checkedAt.sha.slice(0, 12))} (${catalogText(checkedAt.date)}).`,
+        `Inventory: ${doc.capabilities.length}.`,
+      ].join("\n"),
     };
-  }
-  if (format === "json") {
-    return { output: JSON.stringify(successEnvelope({ capability: entry, inventorySize: doc.capabilities.length }), null, 2) };
-  }
-  return {
-    output: [
-      `Added ${catalogText(entry.id)} (${catalogText(entry.name)}), checkpoint ${catalogText(checkedAt.sha.slice(0, 12))} (${catalogText(checkedAt.date)}).`,
-      `Inventory: ${doc.capabilities.length}.`,
-    ].join("\n"),
-  };
+  });
 }
 
 export async function handleCapabilityUpdate(
@@ -588,50 +631,54 @@ export async function handleCapabilityUpdate(
 ): Promise<CommandResult> {
   let missing = false;
   let updated: Capability | null = null;
-  await capabilityCatalog.mutate(root, (current) => {
-    const index = current.capabilities.findIndex((c) => c.id === input.id);
-    if (index === -1) {
-      missing = true;
-      return current;
+  return refusing(async () => {
+    await capabilityCatalog.mutate(root, (current) => {
+      const index = current.capabilities.findIndex((c) => c.id === input.id);
+      if (index === -1) {
+        missing = true;
+        return current;
+      }
+      const previous = current.capabilities[index]!;
+      // `checkedAt` is carried forward untouched. An update is an edit to the
+      // DESCRIPTION of a capability, never a claim that its code was re-read, so
+      // it must not clear a freshness finding. `check --stamp` is the only
+      // command that says "I looked".
+      const next = parseEntry(
+        defined({
+          ...previous,
+          name: input.name ?? previous.name,
+          summary: input.summary ?? previous.summary,
+          surfaces: surfacesFrom(input, previous.surfaces),
+          entryPoints: input.entryPoints ? [...input.entryPoints] : previous.entryPoints,
+          contract: input.contract ?? previous.contract,
+          example: input.example ?? previous.example,
+          rulings: input.rulings ? [...input.rulings] : previous.rulings,
+          items: input.items ? [...input.items] : previous.items,
+          terms: input.terms ? [...input.terms] : previous.terms,
+          checkedAt: previous.checkedAt,
+          status: statusFrom(input.status) ?? previous.status,
+        }),
+      );
+      const refusal = nameRefusal(current.capabilities, next, format);
+      if (refusal !== null) throw refusal;
+      updated = next;
+      const capabilities = [...current.capabilities];
+      capabilities[index] = next;
+      return { ...current, capabilities };
+    });
+    if (missing || updated === null) {
+      return {
+        output: formatError("not_found", `Capability ${catalogText(input.id)} not found.`, format),
+        exitCode: ExitCode.USER_ERROR,
+        errorCode: "not_found",
+      };
     }
-    const previous = current.capabilities[index]!;
-    // `checkedAt` is carried forward untouched. An update is an edit to the
-    // DESCRIPTION of a capability, never a claim that its code was re-read, so
-    // it must not clear a freshness finding. `check --stamp` is the only
-    // command that says "I looked".
-    const next = parseEntry(
-      defined({
-        ...previous,
-        name: input.name ?? previous.name,
-        summary: input.summary ?? previous.summary,
-        surfaces: surfacesFrom(input, previous.surfaces),
-        entryPoints: input.entryPoints ? [...input.entryPoints] : previous.entryPoints,
-        contract: input.contract ?? previous.contract,
-        example: input.example ?? previous.example,
-        rulings: input.rulings ? [...input.rulings] : previous.rulings,
-        items: input.items ? [...input.items] : previous.items,
-        terms: input.terms ? [...input.terms] : previous.terms,
-        checkedAt: previous.checkedAt,
-        status: statusFrom(input.status) ?? previous.status,
-      }),
-    );
-    updated = next;
-    const capabilities = [...current.capabilities];
-    capabilities[index] = next;
-    return { ...current, capabilities };
-  });
-  if (missing || updated === null) {
+    const entry: Capability = updated;
+    if (format === "json") return { output: JSON.stringify(successEnvelope({ capability: entry }), null, 2) };
     return {
-      output: formatError("not_found", `Capability ${catalogText(input.id)} not found.`, format),
-      exitCode: ExitCode.USER_ERROR,
-      errorCode: "not_found",
+      output: `Updated ${catalogText(entry.id)}. Checkpoint unchanged at ${catalogText(entry.checkedAt.sha.slice(0, 12))} (${catalogText(entry.checkedAt.date)}); run \`capability check --stamp ${catalogText(entry.id)}\` after re-reading its entry points.`,
     };
-  }
-  const entry: Capability = updated;
-  if (format === "json") return { output: JSON.stringify(successEnvelope({ capability: entry }), null, 2) };
-  return {
-    output: `Updated ${catalogText(entry.id)}. Checkpoint unchanged at ${catalogText(entry.checkedAt.sha.slice(0, 12))} (${catalogText(entry.checkedAt.date)}); run \`capability check --stamp ${catalogText(entry.id)}\` after re-reading its entry points.`,
-  };
+  });
 }
 
 export interface CapabilityCheckInput {
@@ -668,7 +715,11 @@ export async function handleCapabilityCheck(
     );
   }
   const { doc } = capabilityCatalog.load(root);
-  const report = await checkCapabilities(root, doc.capabilities, ctx.state, {});
+  const scope = capabilityConflictScope(doc);
+  const report = await checkCapabilities(root, doc.capabilities, ctx.state, {
+    conflictedIds: scope.conflictedIds,
+    problemIds: scope.problemIds,
+  });
   const storedById = new Map(doc.capabilities.map((c) => [c.id, c]));
 
   const requested = input.stampAll === true

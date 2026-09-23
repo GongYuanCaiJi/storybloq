@@ -135,15 +135,66 @@ export const LessonIdSchema = z
 export const LIFECYCLE_VALUES = ["active", "archived", "deleted"] as const;
 export type Lifecycle = (typeof LIFECYCLE_VALUES)[number];
 
+/**
+ * T-529: the cross-entry collisions a catalog merge can produce and record as
+ * an `invariant` conflict. One word owned by two glossary entries, and one
+ * capability name used by two capabilities.
+ */
+export const CATALOG_INVARIANT_RULES = ["term-owner", "capability-name"] as const;
+export type CatalogInvariantRule = (typeof CATALOG_INVARIANT_RULES)[number];
+
+function isPlainObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The ENUM is closed on purpose, and `.passthrough()` does not extend it: a
+ * record whose kind a build does not know fails this parse. That matters on
+ * the merge driver's fallback path, which uses this exact parse as a filter
+ * and drops what fails it, so `invariant` is listed here rather than left to
+ * passthrough. Only the catalogs (new in 1.16) ever carry one, so no older
+ * build that reads a ticket or an issue can meet it.
+ *
+ * `entityId`, `rule`, `key` and `entityIds` are the catalog record fields. They
+ * are OMITTED when absent, never written as null: the conflict identity
+ * (`instanceKey`) drops an undefined key but serializes null, so a null would
+ * give a legacy record a new identity.
+ */
 export const ConflictEntrySchema = z.object({
   fieldPath: z.string(),
   field: z.string().optional(),
-  kind: z.enum(["field", "array-element", "coupled", "delete-edit"]),
+  kind: z.enum(["field", "array-element", "coupled", "delete-edit", "invariant"]),
   group: z.string().optional(),
   base: z.unknown(),
   ours: z.unknown(),
   theirs: z.unknown(),
-}).passthrough();
+  entityId: z.string().min(1).optional(),
+  rule: z.enum(CATALOG_INVARIANT_RULES).optional(),
+  key: z.string().optional(),
+  entityIds: z.array(z.string().min(1)).optional(),
+}).passthrough().superRefine((entry, ctx) => {
+  if (entry.kind === "invariant") {
+    if (entry.rule === undefined || entry.key === undefined || entry.entityIds === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "An invariant conflict names its rule, its key and the entries that collide" });
+    } else if (new Set(entry.entityIds).size < 2) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["entityIds"], message: "An invariant conflict names at least two distinct entries" });
+    }
+  }
+  // A catalog's verification record carries each side's whole group as an
+  // object keyed by member name. A positional array would lose the difference
+  // between "delete this member" and "set it to null" on the first JSON round
+  // trip (an undefined array element serializes as null), so the schema
+  // refuses one rather than trusting every writer to know. A side with no
+  // member set is an empty object, never a missing side. Legacy per-member
+  // records carry no entityId and keep whatever shape they always had.
+  if (entry.kind === "coupled" && entry.entityId !== undefined) {
+    for (const side of ["base", "ours", "theirs"] as const) {
+      if (!isPlainObject(entry[side])) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [side], message: "A catalog group conflict records each side as an object keyed by member name" });
+      }
+    }
+  }
+});
 export type ConflictEntry = z.infer<typeof ConflictEntrySchema>;
 
 export const ClaimSchema = z.object({

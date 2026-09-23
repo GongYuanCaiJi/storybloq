@@ -55,7 +55,12 @@ export type SnapshotFileStatus =
 
 /** A single-document family: the parsed entries, or why there are none. */
 export type SnapshotCatalogRead<T> =
-  | { readonly kind: "ok"; readonly entries: readonly T[] }
+  /**
+   * `_conflicts` is the file's own open conflict records at that commit
+   * (T-529), carried so a reader of the snapshot can refuse to treat a
+   * conflicted entry as settled, exactly as a reader of the working tree does.
+   */
+  | { readonly kind: "ok"; readonly entries: readonly T[]; readonly _conflicts?: unknown }
   | { readonly kind: "absent" }
   | { readonly kind: "unreadable"; readonly reason: string };
 
@@ -342,7 +347,8 @@ export async function readLedgerSnapshot(root: string, oid: string, git: Snapsho
     const file = files.get(path);
     if (file === undefined) return { kind: "absent" };
     if (file.status.kind === "unreadable") return file.status;
-    return { kind: "ok", entries: ((file.value as Record<string, unknown>)[key] ?? []) as T[] };
+    const value = file.value as Record<string, unknown>;
+    return { kind: "ok", entries: (value[key] ?? []) as T[], _conflicts: value._conflicts };
   }
 
   function directory<T>(family: DirectoryFamily, accept?: (path: string, value: T) => string | null): SnapshotDirectoryRead<T> {

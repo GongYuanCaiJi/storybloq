@@ -214,6 +214,25 @@ const RULING_RULES: Record<string, MergeRule> = {
   narrative: { kind: "latest-wins", timestampField: "updatedAt" },
 };
 
+// T-529: a CAPABILITY entry inside `.story/capabilities.json`. What an entry
+// claims to have verified is one unit: the contract, the entry points and
+// surfaces it describes, the checkpoint it was read at, the stored status and
+// the owed-work note. Merged per member, "contract from branch A, checkedAt
+// from branch B" would read as verified while describing a contract nobody
+// inspected, so when both sides changed the group and differ the driver keeps
+// OURS whole and records ONE conflict for the entry, addressed by its id.
+// Every other field of an entry merges field by field. A glossary TERM has no
+// group: nothing on a term can read as verified, so every term field,
+// `pendingNote` included, merges field by field (T-529 amendment reading).
+const CAPABILITY_VERIFICATION_MEMBERS = ["entryPoints", "contract", "surfaces", "checkedAt", "status", "pendingNote"];
+const CAPABILITY_VERIFICATION_RULE: MergeRule = { kind: "coupled", group: "verification", members: CAPABILITY_VERIFICATION_MEMBERS, onDivergence: "keep-ours" };
+const CAPABILITY_RULES: Record<string, MergeRule> = {
+  ...Object.fromEntries(CAPABILITY_VERIFICATION_MEMBERS.map((m) => [m, CAPABILITY_VERIFICATION_RULE])),
+};
+
+/** T-529: the catalog entry types. Not ledger entities: they live as elements of one file. */
+export type CatalogEntryType = "capability" | "term";
+
 const RULES_BY_TYPE: Record<string, Record<string, MergeRule>> = {
   ticket: TICKET_RULES,
   issue: ISSUE_RULES,
@@ -221,6 +240,8 @@ const RULES_BY_TYPE: Record<string, Record<string, MergeRule>> = {
   lesson: LESSON_RULES,
   arrangement: ARRANGEMENT_RULES,
   ruling: RULING_RULES,
+  capability: CAPABILITY_RULES,
+  term: {},
 };
 
 export function getMergeRules(entityType: EntityType | string): Record<string, MergeRule> {
@@ -236,7 +257,7 @@ export interface CoupledGroup {
   onDivergence?: "base" | "keep-ours";
 }
 
-export function getCoupledGroups(entityType: EntityType): CoupledGroup[] {
+export function getCoupledGroups(entityType: EntityType | CatalogEntryType): CoupledGroup[] {
   const rules = getMergeRules(entityType);
   const seen = new Set<string>();
   const groups: CoupledGroup[] = [];

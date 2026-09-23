@@ -359,3 +359,28 @@ describe("T-522 commit 3 (byte-review round 2): the fence is SemVer-aware and th
     expect(rulingLifecycleReadiness(storyDir, "1.16.0")).toEqual({ fenceOk: true, attributeOk: true });
   });
 });
+
+describe("T-529: team setup routes both catalogs to the structural driver", () => {
+  const PRE_T529_BLOCK =
+    "# storybloq-merge-begin\ntickets/*.json merge=storybloq-json\nconfig.json merge=storybloq-json\n# storybloq-merge-end\n";
+
+  it("writes the capabilities.json and glossary.json lines, and a rerun is byte-identical", async () => {
+    const storyDir = createStoryDir(createTempGitRepo());
+    await writeGitattributes(storyDir);
+    const first = readFileSync(join(storyDir, ".gitattributes"), "utf-8");
+    expect(first).toContain("capabilities.json merge=storybloq-json");
+    expect(first).toContain("glossary.json merge=storybloq-json");
+    await writeGitattributes(storyDir);
+    expect(readFileSync(join(storyDir, ".gitattributes"), "utf-8")).toBe(first);
+  });
+
+  it("git itself resolves both catalogs to the driver only after setup: a pre-T-529 block leaves them as text", async () => {
+    const setup = await import("../../src/core/team-setup.js");
+    const storyDir = createStoryDir(createTempGitRepo());
+    writeFileSync(join(storyDir, ".gitattributes"), PRE_T529_BLOCK, "utf-8");
+    expect(setup.catalogsWithoutMergeDriver(storyDir)).toEqual(["capabilities.json", "glossary.json"]);
+    await writeGitattributes(storyDir);
+    expect(setup.catalogsWithoutMergeDriver(storyDir)).toEqual([]);
+    expect(effectiveMergeDriver(join(storyDir, ".."), ".story/glossary.json")).toBe(MERGE_DRIVER_NAME);
+  });
+});

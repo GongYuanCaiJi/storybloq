@@ -35,6 +35,9 @@ const GITATTRIBUTES_PATTERNS = [
   "rulings/*.json merge=storybloq-json",
   "config.json merge=storybloq-json",
   "roadmap.json merge=storybloq-json",
+  // T-529: the two catalogs, merged by entry id instead of as text.
+  "capabilities.json merge=storybloq-json",
+  "glossary.json merge=storybloq-json",
 ];
 
 async function findGitRoot(cwd: string): Promise<string> {
@@ -199,6 +202,37 @@ export function rulingLifecycleReadiness(
   const root = dirname(storyDir);
   const attributeOk = effectiveMergeDriver(root, `${basename(storyDir)}/rulings/${rulingId}.json`) === MERGE_DRIVER_NAME;
   return { fenceOk, attributeOk };
+}
+
+/** T-529: the catalog files whose merges must run the structural driver. */
+export const CATALOG_MERGE_FILES = ["capabilities.json", "glossary.json"] as const;
+
+/**
+ * T-529: the catalog files git would NOT merge with the structural driver,
+ * asked of git itself the way `rulingLifecycleReadiness` asks for a ruling
+ * path, so every attribute rule git applies is honoured. Empty when both are
+ * covered, and empty outside a git work tree (or without git), where nothing
+ * merges and `check-attr` could not tell "unset" from "no repository". Pure
+ * read.
+ */
+export function catalogsWithoutMergeDriver(storyDir: string): string[] {
+  const root = dirname(storyDir);
+  if (!insideGitWorkTree(root)) return [];
+  return CATALOG_MERGE_FILES.filter((file) => effectiveMergeDriver(root, `${basename(storyDir)}/${file}`) !== MERGE_DRIVER_NAME);
+}
+
+function insideGitWorkTree(root: string): boolean {
+  try {
+    const out = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: root,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+    });
+    return out.trim() === "true";
+  } catch {
+    return false;
+  }
 }
 
 /** The `merge` attribute git resolves for `relPath` under `root`, or null when unset or unknowable. */

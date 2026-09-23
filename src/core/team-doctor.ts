@@ -4,7 +4,7 @@ import type { ProjectState } from "./project-state.js";
 import type { LoadWarning } from "./errors.js";
 import { isClaimStale } from "./claims.js";
 import { compareVersionStrings, RULING_LIFECYCLE_MIN_CLI_VERSION } from "./team-capabilities.js";
-import { rulingLifecycleReadiness } from "./team-setup.js";
+import { rulingLifecycleReadiness, catalogsWithoutMergeDriver } from "./team-setup.js";
 import { join } from "node:path";
 import { existsSync, readdirSync } from "node:fs";
 import { ENABLE_GIT_REFS_REMEDY } from "./branch-allocation-warning.js";
@@ -563,6 +563,30 @@ export function checkRulingLifecycleReadiness(state: ProjectState, ctx: DoctorCo
   return findings;
 }
 
+/**
+ * T-529: a team-mode project whose catalogs would merge as text. Two branches
+ * each adding an entry would then leave conflict markers inside the JSON, and
+ * the catalog is unreadable until someone repairs it by hand. Asked whether or
+ * not the files exist yet, because the first merge that creates one is
+ * already too late. Only when team mode is on, since a project nobody else
+ * writes to has no merge to protect. It fires whether or not `team setup` has
+ * ever run: `checkMergeDriverConfig` is silent until it has, so this is the
+ * one finding that sends a team project that never ran it to `team setup`.
+ * Outside a git work tree it is silent, since nothing merges there.
+ */
+export function checkCatalogMergeAttributes(state: ProjectState, ctx: DoctorContext): DoctorFinding[] {
+  if (state.config.team?.enabled !== true) return [];
+  const missing = catalogsWithoutMergeDriver(join(ctx.root, ".story"));
+  if (missing.length === 0) return [];
+  return [{
+    severity: "warning",
+    code: "gitattributes_no_catalogs",
+    message: `.story/.gitattributes does not route ${missing.join(" and ")} to the storybloq merge driver; ${missing.length === 1 ? "it" : "they"} would merge as text. Run storybloq team setup.`,
+    entity: null,
+    repair: { command: ["storybloq", "team", "setup"] },
+  }];
+}
+
 export function checkLocalIdAllocator(state: ProjectState, _ctx: DoctorContext): DoctorFinding[] {
   if (state.config.team?.idAllocator === "git-refs") return [];
   return [{
@@ -608,4 +632,5 @@ registerDoctorCheck(checkMergeDriverConfig);
 registerDoctorCheck(checkReservationHealth);
 registerDoctorCheck(checkLocalIdAllocator);
 registerDoctorCheck(checkRulingLifecycleReadiness);
+registerDoctorCheck(checkCatalogMergeAttributes);
 registerDoctorCheck(checkHandoverFilenamePolicy);

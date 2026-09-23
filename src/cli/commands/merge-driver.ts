@@ -2,9 +2,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type { ZodTypeAny } from "zod";
 import {
-  threeWayMerge, mergeConfig, mergeRoadmap,
+  threeWayMerge, mergeConfig, mergeRoadmap, mergeCatalog,
   stripConflicts, entitySnapshot, deepEqual,
-  type MergeResult,
+  type CatalogKey, type MergeResult,
 } from "../../core/merge-driver.js";
 import { carryForward } from "../../core/conflict-lifecycle.js";
 import type { EntityType } from "../../core/field-classification.js";
@@ -17,6 +17,8 @@ import { RoadmapSchema } from "../../models/roadmap.js";
 import { ConflictEntrySchema } from "../../models/types.js";
 import { ArrangementSchema } from "../../models/arrangement.js";
 import { RulingSchema } from "../../models/ruling.js";
+import { CapabilityCatalogSchema } from "../../models/capability.js";
+import { GlossaryCatalogSchema } from "../../models/glossary.js";
 
 function entityTypeFromPath(pathname: string): EntityType | null {
   const dir = basename(dirname(pathname));
@@ -34,12 +36,16 @@ function entityTypeFromPath(pathname: string): EntityType | null {
 export type MergeStrategy =
   | { kind: "entity"; entityType: EntityType }
   | { kind: "config" }
-  | { kind: "roadmap" };
+  | { kind: "roadmap" }
+  | { kind: "catalog"; key: CatalogKey };
 
 function strategyFromPath(pathname: string): MergeStrategy | null {
   const file = basename(pathname);
   if (file === "config.json") return { kind: "config" };
   if (file === "roadmap.json") return { kind: "roadmap" };
+  // T-529: the two catalog files, merged structurally by entry id.
+  if (file === "capabilities.json") return { kind: "catalog", key: "capabilities" };
+  if (file === "glossary.json") return { kind: "catalog", key: "terms" };
   const entityType = entityTypeFromPath(pathname);
   if (entityType) return { kind: "entity", entityType };
   return null;
@@ -49,6 +55,7 @@ function strategyFromPath(pathname: string): MergeStrategy | null {
 export function schemaFor(strategy: MergeStrategy): ZodTypeAny {
   if (strategy.kind === "config") return ConfigSchema;
   if (strategy.kind === "roadmap") return RoadmapSchema;
+  if (strategy.kind === "catalog") return strategy.key === "capabilities" ? CapabilityCatalogSchema : GlossaryCatalogSchema;
   switch (strategy.entityType) {
     case "ticket": return TicketSchema;
     case "issue": return IssueSchema;
@@ -183,6 +190,8 @@ export function handleMergeDriver(
       result = mergeConfig(base, ours, theirs);
     } else if (strategy.kind === "roadmap") {
       result = mergeRoadmap(base, ours, theirs);
+    } else if (strategy.kind === "catalog") {
+      result = mergeCatalog(base, ours, theirs, strategy.key);
     } else {
       result = threeWayMerge(base, ours, theirs, strategy.entityType);
     }

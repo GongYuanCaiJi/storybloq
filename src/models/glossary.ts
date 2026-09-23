@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { RulingIdSchema } from "./types.js";
+import { ConflictEntrySchema, RulingIdSchema } from "./types.js";
 import { CapabilityIdSchema, PendingNoteSchema, TermIdSchema } from "./capability.js";
+import { groupViolations, isViolationRecorded, type CatalogInvariantViolation } from "./catalog-invariant.js";
 
 /**
  * T-524: the glossary. One entry answers "what does this word mean here, and
@@ -195,6 +196,86 @@ export const TermSchema = z
   });
 
 /**
+ * One claim a term entry makes on a word: its term or one of its aliases.
+ * Tolerant of an unvalidated entry, because the merge driver runs the same
+ * walk over a merged document before any schema has seen it.
+ */
+interface TermClaim {
+  readonly value: string;
+  readonly path: (string | number)[];
+  readonly field: string;
+}
+
+function termClaims(entry: unknown, index: number): TermClaim[] {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return [];
+  const raw = entry as Record<string, unknown>;
+  const claims: TermClaim[] = [];
+  if (typeof raw.term === "string") claims.push({ value: raw.term, path: ["terms", index, "term"], field: "term" });
+  if (Array.isArray(raw.aliases)) {
+    raw.aliases.forEach((alias, aliasIndex) => {
+      if (typeof alias === "string") claims.push({ value: alias, path: ["terms", index, "aliases", aliasIndex], field: `alias ${alias}` });
+    });
+  }
+  return claims;
+}
+
+/**
+ * A claim on a word an EARLIER entry already owns. A repeat inside one entry
+ * is not one: `TermSchema` refuses that on the entry itself.
+ */
+interface TermOwnershipCollision {
+  readonly index: number;
+  readonly claim: TermClaim;
+  readonly key: string;
+  readonly ownerIndex: number;
+  readonly ownerField: string;
+}
+
+/**
+ * THE term-owner rule, in one place. The document refine below reports these,
+ * the merge driver records them as `invariant` conflicts, and the resolver
+ * compares them before and after a repair; all three read this walk.
+ */
+function termOwnershipCollisions(terms: readonly unknown[]): TermOwnershipCollision[] {
+  const owners = new Map<string, { index: number; field: string }>();
+  const collisions: TermOwnershipCollision[] = [];
+  terms.forEach((entry, index) => {
+    for (const claim of termClaims(entry, index)) {
+      const key = normalizeTermKey(claim.value);
+      const owner = owners.get(key);
+      if (owner !== undefined && owner.index !== index) {
+        collisions.push({ index, claim, key, ownerIndex: owner.index, ownerField: owner.field });
+        continue;
+      }
+      if (owner === undefined) owners.set(key, { index, field: claim.field });
+    }
+  });
+  return collisions;
+}
+
+function termIdAt(terms: readonly unknown[], index: number): string | undefined {
+  const entry = terms[index];
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const id = (entry as Record<string, unknown>).id;
+  return typeof id === "string" ? id : undefined;
+}
+
+/**
+ * T-529: every word owned by more than one entry, one violation per word,
+ * naming all of its owners. An entry without a readable id cannot be named
+ * by a conflict record, so its claims are left to the schema to refuse.
+ */
+export function termOwnerViolations(terms: readonly unknown[]): CatalogInvariantViolation[] {
+  const pairs: Array<{ key: string; ids: string[] }> = [];
+  for (const collision of termOwnershipCollisions(terms)) {
+    const ownerId = termIdAt(terms, collision.ownerIndex);
+    const id = termIdAt(terms, collision.index);
+    if (ownerId !== undefined && id !== undefined) pairs.push({ key: collision.key, ids: [ownerId, id] });
+  }
+  return groupViolations("term-owner", pairs);
+}
+
+/**
  * The file document. `version` is a literal rather than a number so a future
  * version 2 file fails the parse and surfaces as a CatalogLoadError, instead
  * of passing through and being rewritten by an older CLI that does not
@@ -205,6 +286,8 @@ export const GlossaryCatalogSchema = z
   .object({
     version: z.literal(1),
     terms: z.array(TermSchema).default([]),
+    /** T-529: unresolved merge conflicts, written only by the merge driver. */
+    _conflicts: z.array(ConflictEntrySchema).optional(),
   })
   .passthrough()
   /**
@@ -224,14 +307,24 @@ export const GlossaryCatalogSchema = z
    *    per-field -- the collision that matters most is one entry's alias
    *    against another entry's term, which no field-local rule can see.
    *
-   * A MERGE can produce a document neither side wrote, and this refuses it at
-   * the next load with a location rather than a resolvable conflict record.
-   * Making that case resolvable is T-529's `invariant` record; it is not
-   * missing validation here.
+   * A MERGE can produce a document neither side wrote. T-529: the merge driver
+   * records each such collision as an `invariant` conflict, and a collision
+   * the document's own `_conflicts` records in full is TOLERATED here, so the
+   * merged file loads and `resolve` can repair it. An unrecorded collision is
+   * refused exactly as before, so no write can introduce one.
    */
   .superRefine((doc, ctx) => {
+    const collisions = termOwnershipCollisions(doc.terms);
+    const recorded = new Set(
+      termOwnerViolations(doc.terms)
+        .filter((violation) => isViolationRecorded(doc._conflicts, violation))
+        .map((violation) => violation.key),
+    );
+    const collisionsAt = new Map<number, TermOwnershipCollision[]>();
+    for (const collision of collisions) {
+      collisionsAt.set(collision.index, [...(collisionsAt.get(collision.index) ?? []), collision]);
+    }
     const ids = new Map<string, number>();
-    const names = new Map<string, { index: number; field: string }>();
     doc.terms.forEach((entry, index) => {
       const firstId = ids.get(entry.id);
       if (firstId !== undefined) {
@@ -244,24 +337,13 @@ export const GlossaryCatalogSchema = z
         ids.set(entry.id, index);
       }
 
-      const claims: Array<{ value: string; path: (string | number)[]; field: string }> = [
-        { value: entry.term, path: ["terms", index, "term"], field: "term" },
-      ];
-      (entry.aliases ?? []).forEach((alias, aliasIndex) => {
-        claims.push({ value: alias, path: ["terms", index, "aliases", aliasIndex], field: `alias ${alias}` });
-      });
-      for (const claim of claims) {
-        const key = normalizeTermKey(claim.value);
-        const owner = names.get(key);
-        if (owner !== undefined && owner.index !== index) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: claim.path,
-            message: `${claim.value} is already owned by terms.${owner.index} (its ${owner.field}); one word belongs to one entry`,
-          });
-          continue;
-        }
-        if (owner === undefined) names.set(key, { index, field: claim.field });
+      for (const collision of collisionsAt.get(index) ?? []) {
+        if (recorded.has(collision.key)) continue;
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: collision.claim.path,
+          message: `${collision.claim.value} is already owned by terms.${collision.ownerIndex} (its ${collision.ownerField}); one word belongs to one entry`,
+        });
       }
     });
   });

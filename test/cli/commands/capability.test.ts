@@ -526,7 +526,8 @@ function editCatalog(root: string, edit: (doc: { capabilities: Record<string, un
 
 async function staleRepoWith(ids: string[]): Promise<{ root: string; checkedHead: string }> {
   const root = await newRepo();
-  for (const id of ids) await handleCapabilityAdd({ ...BASE, id }, "md", root);
+  // T-529: capability names are unique, so each entry is named for its id.
+  for (const id of ids) await handleCapabilityAdd({ ...BASE, id, name: `${BASE.name} ${id}` }, "md", root);
   writeFileSync(join(root, "src", "core", "thing.ts"), "export const a = 2;\n");
   git(root, "commit", "-qam", "change");
   return { root, checkedHead: git(root, "rev-parse", "HEAD") };
