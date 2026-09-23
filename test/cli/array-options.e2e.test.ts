@@ -425,6 +425,25 @@ function addTerm(dir: string, ...extra: string[]): { code: number; out: string }
     "--definition", "The session model that owns the judgement gates.", ...extra);
 }
 
+/**
+ * T-529: a glossary as a merge leaves it, two entries claiming one word and
+ * the collision recorded, so `resolve glossary --invariant 1` has something
+ * to resolve. The word carries a comma and the alias surrounding spaces: both
+ * resolve flags take their values literally, never split and never trimmed.
+ */
+function seedWordCollision(dir: string): void {
+  const at = "2026-09-20T10:00:00.000Z";
+  const doc = {
+    version: 1,
+    terms: [
+      { id: "term-pen", term: "pen, tier", definition: "The session model.", updatedAt: at },
+      { id: "term-mgr", term: "manager", aliases: [" Pen, Tier "], definition: "The one who files.", updatedAt: at },
+    ],
+    _conflicts: [{ fieldPath: "/terms", kind: "invariant", rule: "term-owner", key: "pen, tier", entityIds: ["term-mgr", "term-pen"] }],
+  };
+  writeFileSync(join(dir, ".story", "glossary.json"), JSON.stringify(doc, null, 2) + "\n");
+}
+
 const MATRIX: Coverage[] = [
   {
     key: "capability add --entry",
@@ -689,6 +708,28 @@ const MATRIX: Coverage[] = [
       const res = run(dir, "term", "update", "term-pen", "--ruling", "r-aaaaaaaaaaaaaaaa,r-bbbbbbbbbbbbbbbb");
       expect(res.code, res.out).toBe(0);
       expect(terms(dir)[0]!.rulings).toEqual(["r-aaaaaaaaaaaaaaaa", "r-bbbbbbbbbbbbbbbb"]);
+    },
+  },
+  {
+    key: "resolve --rename",
+    check: (dir) => {
+      seedWordCollision(dir);
+      const res = run(dir, "resolve", "glossary", "--invariant", "1", "--rename", "term-pen", " pen, the tier ");
+      expect(res.code, res.out).toBe(0);
+      // Two values, the second whole and untrimmed: a split would make three
+      // and be refused, and a trim would store a different term.
+      expect(terms(dir).find((t) => t.id === "term-pen")!.term).toBe(" pen, the tier ");
+    },
+  },
+  {
+    key: "resolve --drop-alias",
+    check: (dir) => {
+      seedWordCollision(dir);
+      // The alias is matched exactly: a trimmed value would not be an alias
+      // of term-mgr, and the resolution would be refused.
+      const res = run(dir, "resolve", "glossary", "--invariant", "1", "--drop-alias", "term-mgr", " Pen, Tier ");
+      expect(res.code, res.out).toBe(0);
+      expect(terms(dir).find((t) => t.id === "term-mgr")!.aliases).toBeUndefined();
     },
   },
   {

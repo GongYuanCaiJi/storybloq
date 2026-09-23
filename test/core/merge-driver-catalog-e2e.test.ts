@@ -174,3 +174,54 @@ describe("T-529: real git merges of the catalogs through the installed driver", 
     expect(terms.exitCode).toBe(0);
   });
 });
+
+describe("T-529: real git merges resolved with `storybloq resolve`", () => {
+  it("a coupled record: resolve capabilities --id --group verification --use theirs, then the file loads and the merge commits", () => {
+    const dir = createTeamRepo();
+    const exit = divergeAndMerge(dir, (side) => {
+      if (side === "base") writeCaps(dir, [cap("cap-b"), cap("cap-a")]);
+      if (side === "ours") writeCaps(dir, [cap("cap-b"), cap("cap-a", { contract: "Ours: a changed contract.", pendingNote: "Owed: docs." })]);
+      if (side === "theirs") writeCaps(dir, [cap("cap-b"), cap("cap-a", { checkedAt: { sha: "b".repeat(12), date: "2026-09-22" } })]);
+    });
+    expect(exit).not.toBe(0);
+    const res = cli(dir, "resolve", "capabilities", "--id", "cap-a", "--group", "verification", "--use", "theirs", "--format", "json");
+    expect(res.exitCode, res.stdout).toBe(0);
+    expect((JSON.parse(res.stdout) as { data: Rec }).data).toMatchObject({ resolved: ["cap-a: verification"], remaining: 0, fullyResolved: true });
+    const merged = readJson(dir, "capabilities.json");
+    expect(merged._conflicts).toBeUndefined();
+    const entry = (merged.capabilities as Rec[])[1]!;
+    // Theirs' group, whole: its stamp, base's contract, and no pending note (theirs had none).
+    expect(entry.checkedAt).toEqual({ sha: "b".repeat(12), date: "2026-09-22" });
+    expect(entry.contract).toBe("Contract of cap-a.");
+    expect(Object.hasOwn(entry, "pendingNote")).toBe(false);
+    const list = cli(dir, "capability", "list", "--format", "json");
+    expect(list.exitCode, list.stdout).toBe(0);
+    expect(((JSON.parse(list.stdout) as { data: { capabilities: Rec[] } }).data.capabilities).map((c) => c.id)).toEqual(["cap-b", "cap-a"]);
+    const conflicts = cli(dir, "conflicts", "list", "--format", "json");
+    expect((JSON.parse(conflicts.stdout) as { data: { items: Rec[] } }).data.items).toEqual([]);
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "--no-edit");
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  it("an invariant record: resolve glossary --invariant 1 --drop-alias, then ordinary term writes work again", () => {
+    const dir = createTeamRepo();
+    const term = (id: string, word: string, over: Rec = {}): Rec => ({ id, term: word, definition: `What ${word} means.`, updatedAt: "2026-09-20T10:00:00.000Z", ...over });
+    const exit = divergeAndMerge(dir, (side) => {
+      if (side === "base") writeTerms(dir, [term("term-z", "floor")]);
+      if (side === "ours") writeTerms(dir, [term("term-z", "floor"), term("term-b", "pen")]);
+      if (side === "theirs") writeTerms(dir, [term("term-z", "floor"), term("term-a", "manager", { aliases: ["Pen"] })]);
+    });
+    expect(exit).not.toBe(0);
+    const refusedWrite = cli(dir, "term", "add", "--id", "term-c", "--term", "hands", "--definition", "The implementer.");
+    expect(refusedWrite.exitCode).not.toBe(0);
+    const res = cli(dir, "resolve", "glossary", "--invariant", "1", "--drop-alias", "term-a", "Pen");
+    expect(res.exitCode, res.stdout).toBe(0);
+    expect(res.stdout).toContain("All conflicts resolved.");
+    const merged = readJson(dir, "glossary.json");
+    expect(merged._conflicts).toBeUndefined();
+    expect(Object.hasOwn((merged.terms as Rec[]).find((t) => t.id === "term-a")!, "aliases")).toBe(false);
+    const add = cli(dir, "term", "add", "--id", "term-c", "--term", "hands", "--definition", "The implementer.");
+    expect(add.exitCode, add.stdout).toBe(0);
+  });
+});

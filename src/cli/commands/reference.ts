@@ -561,8 +561,8 @@ export const COMMANDS: readonly CommandEntry[] = [
   {
     name: "resolve",
     description: "Resolve merge conflicts on a .story/ item",
-    usage: "storybloq resolve <id> [--field <value>] [--use <ours|theirs>] [--value <value>] [--format <json|md>]",
-    flags: ["--field", "--use", "--value", "--format"],
+    usage: "storybloq resolve <target> [--field <value>] [--use <ours|theirs>] [--value <value>] [--id <value>] [--group <value>] [--invariant <n>] [--rename <id> <value>] [--drop-alias <id> <alias>] [--keep <id>] [--format <json|md>]",
+    flags: ["--field", "--use", "--value", "--id", "--group", "--invariant", "--rename", "--drop-alias", "--keep", "--format"],
   },
   {
     name: "merge-driver",

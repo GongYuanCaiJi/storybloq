@@ -1,5 +1,5 @@
 import type { ConflictEntry } from "../models/types.js";
-import { fieldName, matchesField, isEntityLevel, isReservedKey, type ResolveOptions, type ResolveResult } from "./resolve.js";
+import { fieldName, isEntityLevel, isReservedKey, selectConflicts, type CatalogSelectScope, type ResolveOptions, type ResolveResult } from "./resolve.js";
 
 /**
  * Conflict resolution for config.json / roadmap.json (ISS-749).
@@ -525,10 +525,9 @@ export function resolveDocConflicts(
   const messages: string[] = [];
 
   if (options.field) {
-    const target = conflicts.find((c) => matchesField(c, options.field!));
-    if (!target) {
-      throw new Error(`No conflict found for field "${options.field}"`);
-    }
+    // T-529: the shared selection rule; config and roadmap resolve the one
+    // record it names (they register no coupled groups).
+    const target = selectConflicts(conflicts, { field: options.field }).target;
     // ISS-758 guard: an explicit choice is required.
     if (options.value === undefined && !options.use) {
       throw new Error(
@@ -569,4 +568,233 @@ export function resolveDocConflicts(
     warnings,
     messages,
   };
+}
+
+/** T-529: a catalog resolution's options: the entity forms plus the entry and group scopes. */
+export interface CatalogResolveOptions extends ResolveOptions {
+  readonly entityId?: string;
+  readonly group?: string;
+}
+
+export interface CatalogResolveScope extends CatalogSelectScope {
+  /** The file, for messages: "capabilities.json" or "glossary.json". */
+  readonly file: string;
+  /**
+   * Called before a chosen side removes an entry. Throws to refuse: a
+   * capability is never deleted by a resolution, and a term is not deleted
+   * while a capability references it.
+   */
+  readonly guardDelete: (entryId: string) => void;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** RFC 6901 escaping for one pointer segment. */
+function pointerSegment(segment: string): string {
+  return segment.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+
+/** The one element whose id is `entryId`: -1 when absent, a refusal when there are two. */
+function entryIndex(arr: unknown[], entryId: string, file: string): number {
+  let found = -1;
+  for (let i = 0; i < arr.length; i++) {
+    const el = arr[i];
+    if (isPlainObject(el) && el.id === entryId) {
+      if (found >= 0) {
+        throw new Error(`Cannot resolve: two entries in ${file} have the id "${entryId}". Resolve by hand.`);
+      }
+      found = i;
+    }
+  }
+  return found;
+}
+
+/**
+ * A group record's chosen side, as pointer ops on the entry's CURRENT index.
+ * The payload is untrusted (it arrived with a teammate's branch): it must be a
+ * plain object whose keys are all registered members. For every registered
+ * member, a key the payload lacks (or holds as undefined) is deleted from the
+ * entry, an explicit null is written as null, and any other value is written
+ * as is. Fields outside the group are never touched.
+ */
+function groupOps(
+  c: ConflictEntry,
+  chosen: unknown,
+  index: number,
+  scope: CatalogResolveScope,
+): PlannedOp[] {
+  const group = scope.groups.find((g) => g.group === c.group);
+  if (!group) {
+    throw new Error(`Cannot resolve: "${String(c.group)}" is not a group of ${scope.file}'s entries. Resolve by hand.`);
+  }
+  if (!isPlainObject(chosen)) {
+    throw new Error(`Cannot resolve the "${group.group}" group of "${String(c.entityId)}": the chosen side is not an object of group members. Resolve by hand.`);
+  }
+  for (const key of Object.keys(chosen)) {
+    if (!group.members.includes(key)) {
+      throw new Error(
+        `Cannot resolve the "${group.group}" group of "${String(c.entityId)}": the chosen side carries "${key}", ` +
+        `which is not a member of the group (the record is not trusted). Resolve by hand.`,
+      );
+    }
+  }
+  const ops: PlannedOp[] = [];
+  for (const member of group.members) {
+    const value = Object.hasOwn(chosen, member) ? chosen[member] : undefined;
+    const entry: ConflictEntry = {
+      fieldPath: `/${scope.key}/${index}/${pointerSegment(member)}`,
+      kind: "field",
+      base: undefined,
+      ours: undefined,
+      theirs: undefined,
+    };
+    ops.push(value === undefined ? { op: "pointer-delete", c: entry } : { op: "pointer-set", c: entry, chosen: value });
+  }
+  return ops;
+}
+
+/**
+ * T-529: resolution for capabilities.json and glossary.json, everything but
+ * the invariant records (which have their own resolvers).
+ *
+ * A record that names an entry (`entityId`) is applied to that entry where it
+ * is NOW, found by id, never at the index the merge recorded: a later insert
+ * may have moved it. A record for a whole entry (an add/add or a delete/edit)
+ * goes through the keyed element path, which already locates by id. Records
+ * with no entry (the version, the order, a whole-document fallback) go
+ * through the document path unchanged. A bare `--use` applies every
+ * non-invariant record; the invariant ones stay for `--invariant`.
+ */
+export function resolveCatalogConflicts(
+  doc: Record<string, unknown>,
+  options: CatalogResolveOptions,
+  scope: CatalogResolveScope,
+): ResolveResult {
+  const conflicts = (doc._conflicts as ConflictEntry[] | undefined) ?? [];
+  const nonInvariant = conflicts.filter((c) => c.kind !== "invariant");
+  if (nonInvariant.length === 0) {
+    const pending = conflicts.length;
+    if (pending > 0) {
+      throw new Error(
+        `${scope.file} has only invariant conflicts; resolve each with \`storybloq resolve ${scope.file} --invariant <n> ...\` ` +
+        `(the numbers \`storybloq conflicts show ${scope.file}\` prints).`,
+      );
+    }
+    return { resolved: [], remaining: 0, fullyResolved: true, warnings: [], messages: [] };
+  }
+
+  let selected: ConflictEntry[];
+  if (options.group !== undefined && options.entityId === undefined) {
+    throw new Error(`--group needs --id <entry id>: a group conflict belongs to one entry.`);
+  }
+  if (options.entityId !== undefined || options.field !== undefined || options.group !== undefined) {
+    selected = selectConflicts(conflicts, {
+      field: options.field,
+      group: options.group,
+      entityId: options.entityId,
+      catalog: scope,
+    }).selected;
+  } else if (options.use) {
+    selected = nonInvariant;
+  } else {
+    throw new Error("Must specify --use or --field");
+  }
+
+  if (options.value !== undefined) {
+    if (selected.some((c) => c.kind === "coupled")) {
+      throw new Error(
+        `Cannot use --value on a coupled group: a group is resolved whole. Use --use ours|theirs.`,
+      );
+    }
+    if (options.field === undefined || selected.length !== 1) {
+      throw new Error(`--value sets one field: name it with --field (and the entry with --id).`);
+    }
+  } else if (!options.use) {
+    throw new Error(
+      `--field "${options.field}" requires --use ours|theirs or --value. ` +
+      `Example: storybloq resolve ${scope.file} --id <id> --field ${options.field} --use theirs`,
+    );
+  }
+
+  const chosenFor = (c: ConflictEntry): unknown =>
+    options.value !== undefined ? options.value : options.use === "ours" ? c.ours : c.theirs;
+  const resolved: string[] = [];
+
+  // A whole-document record replaces every entry, so it goes first, and the
+  // entries the other records name are located in what it leaves.
+  const wholeDocument = selected.filter((c) => c.entityId === undefined && isEntityLevel(c));
+  if (wholeDocument.length > 0) {
+    applyPlanned(doc, wholeDocument.map((c) => planOp(doc, c, chosenFor(c))), options.use);
+    resolved.push(...wholeDocument.map((c) => fieldName(c) || "_entity"));
+  }
+
+  const arr = doc[scope.key];
+  const entries = Array.isArray(arr) ? arr : [];
+  const ops: PlannedOp[] = [];
+  for (const c of selected) {
+    if (wholeDocument.includes(c)) continue;
+    const chosen = chosenFor(c);
+    if (c.entityId === undefined) {
+      ops.push(planOp(doc, c, chosen));
+      resolved.push(fieldName(c) || "_entity");
+      continue;
+    }
+    const entryId = c.entityId;
+    // The record is untrusted: its path must be one entry of this catalog
+    // (a whole entry, or a field under one), a whole-entry record's alias must
+    // name the entry its entityId names, and every target is located by that
+    // id in the document as it is now, never at the recorded index.
+    const path = new RegExp(`^/${scope.key}/(\\d+)(/.+)?$`).exec(c.fieldPath);
+    const untrusted = (): Error => new Error(
+      `Cannot resolve: a conflict for entry "${entryId}" has a path or alias that does not describe that entry ` +
+      `(the record is not trusted). Resolve by hand.`,
+    );
+    if (!path || isEntityLevel(c)) throw untrusted();
+    const rest = path[2];
+    const index = entryIndex(entries, entryId, scope.file);
+    if (rest === undefined && (c.kind === "array-element" || c.kind === "delete-edit")) {
+      if (fieldName(c) !== `${scope.key}[id=${entryId}]`) throw untrusted();
+      if (chosen === undefined) {
+        scope.guardDelete(entryId);
+      } else if (!isPlainObject(chosen) || chosen.id !== entryId) {
+        throw new Error(`Cannot resolve "${entryId}": the chosen side is not that entry. Resolve by hand.`);
+      }
+      // The keyed path finds the entry by this id (restoring a deleted one at
+      // the recorded position, clamped); the alias was checked above.
+      ops.push({ op: "keyed", c, chosen });
+      resolved.push(entryId);
+      continue;
+    }
+    if (index < 0) {
+      throw new Error(
+        `Cannot resolve: a conflict names entry "${entryId}", which is not in ${scope.file} ` +
+        `(hand-edited since the merge?). Resolve by hand and re-run.`,
+      );
+    }
+    if (rest === undefined && c.kind === "coupled") {
+      ops.push(...groupOps(c, chosen, index, scope));
+      resolved.push(`${entryId}: ${String(c.group)}`);
+      continue;
+    }
+    if (rest === undefined || (c.kind !== "field" && c.kind !== "delete-edit") || KEYED_ALIAS_REGEX.test(fieldName(c))) {
+      throw untrusted();
+    }
+    // Built here, not by planOp: planOp classifies by the alias, and this
+    // record's alias is not trusted to pick the operation.
+    const target: ConflictEntry = { ...c, fieldPath: `/${scope.key}/${index}${rest}` };
+    ops.push(chosen === undefined ? { op: "pointer-delete", c: target } : { op: "pointer-set", c: target, chosen });
+    resolved.push(`${entryId}: ${fieldName(c)}`);
+  }
+  applyPlanned(doc, ops, options.use);
+
+  const remaining = conflicts.filter((c) => !selected.includes(c));
+  if (remaining.length === 0) delete doc._conflicts;
+  else doc._conflicts = remaining;
+  const invariants = remaining.filter((c) => c.kind === "invariant").length;
+  const messages = invariants > 0
+    ? [`${invariants} invariant conflict(s) stay open: resolve each with \`storybloq resolve ${scope.file} --invariant <n> ...\`.`]
+    : [];
+  return { resolved, remaining: remaining.length, fullyResolved: remaining.length === 0, warnings: [], messages };
 }

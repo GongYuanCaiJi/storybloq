@@ -463,7 +463,14 @@ export async function handleTermDefer(input: { id: string; note: string }, forma
  * The refusal lists the referencing ids and the edits that clear them, so the
  * caller can do in two deliberate steps what this will not do in one.
  */
-export async function handleTermRemove(id: string, format: OutputFormat, root: string): Promise<CommandResult> {
+/**
+ * Why a term cannot be deleted right now, or null when nothing stops it: a
+ * capability references it, or the inventory could not be read (so nothing
+ * can say it is unreferenced). One computation for `term remove` and for
+ * `resolve glossary --keep` (T-529), which calls it inside the resolution
+ * lock so the answer cannot go stale before the write.
+ */
+export function termDeletionRefusal(id: string, root: string): string | null {
   const referencing = (() => {
     try {
       return capabilityCatalog
@@ -479,18 +486,18 @@ export async function handleTermRemove(id: string, format: OutputFormat, root: s
   })();
 
   if (referencing === null) {
-    return termRefused(
-      "The capability inventory could not be read, so whether anything references this term is unknown. Fix `capability check` first; a removal on an unread inventory could break a link.",
-      format,
-    );
+    return "The capability inventory could not be read, so whether anything references this term is unknown. Fix `capability check` first; a removal on an unread inventory could break a link.";
   }
   if (referencing.length > 0) {
     const edits = referencing.map((c) => `capability update ${c} --term ...`).join("; ");
-    return termRefused(
-      `Term ${catalogText(id)} is referenced by ${referencing.map((c) => catalogText(c)).join(", ")}. Clear the reference first: ${catalogText(edits)}`,
-      format,
-    );
+    return `Term ${catalogText(id)} is referenced by ${referencing.map((c) => catalogText(c)).join(", ")}. Clear the reference first: ${catalogText(edits)}`;
   }
+  return null;
+}
+
+export async function handleTermRemove(id: string, format: OutputFormat, root: string): Promise<CommandResult> {
+  const refusal = termDeletionRefusal(id, root);
+  if (refusal !== null) return termRefused(refusal, format);
 
   return refusing(async () => {
     const doc = await glossaryCatalog.mutate(root, (current) => {

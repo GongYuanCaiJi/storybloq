@@ -429,14 +429,24 @@ export function registerConflictsCommand(yargs: Argv): Argv {
 
 export function registerResolveCommand(yargs: Argv): Argv {
   return yargs.command(
-    "resolve <id>",
+    // T-529: the positional is `target`, not `id`, because `--id` names a
+    // catalog entry and yargs gives a positional and an option of one name a
+    // single key (the positional wins and the flag is lost).
+    "resolve <target>",
     "Resolve merge conflicts on a .story/ item",
     (y) =>
-      addFormatOption(y
-        .positional("id", { type: "string", demandOption: true, describe: "Entity ID" })
+      addFormatOption(arrayOptions(y
+        .positional("target", { type: "string", demandOption: true, describe: "Entity ID, config, roadmap, capabilities or glossary" })
         .option("field", { type: "string", describe: "Resolve a specific field" })
         .option("use", { type: "string", choices: ["ours", "theirs"], describe: "Pick a side" })
-        .option("value", { type: "string", describe: "Custom value (JSON)" }), 'an {"ok", "data"} object (or {"ok", "error"} on failure)'),
+        .option("value", { type: "string", describe: "Custom value (JSON)" })
+        .option("id", { type: "string", describe: "Catalog only: the entry whose records to resolve" })
+        .option("group", { type: "string", describe: "Catalog only: resolve an entry's coupled group (with --id)" })
+        .option("invariant", { type: "number", describe: "Catalog only: the invariant conflict to resolve, numbered as conflicts show prints it" })
+        .option("keep", { type: "string", describe: "With --invariant: keep this term, delete the other claimants" }), {
+        rename: { comma: "literal", empty: "preserve", trim: "never", describe: "With --invariant: <id> <new value>" },
+        "drop-alias": { comma: "literal", empty: "preserve", trim: "never", describe: "With --invariant: <id> <alias>" },
+      }), 'an {"ok", "data"} object (or {"ok", "error"} on failure)'),
     async (argv) => {
       const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
       if (!root) { writeOutput(noProjectFoundOutput(argv.format, "ok")); process.exitCode = ExitCode.USER_ERROR; return; }
@@ -446,10 +456,16 @@ export function registerResolveCommand(yargs: Argv): Argv {
         if (argv.value !== undefined) {
           try { parsedValue = JSON.parse(argv.value as string); } catch { parsedValue = argv.value; }
         }
-        const result = await handleResolve(argv.id as string, root, {
+        const result = await handleResolve(argv.target as string, root, {
           field: argv.field as string | undefined,
           use: argv.use as "ours" | "theirs" | undefined,
           value: parsedValue,
+          entityId: argv.id,
+          group: argv.group,
+          invariant: argv.invariant as number | undefined,
+          rename: argv.rename as string[] | undefined,
+          dropAlias: argv["drop-alias"] as string[] | undefined,
+          keep: argv.keep,
           format: (argv.format as "md" | "json") ?? "md",
         });
         writeOutput(result.output);

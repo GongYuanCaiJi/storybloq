@@ -55,6 +55,93 @@ export function isEntityLevel(c: ConflictEntry): boolean {
   return (c as Record<string, unknown>).field === "_entity" || c.fieldPath === "";
 }
 
+/** T-529: what a catalog selection needs to know about the file it reads. */
+export interface CatalogSelectScope {
+  /** The document key holding the entries: "capabilities" or "terms". */
+  readonly key: string;
+  /** The entry type's registered coupled groups (a capability's "verification"). */
+  readonly groups: ReadonlyArray<{ readonly group: string; readonly members: readonly string[] }>;
+}
+
+export interface SelectOptions {
+  readonly field?: string;
+  readonly group?: string;
+  /** Catalogs only: the entry whose records are considered. */
+  readonly entityId?: string;
+  /** Present for a catalog document; absent for an entity or config/roadmap. */
+  readonly catalog?: CatalogSelectScope;
+}
+
+export interface Selection {
+  /** The record the options named; for a group, that group's record. */
+  readonly target: ConflictEntry;
+  /** Every record the resolution consumes. A coupled selection is the whole group. */
+  readonly selected: ConflictEntry[];
+  /** Every other record, in file order. */
+  readonly remaining: ConflictEntry[];
+}
+
+/** The part of a catalog record's fieldPath below its entry: "/capabilities/3/summary" is "/summary". */
+function entryRelativePath(c: ConflictEntry, key: string): string {
+  const prefix = new RegExp(`^/${key}/\\d+`).exec(c.fieldPath);
+  return prefix ? c.fieldPath.slice(prefix[0].length) : c.fieldPath;
+}
+
+/**
+ * T-529: the one selection rule `resolve` uses, for entities and catalogs.
+ *
+ * An entity (and config/roadmap) keeps its exact prior behaviour: the first
+ * record matching --field, and when that record belongs to a coupled group,
+ * every record of the group. A catalog scopes first: with an entry id, only
+ * the records naming that entry; without one, only the document-level records
+ * (the version, the order, a whole-document fallback). Inside that scope a
+ * --group, or a --field naming a group member, selects the group's record, so
+ * two conflicted capabilities never consume each other's group. Invariant
+ * records are never selected here: they have their own resolvers.
+ */
+export function selectConflicts(conflicts: readonly ConflictEntry[], options: SelectOptions): Selection {
+  const catalog = options.catalog;
+  if (!catalog) {
+    const target = conflicts.find((c) => matchesField(c, options.field!));
+    if (!target) {
+      throw new Error(`No conflict found for field "${options.field}"`);
+    }
+    const selected = target.kind === "coupled" && target.group
+      ? conflicts.filter((c) => c.kind === "coupled" && c.group === target.group)
+      : [target];
+    return { target, selected, remaining: conflicts.filter((c) => !selected.includes(c)) };
+  }
+
+  const where = options.entityId !== undefined ? ` on entry "${options.entityId}"` : " at the document level";
+  const scope = conflicts.filter((c) =>
+    c.kind !== "invariant" &&
+    (options.entityId !== undefined ? c.entityId === options.entityId : c.entityId === undefined));
+  let selected: ConflictEntry[];
+  if (options.group !== undefined) {
+    selected = scope.filter((c) => c.kind === "coupled" && c.group === options.group);
+    if (selected.length === 0) throw new Error(`No "${options.group}" group conflict found${where}`);
+  } else if (options.field !== undefined) {
+    const plain = options.field.replace(/^\//, "");
+    const head = plain.split("/")[0]!;
+    const group = catalog.groups.find((g) => g.members.includes(head));
+    const groupRecord = group
+      ? scope.find((c) => c.kind === "coupled" && c.group === group.group)
+      : undefined;
+    if (groupRecord) {
+      selected = [groupRecord];
+    } else {
+      const target = scope.find((c) =>
+        c.entityId !== undefined ? entryRelativePath(c, catalog.key) === `/${plain}` : matchesField(c, options.field!));
+      if (!target) throw new Error(`No conflict found for field "${options.field}"${where}`);
+      selected = [target];
+    }
+  } else {
+    selected = scope;
+    if (selected.length === 0) throw new Error(`No conflict found${where}`);
+  }
+  return { target: selected[0]!, selected, remaining: conflicts.filter((c) => !selected.includes(c)) };
+}
+
 function isDeletedSnapshot(obj: Record<string, unknown>): boolean {
   return obj.lifecycle === "deleted" || (obj.deletedAt != null && obj.deletedAt !== undefined);
 }
@@ -178,10 +265,8 @@ export function resolveConflicts(
   const messages: string[] = [];
 
   if (options.field) {
-    const target = conflicts.find((c) => matchesField(c, options.field!));
-    if (!target) {
-      throw new Error(`No conflict found for field "${options.field}"`);
-    }
+    const selection = selectConflicts(conflicts, { field: options.field });
+    const target = selection.target;
 
     if (target.kind === "coupled" && target.group) {
       if (options.value !== undefined) {
@@ -191,17 +276,14 @@ export function resolveConflicts(
       if (!side) {
         throw new Error(`Coupled group field "${options.field}" requires --use ours|theirs.`);
       }
-      for (const c of conflicts) {
-        if (c.kind === "coupled" && c.group === target.group) {
-          const name = fieldName(c);
-          // ISS-801: reserved names are never legitimate top-level fields;
-          // skip the write, still consume the conflict.
-          if (!isReservedKey(name)) applySide(entity, name, side === "ours" ? c.ours : c.theirs);
-          resolved.push(name);
-        } else {
-          remaining.push(c);
-        }
+      for (const c of selection.selected) {
+        const name = fieldName(c);
+        // ISS-801: reserved names are never legitimate top-level fields;
+        // skip the write, still consume the conflict.
+        if (!isReservedKey(name)) applySide(entity, name, side === "ours" ? c.ours : c.theirs);
+        resolved.push(name);
       }
+      remaining.push(...selection.remaining);
     } else {
       // ISS-758: without an explicit choice the old code silently applied
       // theirs. Require the user to pick a side or supply a value.
@@ -222,9 +304,7 @@ export function resolveConflicts(
         if (!isReservedKey(name)) entity[name] = value;
         resolved.push(name);
       }
-      for (const c of conflicts) {
-        if (c !== target) remaining.push(c);
-      }
+      remaining.push(...selection.remaining);
     }
   } else if (options.use) {
     const side = options.use;

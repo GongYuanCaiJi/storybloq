@@ -99,7 +99,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **reconcile** (--dry-run?, --ci?, --rebalance-ranks?, --format?) - Detect and fix duplicate displayIds across all entity types
 - **conflicts list** (--format?) - List all items with unresolved merge conflicts
 - **conflicts show <id>** (--format?) - Show field-level conflict detail for an item
-- **resolve <id>** (--field?, --use?, --value?, --format?) - Resolve merge conflicts on a .story/ item
+- **resolve <target>** (--field?, --use?, --value?, --id?, --group?, --invariant?, --rename?, --drop-alias?, --keep?, --format?) - Resolve merge conflicts on a .story/ item
 - **merge-driver <ancestor> <ours> <theirs> <pathname>** - Git merge driver for .story/ JSON files (registered via team setup)
 - **team init** (--claim-staleness-hours?, --id-allocator?, --format?) - Enable team mode on this project
 - **team setup** (--format?) - Install the git merge driver and .gitattributes for team mode

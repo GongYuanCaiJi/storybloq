@@ -15,6 +15,7 @@ import type { Ruling } from "../../models/ruling.js";
 import { loadRulingsSafe, writeRulingUnlocked } from "../../core/ruling-loader.js";
 import type { CommandResult } from "../types.js";
 import { sanitizeDisplayText, MAX_PROSE_LENGTH } from "../../core/display-text.js";
+import { catalogOnlyFlags, handleCatalogResolve, type CatalogResolveInput } from "./resolve-catalog.js";
 
 export type ConflictTarget =
   | { kind: "config" }
@@ -409,9 +410,21 @@ export async function handleConflictsShow(
 export async function handleResolve(
   id: string,
   root: string,
-  options: ResolveOptions & { format?: "md" | "json" },
+  options: ResolveOptions & Omit<CatalogResolveInput, "field" | "use" | "value"> & { format?: "md" | "json" },
 ): Promise<CommandResult> {
   const format = options.format ?? "md";
+  // T-529: a catalog is resolved by its own handler, BEFORE this function's
+  // lock: `mutateForRepair` takes the conflict-resolution lock itself, and
+  // that lock is not re-entrant.
+  const catalogTarget = catalogTargetOf(id);
+  if (catalogTarget !== null) return handleCatalogResolve(catalogTarget, root, options);
+  const catalogFlags = catalogOnlyFlags(options);
+  if (catalogFlags.length > 0) {
+    throw new Error(
+      `${catalogFlags.join(", ")} ${catalogFlags.length === 1 ? "applies" : "apply"} only to a catalog ` +
+      `(capabilities or glossary), not to ${JSON.stringify(id)}.`,
+    );
+  }
   const {
     withConflictResolutionLock,
     writeTicketUnlocked, writeIssueUnlocked, writeNoteUnlocked, writeLessonUnlocked,
