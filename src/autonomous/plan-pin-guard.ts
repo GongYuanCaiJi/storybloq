@@ -84,7 +84,25 @@ export async function guardPlanNamesCitedRulings(
   root: string,
   targetId: string | undefined,
   planText: string,
+  mustAddress: readonly string[] = [],
 ): Promise<PlanPinGuardVerdict> {
+  // T-526: governing-context obligations outrank the no-citations early
+  // return. An item that cites nothing can still have had a suggested ruling
+  // it relied on superseded mid-session; the plan must name the new id.
+  const unaddressed = mustAddress.filter((id) => !planText.includes(id));
+  if (unaddressed.length > 0) {
+    return {
+      ok: false,
+      instruction: [
+        "This plan cannot be accepted: governing context changed since the plan was written.",
+        "",
+        ...unaddressed.map((id) => `- governing context changed: ${id} is not named in the plan`),
+        "",
+        "Read each with `storybloq ruling get <id>`, assess its impact on the plan, name it, then resubmit.",
+      ].join("\n"),
+    };
+  }
+
   // Fails closed. An unidentifiable target is exactly the case where the guard
   // cannot know what the plan owes, so it refuses rather than waving it past.
   const citations = await citationsForReviewTarget(root, targetId ?? "");

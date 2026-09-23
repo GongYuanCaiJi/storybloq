@@ -4,6 +4,7 @@
  * Storybloq tools use a shared read/write pipeline:
  *   loadProject(root) → build CommandContext → call handler → classify result
  */
+import { BRIEF_BUDGET_MAX, BRIEF_BUDGET_MIN, handleBrief } from "../cli/commands/brief.js";
 import { z } from "zod";
 import { readFileSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
@@ -1556,6 +1557,19 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
     handleCapabilityCheck({ stamp: args.stamp, stampAll: args.stampAll }, "md", ctx.root, ctx)));
+
+  // --- Context brief (T-526) ---
+  // Read-only. `brief --rebase` writes session state and stays CLI-only.
+  server.registerTool("storybloq_context_brief", {
+    description:
+      "The context brief for a ticket or issue: its binding rulings, suggested rulings with the reason each was " +
+      "suggested, capabilities, terms, lessons, and a disclosure of what discovery could not see. Suggestions bind " +
+      "nothing; only a ruling the item cites binds.",
+    inputSchema: {
+      id: z.string().min(1).describe("Ticket or issue ID"),
+      budget: z.number().int().min(BRIEF_BUDGET_MIN).max(BRIEF_BUDGET_MAX).optional().describe("Byte budget for the rendered brief (default 16000)"),
+    },
+  }, (args) => runMcpReadTool(pinnedRoot, (ctx) => handleBrief(args.id, { budget: args.budget }, ctx)));
 
   // --- Glossary tools (T-524) ---
   // Five leaves, not six: `term remove` stays CLI-only, the same ruling that

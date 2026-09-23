@@ -135,6 +135,53 @@ export interface BuildPacketParams {
    * can change one byte of what an accepted citation says.
    */
   readonly proposals?: readonly Ruling[];
+  /**
+   * T-526: rulings the context brief suggested for this item. Ids and reasons
+   * only, never counted as citations: they bind nothing, and the section says
+   * so, so a reviewer can ask why an applicable one went uncited.
+   */
+  readonly suggestedRulings?: readonly { readonly id: string; readonly reasons: readonly string[] }[];
+  /** T-526: the context manifest the plan under review was written against. */
+  readonly contextManifest?: { readonly ref: string; readonly provisional: boolean };
+  /**
+   * T-526: plan checks the reviewer applies whether or not the project has a
+   * REVIEW.md, because the contract section can be shed for size and a
+   * project without one never sends it.
+   */
+  readonly reviewerChecks?: readonly string[];
+}
+
+/** T-526: the reasons for one suggested entry are bounded so the mandatory block stays small. */
+const SUGGESTED_REASONS_MAX_CHARS = 200;
+
+/**
+ * T-526: the "Suggested (not binding)" block plus the manifest reference.
+ * Mandatory and whole: the entries are already capped by the brief, and each
+ * line is bounded here.
+ */
+export function formatSuggestedSection(
+  suggested: readonly { readonly id: string; readonly reasons: readonly string[] }[],
+  contextManifest: { readonly ref: string; readonly provisional: boolean } | undefined,
+): string {
+  const lines: string[] = [];
+  if (contextManifest !== undefined) {
+    lines.push(`contextManifest: ${contextManifest.ref}${contextManifest.provisional ? " (provisional: recovery is pending, so approving this plan clears no obligation)" : ""}`);
+  }
+  if (suggested.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(
+      "# Suggested (not binding)",
+      "",
+      "The context brief surfaced these rulings as possibly relevant. They bind nothing. If one applies and the plan does not account for it, say so as a finding.",
+      "",
+      ...suggested.map((s) => {
+        const reasons = s.reasons.join("; ");
+        const bounded = reasons.length > SUGGESTED_REASONS_MAX_CHARS ? `${reasons.slice(0, SUGGESTED_REASONS_MAX_CHARS)}...` : reasons;
+        return bounded === "" ? `- ${s.id}` : `- ${s.id} (suggested by ${bounded})`;
+      }),
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -529,6 +576,11 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
     Math.floor(budget * PROPOSALS_TEXT_BUDGET_FRACTION),
   );
 
+  const suggestedText = formatSuggestedSection(params.suggestedRulings ?? [], params.contextManifest);
+  const checksText = (params.reviewerChecks ?? []).length === 0
+    ? ""
+    : ["# Plan checks", "", ...(params.reviewerChecks ?? []).map((c) => `- ${c}`)].join("\n");
+
   const { rounds, rejected } = collectRounds(sessionDir, target, stage, generation);
   const priorRounds = [...rounds.values()]
     .filter((r) => r.round < roundNum)
@@ -664,6 +716,8 @@ export function buildReviewContextPacket(params: BuildPacketParams): ReviewConte
       ORIGIN_RULE,
       ...(rulingsRender.text === "" ? [] : [rulingsRender.text.trim()]),
       ...(proposalsRender.text === "" ? [] : [proposalsRender.text.trim()]),
+      ...(suggestedText === "" ? [] : [suggestedText]),
+      ...(checksText === "" ? [] : [checksText]),
       disclosure,
       captureDirective,
     ].join("\n\n");

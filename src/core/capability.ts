@@ -23,8 +23,9 @@ import { sanitizeDisplayPath, sanitizeDisplayText } from "./display-text.js";
 import { loadRulingsSafe } from "./ruling-loader.js";
 import { glossaryCatalog } from "./glossary.js";
 import { COMMANDS, MCP_TOOLS } from "../cli/commands/reference.js";
-import { entryPointViolations, normalizeEntryPoint, type Capability, type EntryPointRule } from "../models/capability.js";
+import { entryPointViolations, hasPendingNote, normalizeEntryPoint, type Capability, type EntryPointRule } from "../models/capability.js";
 import type { ProjectState } from "./project-state.js";
+import type { LedgerSnapshot } from "./ledger-snapshot.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -87,6 +88,8 @@ export interface CapabilityCheckEntry {
   readonly storedStatus: Capability["status"];
   readonly effectiveStatus: Capability["status"];
   readonly results: readonly CapabilityCheckResult[];
+  /** T-526 (3.7): the stored pending note when one is set, else null. A set note forces `review`. */
+  readonly pendingNote: string | null;
 }
 
 export interface CapabilityCheckReport {
@@ -98,6 +101,15 @@ export interface CapabilityCheckReport {
   /** Git subprocesses actually spawned; asserted by the batching test. */
   readonly gitCalls: number;
   readonly deadlineHit: boolean;
+  /**
+   * Present when the check ran against a ledger snapshot: references were
+   * resolved against that commit's ledger, while path existence, symlinks and
+   * surfaces were still checked on the WORKING TREE. Said on the result so it
+   * is never read as a historical filesystem check.
+   */
+  readonly filesystemChecks?: "working-tree";
+  /** The snapshot's commit when one was used. */
+  readonly snapshotCommit?: string;
 }
 
 export interface CheckOptions {
@@ -118,6 +130,18 @@ export interface CheckOptions {
    * subprocesses then measures the load rather than the batching.
    */
   readonly runGit?: GitRunner;
+  /**
+   * T-526 (3.2): resolve `rulings`, `items` and `terms` against the ledger at
+   * this commit rather than the working tree. An `oid-unavailable` snapshot or
+   * an unreadable family makes the affected references incomplete, never
+   * unknown.
+   */
+  readonly snapshot?: LedgerSnapshot;
+  /**
+   * Compute freshness against this commit instead of reading HEAD. It is the
+   * `head` the report returns and the commit a stamp would certify.
+   */
+  readonly headOid?: string;
 }
 
 const FRESHNESS_CODES: ReadonlySet<CapabilityCheckCode> = new Set([
@@ -132,8 +156,9 @@ const FRESHNESS_CODES: ReadonlySet<CapabilityCheckCode> = new Set([
 export function effectiveStatus(
   storedStatus: Capability["status"],
   results: readonly CapabilityCheckResult[],
+  pending = false,
 ): Capability["status"] {
-  return storedStatus === "review" || results.length > 0 ? "review" : "current";
+  return storedStatus === "review" || results.length > 0 || pending ? "review" : "current";
 }
 
 /** True when `child` is `parent` or sits underneath it on a SEGMENT boundary. */
@@ -391,6 +416,8 @@ interface ReferenceIndex {
   /** Rulings whose file exists but could not be read or validated. */
   readonly rulingUnavailableIds: ReadonlySet<string>;
   readonly itemIds: ReadonlySet<string>;
+  /** True when a snapshot's ticket or issue file could not be read, so a missing item id is unresolved, not unknown. */
+  readonly itemScanIncomplete: boolean;
   readonly termIds: ReadonlySet<string>;
   /**
    * True when the glossary file EXISTS but could not be loaded. Same taint
@@ -428,7 +455,42 @@ function glossaryIds(root: string): { termIds: ReadonlySet<string>; termScanInco
   }
 }
 
-function buildReferenceIndex(root: string, state: ProjectState | null): ReferenceIndex {
+/** The glossary ids at a snapshot's commit: absent is a determinate empty set, anything else unconcluded is taint. */
+function snapshotGlossaryIds(snapshot: LedgerSnapshot): { termIds: ReadonlySet<string>; termScanIncomplete: boolean } {
+  const read = snapshot.terms();
+  if (read.kind === "ok") return { termIds: new Set(read.entries.map((t) => t.id)), termScanIncomplete: false };
+  if (read.kind === "absent") return { termIds: new Set<string>(), termScanIncomplete: false };
+  return { termIds: new Set<string>(), termScanIncomplete: true };
+}
+
+/** Ticket and issue ids (and display ids) at a snapshot's commit, plus whether any item file failed to read. */
+function snapshotItemIds(snapshot: LedgerSnapshot): { ids: Set<string>; incomplete: boolean } {
+  const ids = new Set<string>();
+  const tickets = snapshot.tickets();
+  const issues = snapshot.issues();
+  for (const r of [...tickets.records, ...issues.records]) {
+    ids.add(r.id);
+    const display = (r as { displayId?: string | null }).displayId;
+    if (typeof display === "string" && display.length > 0) ids.add(display);
+  }
+  return { ids, incomplete: !tickets.available || tickets.unreadable.length > 0 || issues.unreadable.length > 0 };
+}
+
+function buildReferenceIndex(root: string, state: ProjectState | null, snapshot?: LedgerSnapshot): ReferenceIndex {
+  if (snapshot !== undefined) {
+    const scan = snapshot.rulingsScan();
+    const items = snapshotItemIds(snapshot);
+    return {
+      rulingIds: new Set(scan.rulings.map((r) => r.id)),
+      rulingScanIncomplete: scan.scanCompleteness !== "complete" || scan.hasUnrecoverableEntries,
+      rulingUnavailableIds: scan.unavailableIds,
+      itemIds: items.ids,
+      itemScanIncomplete: items.incomplete,
+      ...snapshotGlossaryIds(snapshot),
+      cliNames: new Set(COMMANDS.map((c) => c.name)),
+      mcpNames: new Set(MCP_TOOLS.map((t) => t.name)),
+    };
+  }
   const scan = loadRulingsSafe(root);
   const glossary = glossaryIds(root);
   const rulingIds = new Set(scan.rulings.map((r) => r.id));
@@ -453,6 +515,7 @@ function buildReferenceIndex(root: string, state: ProjectState | null): Referenc
     rulingScanIncomplete: scan.scanCompleteness !== "complete" || scan.hasUnrecoverableEntries,
     rulingUnavailableIds: scan.unavailableIds,
     itemIds,
+    itemScanIncomplete: false,
     ...glossary,
     cliNames: new Set(COMMANDS.map((c) => c.name)),
     mcpNames: new Set(MCP_TOOLS.map((t) => t.name)),
@@ -486,7 +549,12 @@ function checkReferences(entry: Capability, index: ReferenceIndex): CapabilityCh
     out.push(result("capability_unknown_ruling", "structural", `unknown ruling: ${id}`));
   }
   for (const id of entry.items ?? []) {
-    if (!index.itemIds.has(id)) out.push(result("capability_unknown_item", "structural", `unknown item: ${id}`));
+    if (index.itemIds.has(id)) continue;
+    if (index.itemScanIncomplete) {
+      out.push(result("capability_check_incomplete", "incomplete", `item ${id} could not be resolved: an item file in the ledger snapshot could not be read`));
+      continue;
+    }
+    out.push(result("capability_unknown_item", "structural", `unknown item: ${id}`));
   }
   for (const id of entry.terms ?? []) {
     if (index.termIds.has(id)) continue;
@@ -733,7 +801,7 @@ export async function checkCapabilities(
   const deadline = start + CHECK_DEADLINE_MS;
   const pastDeadline = (): boolean => now() >= deadline;
 
-  const index = buildReferenceIndex(root, state);
+  const index = buildReferenceIndex(root, state, options.snapshot);
   const perEntry = new Map<string, CapabilityCheckResult[]>();
   for (const entry of entries) {
     const results = [...checkEntryPoints(root, entry), ...checkReferences(entry, index)];
@@ -759,8 +827,12 @@ export async function checkCapabilities(
     const timer = setTimeout(() => controller.abort(), CHECK_DEADLINE_MS);
     try {
       countCall();
-      const headOut = await git(root, ["rev-parse", "--verify", "HEAD^{commit}"], controller.signal);
-      head = headOut.ok && headOut.exitCode === 0 ? headOut.stdout.trim() || null : null;
+      // A caller-supplied commit is resolved like HEAD is, so a bad oid is
+      // "could not be read", never a diff against a string git rejects.
+      // An option-shaped oid is refused outright rather than handed to git.
+      const target = options.headOid === undefined ? "HEAD^{commit}" : options.headOid.startsWith("-") ? null : `${options.headOid}^{commit}`;
+      const headOut = target === null ? null : await git(root, ["rev-parse", "--verify", target], controller.signal);
+      head = headOut !== null && headOut.ok && headOut.exitCode === 0 ? headOut.stdout.trim() || null : null;
 
       const groups = groupByCheckpoint(entries);
       if (head === null) {
@@ -820,15 +892,27 @@ export async function checkCapabilities(
 
   const reported: CapabilityCheckEntry[] = entries.map((entry) => {
     const results = perEntry.get(entry.id) ?? [];
+    const pending = hasPendingNote(entry);
     return {
       id: entry.id,
       storedStatus: entry.status,
-      effectiveStatus: effectiveStatus(entry.status, results),
+      effectiveStatus: effectiveStatus(entry.status, results, pending),
       results,
+      pendingNote: pending ? entry.pendingNote! : null,
     };
   });
 
-  return { entries: reported, head, unchecked, gitCalls, deadlineHit };
+  return {
+    entries: reported,
+    head,
+    unchecked,
+    gitCalls,
+    deadlineHit,
+    ...(options.snapshot !== undefined && {
+      filesystemChecks: "working-tree" as const,
+      ...(options.snapshot.commit !== null && { snapshotCommit: options.snapshot.commit }),
+    }),
+  };
 }
 
 /** True when the entry may be stamped: freshness may be dirty, structure may not. */

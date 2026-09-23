@@ -1,4 +1,5 @@
 import { existsSync, unlinkSync } from "node:fs";
+import { withPlanContext } from "../plan-context.js";
 import { join } from "node:path";
 import type { WorkflowStage, StageResult, StageAdvance, StageContext } from "./types.js";
 import type { GuideReportInput, PendingProjectMutation } from "../session-types.js";
@@ -402,10 +403,7 @@ export class PickTicketStage implements WorkflowStage {
     const citedRulingsSection = formatCitedRulingsSection(resolveEntityCitations(ticket, citationCtx));
 
     // Produce PLAN instruction (advance with result for hybrid dispatch)
-    return {
-      action: "advance",
-      result: {
-        instruction: [
+    const planInstruction = [
           `# Plan for ${ticketLabel}: ${ticket.title}`,
           "",
           ticket.description ? `## Ticket Description\n\n${ticket.description}` : "",
@@ -417,7 +415,12 @@ export class PickTicketStage implements WorkflowStage {
           '```json',
           `{ "sessionId": "${ctx.state.sessionId}", "action": "report", "report": { "completedAction": "plan_written" } }`,
           '```',
-        ].join("\n"),
+        ].join("\n");
+    return {
+      action: "advance",
+      result: {
+        // T-526 (P-1): the pick is a PLAN entry; the brief is published here.
+        instruction: await withPlanContext(ctx, planInstruction),
         reminders: [
           "Write the plan as a markdown file -- do NOT use client-native plan mode.",
           "Do NOT ask the user for approval.",

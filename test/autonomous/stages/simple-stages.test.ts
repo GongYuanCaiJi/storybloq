@@ -211,7 +211,7 @@ describe("PlanStage", () => {
 
   it("report() advances with plan review instruction when plan exists", async () => {
     const state = makeState({ state: "PLAN", ticket: { id: "T-001", title: "Test", claimed: true, risk: "high" } });
-    writeFileSync(join(sessionDir, "plan.md"), "# Implementation Plan\n\n1. Step one\n2. Step two\n", "utf-8");
+    writeFileSync(join(sessionDir, "plan.md"), "# Implementation Plan\n\nEXISTING: none found within src/; closest candidate lacks the behaviour; new implementation limited to this fixture\n1. Step one\n2. Step two\n", "utf-8");
     // Need .story directory for project lock
     mkdirSync(join(testRoot, ".story", "tickets"), { recursive: true });
     mkdirSync(join(testRoot, ".story", "issues"), { recursive: true });

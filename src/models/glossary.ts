@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { RulingIdSchema } from "./types.js";
-import { CapabilityIdSchema, TermIdSchema } from "./capability.js";
+import { CapabilityIdSchema, PendingNoteSchema, TermIdSchema } from "./capability.js";
 
 /**
  * T-524: the glossary. One entry answers "what does this word mean here, and
@@ -157,6 +157,12 @@ export const TermSchema = z
      * quietly in the wrong order.
      */
     updatedAt: z.string().datetime({ offset: true, message: "updatedAt must be an ISO 8601 timestamp" }),
+    /**
+     * T-526 (plan 3.7): known work owed on this term, written by `term defer`
+     * and removed by `term update --clear-pending`. A nonempty note makes the
+     * term's effective status `review` and lists it first in the digest.
+     */
+    pendingNote: PendingNoteSchema.optional(),
   })
   .passthrough()
   /**

@@ -484,6 +484,9 @@ describe("tool description contract (T-460)", () => {
     // T-522 commit 2b adds storybloq_ruling_propose/accept/withdraw (90 -> 93):
     // the proposal lifecycle has an agent consumer (a worker proposes, the pen
     // accepts with the reviewed digest), so all three reach MCP.
-    expect(result.tools.length).toBe(93);
+    // T-526 adds storybloq_context_brief (93 -> 94): the brief's consumer is
+    // the agent about to plan. `brief --rebase` writes session state and
+    // stays CLI-only.
+    expect(result.tools.length).toBe(94);
   });
 });

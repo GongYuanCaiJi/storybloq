@@ -24,6 +24,7 @@ import {
   type TermCheckEntry,
 } from "../../core/glossary.js";
 import { GlossaryCatalogSchema, TermSchema, normalizeTermKey, type Term } from "../../models/glossary.js";
+import { hasPendingNote, PendingNoteSchema } from "../../models/capability.js";
 import { summarizeZodIssues, describeSchemaIssues } from "../../core/zod-issues.js";
 import { sanitizeDisplayText } from "../../core/display-text.js";
 import { successEnvelope, escapeMarkdownInline, formatError, ExitCode } from "../../core/output-formatter.js";
@@ -42,6 +43,8 @@ export interface TermWriteInput {
   readonly rulings?: readonly string[];
   readonly core?: boolean;
   readonly addedBy?: string;
+  /** T-526 (3.7): remove the pending note in this update. */
+  readonly clearPending?: boolean;
 }
 
 // --- shared ---
@@ -115,6 +118,12 @@ function byTerm(entries: readonly Term[]): Term[] {
   return [...entries].sort((a, b) => (a.term < b.term ? -1 : a.term > b.term ? 1 : 0));
 }
 
+/** T-526 (3.7): pending entries first, each group by term. */
+function pendingFirst(entries: readonly Term[]): Term[] {
+  const sorted = byTerm(entries);
+  return [...sorted.filter((t) => hasPendingNote(t)), ...sorted.filter((t) => !hasPendingNote(t))];
+}
+
 // --- rendering ---
 
 function renderResults(entry: TermCheckEntry | undefined): string[] {
@@ -135,6 +144,7 @@ function renderEntry(entry: Term, checked: TermCheckEntry | undefined): string[]
   if (entry.rulings?.length) lines.push(`- Rulings: ${entry.rulings.map((r) => catalogText(r)).join(", ")}`);
   if (entry.addedBy) lines.push(`- Added by: ${catalogText(entry.addedBy)}`);
   lines.push(`- Updated: ${catalogText(entry.updatedAt)}`);
+  if (hasPendingNote(entry)) lines.push(`- Pending: review: ${catalogText(entry.pendingNote!)}`);
   if (checked && checked.results.length > 0) {
     lines.push("- Findings:");
     lines.push(...renderResults(checked));
@@ -164,11 +174,13 @@ export async function handleTermList(
     const omitted = digest.omittedCore + digest.omittedNonCore;
     const names = digest.names.length > 0 ? digest.names.map((n) => catalogText(n)).join(", ") : "none";
     const tail = omitted > 0 ? ` (${omitted} more, \`storybloq term list\`)` : "";
-    return { output: `Glossary: ${names}${tail}` };
+    const pending = digest.pending > 0 ? ` (pending: ${digest.pending}, listed first)` : "";
+    return { output: `Glossary: ${names}${tail}${pending}` };
   }
 
   const report = reportFor(ctx.root, doc.terms);
-  const rows = byTerm(doc.terms)
+  const pending = doc.terms.filter((t) => hasPendingNote(t)).length;
+  const rows = pendingFirst(doc.terms)
     .filter((t) => options.core !== true || t.core === true)
     .filter((t) => options.thin !== true || report.thinIds.includes(t.id));
 
@@ -178,6 +190,7 @@ export async function handleTermList(
         successEnvelope({
           present,
           glossarySize: doc.terms.length,
+          pending,
           terms: rows.map((t) => ({ ...t, results: resultsOf(report, t.id)?.results ?? [] })),
         }),
         null,
@@ -186,7 +199,7 @@ export async function handleTermList(
     };
   }
 
-  const lines = [`# Glossary (${rows.length} of ${doc.terms.length})`, "", ADVISORY];
+  const lines = [`# Glossary (${rows.length} of ${doc.terms.length}${pending > 0 ? `, pending: ${pending}` : ""})`, "", ADVISORY];
   if (!present) {
     lines.push("", "No glossary yet. `storybloq term add` creates the first entry.");
     return { output: lines.join("\n") };
@@ -199,6 +212,7 @@ export async function handleTermList(
     lines.push("", `- **${catalogText(entry.term)}** (${catalogText(entry.id)})${entry.core === true ? " [core]" : ""}`);
     lines.push(`  ${catalogText(entry.definition)}`);
     if (entry.distinction) lines.push(`  Not: ${catalogText(entry.distinction)}`);
+    if (hasPendingNote(entry)) lines.push(`  review: ${catalogText(entry.pendingNote!)}`);
     lines.push(...renderResults(resultsOf(report, entry.id)));
   }
   return { output: lines.join("\n") };
@@ -396,6 +410,7 @@ export async function handleTermUpdate(input: TermWriteInput, format: OutputForm
           rulings: input.rulings ? [...input.rulings] : previous.rulings,
           core: input.core ?? previous.core,
           addedBy: input.addedBy ?? previous.addedBy,
+          pendingNote: input.clearPending === true ? undefined : previous.pendingNote,
           updatedAt: stamp(),
         }),
       );
@@ -410,6 +425,34 @@ export async function handleTermUpdate(input: TermWriteInput, format: OutputForm
     const entry = doc.terms.find((t) => t.id === input.id)!;
     if (format === "json") return { output: JSON.stringify(successEnvelope({ term: entry }), null, 2) };
     return { output: `Updated ${catalogText(entry.id)} (${catalogText(entry.term)}).` };
+  });
+}
+
+/**
+ * T-526 (3.7): record work owed on a term without doing it. Changes only
+ * `pendingNote` and runs no reference check, for the reason `capability defer`
+ * gives: the term is usually being deferred because something it points at
+ * moved. `updatedAt` is left alone too, since the definition did not change.
+ * No conflict-record refusal: that mechanism does not exist yet (T-529).
+ */
+export async function handleTermDefer(input: { id: string; note: string }, format: OutputFormat, root: string): Promise<CommandResult> {
+  const note = input.note.trim();
+  if (note.length === 0) {
+    throw new CliValidationError("invalid_input", "`term defer` needs --note naming the owed work; an empty note would flag nothing.");
+  }
+  const parsedNote = PendingNoteSchema.safeParse(note);
+  if (!parsedNote.success) throw new CliValidationError("invalid_input", parsedNote.error.issues[0]?.message ?? "invalid note");
+  return refusing(async () => {
+    const doc = await glossaryCatalog.mutate(root, (current) => {
+      const index = current.terms.findIndex((t) => t.id === input.id);
+      if (index === -1) throw new TermRefusal(termNotFound(input.id, format));
+      const terms = [...current.terms];
+      terms[index] = { ...terms[index]!, pendingNote: note };
+      return { ...current, terms };
+    });
+    const entry = doc.terms.find((t) => t.id === input.id)!;
+    if (format === "json") return { output: JSON.stringify(successEnvelope({ term: entry }), null, 2) };
+    return { output: `Deferred ${catalogText(entry.id)}: review: ${catalogText(note)}. Clear with \`term update ${catalogText(entry.id)} --clear-pending\`.` };
   });
 }
 

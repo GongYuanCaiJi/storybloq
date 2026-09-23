@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "capabilities": [
+    {
+      "id": "cap-logging",
+      "name": "Logging",
+      "summary": "AppLogger, the one logger in this service: every line carries a request id and secrets are redacted before the line reaches the sink.",
+      "surfaces": {
+        "files": [
+          "src/platform/logging/AppLogger.ts"
+        ]
+      },
+      "entryPoints": [
+        "src/platform/logging/"
+      ],
+      "contract": "AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys and values with [REDACTED] before the line reaches the sink. Implementation: src/platform/logging/AppLogger.ts.",
+      "rulings": [
+        "r-eftp2zdb6as643np"
+      ],
+      "terms": [
+        "term-redaction",
+        "term-request-id"
+      ],
+      "checkedAt": {
+        "sha": "0000000000000000000000000000000000000000",
+        "date": "2026-09-15"
+      },
+      "status": "current"
+    },
+    {
+      "id": "cap-request-routing",
+      "name": "Request routing",
+      "summary": "Router.add(method, path, handler) registers a route and Router.dispatch(req) picks the handler for method plus path, passing it an AppLogger bound to req.requestId.",
+      "surfaces": {
+        "files": [
+          "src/http/router.ts"
+        ]
+      },
+      "entryPoints": [
+        "src/http/router.ts"
+      ],
+      "contract": "Router.add(method, path, handler); Router.dispatch(req) calls the matching handler with an AppLogger bound to req.requestId. Implementation: src/http/router.ts.",
+      "checkedAt": {
+        "sha": "0000000000000000000000000000000000000000",
+        "date": "2026-09-15"
+      },
+      "status": "current"
+    }
+  ]
+}

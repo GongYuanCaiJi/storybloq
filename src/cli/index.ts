@@ -61,6 +61,7 @@ async function runCli(): Promise<void> {
     registerRulingCommand,
     registerCapabilityCommand,
     registerTermCommand,
+    registerBriefCommand,
     registerGateAckCommand,
     registerLandingsCommand,
     registerEarmarkCommand,
@@ -226,6 +227,7 @@ async function runCli(): Promise<void> {
   cli = registerRulingCommand(cli);
   cli = registerCapabilityCommand(cli);
   cli = registerTermCommand(cli);
+  cli = registerBriefCommand(cli);
   cli = registerGateAckCommand(cli);
   cli = registerLandingsCommand(cli);
   cli = registerEarmarkCommand(cli);

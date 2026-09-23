@@ -186,6 +186,18 @@ export const CapabilityCheckpointSchema = z
  * `check --stamp` and an explicit `update --status` writes this field.
  */
 export const CAPABILITY_STATUSES = ["current", "review"] as const;
+
+/** Longest pending note: one sentence naming the owed work, the detail goes in an issue. */
+export const PENDING_NOTE_MAX = 400;
+
+export const PendingNoteSchema = z
+  .string()
+  .max(PENDING_NOTE_MAX, `A pending note is one sentence: keep it under ${PENDING_NOTE_MAX} characters and put the detail in an issue`);
+
+/** True when a stored pending note is set, i.e. present and not blank. */
+export function hasPendingNote(entry: { readonly pendingNote?: string | undefined }): boolean {
+  return typeof entry.pendingNote === "string" && entry.pendingNote.trim().length > 0;
+}
 export type CapabilityStatus = (typeof CAPABILITY_STATUSES)[number];
 
 export const CapabilitySchema = z
@@ -202,6 +214,15 @@ export const CapabilitySchema = z
     terms: z.array(TermIdSchema).optional(),
     checkedAt: CapabilityCheckpointSchema,
     status: z.enum(CAPABILITY_STATUSES).default("current"),
+    /**
+     * T-526 (plan 3.7): known work owed on this entry that nobody has done yet,
+     * written by `capability defer`. A nonempty note forces the effective status
+     * to `review` whatever the checks say, and `check --stamp` refuses to certify
+     * the entry until `--clear-pending` removes it in the same write. An empty
+     * string is treated as no note, so a hand edit to "" never makes the whole
+     * catalog unreadable.
+     */
+    pendingNote: PendingNoteSchema.optional(),
   })
   .passthrough()
   /**

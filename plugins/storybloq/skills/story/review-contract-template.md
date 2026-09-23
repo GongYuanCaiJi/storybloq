@@ -12,7 +12,7 @@ accessibility, performance, data-safety
 
 The change fits the design it lands in: one concept has one home, and new code follows the boundaries and data flow the project already has.
 
-Violations: a second copy of an existing abstraction; logic placed in a layer the project keeps it out of; a reverse dependency between modules.
+Violations: a second copy of an existing abstraction; logic placed in a layer the project keeps it out of; a reverse dependency between modules; a suggested ruling that applies and is not cited.
 
 Blocking: major
 
@@ -52,7 +52,7 @@ Blocking: blocking
 
 The change is verified to do what it claims: tests exist for the behaviour, they fail without the change, and the claim in the description matches what shipped.
 
-Violations: a test that passes with the change removed; a green suite over code that is never executed; a description that names work the diff does not contain.
+Violations: a test that passes with the change removed; a green suite over code that is never executed; a description that names work the diff does not contain; a grep transcript in EXISTING.
 
 Blocking: major
 

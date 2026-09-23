@@ -67,6 +67,8 @@ import {
 import { parkCurrentTicket, parkCurrentIssue } from "./park.js";
 import type { FullSessionState } from "../session-types.js";
 import type { WorkItemRef } from "../../core/arrangement-bounds.js";
+import { currentPointer, pointerMapUnreadable, renderGovernanceHold, runGoverningGate } from "../plan-context.js";
+import { blocksCodeReview, type ContextPointer } from "../context-manifest.js";
 
 /**
  * Finish a ceiling escalation: file the outstanding findings, then park.
@@ -292,6 +294,26 @@ export function forcedLandingFilingSet<T extends { severity: string }>(
   );
 }
 
+/**
+ * T-526 (P-3): code whose plan predates a governing change, a recovery, or a
+ * rebase that invalidated the approval is not reviewed; the item goes back to
+ * PLAN with its reviews reset. Shared by entry and verdict submission.
+ */
+function redirectToPlanIfBlocked(ctx: StageContext, pointer: ContextPointer | null): StageAdvance | null {
+  if (!blocksCodeReview(pointer) || !ctx.state.ticket) return null;
+  ctx.updateDraft({
+    reviews: { plan: [], code: [] },
+    ticket: { ...ctx.state.ticket, realizedRisk: undefined, lastPlanHash: undefined },
+    currentReviewStartedAt: null,
+  } as Partial<typeof ctx.state>);
+  ctx.appendEvent("governing_context_redirect", {
+    outstanding: pointer!.outstanding.map((o) => o.id),
+    recovery: pointer!.recovery !== null,
+    planApprovalInvalidated: pointer!.planApprovalInvalidated !== null,
+  });
+  return { action: "back", target: "PLAN", reason: "governing_context_changed" };
+}
+
 export class CodeReviewStage implements WorkflowStage {
   readonly id = "CODE_REVIEW";
 
@@ -304,10 +326,27 @@ export class CodeReviewStage implements WorkflowStage {
     return effectiveReviewEffort(ctx.state, "CODE_REVIEW") === "off";
   }
 
-  async enter(ctx: StageContext): Promise<StageResult> {
+  async enter(ctx: StageContext): Promise<StageResult | StageAdvance> {
     const backends = reviewBackendsForStage("CODE_REVIEW", ctx.state);
     const codeReviews = ctx.state.reviews.code;
     const roundNum = codeReviews.length + 1;
+
+    // T-526 (P-3): CODE_REVIEW entry is a governance gate. The diff runs on the
+    // first round (a resume runs it before entering); every round refuses to
+    // review code whose plan predates a governing change, a recovery, or a
+    // rebase that invalidated the approval. Review mode has no plan to return
+    // to, and an issue fix never had one.
+    if (!ctx.state.currentIssue && ctx.state.mode !== "review" && ctx.state.ticket) {
+      const gate = roundNum === 1 ? await runGoverningGate(ctx) : { pointer: currentPointer(ctx), unreadable: pointerMapUnreadable(ctx) };
+      // Unreadable is not "no obligations": hold here rather than review a plan
+      // whose governing context is unknown (PLAN cannot repair the map either).
+      if (gate.unreadable !== null) {
+        ctx.appendEvent("governing_context_hold", { reason: gate.unreadable });
+        return { instruction: renderGovernanceHold(gate.unreadable) };
+      }
+      const redirect = redirectToPlanIfBlocked(ctx, gate.pointer);
+      if (redirect) return redirect;
+    }
     const reviewer = nextReviewer(codeReviews, backends, ctx.state.codexUnavailable, ctx.state.codexUnavailableSince);
     const storedRisk = ctx.state.ticket?.realizedRisk ?? ctx.state.ticket?.risk;
     const risk = storedRisk == null ? "low" : normalizeRiskLevel(storedRisk, "high");
@@ -555,6 +594,19 @@ export class CodeReviewStage implements WorkflowStage {
           transitionedFrom: "CODE_REVIEW",
         },
       };
+    }
+
+    // T-526: a verdict submitted while the pointer map is unreadable is refused
+    // for the same reason entry holds; skip_ticket above stays the escape.
+    if (!ctx.state.currentIssue && ctx.state.mode !== "review" && ctx.state.ticket) {
+      // The first verdict re-runs the check entry ran, so a check that failed
+      // at entry (a throw, a failed write) cannot be followed by a verdict.
+      const gate = ctx.state.reviews.code.length === 0
+        ? await runGoverningGate(ctx)
+        : { pointer: currentPointer(ctx), unreadable: pointerMapUnreadable(ctx) };
+      if (gate.unreadable !== null) return { action: "retry", instruction: renderGovernanceHold(gate.unreadable) };
+      const redirect = redirectToPlanIfBlocked(ctx, gate.pointer);
+      if (redirect) return redirect;
     }
 
     const verdict = report.verdict;

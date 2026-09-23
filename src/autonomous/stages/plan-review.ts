@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { citationsForReviewTarget } from "../cited-rulings.js";
 import { guardPlanNamesCitedRulings } from "../plan-pin-guard.js";
+import { currentPointer, PLAN_REVIEWER_CHECKS } from "../plan-context.js";
+import { clearOnApproval, currentItemId, markReviewStart, mustAddress, packetManifestRef, readContextManifests, suggestedFromCurrent } from "../context-manifest.js";
 import { join } from "node:path";
 import { releaseSessionClaim } from "../../core/claims.js";
 import { clearSameSessionEarmark } from "../../core/earmarks.js";
@@ -285,6 +287,7 @@ async function handleCheckGateAck(ctx: StageContext, ticketId: string | undefine
       ctx.root,
       ctx.state.ticket?.id ?? ctx.state.currentIssue?.id,
       planRead.bytes.toString("utf-8"),
+      mustAddress(currentPointer(ctx)),
     );
     if (!guardA.ok) return { action: "retry", instruction: guardA.instruction };
 
@@ -320,7 +323,7 @@ async function handleCheckGateAck(ctx: StageContext, ticketId: string | undefine
         instruction: `Failed to snapshot the approved plan: ${snapshot.reason}. Re-report the same check to retry.`,
       };
     }
-    ctx.writeState({ pendingPlanAck: null, approvedPlanAckDeltas: lookup.ack.deltas ?? null, approvedPlanSnapshot: snapshot.ref });
+    ctx.writeState({ pendingPlanAck: null, approvedPlanAckDeltas: lookup.ack.deltas ?? null, approvedPlanSnapshot: snapshot.ref, ...approvalContextPatch(ctx) });
     if (ctx.state.mode === "plan") {
       ctx.finalizeSession({
         status: "completed" as const,
@@ -382,6 +385,21 @@ async function handleCheckGateAck(ctx: StageContext, ticketId: string | undefine
  * path is what makes a FIXED ceiling tolerable at all: without it, a slow
  * but healthy review parks its findings at the ceiling instead of shipping.
  */
+/**
+ * T-526: the context-pointer update an accepted plan carries. Written with the
+ * write that pins the plan, AFTER the citation guard has passed, never with
+ * the verdict record: a guard refusal after the verdict write would otherwise
+ * leave obligations cleared for a plan that was never accepted.
+ */
+function approvalContextPatch(ctx: StageContext): Record<string, unknown> {
+  const item = ctx.state.currentIssue ? null : currentItemId(ctx.state);
+  if (item === null) return {};
+  const read = readContextManifests((ctx.state as { contextManifests?: unknown }).contextManifests);
+  const pointer = read.ok ? read.map[item] : undefined;
+  if (!read.ok || pointer === undefined) return {};
+  return { contextManifests: { ...read.map, [item]: clearOnApproval(pointer, pointer.reviewRef ?? null) } };
+}
+
 export class PlanReviewStage implements WorkflowStage {
   readonly id = "PLAN_REVIEW";
 
@@ -540,7 +558,23 @@ export class PlanReviewStage implements WorkflowStage {
     const planTarget = ctx.state.ticket?.id ?? ctx.state.currentIssue?.id ?? "unknown";
     const planCitations = await citationsForReviewTarget(ctx.root, planTarget);
 
+    // T-526: the round records which manifest its packet names and which
+    // invalidation token it started under; the approval is judged on both.
+    let contextPacketFields: { suggestedRulings?: { id: string; reasons: string[] }[]; contextManifest?: { ref: string; provisional: boolean } } = {};
+    const contextItem = ctx.state.currentIssue ? null : currentItemId(ctx.state);
+    if (contextItem !== null) {
+      const read = readContextManifests((ctx.state as { contextManifests?: unknown }).contextManifests);
+      const pointer = read.ok ? read.map[contextItem] : undefined;
+      if (read.ok && pointer !== undefined) {
+        const packetRef = packetManifestRef(ctx.dir, contextItem, pointer);
+        contextPacketFields = { suggestedRulings: suggestedFromCurrent(ctx.dir, pointer), contextManifest: packetRef };
+        ctx.writeState({ contextManifests: { ...read.map, [contextItem]: markReviewStart(pointer, packetRef.ref) } } as Partial<typeof ctx.state>);
+      }
+    }
+
     const planContextPacket = buildReviewContextPacket({
+      ...contextPacketFields,
+      ...(contextItem !== null && { reviewerChecks: PLAN_REVIEWER_CHECKS }),
       sessionDir: ctx.dir,
       projectRoot: ctx.root,
       target: planTarget,
@@ -1390,6 +1424,7 @@ export class PlanReviewStage implements WorkflowStage {
         ctx.root,
         ctx.state.ticket?.id ?? ctx.state.currentIssue?.id,
         landedPlanBytes.toString("utf-8"),
+        mustAddress(currentPointer(ctx)),
       );
       if (!guardBC.ok) return { action: "retry", instruction: guardBC.instruction };
 
@@ -1415,6 +1450,8 @@ export class PlanReviewStage implements WorkflowStage {
 
       // T-135: Plan mode exits after plan review approval
       if (ctx.state.mode === "plan") {
+        const contextPatch = approvalContextPatch(ctx);
+        if (Object.keys(contextPatch).length > 0) ctx.writeState(contextPatch);
         ctx.finalizeSession({
           status: "completed" as const,
           terminationReason: "normal" as const,
@@ -1444,7 +1481,7 @@ export class PlanReviewStage implements WorkflowStage {
           instruction: `Failed to snapshot the approved plan: ${landingSnapshot.reason}. Re-report your review verdict to retry.`,
         };
       }
-      ctx.writeState({ approvedPlanSnapshot: landingSnapshot.ref });
+      ctx.writeState({ approvedPlanSnapshot: landingSnapshot.ref, ...approvalContextPatch(ctx) });
       // ISS-1050 interim: deliberately does NOT surface arrangementGateRiskWarnings
       // here -- same reasoning as handleCheckGateAck's identical advance above:
       // a `result` on this return would replace IMPLEMENT's real `enter()`

@@ -17,7 +17,9 @@
  */
 
 import { defineCatalog, type Catalog } from "./catalog.js";
-import { loadRulingsSafe } from "./ruling-loader.js";
+import { loadRulingsSafe, type LoadRulingsResult } from "./ruling-loader.js";
+import type { LedgerSnapshot } from "./ledger-snapshot.js";
+import { hasPendingNote } from "../models/capability.js";
 import {
   GlossaryCatalogSchema,
   foldTermText,
@@ -63,6 +65,13 @@ export interface TermCheckResult {
 export interface TermCheckEntry {
   readonly id: string;
   readonly results: readonly TermCheckResult[];
+  /**
+   * T-526 (3.7): `review` when a pending note is set or a structural or
+   * incomplete result stands; thin alone does not flip it, thin being a
+   * warning everywhere.
+   */
+  readonly effectiveStatus: "current" | "review";
+  readonly pendingNote: string | null;
 }
 
 export interface TermCheckReport {
@@ -73,6 +82,10 @@ export interface TermCheckReport {
   readonly thinIds: readonly string[];
   /** Ids carrying a reference this process could not resolve either way. */
   readonly incompleteIds: readonly string[];
+  /** Ids with a pending note set. */
+  readonly pendingIds: readonly string[];
+  /** Present when the index came from a ledger snapshot (see `LedgerSnapshot.filesystemChecks`). */
+  readonly filesystemChecks?: "working-tree";
 }
 
 export interface TermReferenceIndex {
@@ -100,6 +113,33 @@ export interface TermReferenceIndex {
   readonly rulingScanIncomplete: boolean;
   /** Rulings whose file exists but could not be read or validated. */
   readonly rulingUnavailableIds: ReadonlySet<string>;
+  /** True when the index was built from a ledger snapshot rather than the working tree. */
+  readonly fromSnapshot?: boolean;
+}
+
+function indexFrom(capabilities: CapabilityScan, scan: LoadRulingsResult): TermReferenceIndex {
+  return {
+    capabilityIds: new Set(capabilities.ids),
+    capabilityScanIncomplete: capabilities.incomplete,
+    rulingIds: new Set(scan.rulings.map((r) => r.id)),
+    rulingScanIncomplete: scan.scanCompleteness !== "complete" || scan.hasUnrecoverableEntries,
+    rulingUnavailableIds: new Set(scan.unavailableIds),
+  };
+}
+
+/**
+ * T-526 (3.2): the same index, resolved against the ledger at a snapshot's
+ * commit. An ABSENT capability catalog at that commit is a determinate empty
+ * set, as it is on the working tree; an unreadable one or an unavailable
+ * snapshot is taint.
+ */
+export function buildTermReferenceIndexFromSnapshot(snapshot: LedgerSnapshot): TermReferenceIndex {
+  const caps = snapshot.capabilities();
+  const capabilities: CapabilityScan =
+    caps.kind === "ok"
+      ? { ids: caps.entries.map((c) => c.id), incomplete: false }
+      : { ids: [], incomplete: caps.kind !== "absent" };
+  return { ...indexFrom(capabilities, snapshot.rulingsScan()), fromSnapshot: true };
 }
 
 /**
@@ -115,14 +155,7 @@ export interface TermReferenceIndex {
  * that links one.
  */
 export function buildTermReferenceIndex(root: string, capabilities: CapabilityScan): TermReferenceIndex {
-  const scan = loadRulingsSafe(root);
-  return {
-    capabilityIds: new Set(capabilities.ids),
-    capabilityScanIncomplete: capabilities.incomplete,
-    rulingIds: new Set(scan.rulings.map((r) => r.id)),
-    rulingScanIncomplete: scan.scanCompleteness !== "complete" || scan.hasUnrecoverableEntries,
-    rulingUnavailableIds: new Set(scan.unavailableIds),
-  };
+  return indexFrom(capabilities, loadRulingsSafe(root));
 }
 
 /** The capability id set plus whether the read that produced it actually succeeded. */
@@ -155,6 +188,7 @@ export function checkTerms(entries: readonly Term[], index: TermReferenceIndex):
   const errorIds: string[] = [];
   const thinIds: string[] = [];
   const incompleteIds: string[] = [];
+  const pendingIds: string[] = [];
 
   for (const entry of entries) {
     const results: TermCheckResult[] = [];
@@ -193,10 +227,20 @@ export function checkTerms(entries: readonly Term[], index: TermReferenceIndex):
     if (results.some((r) => r.cls === "structural")) errorIds.push(entry.id);
     if (results.some((r) => r.cls === "thin")) thinIds.push(entry.id);
     if (results.some((r) => r.cls === "incomplete")) incompleteIds.push(entry.id);
-    checked.push({ id: entry.id, results });
+    const pending = hasPendingNote(entry);
+    if (pending) pendingIds.push(entry.id);
+    const flagged = pending || results.some((r) => r.cls === "structural" || r.cls === "incomplete");
+    checked.push({ id: entry.id, results, effectiveStatus: flagged ? "review" : "current", pendingNote: pending ? entry.pendingNote! : null });
   }
 
-  return { entries: checked, errorIds, thinIds, incompleteIds };
+  return {
+    entries: checked,
+    errorIds,
+    thinIds,
+    incompleteIds,
+    pendingIds,
+    ...(index.fromSnapshot === true && { filesystemChecks: "working-tree" as const }),
+  };
 }
 
 // --- match ---
@@ -311,6 +355,10 @@ export interface TermDigest {
   readonly returned: number;
   readonly omittedCore: number;
   readonly omittedNonCore: number;
+  /** T-526 (3.7): entries with a pending note. They are listed FIRST in `names`, core or not. */
+  readonly pending: number;
+  /** Pending names that did not fit the cap. */
+  readonly omittedPending: number;
 }
 
 /**
@@ -333,7 +381,18 @@ export function termDigest(entries: readonly Term[], cap: number = TERM_DIGEST_C
   const coreEntries = byName.filter((e) => e.core === true);
   const core = coreEntries.length;
 
-  const selected = total <= cap ? byName : coreEntries.slice(0, cap);
+  /**
+   * T-526 (3.7): pending entries come FIRST and take their places before the
+   * core rule runs, so an entry somebody deferred work on surfaces even when
+   * it is not core and the glossary is over the cap. They are still bounded
+   * by the cap: a pile of deferred terms is the signal, not a reason to load
+   * the whole glossary.
+   */
+  const pendingEntries = byName.filter((e) => hasPendingNote(e));
+  const pendingSelected = pendingEntries.slice(0, cap);
+  const pendingIds = new Set(pendingSelected.map((e) => e.id));
+  const rest = total <= cap ? byName : coreEntries;
+  const selected = [...pendingSelected, ...rest.filter((e) => !pendingIds.has(e.id))].slice(0, cap);
   const returnedIds = new Set(selected.map((e) => e.id));
   const omittedCore = coreEntries.filter((e) => !returnedIds.has(e.id)).length;
   const omittedNonCore = total - selected.length - omittedCore;
@@ -345,5 +404,7 @@ export function termDigest(entries: readonly Term[], cap: number = TERM_DIGEST_C
     returned: selected.length,
     omittedCore,
     omittedNonCore,
+    pending: pendingEntries.length,
+    omittedPending: pendingEntries.length - pendingSelected.length,
   };
 }

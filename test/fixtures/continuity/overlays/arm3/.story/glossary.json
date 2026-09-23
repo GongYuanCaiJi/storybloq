@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "terms": [
+    {
+      "id": "term-redaction",
+      "term": "redaction",
+      "definition": "Replacing secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before a log line reaches the sink.",
+      "capabilities": [
+        "cap-logging"
+      ],
+      "rulings": [
+        "r-eftp2zdb6as643np"
+      ],
+      "updatedAt": "2026-09-15T00:00:00.000Z"
+    },
+    {
+      "id": "term-request-id",
+      "term": "request id",
+      "aliases": [
+        "requestId"
+      ],
+      "definition": "The id of the incoming request a piece of work belongs to, assigned from the x-request-id header or a new UUID; every log line carries it.",
+      "distinction": "Not a job id: work a request puts on the queue logs under that request's id, never a fresh one.",
+      "capabilities": [
+        "cap-logging"
+      ],
+      "rulings": [
+        "r-eftp2zdb6as643np",
+        "r-p19bbvh0jhj8xgma"
+      ],
+      "updatedAt": "2026-09-15T00:00:00.000Z"
+    }
+  ]
+}

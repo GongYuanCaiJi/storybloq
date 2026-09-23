@@ -2244,6 +2244,15 @@ export const SessionStateSchema = z.object({
    * parse, bricking a session over one damaged value.
    */
   heartbeatGeneration: z.unknown().optional(),
+
+  /**
+   * T-526 (P-3): per item, the context manifest the current plan was written
+   * against, the obligations raised since, and recovery state. `z.unknown()`
+   * for the same reason as its neighbours; the strict reader is
+   * `readContextManifests` in `context-manifest.ts`, and a value that fails it
+   * is unreadable, never "no manifests".
+   */
+  contextManifests: z.unknown().optional(),
 }).passthrough();
 
 export type FullSessionState = z.infer<typeof SessionStateSchema>;

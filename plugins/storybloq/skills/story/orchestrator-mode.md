@@ -99,6 +99,7 @@ There is no `storybloq enrich` command; the pass is a hand-authored fan-out of r
 1. **Byte-verify every claim at current HEAD.** Backlogs rot: re-derive line numbers, confirm each gap still exists, check whether the work already shipped (fully or partially).
 2. **Classify:** `valid-enriched` / `partially-done-rescoped` (name what shipped, with the commit) / `recommend-close` (evidence only -- the orchestrator closes, never the agent).
 3. **Rewrite into the junior-proof template** below. The enriched text IS the spec; implementer prompts collapse to "read the item, follow it, stop if reality differs from VERIFIED STATE."
+   Before writing EXISTING, run the three lookups: `storybloq_ruling_list {scopeTag}` for each tag the item touches, `storybloq_capability_match` with its paths and title, and `storybloq_term_match` with its title and description (`storybloq brief <id>` runs all three). A suggested ruling you judge applicable is cited on the item now (`ticket update --cites-ruling`), never pasted; one you judge inapplicable stays uncited.
 4. **Write with read-modify-write, never blind.** `storybloq_ticket_update` with `{ "id": "T-310", "description": "<full new text>" }` REPLACES the description wholesale. Read the item first (`storybloq_ticket_get`), carry the full prior text into HISTORY, and re-read immediately before writing.
 5. **Issues have NO description field.** Enrichment for issues targets `impact`: `storybloq_issue_update` with `{ "id": "ISS-042", "impact": "<enriched impact incl. template + HISTORY>" }`. Leave `resolution` for the eventual fix. Same read-modify-write discipline via `storybloq_issue_get`.
 6. **Never enrich items belonging to a wave whose chain is currently running.** Read-only in code is not write-safe in the ledger; enrich between waves, or only items scheduled for future waves.
@@ -108,6 +109,7 @@ Template (SIZING is a free-text convention; there is no `ticket.sizing` field):
 ```
 CONTEXT: <what + why, 2-3 sentences>
 VERIFIED STATE @ <sha> (<date>): <exact file:line facts, re-derived at HEAD, that a lower-cost execution tier can trust>
+EXISTING: <reference> ; reuse | extend | replace ; <one-line reason>   (or: none found within <modules inspected>; closest <candidate> lacks <what>; new implementation limited to <scope>)
 SCOPE: <numbered concrete steps, each naming exact files; smallest-correct-change bias>
 OUT OF SCOPE: <explicit list -- the fence for eager models>
 ACCEPTANCE: <item-scoped testable criteria + test plan (the item's suites, NEW tests, RED-without-the-change expectation); require the item's own tests green with no NEW failures vs the recorded tip baseline, never a global "npm test green">

@@ -41,6 +41,20 @@ What you pass is recorded as INTENT, not as execution. A pin you sent is stored 
 
 **Frontend design:** If the current ticket involves UI, frontend, components, layouts, or styling, read `design/design.md` in the same directory as the skill file for design principles. Load the relevant platform reference from `design/references/`. Apply the priority order (clarity > hierarchy > platform correctness > accessibility > state completeness) during both planning and implementation.
 
+## Context brief
+
+Every PLAN entry (the pick, a plan-mode start, a replan and drift recovery) writes `.story/sessions/<id>/context-brief.md` and points the instruction at it. Read it before planning. It has tiers, and only one binds:
+
+- **Cited rulings** bind: the rulings the item cites (`ticket update --cites-ruling`).
+- **Suggested rulings** bind nothing: accepted rulings discovery matched by scope tag, path or capability, each with the reason it was suggested. If one applies, cite it on the item; the plan reviewer is told a suggested ruling that applies and is not cited is a finding.
+- **Proposed** rulings bind nothing until accepted.
+- **Capabilities** are where inspection starts, not a substitute for reading the code; **Stale or unavailable** entries are not candidates. **Terms** carry the distinction that matters.
+- **Disclosure** says what discovery could not see: no match is not evidence that nothing exists.
+
+The plan must carry an EXISTING line, `EXISTING: <reference> ; reuse | extend | replace ; <reason>` or `EXISTING: none found within <modules inspected>; ...`. A bare `EXISTING: none` is sent back.
+
+If a ruling the brief delivered is revised, superseded, withdrawn or newly accepted mid-session, the guide says "governing context changed" and the plan must name that id before it is accepted; CODE_REVIEW sends the item back to PLAN until it is. When a manifest cannot be verified the guide reports "recovery required"; after checking, `storybloq brief --rebase <sessionId> <item> --reason "<why>"` adopts the provisional context. `storybloq brief <id>` prints the same brief on demand.
+
 ## Precedence: task-aware active-session guard
 
 Before any guide call that could start, resume, or cancel a session, run SKILL.md Step 0.5. Ownership determines the action:

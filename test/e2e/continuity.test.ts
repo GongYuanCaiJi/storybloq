@@ -23,6 +23,14 @@ import { handleRulingAccept, handleRulingGet, handleRulingList, handleRulingProp
 import * as oracle from "../core/oracle-1-15/ruling-655b03bf.js";
 import { RulingSchema as OldRulingSchema } from "../core/oracle-1-15/ruling-schema-655b03bf.js";
 import { handleAutonomousGuide } from "../../src/autonomous/guide.js";
+import { buildContextBrief, NO_PATHS_NAMED } from "../../src/autonomous/context-brief.js";
+import { PLAN_REVIEWER_CHECKS } from "../../src/autonomous/plan-context.js";
+import { StageContext } from "../../src/autonomous/stages/types.js";
+import { PlanStage } from "../../src/autonomous/stages/plan.js";
+import { PickTicketStage } from "../../src/autonomous/stages/pick-ticket.js";
+import { CodeReviewStage } from "../../src/autonomous/stages/code-review.js";
+import { resolveRecipe } from "../../src/autonomous/recipes/loader.js";
+import { prepareForCompact, readSession, writeSessionSync } from "../../src/autonomous/session.js";
 import type { CommandContext } from "../../src/cli/types.js";
 import { materialize, hashTree, TASKS } from "../../scripts/continuity-lib.js";
 import { killSidecarsInRoot } from "../autonomous/_sidecar-cleanup.js";
@@ -67,11 +75,8 @@ describe("continuity case 0: fixture", () => {
   it("0b every behavioural fact is carried in every arm; arm 2 has no catalogs (P-1)", () => {
     const arm2 = copy(2);
     for (const f of FACTS.arm2MustNotContain) expect(existsSync(join(arm2, f))).toBe(false);
-    // Arm 3's catalogs land with T-523/T-524. Until the overlay carries a .story, it is a README placeholder and
-    // arm 3 is not asserted; the moment it exists, every declared arm-3 carrier is checked like the others.
-    const overlayLanded = existsSync(join(FIXTURE, "overlays", "arm3", ".story"));
-    if (!overlayLanded) expect(existsSync(join(FIXTURE, "overlays", "arm3", "README.md"))).toBe(true);
-    const arms: readonly (1 | 2 | 3)[] = overlayLanded ? [1, 2, 3] : [1, 2];
+    // Arm 3's catalogs landed with T-526 (overlays/arm3/.story); every declared arm-3 carrier is checked like the others.
+    const arms: readonly (1 | 2 | 3)[] = [1, 2, 3];
     for (const arm of arms) {
       const root = arm === 2 ? arm2 : copy(arm);
       for (const fact of FACTS.facts) {
@@ -135,15 +140,225 @@ describe("continuity cases 4 and 5: compatibility (green today, pinned)", () => 
 });
 
 describe("continuity cases owned by later 1.16.0 tickets (RED evidence recorded by each owner)", () => {
-  it.todo("1 delivery tiers: T-2 (a) brief has no binding, suggested R1 and R2 by scopeTag logging, R3 absent (T-526; entry: the guide's PLAN instruction / brief file)");
-  it.todo("2 discovery then citation: R2 suggested, then cited via ticket update, then binding in the packet and enforced by the plan-pin guard (T-526; entry: brief, packet, plan-pin-guard)");
-  it.todo("6 no-path variant (b) delivers cap-logging by title-word match with the no-paths-named disclosure (T-523 + T-526)");
-  it.todo("7 EXISTING gate: a plan without the EXISTING line is retried (T-526; entry: PLAN report)");
-  it.todo("7n EXISTING negative: a grep transcript in the EXISTING line is a plan-review finding; asserts the reviewer prompt line (T-526; entry: PLAN_REVIEW instruction text)");
   it.todo("8 completion: T-3 move marks cap-logging review at FINALIZE; a report without knowledgeImpact is retried; stale-reference advances and lands in the handover (T-527)");
   it.todo("9 arm 2 subset: with the capability file removed, cases 1 to 5 and 7 pass and the disclosure says no capability inventory (T-526)");
-  it.todo("14 context manifest change detection on resume, replan and CODE_REVIEW entry (T-526 P-3)");
   it.todo("15 second-handoff maintenance: a disposition per impact, follow-up durable across a second session (T-527 P-1/P-2)");
+});
+
+/** Starts a plan-mode session on T-2 through the real guide; returns the session id, its dir, and the PLAN text. */
+async function startPlan(root: string): Promise<{ sid: string; dir: string; text: string }> {
+  const result = await handleAutonomousGuide(root, { sessionId: null, action: "start", mode: "plan", ticketId: "T-2" } as never);
+  const text = (result as { content: { text: string }[] }).content.map((c) => c.text).join("\n");
+  const sid = /\*\*Session:\*\*\s*([0-9a-f-]{36})/i.exec(text)?.[1];
+  expect(sid, text).toBeTruthy();
+  return { sid: sid!, dir: join(root, ".story", "sessions", sid!), text };
+}
+
+async function report(root: string, sid: string, rep: Record<string, unknown>): Promise<string> {
+  const result = await handleAutonomousGuide(root, { sessionId: sid, action: "report", report: rep } as never);
+  return (result as { content: { text: string }[] }).content.map((c) => c.text).join("\n");
+}
+
+const EXISTING_OK = "EXISTING: src/platform/logging/AppLogger.ts ; extend ; AppLogger already carries request ids and redaction";
+
+describe("continuity cases 1, 2, 6, 7, 7n and 14: the context brief (T-526)", () => {
+  it("1 delivery tiers: the guide's PLAN entry writes a brief with no binding, R2 and R1 suggested, R3 absent", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { dir, text } = await startPlan(root);
+    expect(text).toContain("## Context brief");
+    expect(text).toContain("context-brief.md");
+    const brief = readFileSync(join(dir, "context-brief.md"), "utf-8");
+    expect(brief).toContain("none: this item cites no rulings");
+    const suggested = brief.slice(brief.indexOf("## Suggested accepted rulings"), brief.indexOf("## Disclosure"));
+    expect(suggested.indexOf(`**${MAP.rulings.R2}**`)).toBeGreaterThan(-1);
+    expect(suggested.indexOf(`**${MAP.rulings.R1}**`)).toBeGreaterThan(suggested.indexOf(`**${MAP.rulings.R2}**`));
+    expect(suggested).toContain("tag:jobs (path src/jobs/)");
+    expect(brief).not.toContain(MAP.rulings.R3);
+    expect(brief).toContain("no capability inventory");
+  });
+
+  it("2 discovery then citation: suggested R2, cited on the item, then binding in the packet and enforced by the guard", async () => {
+    const root = copy(1, "T-2.a", true);
+    const before = await buildContextBrief(root, "T-2");
+    expect(before.suggested.map((x) => x.id)).toContain(MAP.rulings.R2);
+    const t = join(root, ".story", "tickets", "T-2.json");
+    writeFileSync(t, JSON.stringify({ ...JSON.parse(readFileSync(t, "utf-8")), citesRulings: [MAP.rulings.R2] }, null, 2));
+    const after = await buildContextBrief(root, "T-2");
+    expect(after.suggested.map((x) => x.id)).not.toContain(MAP.rulings.R2);
+    expect(after.binding).toHaveLength(1);
+    const res = await citationsForReviewTarget(root, "T-2");
+    expect(res.kind === "resolved" && res.citations.map((c) => c.citedId)).toEqual([MAP.rulings.R2]);
+    expect((await guardPlanNamesCitedRulings(root, "T-2", "# Plan\n\nNo ids here.")).ok).toBe(false);
+    expect((await guardPlanNamesCitedRulings(root, "T-2", `# Plan\n\nFollows ${MAP.rulings.R2}.`)).ok).toBe(true);
+    // Through the guide: the plan reviewer sees R2 as binding, never among the suggestions.
+    execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t.t", "commit", "-qam", "cite R2"], { cwd: root, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }, stdio: "ignore" });
+    const { sid, dir } = await startPlan(root);
+    writeFileSync(join(dir, "plan.md"), `# Plan\n\n${EXISTING_OK}\n\n1. Add logging per ${MAP.rulings.R2}.\n`);
+    const review = await report(root, sid, { completedAction: "plan_written" });
+    const suggestedAt = review.indexOf("# Suggested (not binding)");
+    expect(suggestedAt).toBeGreaterThan(-1);
+    expect(review.slice(0, suggestedAt)).toContain(MAP.rulings.R2);
+    expect(review.slice(suggestedAt, review.indexOf("# Plan checks"))).not.toContain(MAP.rulings.R2);
+  });
+
+  it("6 no-path variant (b): cap-logging by title word, with the no-paths-named disclosure", async () => {
+    const root = copy(3, "T-2.b", true);
+    const { dir } = await startPlan(root);
+    const brief = readFileSync(join(dir, "context-brief.md"), "utf-8");
+    expect(brief).toContain("(cap-logging)");
+    expect(brief).toContain("matched by title:logging");
+    expect(brief).toContain(NO_PATHS_NAMED);
+  });
+
+  it("7 EXISTING gate: a plan without the EXISTING line is retried; with it the plan reaches review", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { sid, dir } = await startPlan(root);
+    writeFileSync(join(dir, "plan.md"), "# Plan\n\n1. Add logging to src/jobs/JobQueue.ts.\n");
+    const retried = await report(root, sid, { completedAction: "plan_written" });
+    expect(retried).toContain("Plan not accepted: the plan has no EXISTING line.");
+    writeFileSync(join(dir, "plan.md"), "# Plan\n\nEXISTING: none\n\n1. Add logging.\n");
+    expect(await report(root, sid, { completedAction: "plan_written" })).toContain("says none without naming what was inspected");
+    writeFileSync(join(dir, "plan.md"), `# Plan\n\n${EXISTING_OK}\n\n1. Add logging to src/jobs/JobQueue.ts through AppLogger.\n`);
+    expect(await report(root, sid, { completedAction: "plan_written" })).toMatch(/Plan Review -- Round 1/);
+  });
+
+  it("7n EXISTING negative: the plan reviewer is told a grep transcript is a finding, and sees the suggestions and the manifest", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { sid, dir } = await startPlan(root);
+    writeFileSync(join(dir, "plan.md"), `# Plan\n\n${EXISTING_OK}\n\n1. Add logging.\n`);
+    const review = await report(root, sid, { completedAction: "plan_written" });
+    expect(review).toContain(PLAN_REVIEWER_CHECKS[0]);
+    expect(review).toContain(PLAN_REVIEWER_CHECKS[1]);
+    expect(review).toContain("# Suggested (not binding)");
+    expect(review).toContain(`- ${MAP.rulings.R2} (suggested by`);
+    expect(review).toContain("contextManifest: context-manifests/T-2-1");
+    const suggestedBlock = review.slice(review.indexOf("# Suggested (not binding)"), review.indexOf("# Plan checks"));
+    expect(suggestedBlock).not.toMatch(/\bcited\b/i);
+  });
+
+  it("14 change detection: replan, resume and CODE_REVIEW entry each detect a governing change on their own", async () => {
+    const obligation = `governing context changed: ${MAP.rulings.R2} withdrawn`;
+    const recipe = resolveRecipe("coding", {});
+    const outstandingOf = (state: unknown): string[] =>
+      ((state as { contextManifests?: Record<string, { outstanding: { id: string; kind: string }[] }> }).contextManifests?.["T-2"]?.outstanding ?? []).map((o) => `${o.id}:${o.kind}`);
+    /** A fresh plan session whose manifest predates R2's withdrawal: nothing is outstanding yet. */
+    const withdrawnAfterPublish = async (): Promise<{ root: string; sid: string; dir: string }> => {
+      const root = copy(1, "T-2.a", true);
+      const { sid, dir } = await startPlan(root);
+      const rulingFile = join(root, ".story", "rulings", `${MAP.rulings.R2}.json`);
+      writeFileSync(rulingFile, JSON.stringify({ ...JSON.parse(readFileSync(rulingFile, "utf-8")), status: "withdrawn" }, null, 2));
+      expect(outstandingOf(readSession(dir))).toEqual([]);
+      return { root, sid, dir };
+    };
+
+    // Replan: PLAN's own entry detects it, opens with the obligation, and the guard enforces it.
+    {
+      const { root, sid, dir } = await withdrawnAfterPublish();
+      const planCtx = new StageContext(root, dir, readSession(dir)!, recipe);
+      const replan = await new PlanStage().enter(planCtx);
+      expect("instruction" in replan && replan.instruction).toContain(obligation);
+      expect(outstandingOf(readSession(dir))).toEqual([`${MAP.rulings.R2}:withdrawn`]);
+      writeFileSync(join(dir, "plan.md"), `# Plan\n\n${EXISTING_OK}\n\n1. Add logging.\n`);
+      expect(await report(root, sid, { completedAction: "plan_written" })).toContain(`governing context changed and the plan does not address ${MAP.rulings.R2}`);
+    }
+
+    // CODE_REVIEW entry: its own first-round diff finds the change and sends the item back to PLAN.
+    {
+      const { root, dir } = await withdrawnAfterPublish();
+      const crCtx = new StageContext(root, dir, { ...readSession(dir)!, state: "CODE_REVIEW" } as never, recipe);
+      const cr = await new CodeReviewStage().enter(crCtx);
+      expect(cr).toMatchObject({ action: "back", target: "PLAN", reason: "governing_context_changed" });
+      expect(outstandingOf(crCtx.state)).toEqual([`${MAP.rulings.R2}:withdrawn`]);
+    }
+
+    // Resume at PLAN_REVIEW: the gate runs before the stage is entered and persists what it found.
+    {
+      const { root, sid, dir } = await withdrawnAfterPublish();
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+      const live = readSession(dir)!;
+      prepareForCompact(dir, writeSessionSync(dir, { ...live, state: "PLAN_REVIEW", git: { ...live.git, expectedHead: head } } as never), { expectedHead: head });
+      const resumed = await handleAutonomousGuide(root, { sessionId: sid, action: "resume" } as never);
+      const text = (resumed as { content: { text: string }[] }).content.map((c) => c.text).join("\n");
+      expect(text).toContain(`> ${obligation}`);
+      expect(outstandingOf(readSession(dir))).toEqual([`${MAP.rulings.R2}:withdrawn`]);
+    }
+  });
+
+  it("14u unreadable pointer map: CODE_REVIEW holds at entry on every round and refuses a verdict; it is never read as no obligations", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { dir } = await startPlan(root);
+    const recipe = resolveRecipe("coding", {});
+    const damaged = { ...readSession(dir)!, state: "CODE_REVIEW", contextManifests: { "T-2": { current: 7 } } } as never;
+    const hold = "Holding: this item's governing context cannot be verified (state.contextManifests is malformed";
+    const first = await new CodeReviewStage().enter(new StageContext(root, dir, damaged, recipe));
+    expect("instruction" in first && first.instruction).toContain(hold);
+    expect(first).not.toHaveProperty("action");
+    const later = { ...(damaged as object), reviews: { plan: [], code: [{ round: 1, reviewer: "agent", verdict: "revise", findingCount: 1, criticalCount: 0, majorCount: 1, suggestionCount: 0, timestamp: new Date().toISOString() }] } } as never;
+    const second = await new CodeReviewStage().enter(new StageContext(root, dir, later, recipe));
+    expect("instruction" in second && second.instruction).toContain(hold);
+    const verdict = await new CodeReviewStage().report(new StageContext(root, dir, damaged, recipe), { completedAction: "code_review_round", verdict: "approve", findings: [] } as never);
+    expect(verdict).toMatchObject({ action: "retry" });
+    expect((verdict as { instruction: string }).instruction).toContain(hold);
+  });
+
+  it("14t a governing check that throws is not a clear one: CODE_REVIEW holds at entry and refuses the first verdict", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { dir } = await startPlan(root);
+    const recipe = resolveRecipe("coding", {});
+    // The item vanishing from the ledger makes the brief, and so the check, throw.
+    rmSync(join(root, ".story", "tickets", "T-2.json"));
+    const state = { ...readSession(dir)!, state: "CODE_REVIEW" } as never;
+    const entered = await new CodeReviewStage().enter(new StageContext(root, dir, state, recipe));
+    expect("instruction" in entered && entered.instruction).toContain("Holding: this item's governing context cannot be verified (governing context could not be checked");
+    const verdict = await new CodeReviewStage().report(new StageContext(root, dir, state, recipe), { completedAction: "code_review_round", verdict: "approve", findings: [] } as never);
+    expect(verdict).toMatchObject({ action: "retry" });
+    expect((verdict as { instruction: string }).instruction).toContain("governing context could not be checked");
+  });
+
+  it("14r once a failed check is repaired, a verdict on a plan that a governing change overtook goes back to PLAN", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { dir } = await startPlan(root);
+    const recipe = resolveRecipe("coding", {});
+    const ticket = join(root, ".story", "tickets", "T-2.json");
+    const ticketBytes = readFileSync(ticket, "utf-8");
+    const rulingFile = join(root, ".story", "rulings", `${MAP.rulings.R2}.json`);
+    writeFileSync(rulingFile, JSON.stringify({ ...JSON.parse(readFileSync(rulingFile, "utf-8")), status: "withdrawn" }, null, 2));
+    rmSync(ticket);
+    const state = { ...readSession(dir)!, state: "CODE_REVIEW" } as never;
+    const entered = await new CodeReviewStage().enter(new StageContext(root, dir, state, recipe));
+    expect("instruction" in entered && entered.instruction).toContain("Holding:");
+    writeFileSync(ticket, ticketBytes);
+    const verdict = await new CodeReviewStage().report(new StageContext(root, dir, state, recipe), { completedAction: "code_review_round", verdict: "approve", findings: [] } as never);
+    expect(verdict).toMatchObject({ action: "back", target: "PLAN", reason: "governing_context_changed" });
+  });
+
+  it("P-1 pick entry: an auto-mode pick of T-2 is a PLAN entry and delivers the brief", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { dir } = await startPlan(root);
+    const live = readSession(dir)!;
+    const ctx = new StageContext(root, dir, { ...live, state: "PICK_TICKET", mode: "auto", ticket: undefined } as never, resolveRecipe("coding", {}));
+    const picked = await new PickTicketStage().report(ctx, { completedAction: "ticket_picked", ticketId: "T-2" });
+    expect(picked.action).toBe("advance");
+    const instruction = (picked as { result?: { instruction?: string } }).result?.instruction ?? "";
+    expect(instruction).toContain("## Context brief");
+    expect(readFileSync(join(dir, "context-brief.md"), "utf-8")).toContain(`**${MAP.rulings.R2}**`);
+    expect(existsSync(join(dir, "context-manifests", "T-2-2.json"))).toBe(true);
+  });
+
+  it("P-1 drift entry: HEAD moving while COMPACT was pending re-enters PLAN with a fresh brief", async () => {
+    const root = copy(1, "T-2.a", true);
+    const { sid, dir } = await startPlan(root);
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf-8" }).trim();
+    // A parentless sibling of HEAD: never an ancestor, so the resume reads it as external drift.
+    const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t.t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t.t" };
+    const sibling = execFileSync("git", ["commit-tree", `${head}^{tree}`, "-m", "sibling"], { cwd: root, env, encoding: "utf-8" }).trim();
+    prepareForCompact(dir, readSession(dir)!, { expectedHead: sibling });
+    const resumed = await handleAutonomousGuide(root, { sessionId: sid, action: "resume" } as never);
+    const text = (resumed as { content: { text: string }[] }).content.map((c) => c.text).join("\n");
+    expect(text).toContain("HEAD changed while COMPACT was pending");
+    expect(text).toContain("## Context brief");
+    expect(existsSync(join(dir, "context-manifests", "T-2-2.json"))).toBe(true);
+  });
 });
 
 describe("continuity cases 3 and 10 to 13: ruling lifecycle (T-522)", () => {

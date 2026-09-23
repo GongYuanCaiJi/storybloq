@@ -40,6 +40,8 @@ import {
   CapabilityCatalogSchema,
   CapabilitySchema,
   CAPABILITY_STATUSES,
+  hasPendingNote,
+  PendingNoteSchema,
   type Capability,
   type CapabilityCatalog,
   type CapabilityStatus,
@@ -120,6 +122,34 @@ function defined<T extends Record<string, unknown>>(obj: T): T {
 
 /** Thrown inside a stamp transaction to abort it without a write. */
 class NothingToStamp extends Error {}
+
+/**
+ * A refusal decided INSIDE a transaction, the `TermRefusal` pattern: `mutate`
+ * writes whatever its function returns, the unchanged document included, so a
+ * refusal must throw to abort the write. Only `refusing` catches it.
+ */
+class CapabilityRefusal extends Error {
+  constructor(readonly result: CommandResult) {
+    super("capability write refused");
+  }
+}
+
+async function refusing(run: () => Promise<CommandResult>): Promise<CommandResult> {
+  try {
+    return await run();
+  } catch (err) {
+    if (err instanceof CapabilityRefusal) return err.result;
+    throw err;
+  }
+}
+
+/**
+ * Pending entries first, then the stored order: a list read by a human or by
+ * `/story` Step 2 should open with the work somebody deferred.
+ */
+function pendingFirst<T extends { cap: Capability }>(rows: readonly T[]): T[] {
+  return [...rows.filter((r) => hasPendingNote(r.cap)), ...rows.filter((r) => !hasPendingNote(r.cap))];
+}
 
 function parseEntry(candidate: unknown): Capability {
   const parsed = CapabilitySchema.safeParse(candidate);
@@ -257,6 +287,7 @@ function renderEntry(cap: Capability, checked: CapabilityCheckEntry | undefined)
   if (cap.items?.length) lines.push(`- Items: ${cap.items.map((i) => catalogText(i)).join(", ")}`);
   if (cap.terms?.length) lines.push(`- Terms: ${cap.terms.map((t) => catalogText(t)).join(", ")}`);
   lines.push(`- Checked at: ${catalogText(cap.checkedAt.sha.slice(0, 12))} (${catalogText(cap.checkedAt.date)})`);
+  if (hasPendingNote(cap)) lines.push(`- Pending: review: ${catalogText(cap.pendingNote!)}`);
   if (checked && checked.results.length > 0) {
     lines.push("- Findings:");
     lines.push(...renderResults(checked));
@@ -293,9 +324,12 @@ export async function handleCapabilityList(
   // Filtering runs on the EFFECTIVE status, not the stored one. `--status
   // review` that only matched the manual flag would hide exactly the entries
   // the flag is meant to find: the ones the check just marked.
-  const rows = doc.capabilities
-    .map((cap) => ({ cap, checked: statusOf(report, cap.id) }))
-    .filter(({ cap, checked }) => status === undefined || (checked?.effectiveStatus ?? cap.status) === status);
+  const rows = pendingFirst(
+    doc.capabilities
+      .map((cap) => ({ cap, checked: statusOf(report, cap.id) }))
+      .filter(({ cap, checked }) => status === undefined || (checked?.effectiveStatus ?? cap.status) === status),
+  );
+  const pending = doc.capabilities.filter((c) => hasPendingNote(c)).length;
 
   if (ctx.format === "json") {
     return {
@@ -303,6 +337,7 @@ export async function handleCapabilityList(
         successEnvelope({
           present,
           inventorySize: doc.capabilities.length,
+          pending,
           freshnessChecked: !skip && report.head !== null,
           head: report.head,
           unchecked: report.unchecked,
@@ -318,7 +353,7 @@ export async function handleCapabilityList(
     };
   }
 
-  const lines = [`# Capabilities (${rows.length} of ${doc.capabilities.length})`, ""];
+  const lines = [`# Capabilities (${rows.length} of ${doc.capabilities.length}${pending > 0 ? `, pending: ${pending}` : ""})`, ""];
   lines.push(...freshnessCaveat(report, skip));
   if (!present) {
     lines.push("", "No capability inventory yet. `storybloq capability add` creates the first entry.");
@@ -333,6 +368,7 @@ export async function handleCapabilityList(
     lines.push("", `- **${catalogText(cap.name)}** (${catalogText(cap.id)}) [${catalogText(effective)}]`);
     lines.push(`  ${catalogText(cap.summary)}`);
     lines.push(`  ${cap.entryPoints.map((p) => catalogPath(p)).join(", ")}`);
+    if (hasPendingNote(cap)) lines.push(`  review: ${catalogText(cap.pendingNote!)}`);
     lines.push(...renderResults(checked));
   }
   return { output: lines.join("\n") };
@@ -425,6 +461,72 @@ export async function handleCapabilityMatch(
 }
 
 // --- write handlers ---
+
+/** The entry with no `pendingNote` key at all, rather than an empty one. */
+function withoutPendingNote(entry: Capability): Capability {
+  const { pendingNote: _cleared, ...rest } = entry;
+  return rest as Capability;
+}
+
+export interface CapabilityDeferInput {
+  readonly id: string;
+  readonly note: string;
+  /** A follow-up issue that owns the deferred work; it must exist in the ledger. */
+  readonly issue?: string;
+}
+
+/**
+ * T-526 (3.7): record work owed on an entry without doing it. The narrowest
+ * write in this file: it sets `pendingNote` and the stored `review` flag and
+ * touches nothing else, and it runs NO structural check, because the reason to
+ * defer is usually that the entry is already wrong (its path was renamed or
+ * deleted) and a check would refuse the very write that records that.
+ *
+ * Not refused on a conflict record: no catalog conflict-record mechanism
+ * exists yet (T-529 owns it). An unreadable file refuses through `mutate`'s
+ * own load.
+ */
+export async function handleCapabilityDefer(
+  input: CapabilityDeferInput,
+  format: OutputFormat,
+  root: string,
+  ctx?: CommandContext,
+): Promise<CommandResult> {
+  const note = input.note.trim();
+  if (note.length === 0) {
+    throw new CliValidationError("invalid_input", "`capability defer` needs --note naming the owed work; an empty note would clear nothing and flag nothing.");
+  }
+  const parsedNote = PendingNoteSchema.safeParse(note);
+  if (!parsedNote.success) throw new CliValidationError("invalid_input", parsedNote.error.issues[0]?.message ?? "invalid note");
+  if (input.issue !== undefined && ctx !== undefined) {
+    const known = ctx.state.issues.some((i) => i.id === input.issue || (i as { displayId?: string | null }).displayId === input.issue);
+    if (!known) throw new CliValidationError("not_found", `Issue ${catalogText(input.issue)} not found: --issue names the follow-up that owns the deferred work.`);
+  }
+  const text = input.issue !== undefined && !note.includes(input.issue) ? `${note} (follow-up ${input.issue})` : note;
+  return refusing(async () => {
+    let written: Capability | null = null;
+    await capabilityCatalog.mutate(root, (current) => {
+      const index = current.capabilities.findIndex((c) => c.id === input.id);
+      if (index === -1) {
+        throw new CapabilityRefusal({
+          output: formatError("not_found", `Capability ${catalogText(input.id)} not found.`, format),
+          exitCode: ExitCode.USER_ERROR,
+          errorCode: "not_found",
+        });
+      }
+      const next = { ...current.capabilities[index]!, pendingNote: text, status: "review" as const };
+      written = next;
+      const capabilities = [...current.capabilities];
+      capabilities[index] = next;
+      return { ...current, capabilities };
+    });
+    const entry: Capability = written!;
+    if (format === "json") return { output: JSON.stringify(successEnvelope({ capability: entry }), null, 2) };
+    return {
+      output: `Deferred ${catalogText(entry.id)}: review: ${catalogText(text)}. It reads \`review\` until \`capability check --stamp ${catalogText(entry.id)} --clear-pending\`.`,
+    };
+  });
+}
 
 export async function handleCapabilityAdd(
   input: CapabilityWriteInput,
@@ -534,6 +636,12 @@ export async function handleCapabilityUpdate(
 export interface CapabilityCheckInput {
   readonly stamp?: readonly string[];
   readonly stampAll?: boolean;
+  /**
+   * T-526 (3.7): remove the pending note in the same write that stamps. A
+   * stamp alone is refused while a note is set: the note names work nobody
+   * has done, and a stamp says somebody looked.
+   */
+  readonly clearPending?: boolean;
 }
 
 /**
@@ -552,8 +660,15 @@ export async function handleCapabilityCheck(
   root: string,
   ctx: CommandContext,
 ): Promise<CommandResult> {
+  if (input.clearPending === true && input.stampAll !== true && (input.stamp ?? []).length === 0) {
+    throw new CliValidationError(
+      "invalid_input",
+      "--clear-pending clears a pending note in the same write as a stamp: pass it with --stamp <id>. A note is only cleared by the act of having looked.",
+    );
+  }
   const { doc } = capabilityCatalog.load(root);
   const report = await checkCapabilities(root, doc.capabilities, ctx.state, {});
+  const storedById = new Map(doc.capabilities.map((c) => [c.id, c]));
 
   const requested = input.stampAll === true
     ? report.entries.map((e) => e.id)
@@ -567,13 +682,19 @@ export async function handleCapabilityCheck(
     };
   }
 
-  const stampable = requested.filter((id) => isStampable(statusOf(report, id)!));
+  const blockedByNote = (id: string): boolean => input.clearPending !== true && hasPendingNote(storedById.get(id)!);
+  const stampable = requested.filter((id) => isStampable(statusOf(report, id)!) && !blockedByNote(id));
   const refused = requested
     .filter((id) => !stampable.includes(id))
     .map((id) => {
       const entry = statusOf(report, id)!;
-      const blocking = entry.results.filter((r) => r.cls !== "freshness");
-      return { id, reasons: blocking.map((r) => r.detail) };
+      const blocking = entry.results.filter((r) => r.cls !== "freshness").map((r) => r.detail);
+      if (blockedByNote(id)) {
+        blocking.push(
+          `a pending note is set (${sanitizeDisplayText(storedById.get(id)!.pendingNote!)}): do the deferred work, then stamp with --clear-pending`,
+        );
+      }
+      return { id, reasons: blocking };
     });
 
   let stamped: { sha: string; date: string } | null = null;
@@ -634,7 +755,7 @@ export async function handleCapabilityCheck(
             // Stamping clears the manual `review` flag as well as the freshness
             // finding: the flag means "somebody should look", and this command
             // is the act of having looked.
-            eligible.has(c.id) ? { ...c, checkedAt: checkpoint, status: "current" as const } : c,
+            eligible.has(c.id) ? withoutPendingNote({ ...c, checkedAt: checkpoint, status: "current" as const }) : c,
           ),
         };
       });

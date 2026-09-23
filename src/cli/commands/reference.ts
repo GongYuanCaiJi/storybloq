@@ -303,8 +303,14 @@ export const COMMANDS: readonly CommandEntry[] = [
   {
     name: "capability check",
     description: "Check every capability against HEAD; --stamp re-records the checkpoint after re-reading an entry. Refused for a structural finding, which a new sha would hide rather than fix",
-    usage: "storybloq capability check [--stamp <value>] [--stamp-all] [--format <json|md>]",
-    flags: ["--stamp", "--stamp-all", "--format"],
+    usage: "storybloq capability check [--stamp <value>] [--stamp-all] [--clear-pending] [--format <json|md>]",
+    flags: ["--stamp", "--stamp-all", "--clear-pending", "--format"],
+  },
+  {
+    name: "capability defer",
+    description: "Record owed work on a capability as a pending note: it stays current, renders pending first, and a stamp is refused until --clear-pending",
+    usage: "storybloq capability defer <id> --note <value> [--issue <value>] [--format <json|md>]",
+    flags: ["--note", "--issue", "--format"],
   },
   {
     name: "term list",
@@ -339,8 +345,20 @@ export const COMMANDS: readonly CommandEntry[] = [
   {
     name: "term update",
     description: "Edit a term. Supplied list flags replace the stored lists",
-    usage: "storybloq term update <id> [--term <value>] [--definition <value>] [--distinction <value>] [--alias <value>] [--capability <value>] [--ruling <value>] [--core] [--added-by <value>] [--format <json|md>]",
-    flags: ["--term", "--definition", "--distinction", "--alias", "--capability", "--ruling", "--core", "--added-by", "--format"],
+    usage: "storybloq term update <id> [--term <value>] [--definition <value>] [--distinction <value>] [--alias <value>] [--capability <value>] [--ruling <value>] [--core] [--added-by <value>] [--clear-pending] [--format <json|md>]",
+    flags: ["--term", "--definition", "--distinction", "--alias", "--capability", "--ruling", "--core", "--added-by", "--clear-pending", "--format"],
+  },
+  {
+    name: "term defer",
+    description: "Record owed work on a term as a pending note, rendered pending first until term update --clear-pending",
+    usage: "storybloq term defer <id> --note <value> [--format <json|md>]",
+    flags: ["--note", "--format"],
+  },
+  {
+    name: "brief",
+    description: "The context brief for a ticket or issue: binding rulings, suggested rulings, capabilities, terms, lessons, and what discovery could not see. Read-only; a suggestion binds nothing. --rebase adopts a session's provisional context manifest after recovery",
+    usage: "storybloq brief <id> [--budget <value>] [--rebase <value>] [--reason <value>] [--by <value>] [--format <json|md>]",
+    flags: ["--budget", "--rebase", "--reason", "--by", "--format"],
   },
   {
     name: "term remove",
@@ -1023,6 +1041,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_capability_add", description: "Add a capability; stamps the checkpoint at HEAD, recording that its entry points were read", params: ["id","name","summary","entryPoints","contract","example?","cli?","mcp?","app?","files?","rulings?","items?","terms?","status?"] },
   { name: "storybloq_capability_update", description: "Edit a capability; supplied lists replace stored ones and the checkpoint is never touched", params: ["id","name?","summary?","entryPoints?","contract?","example?","cli?","mcp?","app?","files?","rulings?","items?","terms?","status?"] },
   { name: "storybloq_capability_check", description: "Check every capability against HEAD; stamp re-records the checkpoint, refused for a structural or incomplete finding", params: ["stamp?","stampAll?"] },
+  { name: "storybloq_context_brief", description: "The context brief for a ticket or issue: binding and suggested rulings with reasons, capabilities, terms, lessons, and what discovery could not see. Suggestions bind nothing", params: ["id","budget?"] },
   { name: "storybloq_term_match", description: "Which glossary terms appear in a piece of text. Whole-word, case-insensitive and advisory: a match suggests a term and changes nothing", params: ["text"] },
   { name: "storybloq_term_list", description: "List the glossary, or its bounded names-only digest (core-first over the cap)", params: ["core?","thin?","digest?"] },
   { name: "storybloq_term_get", description: "Get one term: definition, distinction, and the capabilities and rulings behind it", params: ["id"] },

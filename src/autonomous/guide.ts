@@ -142,6 +142,7 @@ import { sanitizeDisplayPath, sanitizeDisplayText } from "../core/display-text.j
 import { escapeMarkdownDocumentStrict, formatCitedRulingsSection } from "../core/output-formatter.js";
 import { loadCitationContext } from "../core/ruling-loader.js";
 import { resolveEntityCitations } from "../core/ruling.js";
+import { runGoverningGate, withPlanContext } from "./plan-context.js";
 
 /**
  * ISS-899: whether this caller is refused, and WHY, which the call sites need
@@ -2132,7 +2133,7 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
         const citedRulingsSection = formatCitedRulingsSection(
           resolveEntityCitations(ticket, loadCitationContext(root)),
         );
-        instruction = [
+        const planInstruction = [
           `# ${modeLabels[mode]} -- ${ticketResolution.displayId}: ${ticket.title}`,
           "",
           `Write an implementation plan for ticket **${ticketResolution.displayId}**: ${ticket.title}`,
@@ -2147,6 +2148,8 @@ async function handleStart(root: string, args: GuideInput): Promise<McpToolResul
           `{ "sessionId": "${updated.sessionId}", "action": "report", "report": { "completedAction": "plan_written" } }`,
           '```',
         ].join("\n");
+        // T-526 (P-1): the plan-mode and guided start is a PLAN entry.
+        instruction = await withPlanContext(new StageContext(root, dir, written, resolvedRecipe), planInstruction);
       }
 
       const reminders = mode === "guided"
@@ -3497,7 +3500,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
       ? { ...info.state.ticket, realizedRisk: undefined, lastPlanHash: undefined }
       : undefined;
 
-    const driftWritten = writeSessionAndRefresh(root, info.dir, {
+    let driftWritten = writeSessionAndRefresh(root, info.dir, {
       ...refreshedResumeState,
       state: mapping.state,
       previousState: "COMPACT",
@@ -3546,10 +3549,20 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
     });
     removeResumeMarker(root);
 
+    // T-526 (P-3): drift runs the gate before anything is rebuilt. PLAN runs it
+    // inside its own entry; the other targets run it here.
+    let driftGovernance: string[] = [];
+    if (mapping.state !== "PLAN" && driftWritten.ticket) {
+      const gateCtx = new StageContext(root, info.dir, driftWritten, resolveRecipeFromState(driftWritten));
+      driftGovernance = (await runGoverningGate(gateCtx)).lines;
+      driftWritten = gateCtx.state;
+    }
+
     // State-specific actionable instructions after drift recovery
     const driftPreamble = [
       `**HEAD changed while COMPACT was pending** (expected ${expectedHead.slice(0, 8)}, got ${headResult.data.hash.slice(0, 8)}). Review state invalidated.`,
       compactionNotice,
+      ...driftGovernance.map((l) => `> ${l}`),
       "",
     ].filter(Boolean).join("\n\n");
 
@@ -3609,8 +3622,10 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
 
     if (mapping.state === "PLAN") {
       const ticketInfo = driftWritten.ticket ? `for ${displaySessionTicket(driftWritten.ticket)}: ${driftWritten.ticket.title}` : "";
-      return guideResult(driftWritten, "PLAN", {
-        instruction: [
+      // T-526 (P-1): drift recovery into PLAN is a PLAN entry; the gate runs
+      // against the pre-drift manifest before the brief is rebuilt.
+      const planCtx = new StageContext(root, info.dir, driftWritten, resolveRecipeFromState(driftWritten));
+      const planInstruction = await withPlanContext(planCtx, [
           `# ${resumeHeading} -- HEAD Mismatch`,
           "",
           `${driftPreamble}Write a new implementation plan ${ticketInfo}. Save to \`.story/sessions/${driftWritten.sessionId}/plan.md\`.`,
@@ -3619,7 +3634,9 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
           '```json',
           `{ "sessionId": "${driftWritten.sessionId}", "action": "report", "report": { "completedAction": "plan_written" } }`,
           '```',
-        ].join("\n"),
+        ].join("\n"));
+      return guideResult(planCtx.state, "PLAN", {
+        instruction: planInstruction,
         reminders: ["Previous plan/reviews invalidated by drift. Write a fresh plan."],
       });
     }
@@ -3830,6 +3847,10 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
   if (resumeStage) {
     const recipe = resolveRecipeFromState(written);
     const ctx = new StageContext(root, info.dir, written, recipe);
+    // T-526 (P-3): a resume diffs the item's context manifest against the
+    // ledger. PLAN runs the same gate inside its own entry; everywhere else it
+    // runs here, before the stage is entered, so CODE_REVIEW sees the result.
+    const governingLines = resumeState === "PLAN" ? [] : (await runGoverningGate(ctx)).lines;
     const enterResult = await resumeStage.enter(ctx);
 
     if (isStageAdvance(enterResult)) {
@@ -3845,6 +3866,7 @@ async function handleResume(root: string, args: GuideInput): Promise<McpToolResu
         written.ticket ? `Working on: **${displaySessionTicket(written.ticket)}: ${written.ticket.title}**` : "",
         "",
         modeContext,
+        ...governingLines.map((l) => `> ${l}`),
         "",
         "---",
         "",

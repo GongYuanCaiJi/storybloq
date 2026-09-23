@@ -77,7 +77,7 @@ describe("PlanStage claim acquisition fails closed on a lock/IO error (ISS-1051)
     }));
     sessionDir = join(root, ".story", "sessions", "s");
     mkdirSync(sessionDir, { recursive: true });
-    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\nSome content.\n");
+    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\nEXISTING: none found within src/; closest candidate lacks the behaviour; new implementation limited to this fixture\nSome content.\n");
     writeFileSync(
       join(root, ".story", "tickets", "T-001.json"),
       JSON.stringify({

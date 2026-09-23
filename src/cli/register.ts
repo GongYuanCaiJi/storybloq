@@ -30,6 +30,7 @@ import {
   handleCapabilityAdd,
   handleCapabilityUpdate,
   handleCapabilityCheck,
+  handleCapabilityDefer,
   type CapabilityWriteInput,
 } from "./commands/capability.js";
 import {
@@ -40,8 +41,10 @@ import {
   handleTermAdd,
   handleTermUpdate,
   handleTermRemove,
+  handleTermDefer,
   type TermWriteInput,
 } from "./commands/term.js";
+import { handleBrief, handleBriefRebase } from "./commands/brief.js";
 
 // Shared comma/empty/trim/emptyAfterSplit combinations. See array-options.ts for
 // what each axis means and ISS-886 for why they are declared per registration.
@@ -6368,7 +6371,9 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
           (y2) =>
             addFormatOption(
               arrayOptions(
-                y2.option("stamp-all", { type: "boolean", describe: "Re-stamp every entry whose only findings are freshness findings" }),
+                y2
+                  .option("stamp-all", { type: "boolean", describe: "Re-stamp every entry whose only findings are freshness findings" })
+                  .option("clear-pending", { type: "boolean", describe: "Clear the pending note in the same write as the stamp (a stamp alone is refused while a note is set)" }),
                 { stamp: { ...SPLIT_LIST, describe: "Capability ID to re-stamp after re-reading it (repeatable)" } },
               ),
             ),
@@ -6379,7 +6384,35 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
             // write from inside the handler.
             await runReadCommand(format, (ctx) =>
               handleCapabilityCheck(
-                { stamp: argv.stamp as string[] | undefined, stampAll: argv["stamp-all"] as boolean | undefined },
+                {
+                  stamp: argv.stamp as string[] | undefined,
+                  stampAll: argv["stamp-all"] as boolean | undefined,
+                  clearPending: argv["clear-pending"] as boolean | undefined,
+                },
+                format,
+                ctx.root,
+                ctx,
+              ),
+            );
+          },
+        )
+        .command(
+          "defer <id>",
+          "Record work owed on a capability without doing it: sets a pending note and the review flag, touches nothing else, runs no check",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Capability ID" })
+                .option("note", { type: "string", demandOption: true, describe: "One sentence naming the owed work" })
+                .option("issue", { type: "string", describe: "Follow-up issue that owns the work (must exist)" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            // Through the read pipeline for ctx.state (the --issue lookup); the
+            // write happens inside the handler, as `check` does it.
+            await runReadCommand(format, (ctx) =>
+              handleCapabilityDefer(
+                { id: argv.id as string, note: argv.note as string, issue: argv.issue as string | undefined },
                 format,
                 ctx.root,
                 ctx,
@@ -6562,7 +6595,8 @@ export function registerTermCommand(yargs: Argv): Argv {
                   .option("definition", { type: "string", describe: "One sentence: what it means here" })
                   .option("distinction", { type: "string", describe: "One sentence: what it is NOT" })
                   .option("core", { type: "boolean", describe: "Mark or unmark as core" })
-                  .option("added-by", { type: "string", describe: "Who filed it" }),
+                  .option("added-by", { type: "string", describe: "Who filed it" })
+                  .option("clear-pending", { type: "boolean", describe: "Clear the pending note set by term defer" }),
                 {
                   alias: { ...LITERAL_DROP_BLANK, describe: "Aliases, REPLACING the current list (repeatable; a comma is legal in a phrase, so repeat the flag)" },
                   capability: { ...SPLIT_LIST, describe: "Capability IDs, replacing the current list (repeatable)" },
@@ -6572,7 +6606,23 @@ export function registerTermCommand(yargs: Argv): Argv {
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCatalogWrite(format, (root) => handleTermUpdate({ ...termWriteInput(argv), id: argv.id as string }, format, root));
+            await runCatalogWrite(format, (root) =>
+              handleTermUpdate({ ...termWriteInput(argv), id: argv.id as string, clearPending: argv["clear-pending"] as boolean | undefined }, format, root),
+            );
+          },
+        )
+        .command(
+          "defer <id>",
+          "Record work owed on a term without doing it: sets a pending note, touches nothing else",
+          (y2) =>
+            addFormatOption(
+              y2
+                .positional("id", { type: "string", demandOption: true, describe: "Term ID" })
+                .option("note", { type: "string", demandOption: true, describe: "One sentence naming the owed work" }),
+            ),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            await runCatalogWrite(format, (root) => handleTermDefer({ id: argv.id as string, note: argv.note as string }, format, root));
           },
         )
         .command(
@@ -6600,4 +6650,38 @@ function termWriteInput(argv: Record<string, unknown>): TermWriteInput {
     core: argv.core as boolean | undefined,
     addedBy: argv["added-by"] as string | undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// brief (T-526)
+// ---------------------------------------------------------------------------
+
+export function registerBriefCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "brief <id>",
+    "The context brief for a ticket or issue: its binding rulings, suggested rulings, capabilities, terms, and what discovery could not see. Read-only; suggestions bind nothing.",
+    (y) =>
+      addFormatOption(
+        y
+          .positional("id", { type: "string", demandOption: true, describe: "Ticket or issue ID (with --rebase, the item whose manifest is rebased)" })
+          .option("budget", { type: "number", describe: "Byte budget for the rendered brief (default 16000)" })
+          .option("rebase", { type: "string", describe: "Session ID: adopt that session's latest provisional context manifest for <id> after recovery" })
+          .option("reason", { type: "string", describe: "With --rebase: why the provisional context is being adopted (required)" })
+          .option("by", { type: "string", describe: "With --rebase: who is adopting it", default: "cli" }),
+      ),
+    async (argv) => {
+      const format = parseOutputFormat(argv.format);
+      if (argv.rebase !== undefined) {
+        await runCatalogWrite(format, (root) =>
+          handleBriefRebase(
+            { sessionId: argv.rebase as string, item: argv.id as string, reason: (argv.reason as string | undefined) ?? "", by: argv.by as string },
+            format,
+            root,
+          ),
+        );
+        return;
+      }
+      await runReadCommand(format, (ctx) => handleBrief(argv.id as string, { budget: argv.budget }, ctx));
+    },
+  );
 }

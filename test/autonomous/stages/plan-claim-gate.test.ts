@@ -170,7 +170,7 @@ describe("PLAN stage claim handling (ISS-759)", () => {
       // Claim held by the SAME user but on a previous per-ticket branch.
       claim: { user: "me@example.com", branch: "story/T-001-old-attempt", since: NOW },
     });
-    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\n1. Do the thing.\n", "utf-8");
+    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\nEXISTING: none found within src/; closest candidate lacks the behaviour; new implementation limited to this fixture\n1. Do the thing.\n", "utf-8");
 
     const state = makeState({
       ticket: { id: "T-001", title: "Test ticket", claimed: true },
@@ -194,7 +194,7 @@ describe("PLAN stage claim handling (ISS-759)", () => {
       ...baseTicket,
       claim: { user: "rival@example.com", branch: "feature/rival", since: NOW },
     });
-    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\n1. Do the thing.\n", "utf-8");
+    writeFileSync(join(sessionDir, "plan.md"), "# Plan\n\nEXISTING: none found within src/; closest candidate lacks the behaviour; new implementation limited to this fixture\n1. Do the thing.\n", "utf-8");
 
     const state = makeState({
       ticket: { id: "T-001", title: "Test ticket", claimed: true },

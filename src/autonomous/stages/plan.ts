@@ -8,6 +8,9 @@ import type { GuideReportInput } from "../session-types.js";
 import { PARK_ACTION, parkCurrentTicket, parkHintLines } from "./park.js";
 import { normalizeRiskLevel } from "../review-depth.js";
 import { canAcquireTicketClaim } from "../candidate-authority.js";
+import { currentPointer, existingLineProblem, existingRetryInstruction, withPlanContext } from "../plan-context.js";
+import { currentItemId, mustAddress, readContextManifests } from "../context-manifest.js";
+import { getStage } from "./registry.js";
 
 /** Read a file, return empty string on error. */
 function readFileSafe(path: string): string {
@@ -34,8 +37,7 @@ export class PlanStage implements WorkflowStage {
 
   async enter(ctx: StageContext): Promise<StageResult> {
     const ticket = ctx.state.ticket;
-    return {
-      instruction: [
+    const instruction = [
         `# Plan for ${ticket?.id ?? "unknown"}: ${ticket?.title ?? ""}`,
         "",
         `Write an implementation plan for this ticket. Save it to \`.story/sessions/${ctx.state.sessionId}/plan.md\`.`,
@@ -50,7 +52,10 @@ export class PlanStage implements WorkflowStage {
           ctx.state.sessionId,
           ((ctx.state as Record<string, unknown>).planGateNonApprovals as number | undefined) ?? 0,
         ),
-      ].join("\n"),
+      ].join("\n");
+    return {
+      // T-526 (P-1): replan and resume enter here; the brief is rebuilt and published on every entry.
+      instruction: await withPlanContext(ctx, instruction),
       reminders: [
         "Write the plan as a markdown file -- do NOT use client-native plan mode.",
         "Do NOT ask the user for approval.",
@@ -129,6 +134,23 @@ export class PlanStage implements WorkflowStage {
     const planHash = simpleHash(planContent);
     if (ctx.state.ticket?.lastPlanHash && ctx.state.ticket.lastPlanHash === planHash) {
       return { action: "retry", instruction: "Plan has not changed since the last review. Address the review findings, then revise the plan and call me again." };
+    }
+
+    // T-526 (B-D): the EXISTING conclusion and the governing-change
+    // obligations. After the unchanged-plan check, so that plan is named as
+    // such first, and BEFORE the claim: the claim mints an epoch that only
+    // reaches the draft on the advance, so a retry after it would drop the
+    // epoch. PLAN is ticket-only; the issue guard keeps it that way.
+    if (!ctx.state.currentIssue) {
+      const problem = existingLineProblem(planContent);
+      if (problem !== null) return { action: "retry", instruction: existingRetryInstruction(problem) };
+      const owed = mustAddress(currentPointer(ctx)).filter((id) => !planContent.includes(id));
+      if (owed.length > 0) {
+        return {
+          action: "retry",
+          instruction: `Plan not accepted: governing context changed and the plan does not address ${owed.join(", ")}. Read each with \`storybloq ruling get <id>\`, say in the plan how it affects this work, and call me again.`,
+        };
+      }
     }
 
     // Preserve the ticket's plan-time risk seed. Legacy sessions without a
@@ -222,6 +244,18 @@ export class PlanStage implements WorkflowStage {
           transitionedFrom: "PLAN",
         },
       };
+    }
+
+    // T-526: with plan review off there is no approval to clear obligations on,
+    // so a plan that named every one of them (checked above) clears them here.
+    const planReview = getStage("PLAN_REVIEW");
+    const item = currentItemId(ctx.state);
+    if (item !== null && planReview?.skip?.(ctx)) {
+      const read = readContextManifests((ctx.state as { contextManifests?: unknown }).contextManifests);
+      const pointer = read.ok ? read.map[item] : undefined;
+      if (read.ok && pointer && pointer.recovery === null) {
+        ctx.updateDraft({ contextManifests: { ...read.map, [item]: { ...pointer, outstanding: [], planApprovalInvalidated: null } } } as Partial<typeof ctx.state>);
+      }
     }
 
     // Stage field updates (persisted atomically with state transition by processAdvance)

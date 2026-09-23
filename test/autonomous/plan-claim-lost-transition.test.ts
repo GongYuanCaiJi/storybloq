@@ -98,7 +98,7 @@ describe("PLAN claim-lost transition to PICK_TICKET (ISS-767)", () => {
       git: { branch: "main", mergeBase: "abc123", expectedHead: "abc123", initHead: "abc123" },
       reviews: { plan: [], code: [] },
     } as unknown as FullSessionState);
-    writeFileSync(join(sessDir, "plan.md"), "# Plan\n\n1. Do the thing.\n", "utf-8");
+    writeFileSync(join(sessDir, "plan.md"), "# Plan\n\nEXISTING: none found within src/; closest candidate lacks the behaviour; new implementation limited to this fixture\n1. Do the thing.\n", "utf-8");
 
     const result = await handleAutonomousGuide(root, {
       action: "report",
