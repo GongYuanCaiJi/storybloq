@@ -17,6 +17,7 @@ import { COMPACT_NEEDED_ADVICE, basisText, renderUsageAdvisory } from "../../cor
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
 import { scanTail } from "../../core/session-intel/transcript-scan.js";
+import type { SubagentHookSignal } from "../../autonomous/subagent-compaction.js";
 
 export interface SessionIntelOptions {
   readonly cwd?: string;
@@ -159,6 +160,8 @@ export interface SessionIntelStartOptions {
   readonly transcriptPath?: string;
   readonly client?: "claude" | "codex";
   readonly now?: number;
+  /** ISS-1307: explicit subagent signals from hook stdin; a subagent's start is not this session's. */
+  readonly subagent?: SubagentHookSignal;
   /** Test seams. */
   readonly projectsDir?: string;
   readonly userSettingsPath?: string;
@@ -185,6 +188,7 @@ export function handleSessionIntelStart(options: SessionIntelStartOptions = {}):
   const skipped = (reason: string): SessionIntelStartOutcome => ({ status: "skipped", reason, capture: null, reconcile: null });
   try {
     if ((options.client ?? "claude") !== "claude") return skipped("client is not Claude");
+    if (options.subagent && (options.subagent.agentId || options.subagent.viaTranscriptPath)) return skipped("subagent hook");
     const source = options.source ?? "startup";
     if (!CAPTURE_SOURCES.has(source)) return skipped(`unknown source ${source}`);
     const sessionId = options.sessionId ?? null;

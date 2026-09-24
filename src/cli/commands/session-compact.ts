@@ -89,6 +89,14 @@ import {
 } from "../../bus/index.js";
 import { spawnAutoAttachBestEffort } from "../../bus/auto-attach-spawn.js";
 import { autoAttachConvergenceNeeded } from "../../bus/auto-attach-gate.js";
+import {
+  classifyPreCompact,
+  classifySessionStart,
+  isSubagentTranscriptPath,
+  type ClassifyOptions,
+  type SubagentCompactionVerdict,
+  type SubagentHookSignal,
+} from "../../autonomous/subagent-compaction.js";
 
 // ---------------------------------------------------------------------------
 // session-compact-prepare (PreCompact hook)
@@ -107,6 +115,12 @@ export interface SessionCompactPrepareOptions {
   readonly clientTaskId?: string;
   readonly cwd?: string;
   readonly transcriptPath?: string;
+  /** ISS-1307: PreCompact `trigger` ("auto" | "manual"). */
+  readonly trigger?: string;
+  /** ISS-1307: explicit subagent signals from hook stdin. */
+  readonly subagent?: SubagentHookSignal;
+  /** ISS-1307 test seams for the subagent classification. */
+  readonly classify?: ClassifyOptions;
 }
 
 export async function handleSessionCompactPrepare(
@@ -121,6 +135,29 @@ export async function handleSessionCompactPrepare(
     : process.env.CLAUDE_CODE_SESSION_ID;
   const clientTaskId = normalizeClientTaskId(options.clientTaskId)
     ?? normalizeClientTaskId(environmentTaskId);
+
+  // ISS-1307: a subagent's compaction arrives with the parent's session id.
+  // Decide it before anything records a compaction (intel pending mark, Bus
+  // succession, session transition); on any doubt this is the parent's own.
+  let verdict: SubagentCompactionVerdict | null = null;
+  try {
+    verdict = classifyPreCompact({
+      client,
+      trigger: options.trigger,
+      subagent: options.subagent,
+      transcriptPath: options.transcriptPath,
+      sessionId: clientTaskId ?? undefined,
+    }, options.classify);
+  } catch {
+    verdict = null;
+  }
+  if (verdict) {
+    await recordSubagentCompactionIgnored(root, client, clientTaskId, verdict, {
+      hook: "pre_compact",
+      trigger: options.trigger ?? null,
+    });
+    return;
+  }
 
   // T-499: mark the compaction pending for session intel BEFORE anything
   // that can stall. Reconciliation at the next entry point resolves it
@@ -200,6 +237,46 @@ export async function handleSessionCompactPrepare(
 
 }
 
+/**
+ * ISS-1307: the diagnostic trace of an ignored subagent compaction. Appended
+ * only to the caller's own active session, with no state write. One lock
+ * attempt, no wait: a subagent hook must not queue on the parent's lock, and
+ * a busy lock drops the event with one stderr line. Never throws.
+ */
+async function recordSubagentCompactionIgnored(
+  root: string,
+  client: StorybloqClient,
+  clientTaskId: string | null | undefined,
+  verdict: SubagentCompactionVerdict,
+  detail: { hook: "pre_compact"; trigger: string | null } | { hook: "session_start"; source: string | null },
+): Promise<void> {
+  try {
+    // Nothing to record without an active session; take no lock for it.
+    if (!findActiveSessionFull(root)) return;
+    await withSessionLock(root, async () => {
+      const active = findActiveSessionFull(root);
+      if (!active) return;
+      const ownership = resolveSessionOwnership(active.state, ownerTaskForClient(client, clientTaskId));
+      if (!callerMayAct(ownership)) return;
+      appendEvent(active.dir, {
+        rev: active.state.revision,
+        type: "subagent_compaction_ignored",
+        timestamp: new Date().toISOString(),
+        data: {
+          ...detail,
+          signal: verdict.signal,
+          agentId: verdict.agentId === null ? null : sanitizeForContext(verdict.agentId, 128) || null,
+          fill: verdict.fill,
+        },
+      });
+    }, { retries: 0 });
+  } catch (err) {
+    process.stderr.write(
+      `[storybloq] subagent compaction ignored; event not recorded: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // session-resume-prompt (SessionStart hook)
 // ---------------------------------------------------------------------------
@@ -265,6 +342,11 @@ export interface SessionStartHookContext {
   readonly errorType?: string;
   readonly permissionMode?: string;
   readonly hookEventName?: string;
+  // ISS-1307: subagent signals (additive). `agent_type` is deliberately not
+  // read: a `claude --agent X` main session carries it on every hook.
+  readonly agentId?: string;
+  readonly trigger?: string;
+  readonly subagent?: SubagentHookSignal;
 }
 
 export const HOOK_STDIN_DEFAULT_MAX_BYTES = 65536;
@@ -340,6 +422,8 @@ export async function readHookStdinContext(
       error?: unknown;
       permission_mode?: unknown;
       hook_event_name?: unknown;
+      agent_id?: unknown;
+      trigger?: unknown;
     };
     const sessionId = typeof parsed.session_id === "string"
       ? normalizeClientTaskId(parsed.session_id)
@@ -363,6 +447,16 @@ export async function readHookStdinContext(
     const hookEventName = typeof parsed.hook_event_name === "string" && parsed.hook_event_name.length <= 64
       ? parsed.hook_event_name
       : undefined;
+    const agentId = typeof parsed.agent_id === "string" && parsed.agent_id.length > 0 && parsed.agent_id.length <= 256
+      ? parsed.agent_id
+      : undefined;
+    const trigger = typeof parsed.trigger === "string" && parsed.trigger.length > 0 && parsed.trigger.length <= 32
+      ? parsed.trigger
+      : undefined;
+    const viaTranscriptPath = transcriptPath !== undefined && isSubagentTranscriptPath(transcriptPath);
+    const subagent: SubagentHookSignal | undefined = agentId || viaTranscriptPath
+      ? { ...(agentId ? { agentId } : {}), viaTranscriptPath }
+      : undefined;
     return {
       ...(typeof parsed.source === "string" ? { source: parsed.source } : {}),
       ...(sessionId ? { sessionId } : {}),
@@ -371,6 +465,9 @@ export async function readHookStdinContext(
       ...(errorType ? { errorType } : {}),
       ...(permissionMode ? { permissionMode } : {}),
       ...(hookEventName ? { hookEventName } : {}),
+      ...(agentId ? { agentId } : {}),
+      ...(trigger ? { trigger } : {}),
+      ...(subagent ? { subagent } : {}),
     };
   } catch {
     return {};
@@ -675,6 +772,10 @@ export async function handleSessionResumePrompt(
     clientTaskId?: string;
     cwd?: string;
     transcriptPath?: string;
+    /** ISS-1307: explicit subagent signals from hook stdin. */
+    subagent?: SubagentHookSignal;
+    /** ISS-1307 test seams for the subagent classification. */
+    classify?: ClassifyOptions;
   } = {},
 ): Promise<void> {
   try {
@@ -686,12 +787,36 @@ export async function handleSessionResumePrompt(
     const clientTaskId = explicitTaskId ?? inheritedTaskId ?? undefined;
     const root = discoverProjectRoot(options.cwd);
     if (!root) return; // No .story/ -- silent
+    const client: StorybloqClient = options.codexHookJson ? "codex" : "claude";
+
+    // ISS-1307: a subagent's compaction start is not the parent's. Decided
+    // before the Bus succession is consumed and before any observed mark,
+    // breadcrumb or resume message; on any doubt this is the parent's own.
+    let verdict: SubagentCompactionVerdict | null = null;
+    try {
+      verdict = classifySessionStart({
+        root,
+        client,
+        source: options.source,
+        subagent: options.subagent,
+        transcriptPath: options.transcriptPath,
+        sessionId: clientTaskId,
+      }, options.classify);
+    } catch {
+      verdict = null;
+    }
+    if (verdict) {
+      await recordSubagentCompactionIgnored(root, client, clientTaskId, verdict, {
+        hook: "session_start",
+        source: options.source ?? null,
+      });
+      return;
+    }
 
     // T-424: opportunistic waker respawn (reboot/crash recovery). Cheap
     // lockless probe inside; must never affect the resume prompt.
     await spawnWakerBestEffort();
 
-    const client: StorybloqClient = options.codexHookJson ? "codex" : "claude";
     let busMarker = "";
     let codexSurface: BusSurface | null = null;
     if (clientTaskId) {

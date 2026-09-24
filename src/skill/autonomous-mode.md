@@ -101,6 +101,7 @@ Before any guide call that could start, resume, or cancel a session, run SKILL.m
 - Context feels large -- continue the guide. Do not cancel manually; verified client compaction preserves the session, and threshold pressure rotates through HANDOVER at the next clean boundary.
 - Compaction happened -- rerun Step 0.5. If `ownerTask` matches or is absent on a legacy COMPACT session, resume automatically. If the compacted lease expired, ask for `Resume here`; if another live task owns it, open/message that task unless the user explicitly confirms it is gone and requests takeover.
 - Session stuck after compact -- inspect with `storybloq_session_report`. A verified same owner may run `storybloq session clear-compact <full-sessionId>` for a stale or blocked marker, then resume that same full id with `clientTaskId`. An expired session still requires explicit recovery selection. Never clear a foreign live lease.
+- Board tag `[Compacted]` outlives your own compaction -- a subagent's compaction was recorded as the session's (ISS-1307). Resume when your next report asks, then re-report. Residual: a subagent compacting before your first auto compaction, after a model change, or with your context at 60%+ of its compaction point.
 - Unrecoverable error -- `storybloq session stop <sessionId>` is destructive and must never be called bare. Require exact typed `cancel <T>` confirmation, resolve `<T>` to the full id, and stop only that session.
 
 ## Targeted Mode

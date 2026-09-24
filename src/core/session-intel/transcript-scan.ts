@@ -38,7 +38,7 @@ export const FULL_READ_BUDGET_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_TAIL_LINES = 400;
 const CHUNK_BYTES = 1024 * 1024;
 const ANCHOR_BYTES = 64;
-const MAX_LINE_BYTES = 4 * 1024 * 1024;
+export const MAX_LINE_BYTES = 4 * 1024 * 1024;
 
 export interface ScanRequest {
   readonly path: string;
@@ -61,6 +61,8 @@ type Parsed =
   | { kind: "model"; ts: string | null; oneMillion: boolean }
   | { kind: "meta"; facts: FactBits }
   | { kind: "skip" };
+
+export type ParsedTranscriptRecord = Parsed;
 
 interface FactBits {
   version?: string;
@@ -151,6 +153,15 @@ export function parseTranscriptRecord(line: string, expectedSessionId: string): 
   } catch {
     return { kind: "skip" };
   }
+  return parseTranscriptObject(raw, expectedSessionId);
+}
+
+/**
+ * ISS-1307: the classification half of `parseTranscriptRecord`, for a
+ * caller that parsed the line itself and must tell a malformed line from an
+ * ignored one (the subagent-compaction fill scan fails safe on the former).
+ */
+export function parseTranscriptObject(raw: unknown, expectedSessionId: string): Parsed {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { kind: "skip" };
   const r = raw as Record<string, unknown>;
   const sid = typeof r.sessionId === "string" ? r.sessionId : null;

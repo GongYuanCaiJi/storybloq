@@ -5492,6 +5492,8 @@ export function registerSessionCommand(yargs: Argv): Argv {
               clientTaskId: hookContext.sessionId,
               cwd: hookContext.cwd,
               transcriptPath: hookContext.transcriptPath,
+              trigger: hookContext.trigger,
+              subagent: hookContext.subagent,
             });
           },
         )
@@ -5514,6 +5516,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
                 clientTaskId: hookContext.sessionId,
                 cwd: hookContext.cwd,
                 transcriptPath: hookContext.transcriptPath,
+                subagent: hookContext.subagent,
               });
             } catch (err) {
               process.stderr.write(
@@ -5575,6 +5578,7 @@ export function registerSessionCommand(yargs: Argv): Argv {
                 sessionId: hookContext.sessionId,
                 cwd: hookContext.cwd,
                 transcriptPath: hookContext.transcriptPath,
+                subagent: hookContext.subagent,
               });
             } catch (err) {
               // Hook contract: always exit 0, never block a session start.

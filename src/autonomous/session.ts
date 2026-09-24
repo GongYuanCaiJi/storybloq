@@ -1890,10 +1890,15 @@ export function deleteSessionDir(root: string, sessionId: string): void {
 /**
  * Execute a function while holding the session filesystem lock.
  * Uses proper-lockfile on .story/sessions/.lock.
+ *
+ * `opts.retries` (default 3) bounds the acquisition attempts; 0 means one
+ * attempt with no wait, for a best-effort caller that must not block on the
+ * lock (ISS-1307: a subagent hook recording a diagnostic event).
  */
 export async function withSessionLock<T>(
   root: string,
   fn: () => Promise<T>,
+  opts: { retries?: number } = {},
 ): Promise<T> {
   const sessDir = sessionsRoot(root);
   mkdirSync(sessDir, { recursive: true });
@@ -1901,7 +1906,7 @@ export async function withSessionLock<T>(
   let release: (() => Promise<void>) | undefined;
   try {
     release = await lockfile.lock(sessDir, {
-      retries: { retries: 3, minTimeout: 100, maxTimeout: 1000 },
+      retries: { retries: opts.retries ?? 3, minTimeout: 100, maxTimeout: 1000 },
       stale: 30000,
       lockfilePath: join(sessDir, ".lock"),
     });

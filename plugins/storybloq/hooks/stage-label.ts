@@ -19,7 +19,7 @@ export const STAGE_LABELS: Readonly<Record<string, string>> = Object.freeze({
   VERIFY: "Verifying",
   FINALIZE: "Finalizing",
   KNOWLEDGE_REVIEW: "Knowledge review",
-  COMPACT: "Compacting",
+  COMPACT: "Compacted",
   LESSON_CAPTURE: "Lessons",
   ISSUE_FIX: "Fixing issue",
   ISSUE_SWEEP: "Issue sweep",
