@@ -1,0 +1,110 @@
+{
+  "node": "Box",
+  "flexDirection": "column",
+  "children": [
+    {
+      "node": "Box",
+      "key": "header",
+      "flexDirection": "row",
+      "alignItems": "center",
+      "marginRight": 3,
+      "children": [
+        {
+          "node": "Text",
+          "wrap": "truncate",
+          "children": [
+            {
+              "node": "Text",
+              "key": "wordmark",
+              "bold": true,
+              "children": "Storybloq"
+            },
+            {
+              "node": "Text",
+              "key": "version",
+              "dimColor": true,
+              "children": " (<MOD_VERSION>)"
+            },
+            {
+              "node": "Text",
+              "key": "project",
+              "bold": true,
+              "children": " - repo"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "Box",
+      "key": "board",
+      "flexDirection": "column",
+      "children": [
+        {
+          "node": "Text",
+          "key": "narrow-heading",
+          "color": "cyan",
+          "bold": true,
+          "wrap": "truncate",
+          "children": [
+            {
+              "node": "Text",
+              "children": "In progress"
+            },
+            {
+              "node": "Text",
+              "dimColor": true,
+              "bold": false,
+              "children": " 1"
+            }
+          ]
+        },
+        {
+          "node": "Box",
+          "key": "narrow-card-0",
+          "children": [
+            {
+              "node": "Text",
+              "key": "ticket:T-001",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "dimColor": true,
+                  "children": "T-001 "
+                },
+                {
+                  "node": "Text",
+                  "dimColor": false,
+                  "children": ""
+                },
+                {
+                  "node": "Text",
+                  "bold": true,
+                  "dimColor": false,
+                  "children": "Ticket T-001"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "Box",
+      "key": "footer",
+      "flexDirection": "row",
+      "justifyContent": "flex-end",
+      "children": [
+        {
+          "node": "Text",
+          "key": "context",
+          "dimColor": true,
+          "bold": false,
+          "wrap": "truncate",
+          "children": "context --"
+        }
+      ]
+    }
+  ]
+}

@@ -15,7 +15,7 @@
  * relatively silently reads an empty directory and clears the board; one that
  * pinned its root does not notice the move at all.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION, contextLabel } from "../../plugins/storybloq/hooks/sidebar.js";
 
 const PANE_ID = "storybloq";
@@ -1134,4 +1134,318 @@ it("keeps a short dock as an In progress sidebar with a bottom footer", async ()
   expect(tall.height).toBe(54);
   expect(JSON.stringify(tall)).toContain("board-open");
   expect(findUi(tall, "footer-space").flexGrow).toBe(1);
+});
+
+/**
+ * T-531: a `/story auto` session shows its stage on the In progress card and in
+ * the footer, read from `.story/status.json` alone.
+ *
+ * The native `claude plugin test` suite (`sidebar.test.ts`) does not pass at
+ * 81e42701 (ARCHITECTURE.md: it needs repair before it can gate), so these
+ * fixtures live here, in the harness the default vitest run executes. The
+ * inactive board is pinned against golden files rendered at 81e42701, before
+ * any of this existed, with the Mod's version normalized so a release bump
+ * does not break them.
+ */
+describe("T-531: the autonomous stage on the in-progress card and in the footer", () => {
+  const CONSTANT = "an autonomous session is active";
+  const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function live(over: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schemaVersion: 1,
+      sessionActive: true,
+      sessionId: "s-1",
+      state: "IMPLEMENT",
+      ticket: "T-001",
+      ticketTitle: "Ticket T-001",
+      claudeStatus: "working",
+      observedAt: new Date().toISOString(),
+      ...over,
+    };
+  }
+
+  function without(key: string): Record<string, unknown> {
+    const status = live();
+    delete status[key];
+    return status;
+  }
+
+  async function booted(status: unknown, seed?: (h: Harness) => void): Promise<Harness> {
+    const h = new Harness();
+    seedLedger(h.fs, "/repo");
+    seed?.(h);
+    if (status !== undefined) {
+      h.fs.addFile("/repo/.story/status.json", typeof status === "string" ? status : JSON.stringify(status));
+    }
+    await h.start("/repo");
+    await h.settle();
+    return h;
+  }
+
+  function draw(h: Harness, width: number, placement: "dock" | "inline" | null, rows = 40): any {
+    const props: Record<string, unknown> = { bodyColumns: width, scroll: { offset: 0, bodyRows: 30 } };
+    if (placement !== null) props["placement"] = placement;
+    return h.handlers.get("ui.render")!(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: width + 4, rows }, props },
+      (e: any) => e,
+    );
+  }
+
+  /** The text a node draws, its runs joined. */
+  function textOf(node: any): string {
+    if (typeof node === "string") return node;
+    if (Array.isArray(node)) return node.map(textOf).join("");
+    if (node && typeof node === "object") return textOf(node.children);
+    return "";
+  }
+
+  /** Every string a tree draws, leaf by leaf. */
+  function leaves(node: any, out: string[] = []): string[] {
+    if (typeof node === "string") out.push(node);
+    else if (Array.isArray(node)) for (const child of node) leaves(child, out);
+    else if (node && typeof node === "object") leaves(node.children, out);
+    return out;
+  }
+
+  /** The session footer lines: the constant, or an `auto:` line. */
+  function sessionLines(tree: any): string[] {
+    return leaves(tree).filter((text) => text === CONSTANT || text.startsWith("auto:"));
+  }
+
+  function tagCount(tree: any): number {
+    return leaves(tree).filter((text) => /^\[[^\]]*\] $/.test(text) && text !== "[Blocked] " && text !== "[!] ").length;
+  }
+
+  function golden(tree: any): string {
+    return JSON.stringify(tree, null, 2).split(MOD_VERSION).join("<MOD_VERSION>") + "\n";
+  }
+
+  it("a live IMPLEMENT on T-001 tags that card and names the stage in the footer", async () => {
+    const h = await booted(live());
+    for (const [width, placement] of [[40, "dock"], [156, "inline"], [40, null], [45, "inline"]] as const) {
+      const tree = draw(h, width, placement);
+      const where = `${placement}@${width}`;
+      const row = findUi(tree, "ticket:T-001");
+      expect(textOf(row), where).toBe("T-001 [Implementing] Ticket T-001");
+      expect(row.children[1], where).toMatchObject({ children: "[Implementing] ", color: "cyan" });
+      expect(row.children[1].dimColor, where).toBeFalsy();
+      expect(row.children[0], where).toMatchObject({ children: "T-001 ", dimColor: true });
+      expect(tagCount(tree), where).toBe(1);
+      expect(sessionLines(tree), where).toEqual(["auto: Implementing T-001"]);
+      // The Open card is never tagged.
+      expect(textOf(findUi(tree, "ticket:T-002")), where).not.toContain("[Implementing]");
+    }
+  });
+
+  it("labels the other stages through the same table", async () => {
+    for (const [state, label] of [["PLAN_REVIEW", "Plan review"], ["CODE_REVIEW", "Code review"], ["WRITE_TESTS", "Writing tests"]]) {
+      const h = await booted(live({ state }));
+      const tree = draw(h, 156, "inline");
+      expect(textOf(findUi(tree, "ticket:T-001"))).toBe(`T-001 [${label}] Ticket T-001`);
+      expect(sessionLines(tree)).toEqual([`auto: ${label} T-001`]);
+    }
+  });
+
+  it("draws the inactive board exactly as 81e42701 did", async () => {
+    const h = await booted({ sessionActive: false });
+    await expect(golden(draw(h, 40, "dock"))).toMatchFileSnapshot("./__golden__/t531-inactive-dock-40.json");
+    await expect(golden(draw(h, 156, "inline"))).toMatchFileSnapshot("./__golden__/t531-inactive-inline-156.json");
+    await expect(golden(draw(h, 45, "inline"))).toMatchFileSnapshot("./__golden__/t531-inactive-inline-45.json");
+  });
+
+  it("an inactive status with stray session fields draws byte-identically to a bare one", async () => {
+    const bare = await booted({ sessionActive: false });
+    const stray = await booted({ ...live(), sessionActive: false });
+    const missing = await booted(undefined);
+    // The last case is the short docked sidebar (a 20-row terminal).
+    for (const [width, placement, rows] of [[40, "dock", 40], [156, "inline", 40], [45, "inline", 40], [40, "dock", 20]] as const) {
+      const expected = JSON.stringify(draw(bare, width, placement, rows));
+      expect(JSON.stringify(draw(stray, width, placement, rows))).toBe(expected);
+      expect(JSON.stringify(draw(missing, width, placement, rows))).toBe(expected);
+    }
+  });
+
+  it("a malformed state gives no tag and the constant footer, and keeps the session active", async () => {
+    const cases: [string, Record<string, unknown>][] = [
+      ["missing", without("state")],
+      ["number", live({ state: 42 })],
+      ["empty", live({ state: "" })],
+      ["underscores", live({ state: "___" })],
+      ["blank", live({ state: "   " })],
+      ["object", live({ state: { name: "IMPLEMENT" } })],
+      ["controls only", live({ state: "\u001b\u0007\u009b" })],
+    ];
+    for (const [name, status] of cases) {
+      const h = await booted(status);
+      for (const [width, placement] of [[40, "dock"], [45, "inline"]] as const) {
+        const tree = draw(h, width, placement);
+        expect(textOf(findUi(tree, "ticket:T-001")), name).toBe("T-001 Ticket T-001");
+        expect(tagCount(tree), name).toBe(0);
+        expect(sessionLines(tree), name).toEqual([CONSTANT]);
+      }
+    }
+  });
+
+  it("a valid state with a malformed or missing ticket shows the stage alone and tags nothing", async () => {
+    const cases: [string, Record<string, unknown>][] = [
+      ["missing", without("ticket")],
+      ["null", live({ ticket: null })],
+      ["number", live({ ticket: 1 })],
+      ["empty", live({ ticket: "" })],
+      ["object", live({ ticket: { id: "T-001" } })],
+    ];
+    for (const [name, status] of cases) {
+      const h = await booted(status);
+      const tree = draw(h, 40, "dock");
+      expect(textOf(findUi(tree, "ticket:T-001")), name).toBe("T-001 Ticket T-001");
+      expect(tagCount(tree), name).toBe(0);
+      expect(sessionLines(tree), name).toEqual(["auto: Implementing"]);
+    }
+  });
+
+  it("unreadable status text draws no session at all, as before", async () => {
+    for (const text of ["null", "{not json", "[]", '"IMPLEMENT"', "42"]) {
+      const h = await booted(text);
+      const tree = draw(h, 40, "dock");
+      expect(sessionLines(tree), text).toEqual([]);
+      expect(tagCount(tree), text).toBe(0);
+    }
+  });
+
+  it("never draws a control sequence or a line break from status.json", async () => {
+    const h = await booted(live({
+      state: "EVIL\u001b]0;pwn\u0007_STATE\r\nX",
+      ticket: "T-001\u001b[2J\u2028",
+    }));
+    for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
+      const tree = draw(h, width, placement);
+      for (const text of leaves(tree)) expect(text).not.toMatch(UNSAFE);
+      expect(sessionLines(tree)).toEqual(["auto: evil ]0;pwn state x T-001 [2J"]);
+      // The raw id is what matches, and no card id carries a control character.
+      expect(tagCount(tree)).toBe(0);
+    }
+  });
+
+  it("tags no card when the session ticket is not the one in-progress ticket card", async () => {
+    const cases: [string, Record<string, unknown>, ((h: Harness) => void) | undefined, string][] = [
+      ["not on the board", live({ ticket: "T-404" }), undefined, "auto: Implementing T-404"],
+      ["open, not in progress", live({ ticket: "T-002" }), undefined, "auto: Implementing T-002"],
+      ["two in-progress cards share the id", live(), (h) => {
+        h.fs.addFile("/repo/.story/tickets/t-dup.json", JSON.stringify({
+          id: "t-dup", displayId: "T-001", title: "Twin", type: "task", status: "inprogress", phase: "p1", order: 2,
+        }));
+      }, "auto: Implementing T-001"],
+      ["an issue card has the id", live({ ticket: "ISS-001" }), (h) => {
+        h.fs.addFile("/repo/.story/issues/ISS-001.json", JSON.stringify({
+          id: "ISS-001", displayId: "ISS-001", title: "Issue ISS-001", severity: "high", status: "inprogress",
+        }));
+      }, "auto: Implementing ISS-001"],
+    ];
+    for (const [name, status, seed, footer] of cases) {
+      const h = await booted(status, seed);
+      for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
+        const tree = draw(h, width, placement);
+        expect(tagCount(tree), `${name} ${placement}@${width}`).toBe(0);
+        expect(sessionLines(tree), name).toEqual([footer]);
+      }
+    }
+  });
+
+  it("marks a status older than the presence TTL as uncertain, dimmed with a question mark", async () => {
+    const now = Date.parse("2026-09-23T12:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const stale = await booted(live({ observedAt: new Date(now - 12 * 60 * 60 * 1000 - 60_000).toISOString() }));
+    for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
+      const tree = draw(stale, width, placement);
+      const row = findUi(tree, "ticket:T-001");
+      expect(textOf(row)).toBe("T-001 [Implementing?] Ticket T-001");
+      expect(row.children[1]).toMatchObject({ children: "[Implementing?] ", dimColor: true });
+      expect(row.children[1].color).not.toBe("cyan");
+      expect(sessionLines(tree)).toEqual(["auto: Implementing? T-001"]);
+    }
+    const fresh = await booted(live({ observedAt: new Date(now - 60 * 60 * 1000).toISOString() }));
+    const tree = draw(fresh, 40, "dock");
+    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Implementing] Ticket T-001");
+    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
+    // Only state parsed, stale: the footer still says so.
+    const alone = await booted({ ...without("ticket"), observedAt: new Date(now - 13 * 60 * 60 * 1000).toISOString() });
+    expect(sessionLines(draw(alone, 40, "dock"))).toEqual(["auto: Implementing?"]);
+  });
+
+  it("the narrow strip truncates the title, never the id or the tag", async () => {
+    const long = "Native canvas, document objects, and local saving";
+    const h = await booted(live(), (hh) => {
+      hh.fs.addFile("/repo/.story/tickets/T-001.json", JSON.stringify({
+        id: "T-001", displayId: "T-001", title: long, type: "task", status: "inprogress", phase: "p1", order: 1,
+      }));
+    });
+    const tree = draw(h, 45, "inline");
+    expect(findUi(tree, "narrow-heading")).toBeDefined();
+    const text = textOf(findUi(tree, "ticket:T-001"));
+    expect(text.startsWith("T-001 [Implementing] Native canvas")).toBe(true);
+    expect(text.endsWith("…")).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(45);
+    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
+  });
+
+  it("drops the tag before the id when the two do not fit", async () => {
+    const h = await booted(live());
+    // 23 cells hold "T-001 [Implementing] " and the two title cells the row keeps.
+    const fits = textOf(findUi(draw(h, 23, "inline"), "ticket:T-001"));
+    expect(fits.startsWith("T-001 [Implementing] ")).toBe(true);
+    for (const width of [22, 18, 12]) {
+      const tree = draw(h, width, "inline");
+      const text = textOf(findUi(tree, "ticket:T-001"));
+      expect(text.startsWith("T-001 "), String(width)).toBe(true);
+      expect(text, String(width)).not.toContain("[Implementing");
+      expect(tagCount(tree), String(width)).toBe(0);
+    }
+  });
+
+  it("keeps the tag beside a blocked marker when both fit", async () => {
+    const h = await booted(live(), (hh) => {
+      hh.fs.addFile("/repo/.story/tickets/T-001.json", JSON.stringify({
+        id: "T-001", displayId: "T-001", title: "Ticket T-001", type: "task", status: "inprogress", phase: "p1", order: 1, blockedBy: ["T-002"],
+      }));
+    });
+    const row = findUi(draw(h, 156, "inline"), "ticket:T-001");
+    expect(textOf(row)).toBe("T-001 [Implementing] [Blocked] Ticket T-001");
+    expect(row.children[2]).toMatchObject({ children: "[Blocked] ", color: "yellow" });
+    // Docked at 40 the column holds 38 cells: the title is what gives way.
+    expect(textOf(findUi(draw(h, 40, "dock"), "ticket:T-001"))).toBe("T-001 [Implementing] [Blocked] Ticket…");
+    // The marker counts: 27 cells hold "T-001 [Implementing] [!] " and two
+    // title cells, 26 do not, and the tag goes before the id is shortened.
+    const fits = textOf(findUi(draw(h, 27, "inline"), "ticket:T-001"));
+    expect(fits.startsWith("T-001 [Implementing] [!] ")).toBe(true);
+    const tight = draw(h, 26, "inline");
+    const text = textOf(findUi(tight, "ticket:T-001"));
+    expect(text.startsWith("T-001 [!] ")).toBe(true);
+    expect(text).not.toContain("[Implementing");
+    expect(tagCount(tight)).toBe(0);
+  });
+
+  it("the narrow Open fallback never carries the tag", async () => {
+    const h = await booted(live(), (hh) => {
+      hh.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "open"));
+    });
+    const tree = draw(h, 45, "inline");
+    expect(textOf(findUi(tree, "narrow-heading"))).toContain("Open");
+    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 Ticket T-001");
+    expect(tagCount(tree)).toBe(0);
+    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
+  });
+
+  it("the short docked sidebar tags the card too", async () => {
+    const h = await booted(live());
+    const tree = draw(h, 40, "dock", 20);
+    expect(findUi(tree, "short-sidebar")).toBeDefined();
+    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Implementing] Ticket T-001");
+  });
 });

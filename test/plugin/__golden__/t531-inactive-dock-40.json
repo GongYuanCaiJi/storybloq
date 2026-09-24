@@ -1,0 +1,362 @@
+{
+  "node": "Box",
+  "flexDirection": "column",
+  "height": 34,
+  "children": [
+    {
+      "node": "Box",
+      "key": "header",
+      "flexDirection": "row",
+      "alignItems": "center",
+      "marginRight": 3,
+      "children": [
+        {
+          "node": "Text",
+          "color": "white",
+          "wrap": "truncate",
+          "children": [
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "wordmark",
+              "bold": true,
+              "children": "Storybloq"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "version",
+              "dimColor": true,
+              "children": " (<MOD_VERSION>)"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "project",
+              "bold": true,
+              "children": " - repo"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "Text",
+      "color": "white",
+      "key": "header-gap",
+      "children": " "
+    },
+    {
+      "node": "Box",
+      "key": "board",
+      "flexDirection": "column",
+      "gap": 0,
+      "children": [
+        {
+          "node": "Box",
+          "key": "board-open",
+          "flexDirection": "column",
+          "borderStyle": "round",
+          "width": 40,
+          "overflow": "hidden",
+          "children": [
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-open-heading",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "Open"
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "bold": false,
+                  "children": " 2"
+                }
+              ]
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-open-rule",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": "──────────────────────────────────────"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "ticket:T-002",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "children": "T-002 "
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": false,
+                  "children": ""
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "bold": true,
+                  "dimColor": false,
+                  "children": "Ticket T-002"
+                }
+              ]
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "issue:ISS-001",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "yellow",
+                  "dimColor": true,
+                  "children": "ISS-001 "
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": false,
+                  "children": ""
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "bold": true,
+                  "dimColor": false,
+                  "children": "Issue ISS-001"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "node": "Box",
+          "key": "board-inprogress",
+          "flexDirection": "column",
+          "borderStyle": "round",
+          "width": 40,
+          "overflow": "hidden",
+          "children": [
+            {
+              "node": "Text",
+              "color": "cyan",
+              "key": "board-inprogress-heading",
+              "bold": true,
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "In progress"
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "bold": false,
+                  "children": " 1"
+                }
+              ]
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-inprogress-rule",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": "──────────────────────────────────────"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "ticket:T-001",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "children": "T-001 "
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": false,
+                  "children": ""
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "bold": true,
+                  "dimColor": false,
+                  "children": "Ticket T-001"
+                }
+              ]
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "children": " "
+            }
+          ]
+        },
+        {
+          "node": "Box",
+          "key": "board-done",
+          "flexDirection": "column",
+          "borderStyle": "round",
+          "width": 40,
+          "overflow": "hidden",
+          "children": [
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-done-heading",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "Done"
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "bold": false,
+                  "children": " 0"
+                }
+              ]
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-done-rule",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": "──────────────────────────────────────"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-done-empty-0",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": "        · Progress starts here"
+            },
+            {
+              "node": "Text",
+              "color": "white",
+              "key": "board-done-empty-1",
+              "dimColor": true,
+              "wrap": "truncate",
+              "children": "                   "
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node": "Text",
+      "color": "white",
+      "key": "issues-gap",
+      "children": " "
+    },
+    {
+      "node": "Box",
+      "key": "footer-space",
+      "flexGrow": 1
+    },
+    {
+      "node": "Box",
+      "key": "footer",
+      "flexDirection": "row",
+      "justifyContent": "space-between",
+      "alignItems": "center",
+      "children": [
+        {
+          "node": "Box",
+          "key": "issues",
+          "flexDirection": "row",
+          "width": 25,
+          "overflow": "hidden",
+          "children": [
+            {
+              "node": "Text",
+              "color": "white",
+              "wrap": "truncate",
+              "children": [
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "0 crit",
+                  "dimColor": true
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "children": " "
+                },
+                {
+                  "node": "Text",
+                  "color": "yellow",
+                  "children": "1 high"
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "children": " "
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "0 med",
+                  "dimColor": true
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "dimColor": true,
+                  "children": " "
+                },
+                {
+                  "node": "Text",
+                  "color": "white",
+                  "children": "0 low",
+                  "dimColor": true
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "node": "Text",
+          "color": "white",
+          "key": "context",
+          "dimColor": true,
+          "bold": false,
+          "wrap": "truncate",
+          "children": "context --"
+        }
+      ]
+    }
+  ]
+}

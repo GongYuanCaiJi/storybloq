@@ -1,6 +1,7 @@
 import type { DashboardState } from "./dashboard-state.js";
 import type { SidebarBoardCard, SidebarProjection } from "./sidebar-projection.js";
 import { graphemes, cellWidth, truncate } from "./terminal-text.js";
+import { displaySafe, stageLabel, stageStale } from "./stage-label.js";
 const COLUMN_CARD_CAP = 6;
 const COLUMN_TAIL = "...";
 const BOARD_COLUMNS = 3;
@@ -200,19 +201,72 @@ function headingContent(dashboard: DashboardState, elements: any, label: string,
     paneText(dashboard, elements.Text, { dimColor: !emphasis, bold: emphasis, children: tail }),
   ];
 }
-/** IDs lead in muted text; titles carry emphasis and blockers stay visible. */
-function cardRow(dashboard: DashboardState, elements: any, card: SidebarBoardCard, width: number, done = false): unknown {
+/**
+* T-531: the card an autonomous session is working and the tag it carries.
+* `key` is the card's stable key; `text` is the drawn tag with its trailing
+* space; `stale` dims it.
+*/
+interface StageMark {
+  readonly key: string;
+  readonly text: string;
+  readonly stale: boolean;
+}
+/**
+* T-531: which In progress card carries the session's stage, if any.
+*
+* Only while a session is active and its state and ticket both parsed, and only
+* the one ticket card whose id is the session's ticket (status.json and the
+* card both use the display id, falling back to the id). Two cards that share a
+* display id, which a reconcile not yet run can leave, tag neither: guessing
+* would put the stage on work the session is not doing.
+*/
+function stageMark(dashboard: DashboardState, cards: readonly SidebarBoardCard[], now = Date.now()): StageMark | null {
+  const state = dashboard.sessionState;
+  const ticket = dashboard.sessionTicket;
+  if (!dashboard.sessionActive || state === null || ticket === null)
+    return null;
+  const matches = cards.filter((card) => card.kind === "ticket" && card.id === ticket);
+  if (matches.length !== 1)
+    return null;
+  const stale = stageStale(dashboard.sessionObservedAt, now);
+  return { key: matches[0]!.key, text: `[${stageLabel(state)}${stale ? "?" : ""}] `, stale };
+}
+/**
+* T-531: the footer line for an active session: "auto: Implementing T-001",
+* "auto: Implementing" when no ticket parsed, and the old sentence when no
+* state did. A stage older than the presence TTL carries a "?", as its tag does.
+*/
+export function sessionLine(dashboard: DashboardState, now = Date.now()): string {
+  const state = dashboard.sessionState;
+  if (state === null)
+    return "an autonomous session is active";
+  const stage = `auto: ${stageLabel(state)}${stageStale(dashboard.sessionObservedAt, now) ? "?" : ""}`;
+  const ticket = dashboard.sessionTicket === null ? "" : displaySafe(dashboard.sessionTicket);
+  return ticket === "" ? stage : `${stage} ${ticket}`;
+}
+/**
+* IDs lead in muted text; titles carry emphasis and blockers stay visible.
+*
+* The session's stage tag (T-531) sits after the id, ahead of any marker, and
+* only when the whole id, the tag, the marker and two title cells fit: the
+* title is what gets cut, and the tag goes whole before the id would be. A card
+* without it draws exactly the three runs it always did.
+*/
+function cardRow(dashboard: DashboardState, elements: any, card: SidebarBoardCard, width: number, done = false, stage: StageMark | null = null): unknown {
   const effect = dashboard.motion.card(card.key);
   const ready = effect.ready && !card.blocked && !done;
   const blocked = card.blocked ? (width >= 32 ? "[Blocked] " : "[!] ") : ready ? (width >= 32 ? "✓ Ready " : "✓ ") : "";
-  const id = truncate(card.id, Math.max(1, width - cellWidth(blocked) - 3));
-  const room = Math.max(1, width - cellWidth(id) - cellWidth(blocked) - 1);
+  const tag = stage !== null && stage.key === card.key
+    && cellWidth(card.id) + 1 + cellWidth(stage.text) + cellWidth(blocked) + 2 <= width ? stage.text : "";
+  const id = truncate(card.id, Math.max(1, width - cellWidth(tag) - cellWidth(blocked) - 3));
+  const room = Math.max(1, width - cellWidth(id) - cellWidth(tag) - cellWidth(blocked) - 1);
   const tone = card.kind === "issue" && card.severity !== null ? SEVERITY_TONES[card.severity] : undefined;
   return paneText(dashboard, elements.Text, {
     key: card.key,
     wrap: "truncate",
     children: [
       paneText(dashboard, elements.Text, { dimColor: true, ...(tone ? { color: tone } : {}), children: `${id} ` }),
+      ...(tag === "" ? [] : [paneText(dashboard, elements.Text, { ...(stage!.stale ? { dimColor: true } : { color: "cyan" }), children: tag })]),
       paneText(dashboard, elements.Text, { ...(card.blocked ? { color: "yellow" } : { dimColor: effect.fading }), children: blocked }),
       paneText(dashboard, elements.Text, { bold: !done, dimColor: done, children: shimmerTitle(dashboard, elements, truncate(card.title, room), effect.progress) }),
     ],
@@ -251,14 +305,14 @@ function shimmerTitle(dashboard: DashboardState, elements: any, title: string, p
 * back by the budget, so a capped column can say it was capped without
 * standing a row taller than the rest.
 */
-function bodyRowsOf(dashboard: DashboardState, elements: any, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number, column: BoardColumnKey): unknown[] {
+function bodyRowsOf(dashboard: DashboardState, elements: any, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number, column: BoardColumnKey, stage: StageMark | null = null): unknown[] {
   const rows: unknown[] = [];
   if (cards.length === 0) {
     return emptyColumnRows(dashboard, elements, column, width, height);
   }
   else {
     for (const card of cards.slice(0, shown))
-      rows.push(cardRow(dashboard, elements, card, width, column === "board-done"));
+      rows.push(cardRow(dashboard, elements, card, width, column === "board-done", stage));
     if (cards.length > shown)
       rows.push(paneText(dashboard, elements.Text, { dimColor: true, wrap: "truncate", children: COLUMN_TAIL }));
   }
@@ -303,10 +357,10 @@ export function inProgressBoard(dashboard: DashboardState, elements: any, width:
   const cards = dashboard.projection?.board.inProgress ?? [];
   const shown = Math.min(COLUMN_CARD_CAP, Math.max(0, body - (cards.length > body ? 1 : 0)));
   return boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress,
-    cards, width, shown, Math.max(1, Math.min(body, cards.length || 2)));
+    cards, width, shown, Math.max(1, Math.min(body, cards.length || 2)), stageMark(dashboard, cards));
 }
 
-function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnKey, heading: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number): unknown {
+function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnKey, heading: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number, stage: StageMark | null = null): unknown {
   // The border takes a column on each side, so the text inside has that much
   // less. Getting this wrong wraps every row and the board falls apart.
   const textWidth = Math.max(1, width - BORDER_COLUMNS);
@@ -324,7 +378,7 @@ function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnK
         children: headingContent(dashboard, elements, heading, cards.length, textWidth),
       }),
       paneText(dashboard, elements.Text, { key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
-      ...bodyRowsOf(dashboard, elements, cards, textWidth, shown, height, key),
+      ...bodyRowsOf(dashboard, elements, cards, textWidth, shown, height, key, stage),
     ],
   });
 }
@@ -360,6 +414,8 @@ export function narrowBoard(dashboard: DashboardState, elements: any, board: Sid
   const inProgress = board.inProgress as readonly SidebarBoardCard[];
   const fallback = inProgress.length === 0;
   const cards = fallback ? (board.open as readonly SidebarBoardCard[]) : inProgress;
+  // The Open fallback is not work in hand, so it never carries the stage.
+  const stage = fallback ? null : stageMark(dashboard, inProgress);
   const rows: unknown[] = [
     paneText(dashboard, elements.Text, {
       key: "narrow-heading",
@@ -373,7 +429,7 @@ export function narrowBoard(dashboard: DashboardState, elements: any, board: Sid
   }
   else {
     cards.slice(0, NARROW_BOARD_CARDS).forEach((card, index) => {
-      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(dashboard, elements, card, width)] }));
+      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(dashboard, elements, card, width, false, stage)] }));
     });
     if (cards.length > NARROW_BOARD_CARDS) {
       rows.push(paneText(dashboard, elements.Text, {
@@ -433,7 +489,7 @@ export function boardNode(dashboard: DashboardState, elements: any, board: Sideb
     gap: stacked ? 0 : COLUMN_GAP,
     children: [
       boardColumn(dashboard, elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[0]!, shown, height),
-      boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height),
+      boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height, stageMark(dashboard, board.inProgress)),
       boardColumn(dashboard, elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[2]!, shown, height),
     ],
   });

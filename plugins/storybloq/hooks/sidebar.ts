@@ -1,8 +1,9 @@
 import { createDashboardState, type DashboardState, type ScanItem, type CachedRecord } from "./dashboard-state.js";
-import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel } from "./dashboard-view.js";
+import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel, sessionLine } from "./dashboard-view.js";
 export { contextLabel, MOD_VERSION } from "./dashboard-view.js";
 import { wroteLedger } from "./ledger-write-detection.js";
 import { cellWidth, truncate } from "./terminal-text.js";
+import { statusField } from "./stage-label.js";
 /**
 * T-508: the ledger sidebar Mod. Draws `.story/` beside the transcript.
 *
@@ -145,6 +146,7 @@ function forgetEverything(dashboard: DashboardState): void {
   dashboard.themeLight = false;
   dashboard.paneInline = false;
   dashboard.sessionActive = false;
+  forgetSession(dashboard);
   dashboard.contextPercent = null;
   dashboard.warm = false;
   dashboard.uiAvailable = true;
@@ -286,20 +288,39 @@ async function readHeader(dashboard: DashboardState, $: any): Promise<void> {
   catch {
     dashboard.handoverFilenames = [];
   }
-  // status.json is a session flag and nothing else; the ledger numbers do
-  // not come from it.
+  // status.json is the session flag and, since T-531, the stage the session
+  // is in; the ledger numbers do not come from it. Each stage field is kept
+  // only when it is a usable string and is independent of the others, and
+  // none of them is read before the flag is decided, so a malformed field
+  // can neither throw past it nor change it.
   dashboard.sessionActive = false;
+  forgetSession(dashboard);
   if (await $.fs.exists(p(dashboard, STATUS_PATH))) {
     try {
       const parsed = JSON.parse(await $.fs.read(p(dashboard, STATUS_PATH))) as {
         sessionActive?: unknown;
+        state?: unknown;
+        ticket?: unknown;
+        claudeStatus?: unknown;
+        observedAt?: unknown;
       };
       dashboard.sessionActive = parsed.sessionActive === true;
+      dashboard.sessionState = statusField(parsed.state);
+      dashboard.sessionTicket = statusField(parsed.ticket);
+      dashboard.sessionClaudeStatus = statusField(parsed.claudeStatus);
+      dashboard.sessionObservedAt = statusField(parsed.observedAt);
     }
     catch {
       dashboard.sessionActive = false;
     }
   }
+}
+/** T-531: the stage fields back to unset. */
+function forgetSession(dashboard: DashboardState): void {
+  dashboard.sessionState = null;
+  dashboard.sessionTicket = null;
+  dashboard.sessionClaudeStatus = null;
+  dashboard.sessionObservedAt = null;
 }
 async function loadCache(dashboard: DashboardState, $: any): Promise<void> {
   if (dashboard.cacheLoaded)
@@ -932,7 +953,7 @@ export function registerSidebar(on: On, _options: Options): void {
         rows.push(narrowBoard(dashboard, elements, dashboard.projection.board, width));
         rows.push(Box({ key: "footer", flexDirection: "row", justifyContent: "flex-end", children: [contextNode(dashboard, elements, dashboard.contextPercent, width)] }));
         if (dashboard.sessionActive) {
-          rows.push(paneText(dashboard, elements.Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+          rows.push(paneText(dashboard, elements.Text, { dimColor: true, wrap: "truncate", children: sessionLine(dashboard) }));
         }
       }
       else {
@@ -944,7 +965,7 @@ export function registerSidebar(on: On, _options: Options): void {
         if (placement === "dock") rows.push(Box({ key: "footer-space", flexGrow: 1 }));
         rows.push(footerNode(dashboard, elements, dashboard.projection.issuesBySeverity, dashboard.contextPercent, width));
         if (dashboard.sessionActive) {
-          rows.push(paneText(dashboard, Text, { dimColor: true, wrap: "truncate", children: "an autonomous session is active" }));
+          rows.push(paneText(dashboard, Text, { dimColor: true, wrap: "truncate", children: sessionLine(dashboard) }));
         }
       }
       return Box({ flexDirection: "column", ...(placement === "dock" ? { height: dockHeight(e) } : {}), children: rows });

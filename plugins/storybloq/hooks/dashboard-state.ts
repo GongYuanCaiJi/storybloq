@@ -41,6 +41,11 @@ export interface DashboardState {
   themeLight: boolean;
   paneInline: boolean;
   sessionActive: boolean;
+  /** T-531: status.json's `state`, `ticket`, `claudeStatus` and `observedAt`; null when absent or malformed. */
+  sessionState: string | null;
+  sessionTicket: string | null;
+  sessionClaudeStatus: string | null;
+  sessionObservedAt: string | null;
   contextPercent: number | null;
   warm: boolean;
   uiAvailable: boolean;
@@ -81,6 +86,10 @@ export function createDashboardState(): DashboardState {
     themeLight: false,
     paneInline: false,
     sessionActive: false,
+    sessionState: null,
+    sessionTicket: null,
+    sessionClaudeStatus: null,
+    sessionObservedAt: null,
     contextPercent: null,
     warm: false,
     uiAvailable: true,

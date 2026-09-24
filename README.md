@@ -65,6 +65,8 @@ Requires Node.js 20+ and at least one AI client: Claude Code or Codex CLI 0.130.
 
 Setup also installs the ledger dashboard for Claude Code. On version 2.1.272 or newer, a project with a `.story/` directory draws its tickets, issues, and progress in a pane beside the transcript, with no extra flags on the install command and nothing to configure. Projects without `.story/` show nothing. Turn the dashboard off with `/plugin configure storybloq`.
 
+While a `/story auto` session runs, the dashboard shows where it is. The In progress card the session is working carries its stage after the id, as in `T-001 [Implementing] Native canvas, document objects, and local saving`, and the footer reads `auto: Implementing T-001`. The stage comes from `.story/status.json` alone. A status older than 12 hours, the presence TTL, is drawn dimmed with a question mark (`[Implementing?]`) because nothing has confirmed it since. When the pane is narrow the title is cut first, and the tag is dropped before the id is shortened.
+
 ## Your first two sessions
 
 1. Open your project in Claude Code or Codex. Type `/story` in Claude Code chat or `$story` in Codex chat. For a new project, the skill guides you through setup.
