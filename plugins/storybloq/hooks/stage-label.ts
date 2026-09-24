@@ -2,32 +2,33 @@
  * T-531: the words the dashboard uses for an autonomous session's stage.
  *
  * `.story/status.json` names the guide's state ("IMPLEMENT"); the In progress
- * card and the footer say what that means ("Implementing"). The Mod cannot
- * import `src/`, which does not ship with the plugin, so the table lives here
- * and test/plugin/stage-label.test.ts holds it to the guide's own state list:
- * a state added there fails that test until it has a label here.
+ * card, or its heading, says what that means in one short word ("Code",
+ * T-532). The Mod cannot import `src/`, which does not ship with the plugin,
+ * so the table lives here and test/plugin/stage-label.test.ts holds it to the
+ * guide's own state list: a state added there fails that test until it has a
+ * label here.
  */
 
 export const STAGE_LABELS: Readonly<Record<string, string>> = Object.freeze({
-  PLAN: "Planning",
-  PLAN_REVIEW: "Plan review",
-  WRITE_TESTS: "Writing tests",
-  IMPLEMENT: "Implementing",
-  TEST: "Testing",
-  CODE_REVIEW: "Code review",
-  BUILD: "Building",
-  VERIFY: "Verifying",
-  FINALIZE: "Finalizing",
-  KNOWLEDGE_REVIEW: "Knowledge review",
+  INIT: "Start",
+  LOAD_CONTEXT: "Load",
+  PICK_TICKET: "Pick",
+  PLAN: "Plan",
+  PLAN_REVIEW: "Review",
+  WRITE_TESTS: "Tests",
+  IMPLEMENT: "Code",
+  TEST: "Test",
+  CODE_REVIEW: "Review",
+  BUILD: "Build",
+  VERIFY: "Verify",
+  FINALIZE: "Commit",
+  KNOWLEDGE_REVIEW: "Ledger",
   COMPACT: "Compacted",
   LESSON_CAPTURE: "Lessons",
-  ISSUE_FIX: "Fixing issue",
-  ISSUE_SWEEP: "Issue sweep",
-  PICK_TICKET: "Picking",
-  LOAD_CONTEXT: "Loading",
-  INIT: "Starting",
+  ISSUE_FIX: "Fix",
+  ISSUE_SWEEP: "Sweep",
   HANDOVER: "Handover",
-  COMPLETE: "Complete",
+  COMPLETE: "Done",
   SESSION_END: "Ended",
 });
 

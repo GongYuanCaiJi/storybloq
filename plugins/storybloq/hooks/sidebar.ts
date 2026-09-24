@@ -1,5 +1,5 @@
 import { createDashboardState, type DashboardState, type ScanItem, type CachedRecord } from "./dashboard-state.js";
-import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel, sessionLine } from "./dashboard-view.js";
+import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout, rowBudget, compactBoard, narrowBoard, boardNode, headerNode, contextNode, footerNode, contextLabel } from "./dashboard-view.js";
 export { contextLabel, MOD_VERSION } from "./dashboard-view.js";
 import { wroteLedger } from "./ledger-write-detection.js";
 import { cellWidth, truncate } from "./terminal-text.js";
@@ -118,6 +118,8 @@ const HANDOVERS_DIR = ".story/handovers";
 const CONFIG_PATH = ".story/config.json";
 const ROADMAP_PATH = ".story/roadmap.json";
 const STATUS_PATH = ".story/status.json";
+/** T-532: tool calls read the context fill at most this often. */
+const CONTEXT_REFRESH_MS = 5000;
 function forgetEverything(dashboard: DashboardState): void {
   dashboard.cache = {};
   dashboard.cacheLoaded = false;
@@ -148,6 +150,7 @@ function forgetEverything(dashboard: DashboardState): void {
   dashboard.sessionActive = false;
   forgetSession(dashboard);
   dashboard.contextPercent = null;
+  dashboard.contextReadAt = null;
   dashboard.warm = false;
   dashboard.uiAvailable = true;
   dashboard.noLedger = false;
@@ -303,12 +306,20 @@ async function readHeader(dashboard: DashboardState, $: any): Promise<void> {
         ticket?: unknown;
         claudeStatus?: unknown;
         observedAt?: unknown;
+        currentIssue?: unknown;
       };
       dashboard.sessionActive = parsed.sessionActive === true;
       dashboard.sessionState = statusField(parsed.state);
       dashboard.sessionTicket = statusField(parsed.ticket);
       dashboard.sessionClaudeStatus = statusField(parsed.claudeStatus);
       dashboard.sessionObservedAt = statusField(parsed.observedAt);
+      // T-532: an ISSUE_FIX session names its issue here, with `ticket` null.
+      const issue = parsed.currentIssue;
+      if (typeof issue === "object" && issue !== null && !Array.isArray(issue)) {
+        const { id, displayId } = issue as { id?: unknown; displayId?: unknown };
+        dashboard.sessionIssueId = statusField(id);
+        dashboard.sessionIssue = statusField(displayId) ?? dashboard.sessionIssueId;
+      }
     }
     catch {
       dashboard.sessionActive = false;
@@ -321,6 +332,8 @@ function forgetSession(dashboard: DashboardState): void {
   dashboard.sessionTicket = null;
   dashboard.sessionClaudeStatus = null;
   dashboard.sessionObservedAt = null;
+  dashboard.sessionIssue = null;
+  dashboard.sessionIssueId = null;
 }
 async function loadCache(dashboard: DashboardState, $: any): Promise<void> {
   if (dashboard.cacheLoaded)
@@ -545,8 +558,11 @@ async function attach(dashboard: DashboardState, $: any): Promise<void> {
   // readable the moment the Mod loads into a session that has already had a
   // response. Reading them only on `turn.complete` is why the owner's header
   // was blank after a reload, with the fill only appearing a turn later.
-  dashboard.contextPercent = await readContextFill($);
-  dashboard.motion.setContext(dashboard.contextPercent, true);
+  const read = await refreshContext(dashboard, $);
+  if (read !== null) {
+    dashboard.contextPercent = read.value;
+    dashboard.motion.setContext(read.value, true);
+  }
   dashboard.themeLight = await readThemeLight(dashboard, $);
   await readHeader(dashboard, $);
   await loadCache(dashboard, $);
@@ -873,6 +889,18 @@ async function readContextFill($: any): Promise<number | null> {
     return null;
   }
 }
+/**
+* T-532: a context read, and whether it is still the newest one. Every read
+* takes the next sequence number and a session start takes one too, so a slow
+* read that a later read or a restart has overtaken comes back null and is
+* dropped: a tool call's figure from before a compaction must not replace the
+* compaction's own.
+*/
+async function refreshContext(dashboard: DashboardState, $: any): Promise<{ value: number | null } | null> {
+  const seq = ++dashboard.contextSeq;
+  const value = await readContextFill($);
+  return seq === dashboard.contextSeq ? { value } : null;
+}
 export function registerSidebar(on: On, _options: Options): void {
   const dashboard = createDashboardState();
   forgetEverything(dashboard);
@@ -952,9 +980,6 @@ export function registerSidebar(on: On, _options: Options): void {
       else if (layout === "narrow") {
         rows.push(narrowBoard(dashboard, elements, dashboard.projection.board, width));
         rows.push(Box({ key: "footer", flexDirection: "row", justifyContent: "flex-end", children: [contextNode(dashboard, elements, dashboard.contextPercent, width)] }));
-        if (dashboard.sessionActive) {
-          rows.push(paneText(dashboard, elements.Text, { dimColor: true, wrap: "truncate", children: sessionLine(dashboard) }));
-        }
       }
       else {
         rows.push(budget.compact
@@ -964,9 +989,6 @@ export function registerSidebar(on: On, _options: Options): void {
           rows.push(paneText(dashboard, Text, { key: "issues-gap", children: " " }));
         if (placement === "dock") rows.push(Box({ key: "footer-space", flexGrow: 1 }));
         rows.push(footerNode(dashboard, elements, dashboard.projection.issuesBySeverity, dashboard.contextPercent, width));
-        if (dashboard.sessionActive) {
-          rows.push(paneText(dashboard, Text, { dimColor: true, wrap: "truncate", children: sessionLine(dashboard) }));
-        }
       }
       return Box({ flexDirection: "column", ...(placement === "dock" ? { height: dockHeight(e) } : {}), children: rows });
     }
@@ -1033,6 +1055,11 @@ export function registerSidebar(on: On, _options: Options): void {
     dashboard.uiAvailable = false;
   });
   on("session.start", async ($: any, e: any, next: (e: any) => unknown) => {
+    // T-532: first, before anything can return or wait. A reload fires this
+    // again without re-registering: the tool-call throttle starts over, and
+    // any context read still in flight from before is overtaken.
+    dashboard.contextReadAt = null;
+    dashboard.contextSeq += 1;
     if (!dashboard.uiAvailable) {
       if (!dashboard.saidNoUi) {
         dashboard.saidNoUi = true;
@@ -1125,8 +1152,11 @@ export function registerSidebar(on: On, _options: Options): void {
       await attachIfLedgerArrived(dashboard, $);
       return next(e);
     }
-    dashboard.contextPercent = await readContextFill($);
-    dashboard.motion.setContext(dashboard.contextPercent);
+    const read = await refreshContext(dashboard, $);
+    if (read !== null) {
+      dashboard.contextPercent = read.value;
+      dashboard.motion.setContext(read.value);
+    }
     await readHeader(dashboard, $);
     requestScan(dashboard, $);
     return next(e);
@@ -1153,13 +1183,33 @@ export function registerSidebar(on: On, _options: Options): void {
       else
         requestScan(dashboard, $);
     }
+    // T-532: the gauge inside a turn. A long turn otherwise sat on the figure
+    // from its start: the owner's board read 99% while the client had long
+    // since moved. At most one read per CONTEXT_REFRESH_MS of tool calls,
+    // stamped before the await so calls running side by side share it, and a
+    // redraw only when the figure moved.
+    if (dashboard.uiAvailable && dashboard.sidebarEnabled && !dashboard.noLedger) {
+      const now = Date.now();
+      if (dashboard.contextReadAt === null || now - dashboard.contextReadAt >= CONTEXT_REFRESH_MS) {
+        dashboard.contextReadAt = now;
+        const read = await refreshContext(dashboard, $);
+        if (read !== null && read.value !== dashboard.contextPercent) {
+          dashboard.contextPercent = read.value;
+          dashboard.motion.setContext(read.value);
+          $.ui.invalidate("ui.render");
+        }
+      }
+    }
     return result;
   });
   on("session.compact", async ($: any, e: any, next: (e: any) => unknown) => {
     if (!dashboard.uiAvailable || !dashboard.sidebarEnabled || dashboard.noLedger)
       return next(e);
-    dashboard.contextPercent = await readContextFill($);
-    dashboard.motion.setContext(dashboard.contextPercent);
+    const read = await refreshContext(dashboard, $);
+    if (read !== null) {
+      dashboard.contextPercent = read.value;
+      dashboard.motion.setContext(read.value);
+    }
     $.ui.invalidate("ui.render");
     return next(e);
   });

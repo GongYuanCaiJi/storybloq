@@ -28,35 +28,35 @@ describe("T-531 stage labels", () => {
     expect(Object.keys(STAGE_LABELS).sort()).toEqual([...WORKFLOW_STATES].sort());
   });
 
-  it("uses exactly the labels the ticket names", () => {
+  it("uses exactly the short labels T-532 names", () => {
     expect(STAGE_LABELS).toEqual({
-      PLAN: "Planning",
-      PLAN_REVIEW: "Plan review",
-      WRITE_TESTS: "Writing tests",
-      IMPLEMENT: "Implementing",
-      TEST: "Testing",
-      CODE_REVIEW: "Code review",
-      BUILD: "Building",
-      VERIFY: "Verifying",
-      FINALIZE: "Finalizing",
-      KNOWLEDGE_REVIEW: "Knowledge review",
+      INIT: "Start",
+      LOAD_CONTEXT: "Load",
+      PICK_TICKET: "Pick",
+      PLAN: "Plan",
+      PLAN_REVIEW: "Review",
+      WRITE_TESTS: "Tests",
+      IMPLEMENT: "Code",
+      TEST: "Test",
+      CODE_REVIEW: "Review",
+      BUILD: "Build",
+      VERIFY: "Verify",
+      FINALIZE: "Commit",
+      KNOWLEDGE_REVIEW: "Ledger",
       COMPACT: "Compacted",
       LESSON_CAPTURE: "Lessons",
-      ISSUE_FIX: "Fixing issue",
-      ISSUE_SWEEP: "Issue sweep",
-      PICK_TICKET: "Picking",
-      LOAD_CONTEXT: "Loading",
-      INIT: "Starting",
+      ISSUE_FIX: "Fix",
+      ISSUE_SWEEP: "Sweep",
       HANDOVER: "Handover",
-      COMPLETE: "Complete",
+      COMPLETE: "Done",
       SESSION_END: "Ended",
     });
     expect(Object.isFrozen(STAGE_LABELS)).toBe(true);
   });
 
   it("maps a known state through the table", () => {
-    expect(stageLabel("IMPLEMENT")).toBe("Implementing");
-    expect(stageLabel("PLAN_REVIEW")).toBe("Plan review");
+    expect(stageLabel("IMPLEMENT")).toBe("Code");
+    expect(stageLabel("PLAN_REVIEW")).toBe("Review");
   });
 
   it("falls back to the raw state, lowercased with spaces, never blank", () => {

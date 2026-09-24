@@ -14,7 +14,7 @@ This file is referenced from SKILL.md for `/story auto` / `$story auto`, review,
 4. The guide advances through: PICK_TICKET -> PLAN -> PLAN_REVIEW -> IMPLEMENT -> CODE_REVIEW -> FINALIZE -> KNOWLEDGE_REVIEW -> COMPLETE -> loop
 5. Continue until the guide returns SESSION_END
 
-While the session runs, the Claude Code ledger dashboard shows its stage on the In progress card and in its footer (`auto: Implementing T-001`); the storybloq README describes it.
+While it runs, the Claude Code ledger dashboard tags its In progress card (`T-001 [Code]`), or the heading if none matches, with no footer line; see the storybloq README.
 
 **Ticket review depth:** Optional ticket metadata `reviewRisk` accepts `low`, `medium`, or `high` and sets the minimum PLAN_REVIEW depth to one, two, or three rounds. Set it with `storybloq ticket meta set T-001 reviewRisk '"high"'` or `storybloq_ticket_meta_set`. Legacy `risk` metadata remains compatible. Malformed explicit values fail closed to high, and risk metadata never skips a review stage.
 

@@ -1,7 +1,7 @@
 import type { DashboardState } from "./dashboard-state.js";
 import type { SidebarBoardCard, SidebarProjection } from "./sidebar-projection.js";
 import { graphemes, cellWidth, truncate } from "./terminal-text.js";
-import { displaySafe, stageLabel, stageStale } from "./stage-label.js";
+import { stageLabel, stageStale } from "./stage-label.js";
 const COLUMN_CARD_CAP = 6;
 const COLUMN_TAIL = "...";
 const BOARD_COLUMNS = 3;
@@ -193,56 +193,79 @@ export function rowBudget(e: any, stacked: boolean): {
 * "In progress 100" at fourteen cells is "In progr… 100", never
 * "In progress 1…", which would quietly report a different number.
 */
-function headingContent(dashboard: DashboardState, elements: any, label: string, count: number, width: number): unknown[] {
+function headingContent(dashboard: DashboardState, elements: any, label: string, count: number, width: number, stage: StageMark | null = null): unknown[] {
   const tail = ` ${count}`;
   const emphasis = dashboard.motion.count(label === "In progress" ? "inProgress" : label === "Done" ? "done" : "open");
+  const tag = headingTag(label, count, stage, width);
   return [
     paneText(dashboard, elements.Text, { children: truncate(label, Math.max(1, width - tail.length)) }),
     paneText(dashboard, elements.Text, { dimColor: !emphasis, bold: emphasis, children: tail }),
+    ...(tag === "" ? [] : [paneText(dashboard, elements.Text, { ...(stage!.stale ? { dimColor: true } : { color: "cyan" }), children: tag })]),
   ];
 }
 /**
-* T-531: the card an autonomous session is working and the tag it carries.
-* `key` is the card's stable key; `text` is the drawn tag with its trailing
-* space; `stale` dims it.
+* T-532: the stage after a heading, " [Code]", for a session no drawn card
+* carries. Only whole, after the whole label and count: the tag is what goes
+* first, so the count is never cut to make room for it. Empty otherwise.
+*/
+function headingTag(label: string, count: number, stage: StageMark | null, width: number): string {
+  if (stage === null || stage.key !== null)
+    return "";
+  const tag = ` ${stage.text.trimEnd()}`;
+  return cellWidth(label) + cellWidth(` ${count}`) + cellWidth(tag) <= width ? tag : "";
+}
+/**
+* T-531: the stage an autonomous session is in and where it is drawn. `key` is
+* the stable key of the drawn card that carries it, or null when no drawn card
+* does and the In progress heading carries it instead (T-532); `text` is the
+* card's tag with its trailing space; `stale` dims it.
 */
 interface StageMark {
-  readonly key: string;
+  readonly key: string | null;
   readonly text: string;
   readonly stale: boolean;
 }
 /**
-* T-531: which In progress card carries the session's stage, if any.
+* The session's stage for an In progress column that draws its first `shown`
+* cards, or null when no session is active or its state did not parse.
 *
-* Only while a session is active and its state and ticket both parsed, and only
-* the one ticket card whose id is the session's ticket (status.json and the
-* card both use the display id, falling back to the id). Two cards that share a
-* display id, which a reconcile not yet run can leave, tag neither: guessing
-* would put the stage on work the session is not doing.
+* The card is resolved against the whole column first and only then asked
+* whether it is drawn: a twin past the cap must still make a drawn card
+* ambiguous, and a capped card must not hand its tag to a drawn look-alike.
+* Unresolved, ambiguous or cut by the cap, the stage goes to the heading.
 */
-function stageMark(dashboard: DashboardState, cards: readonly SidebarBoardCard[], now = Date.now()): StageMark | null {
+function sessionStage(dashboard: DashboardState, cards: readonly SidebarBoardCard[], shown: number, now = Date.now()): StageMark | null {
   const state = dashboard.sessionState;
-  const ticket = dashboard.sessionTicket;
-  if (!dashboard.sessionActive || state === null || ticket === null)
+  if (!dashboard.sessionActive || state === null)
     return null;
-  const matches = cards.filter((card) => card.kind === "ticket" && card.id === ticket);
-  if (matches.length !== 1)
-    return null;
+  const card = sessionCard(dashboard, cards);
   const stale = stageStale(dashboard.sessionObservedAt, now);
-  return { key: matches[0]!.key, text: `[${stageLabel(state)}${stale ? "?" : ""}] `, stale };
+  return {
+    key: card !== null && cards.indexOf(card) < shown ? card.key : null,
+    text: `[${stageLabel(state)}${stale ? "?" : ""}] `,
+    stale,
+  };
 }
 /**
-* T-531: the footer line for an active session: "auto: Implementing T-001",
-* "auto: Implementing" when no ticket parsed, and the old sentence when no
-* state did. A stage older than the presence TTL carries a "?", as its tag does.
+* The one In progress card that is the session's item, or null.
+*
+* A ticket session matches ticket cards only, by display id (falling back to
+* the id), and two that share it match neither: guessing would put the stage
+* on work the session is not doing. An ISSUE_FIX session (T-532) carries no
+* ticket and matches issue cards only: by its canonical id first, which no
+* reconcile can duplicate, and by display id only when no card has that id.
 */
-export function sessionLine(dashboard: DashboardState, now = Date.now()): string {
-  const state = dashboard.sessionState;
-  if (state === null)
-    return "an autonomous session is active";
-  const stage = `auto: ${stageLabel(state)}${stageStale(dashboard.sessionObservedAt, now) ? "?" : ""}`;
-  const ticket = dashboard.sessionTicket === null ? "" : displaySafe(dashboard.sessionTicket);
-  return ticket === "" ? stage : `${stage} ${ticket}`;
+function sessionCard(dashboard: DashboardState, cards: readonly SidebarBoardCard[]): SidebarBoardCard | null {
+  const only = (matches: readonly SidebarBoardCard[]): SidebarBoardCard | null => matches.length === 1 ? matches[0]! : null;
+  const ticket = dashboard.sessionTicket;
+  if (ticket !== null)
+    return only(cards.filter((card) => card.kind === "ticket" && card.id === ticket));
+  const issueId = dashboard.sessionIssueId;
+  const byKey = issueId === null ? null : only(cards.filter((card) => card.kind === "issue" && card.key === `issue:${issueId}`));
+  if (byKey !== null)
+    return byKey;
+  const issue = dashboard.sessionIssue;
+  return issue === null ? null : only(cards.filter((card) => card.kind === "issue" && card.id === issue));
 }
 /**
 * IDs lead in muted text; titles carry emphasis and blockers stay visible.
@@ -357,7 +380,7 @@ export function inProgressBoard(dashboard: DashboardState, elements: any, width:
   const cards = dashboard.projection?.board.inProgress ?? [];
   const shown = Math.min(COLUMN_CARD_CAP, Math.max(0, body - (cards.length > body ? 1 : 0)));
   return boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress,
-    cards, width, shown, Math.max(1, Math.min(body, cards.length || 2)), stageMark(dashboard, cards));
+    cards, width, shown, Math.max(1, Math.min(body, cards.length || 2)), sessionStage(dashboard, cards, shown));
 }
 
 function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnKey, heading: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[], width: number, shown: number, height: number, stage: StageMark | null = null): unknown {
@@ -375,22 +398,25 @@ function boardColumn(dashboard: DashboardState, elements: any, key: BoardColumnK
         key: `${key}-heading`,
         ...style,
         wrap: "truncate",
-        children: headingContent(dashboard, elements, heading, cards.length, textWidth),
+        children: headingContent(dashboard, elements, heading, cards.length, textWidth, stage),
       }),
       paneText(dashboard, elements.Text, { key: `${key}-rule`, dimColor: true, wrap: "truncate", children: HEADING_RULE.repeat(textWidth) }),
       ...bodyRowsOf(dashboard, elements, cards, textWidth, shown, height, key, stage),
     ],
   });
 }
-/** The board reduced to three counted rows, when no frame will fit. */
+/**
+* The board reduced to three counted rows, when no frame will fit. No card is
+* drawn, so a session's stage rides on the In progress row.
+*/
 export function compactBoard(dashboard: DashboardState, elements: any, board: SidebarProjection["board"], width: number): unknown {
-  const line = (key: string, label: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[]): unknown => paneText(dashboard, elements.Text, { key, ...style, wrap: "truncate", children: headingContent(dashboard, elements, label, cards.length, width) });
+  const line = (key: string, label: string, style: Readonly<Record<string, unknown>>, cards: readonly SidebarBoardCard[], stage: StageMark | null = null): unknown => paneText(dashboard, elements.Text, { key, ...style, wrap: "truncate", children: headingContent(dashboard, elements, label, cards.length, width, stage) });
   return elements.Box({
     key: "board",
     flexDirection: "column",
     children: [
       line("board-open", "Open", COLUMN_STYLES.open, board.open),
-      line("board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress),
+      line("board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, sessionStage(dashboard, board.inProgress, 0)),
       line("board-done", "Done", COLUMN_STYLES.done, board.done),
     ],
   });
@@ -408,35 +434,46 @@ export function compactBoard(dashboard: DashboardState, elements: any, board: Si
 * Nothing in progress and the strip shows the Open column the same way
 * (ISS-1254): the owner's project had no work in hand and the strip said
 * "In progress 0, none", which is a count and not the work; the next thing to
-* pick up is what the strip is for then.
+* pick up is what the strip is for then. An active session's stage (T-532)
+* still gets a row there, "In progress 0 [Pick]", above Open, which gives up
+* a card for it so the strip stays five rows; the Open cards never carry it.
 */
 export function narrowBoard(dashboard: DashboardState, elements: any, board: SidebarProjection["board"], width: number): unknown {
   const inProgress = board.inProgress as readonly SidebarBoardCard[];
   const fallback = inProgress.length === 0;
   const cards = fallback ? (board.open as readonly SidebarBoardCard[]) : inProgress;
-  // The Open fallback is not work in hand, so it never carries the stage.
-  const stage = fallback ? null : stageMark(dashboard, inProgress);
-  const rows: unknown[] = [
-    paneText(dashboard, elements.Text, {
-      key: "narrow-heading",
-      ...(fallback ? COLUMN_STYLES.open : COLUMN_STYLES.inProgress),
+  const stage = sessionStage(dashboard, inProgress, NARROW_BOARD_CARDS);
+  const stageRow = fallback && headingTag("In progress", 0, stage, width) !== "";
+  const limit = stageRow ? NARROW_BOARD_CARDS - 1 : NARROW_BOARD_CARDS;
+  const rows: unknown[] = [];
+  if (stageRow) {
+    rows.push(paneText(dashboard, elements.Text, {
+      key: "narrow-stage-heading",
+      ...COLUMN_STYLES.inProgress,
       wrap: "truncate",
-      children: headingContent(dashboard, elements, fallback ? "Open" : "In progress", cards.length, width),
-    }),
-  ];
+      children: headingContent(dashboard, elements, "In progress", 0, width, stage),
+    }));
+  }
+  rows.push(paneText(dashboard, elements.Text, {
+    key: "narrow-heading",
+    ...(fallback ? COLUMN_STYLES.open : COLUMN_STYLES.inProgress),
+    wrap: "truncate",
+    children: headingContent(dashboard, elements, fallback ? "Open" : "In progress", cards.length, width, fallback ? null : stage),
+  }));
   if (cards.length === 0) {
     rows.push(...emptyColumnRows(dashboard, elements, fallback ? "board-open" : "board-inprogress", width, 1, false));
   }
   else {
-    cards.slice(0, NARROW_BOARD_CARDS).forEach((card, index) => {
-      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(dashboard, elements, card, width, false, stage)] }));
+    // The Open fallback is not work in hand, so its cards never carry the stage.
+    cards.slice(0, limit).forEach((card, index) => {
+      rows.push(elements.Box({ key: `narrow-card-${index}`, children: [cardRow(dashboard, elements, card, width, false, fallback ? null : stage)] }));
     });
-    if (cards.length > NARROW_BOARD_CARDS) {
+    if (cards.length > limit) {
       rows.push(paneText(dashboard, elements.Text, {
         key: "narrow-tail",
         dimColor: true,
         wrap: "truncate",
-        children: truncate(`... ${cards.length - NARROW_BOARD_CARDS} more`, width),
+        children: truncate(`... ${cards.length - limit} more`, width),
       }));
     }
   }
@@ -489,7 +526,7 @@ export function boardNode(dashboard: DashboardState, elements: any, board: Sideb
     gap: stacked ? 0 : COLUMN_GAP,
     children: [
       boardColumn(dashboard, elements, "board-open", "Open", COLUMN_STYLES.open, board.open, widths[0]!, shown, height),
-      boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height, stageMark(dashboard, board.inProgress)),
+      boardColumn(dashboard, elements, "board-inprogress", "In progress", COLUMN_STYLES.inProgress, board.inProgress, widths[1]!, shown, height, sessionStage(dashboard, board.inProgress, shown)),
       boardColumn(dashboard, elements, "board-done", "Done", COLUMN_STYLES.done, board.done, widths[2]!, shown, height),
     ],
   });

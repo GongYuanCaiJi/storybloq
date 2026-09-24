@@ -46,7 +46,22 @@ export interface DashboardState {
   sessionTicket: string | null;
   sessionClaudeStatus: string | null;
   sessionObservedAt: string | null;
+  /**
+   * T-532: status.json's `currentIssue`, which ISSUE_FIX carries in place of
+   * `ticket`. `sessionIssue` is its display id, falling back to its id;
+   * `sessionIssueId` is the id alone. Null when absent or malformed.
+   */
+  sessionIssue: string | null;
+  sessionIssueId: string | null;
   contextPercent: number | null;
+  /** T-532: when a tool call last read the context fill; null before the first. */
+  contextReadAt: number | null;
+  /**
+   * T-532: bumped by every context read and every session start. A read's
+   * result is applied only while its number is still the latest. Monotonic:
+   * never reset.
+   */
+  contextSeq: number;
   warm: boolean;
   uiAvailable: boolean;
   noLedger: boolean;
@@ -90,7 +105,11 @@ export function createDashboardState(): DashboardState {
     sessionTicket: null,
     sessionClaudeStatus: null,
     sessionObservedAt: null,
+    sessionIssue: null,
+    sessionIssueId: null,
     contextPercent: null,
+    contextReadAt: null,
+    contextSeq: 0,
     warm: false,
     uiAvailable: true,
     noLedger: false,

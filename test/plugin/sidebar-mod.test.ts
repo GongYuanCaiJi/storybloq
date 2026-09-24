@@ -1137,8 +1137,224 @@ it("keeps a short dock as an In progress sidebar with a bottom footer", async ()
 });
 
 /**
- * T-531: a `/story auto` session shows its stage on the In progress card and in
- * the footer, read from `.story/status.json` alone.
+ * T-532: the context gauge moved only at the end of a turn, so a long turn sat
+ * on a stale figure. A tool call now refreshes it, at most once per five
+ * seconds, and redraws only when the figure changed.
+ */
+describe("T-532: the context gauge follows tool calls inside a turn", () => {
+  const NOW = Date.parse("2026-09-24T12:00:00.000Z");
+  const READ = { tool: "Read", file_path: "/repo/src/a.ts" };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function gauge(start = 20) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const h = new Harness(); seedLedger(h.fs, "/repo");
+    const usage = { tokens: start, reads: 0 };
+    h.$.session.usage = async () => {
+      usage.reads += 1;
+      return { context: { tokens: usage.tokens, breakdown: { autoCompactThreshold: 100 } } };
+    };
+    let invalidations = 0;
+    h.$.ui.invalidate = () => { invalidations += 1; };
+    await h.start("/repo"); await h.settle();
+    h.render();
+    await h.fire("turn.start", { turnId: "main" });
+    return { h, usage, invalidations: () => invalidations };
+  }
+
+  const shown = (h: Harness): string => findUi(JSON.parse(h.render()), "context").children;
+
+  it("a tool call inside a turn moves the gauge and redraws once", async () => {
+    const { h, usage, invalidations } = await gauge();
+    expect(shown(h)).toMatch(/ 20%$/);
+    usage.tokens = 90;
+    const reads = usage.reads;
+    const before = invalidations();
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 1);
+    expect(invalidations() - before).toBe(1);
+    expect(shown(h)).toMatch(/ 90%$/);
+  });
+
+  it("reads at most once per five seconds of tool calls", async () => {
+    const { h, usage } = await gauge();
+    const reads = usage.reads;
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 1);
+    vi.setSystemTime(NOW + 4_999);
+    usage.tokens = 70;
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 1);
+    expect(shown(h)).toMatch(/ 20%$/);
+    vi.setSystemTime(NOW + 5_000);
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 2);
+    expect(shown(h)).toMatch(/ 70%$/);
+  });
+
+  it("concurrent tool calls in one window read once", async () => {
+    const { h, usage } = await gauge();
+    const reads = usage.reads;
+    await Promise.all([h.fire("tool.call", READ), h.fire("tool.call", READ), h.fire("tool.call", READ)]);
+    expect(usage.reads).toBe(reads + 1);
+  });
+
+  it("an unchanged figure does not redraw", async () => {
+    const { h, usage, invalidations } = await gauge();
+    const reads = usage.reads;
+    const before = invalidations();
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 1);
+    expect(invalidations()).toBe(before);
+  });
+
+  it("turn.complete and session.compact still read inside the tool-call window", async () => {
+    const { h, usage } = await gauge();
+    await h.fire("tool.call", READ);
+    const reads = usage.reads;
+    vi.setSystemTime(NOW + 1_000);
+    usage.tokens = 55;
+    await h.fire("turn.complete", { turnId: "main" });
+    expect(usage.reads).toBe(reads + 1);
+    expect(shown(h)).toMatch(/ 55%$/);
+    usage.tokens = 5;
+    await h.fire("session.compact", {});
+    expect(usage.reads).toBe(reads + 2);
+    expect(shown(h)).toMatch(/ 5%$/);
+  });
+
+  it("a ledger-writing tool call still rescans, and the gauge reads with it", async () => {
+    const { h, usage } = await gauge();
+    usage.tokens = 64;
+    h.fs.addFile("/repo/.story/tickets/T-002.json", ticket("T-002", "inprogress"));
+    await h.fire("tool.call", { tool: "Write", file_path: "/repo/.story/tickets/T-002.json" });
+    await h.settle();
+    expect(shown(h)).toMatch(/ 64%$/);
+    expect(JSON.stringify(findUi(JSON.parse(h.render()), "board-inprogress"))).toContain("T-002");
+  });
+
+  it("does not read the gauge while the Mod is off or has no ledger", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+    const h = new Harness();
+    let reads = 0;
+    h.$.session.usage = async () => { reads += 1; return {}; };
+    await h.fire("tool.call", READ);
+    expect(reads).toBe(0);
+    h.fs.addDir("/empty");
+    await h.start("/empty"); await h.settle();
+    const after = reads;
+    await h.fire("tool.call", READ);
+    expect(reads).toBe(after);
+  });
+
+  /** A usage stub whose next read waits on the test. */
+  function deferredUsage(h: Harness) {
+    const pending: ((tokens: number) => void)[] = [];
+    let live: number | null = null;
+    h.$.session.usage = () => {
+      if (live !== null) return Promise.resolve({ context: { tokens: live, breakdown: { autoCompactThreshold: 100 } } });
+      return new Promise((resolve) => {
+        pending.push((tokens) => resolve({ context: { tokens, breakdown: { autoCompactThreshold: 100 } } }));
+      });
+    };
+    return {
+      /** Settles the oldest pending read with `tokens`. */
+      resolve: (tokens: number) => pending.shift()!(tokens),
+      /** From now on reads answer at once with `tokens`. */
+      answer: (tokens: number | null) => { live = tokens; },
+      pending: () => pending.length,
+    };
+  }
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  it("a second session.start on the same dashboard resets the throttle", async () => {
+    const { h, usage } = await gauge();
+    await h.fire("tool.call", READ);
+    vi.setSystemTime(NOW + 1_000);
+    await h.start("/repo"); await h.settle();
+    const reads = usage.reads;
+    vi.setSystemTime(NOW + 2_000);
+    await h.fire("tool.call", READ);
+    expect(usage.reads).toBe(reads + 1);
+  });
+
+  it("a tool-call read overtaken by session.compact never restores the older figure", async () => {
+    const { h, invalidations } = await gauge();
+    const usage = deferredUsage(h);
+    const call = h.fire("tool.call", READ);
+    await flush();
+    expect(usage.pending()).toBe(1);
+    usage.answer(5);
+    await h.fire("session.compact", {});
+    expect(shown(h)).toMatch(/ 5%$/);
+    const before = invalidations();
+    usage.resolve(99);
+    await call;
+    expect(shown(h)).toMatch(/ 5%$/);
+    expect(invalidations()).toBe(before);
+  });
+
+  it("a tool-call read that lands during a restart's root discovery is dropped", async () => {
+    const { h, invalidations } = await gauge();
+    const usage = deferredUsage(h);
+    const call = h.fire("tool.call", READ);
+    await flush();
+    expect(usage.pending()).toBe(1);
+    // Hold the restart inside root discovery.
+    const exists = h.$.fs.exists;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    h.$.fs.exists = async (path: string) => { await held; return exists(path); };
+    const restart = h.start("/repo");
+    await flush();
+    const before = invalidations();
+    usage.resolve(99);
+    await call;
+    expect(shown(h)).toMatch(/ 20%$/);
+    expect(invalidations()).toBe(before);
+    h.$.fs.exists = exists;
+    usage.answer(30);
+    release();
+    await restart; await h.settle();
+    expect(shown(h)).toMatch(/ 30%$/);
+  });
+
+  it("a tool-call read that lands after a restart into a directory with no ledger is dropped", async () => {
+    const { h, invalidations } = await gauge();
+    const usage = deferredUsage(h);
+    const call = h.fire("tool.call", READ);
+    await flush();
+    expect(usage.pending()).toBe(1);
+    h.fs.addDir("/elsewhere");
+    await h.start("/elsewhere"); await h.settle();
+    const before = invalidations();
+    usage.resolve(99);
+    await call;
+    expect(invalidations()).toBe(before);
+    expect(usage.pending()).toBe(0);
+  });
+
+  it("never reads usage while drawing", async () => {
+    const { h, usage } = await gauge();
+    const reads = usage.reads;
+    for (let i = 0; i < 5; i += 1) h.render();
+    expect(usage.reads).toBe(reads);
+  });
+});
+
+/**
+ * T-531: a `/story auto` session shows its stage on the In progress card,
+ * read from `.story/status.json` alone. T-532: the footer line is gone, the
+ * labels are short, an ISSUE_FIX session tags its issue card, and a session
+ * whose item no drawn card carries tags the In progress heading instead.
  *
  * The native `claude plugin test` suite (`sidebar.test.ts`) does not pass at
  * 81e42701 (ARCHITECTURE.md: it needs repair before it can gate), so these
@@ -1147,9 +1363,9 @@ it("keeps a short dock as an In progress sidebar with a bottom footer", async ()
  * any of this existed, with the Mod's version normalized so a release bump
  * does not break them.
  */
-describe("T-531: the autonomous stage on the in-progress card and in the footer", () => {
-  const CONSTANT = "an autonomous session is active";
+describe("T-531 and T-532: the autonomous stage on the in-progress card or heading", () => {
   const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  const HEADING = "board-inprogress-heading";
 
   afterEach(() => {
     vi.useRealTimers();
@@ -1197,6 +1413,15 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     );
   }
 
+  /** The three counted rows: no viewport rows, and a pane too short for a frame. */
+  function drawCompact(h: Harness, width = 156): any {
+    return h.handlers.get("ui.render")!(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, props: { bodyColumns: width, placement: "inline", scroll: { offset: 0, bodyRows: 5 } } },
+      (e: any) => e,
+    );
+  }
+
   /** The text a node draws, its runs joined. */
   function textOf(node: any): string {
     if (typeof node === "string") return node;
@@ -1213,42 +1438,72 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     return out;
   }
 
-  /** The session footer lines: the constant, or an `auto:` line. */
-  function sessionLines(tree: any): string[] {
-    return leaves(tree).filter((text) => text === CONSTANT || text.startsWith("auto:"));
-  }
-
+  /** Card tags: "[Code] " runs, not the blocked markers. */
   function tagCount(tree: any): number {
     return leaves(tree).filter((text) => /^\[[^\]]*\] $/.test(text) && text !== "[Blocked] " && text !== "[!] ").length;
+  }
+
+  /** Heading tags: " [Code]" runs. */
+  function headingTags(tree: any): string[] {
+    return leaves(tree).filter((text) => /^ \[.*\]$/.test(text));
+  }
+
+  /** The run that draws a heading tag inside `node`, if any. */
+  function headingRun(node: any): any {
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = headingRun(child);
+        if (hit) return hit;
+      }
+      return undefined;
+    }
+    if (node && typeof node === "object") {
+      if (typeof node.children === "string" && /^ \[.*\]$/.test(node.children)) return node;
+      return headingRun(node.children);
+    }
+    return undefined;
+  }
+
+  /** No footer session line of either T-531 form, anywhere. */
+  function expectNoFooter(tree: any, where: string): void {
+    for (const text of leaves(tree)) {
+      expect(text, where).not.toBe("an autonomous session is active");
+      expect(text.startsWith("auto:"), where).toBe(false);
+    }
   }
 
   function golden(tree: any): string {
     return JSON.stringify(tree, null, 2).split(MOD_VERSION).join("<MOD_VERSION>") + "\n";
   }
 
-  it("a live IMPLEMENT on T-001 tags that card and names the stage in the footer", async () => {
+  const LAYOUTS = [[40, "dock", 40], [156, "inline", 40], [40, null, 40], [45, "inline", 40], [40, "dock", 20]] as const;
+
+  it("a live IMPLEMENT on T-001 tags that card, and no layout draws a footer session line", async () => {
     const h = await booted(live());
-    for (const [width, placement] of [[40, "dock"], [156, "inline"], [40, null], [45, "inline"]] as const) {
-      const tree = draw(h, width, placement);
-      const where = `${placement}@${width}`;
+    for (const [width, placement, rows] of LAYOUTS) {
+      const tree = draw(h, width, placement, rows);
+      const where = `${placement}@${width}x${rows}`;
       const row = findUi(tree, "ticket:T-001");
-      expect(textOf(row), where).toBe("T-001 [Implementing] Ticket T-001");
-      expect(row.children[1], where).toMatchObject({ children: "[Implementing] ", color: "cyan" });
+      expect(textOf(row), where).toBe("T-001 [Code] Ticket T-001");
+      expect(row.children[1], where).toMatchObject({ children: "[Code] ", color: "cyan" });
       expect(row.children[1].dimColor, where).toBeFalsy();
       expect(row.children[0], where).toMatchObject({ children: "T-001 ", dimColor: true });
       expect(tagCount(tree), where).toBe(1);
-      expect(sessionLines(tree), where).toEqual(["auto: Implementing T-001"]);
+      expect(headingTags(tree), where).toEqual([]);
+      expectNoFooter(tree, where);
       // The Open card is never tagged.
-      expect(textOf(findUi(tree, "ticket:T-002")), where).not.toContain("[Implementing]");
+      const open = findUi(tree, "ticket:T-002");
+      if (open) expect(textOf(open), where).not.toContain("[Code]");
     }
+    expectNoFooter(drawCompact(h), "compact");
   });
 
   it("labels the other stages through the same table", async () => {
-    for (const [state, label] of [["PLAN_REVIEW", "Plan review"], ["CODE_REVIEW", "Code review"], ["WRITE_TESTS", "Writing tests"]]) {
+    for (const [state, label] of [["PLAN_REVIEW", "Review"], ["CODE_REVIEW", "Review"], ["WRITE_TESTS", "Tests"], ["FINALIZE", "Commit"], ["COMPACT", "Compacted"]]) {
       const h = await booted(live({ state }));
       const tree = draw(h, 156, "inline");
       expect(textOf(findUi(tree, "ticket:T-001"))).toBe(`T-001 [${label}] Ticket T-001`);
-      expect(sessionLines(tree)).toEqual([`auto: ${label} T-001`]);
+      expectNoFooter(tree, state);
     }
   });
 
@@ -1261,7 +1516,7 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
 
   it("an inactive status with stray session fields draws byte-identically to a bare one", async () => {
     const bare = await booted({ sessionActive: false });
-    const stray = await booted({ ...live(), sessionActive: false });
+    const stray = await booted({ ...live(), sessionActive: false, currentIssue: { id: "ISS-001", displayId: "ISS-001" } });
     const missing = await booted(undefined);
     // The last case is the short docked sidebar (a 20-row terminal).
     for (const [width, placement, rows] of [[40, "dock", 40], [156, "inline", 40], [45, "inline", 40], [40, "dock", 20]] as const) {
@@ -1269,9 +1524,12 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
       expect(JSON.stringify(draw(stray, width, placement, rows))).toBe(expected);
       expect(JSON.stringify(draw(missing, width, placement, rows))).toBe(expected);
     }
+    expect(JSON.stringify(drawCompact(stray))).toBe(JSON.stringify(drawCompact(bare)));
   });
 
-  it("a malformed state gives no tag and the constant footer, and keeps the session active", async () => {
+  // With no usable state nothing reads `sessionActive`, so whether a malformed
+  // state keeps it true is not observable in a draw.
+  it("a malformed state gives no tag anywhere", async () => {
     const cases: [string, Record<string, unknown>][] = [
       ["missing", without("state")],
       ["number", live({ state: 42 })],
@@ -1287,25 +1545,29 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
         const tree = draw(h, width, placement);
         expect(textOf(findUi(tree, "ticket:T-001")), name).toBe("T-001 Ticket T-001");
         expect(tagCount(tree), name).toBe(0);
-        expect(sessionLines(tree), name).toEqual([CONSTANT]);
+        expect(headingTags(tree), name).toEqual([]);
+        expectNoFooter(tree, name);
       }
     }
   });
 
-  it("a valid state with a malformed or missing ticket shows the stage alone and tags nothing", async () => {
+  it("a valid state with no usable ticket or issue tags the In progress heading", async () => {
     const cases: [string, Record<string, unknown>][] = [
       ["missing", without("ticket")],
       ["null", live({ ticket: null })],
       ["number", live({ ticket: 1 })],
       ["empty", live({ ticket: "" })],
       ["object", live({ ticket: { id: "T-001" } })],
+      ["issue not an object", live({ ticket: null, currentIssue: "ISS-001" })],
+      ["issue without ids", live({ ticket: null, currentIssue: { title: "x" } })],
     ];
     for (const [name, status] of cases) {
       const h = await booted(status);
       const tree = draw(h, 40, "dock");
       expect(textOf(findUi(tree, "ticket:T-001")), name).toBe("T-001 Ticket T-001");
       expect(tagCount(tree), name).toBe(0);
-      expect(sessionLines(tree), name).toEqual(["auto: Implementing"]);
+      expect(textOf(findUi(tree, HEADING)), name).toBe("In progress 1 [Code]");
+      expect(headingRun(findUi(tree, HEADING)), name).toMatchObject({ children: " [Code]", color: "cyan" });
     }
   });
 
@@ -1313,8 +1575,8 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     for (const text of ["null", "{not json", "[]", '"IMPLEMENT"', "42"]) {
       const h = await booted(text);
       const tree = draw(h, 40, "dock");
-      expect(sessionLines(tree), text).toEqual([]);
       expect(tagCount(tree), text).toBe(0);
+      expect(headingTags(tree), text).toEqual([]);
     }
   });
 
@@ -1322,39 +1584,176 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     const h = await booted(live({
       state: "EVIL\u001b]0;pwn\u0007_STATE\r\nX",
       ticket: "T-001\u001b[2J\u2028",
+      currentIssue: { id: "ISS-001\u001b[2J", displayId: "ISS-001\u0007" },
     }));
     for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
       const tree = draw(h, width, placement);
       for (const text of leaves(tree)) expect(text).not.toMatch(UNSAFE);
-      expect(sessionLines(tree)).toEqual(["auto: evil ]0;pwn state x T-001 [2J"]);
-      // The raw id is what matches, and no card id carries a control character.
+      // The raw id is what matches, and no card id carries a control
+      // character, so the stage goes to the heading, made safe.
       expect(tagCount(tree)).toBe(0);
+      expect(headingTags(tree)).toEqual([" [evil ]0;pwn state x]"]);
     }
   });
 
-  it("tags no card when the session ticket is not the one in-progress ticket card", async () => {
-    const cases: [string, Record<string, unknown>, ((h: Harness) => void) | undefined, string][] = [
-      ["not on the board", live({ ticket: "T-404" }), undefined, "auto: Implementing T-404"],
-      ["open, not in progress", live({ ticket: "T-002" }), undefined, "auto: Implementing T-002"],
+  it("tags the heading, not a card, when no drawn in-progress card is the session's own", async () => {
+    const cases: [string, Record<string, unknown>, ((h: Harness) => void) | undefined][] = [
+      ["not on the board", live({ ticket: "T-404" }), undefined],
+      ["open, not in progress", live({ ticket: "T-002" }), undefined],
       ["two in-progress cards share the id", live(), (h) => {
         h.fs.addFile("/repo/.story/tickets/t-dup.json", JSON.stringify({
           id: "t-dup", displayId: "T-001", title: "Twin", type: "task", status: "inprogress", phase: "p1", order: 2,
         }));
-      }, "auto: Implementing T-001"],
-      ["an issue card has the id", live({ ticket: "ISS-001" }), (h) => {
+      }],
+      ["a ticket id never tags an issue card", live({ ticket: "ISS-001" }), (h) => {
         h.fs.addFile("/repo/.story/issues/ISS-001.json", JSON.stringify({
           id: "ISS-001", displayId: "ISS-001", title: "Issue ISS-001", severity: "high", status: "inprogress",
         }));
-      }, "auto: Implementing ISS-001"],
+      }],
+      ["an issue id never tags a ticket card", live({ ticket: null, state: "ISSUE_FIX", currentIssue: { id: "T-001", displayId: "T-001" } }), undefined],
     ];
-    for (const [name, status, seed, footer] of cases) {
+    for (const [name, status, seed] of cases) {
       const h = await booted(status, seed);
+      const label = status["state"] === "ISSUE_FIX" ? "Fix" : "Code";
+      for (const [width, placement] of [[40, "dock"], [156, "inline"]] as const) {
+        const tree = draw(h, width, placement);
+        const where = `${name} ${placement}@${width}`;
+        expect(tagCount(tree), where).toBe(0);
+        expect(headingTags(tree), where).toEqual([` [${label}]`]);
+        expect(textOf(findUi(tree, HEADING)), where).toMatch(new RegExp(`^In progress \\d+ \\[${label}\\]$`));
+        expectNoFooter(tree, where);
+      }
+      const narrow = draw(h, 45, "inline");
+      expect(tagCount(narrow), name).toBe(0);
+      expect(textOf(findUi(narrow, "narrow-heading")), name).toMatch(new RegExp(`^In progress \\d+ \\[${label}\\]$`));
+    }
+  });
+
+  it("an ISSUE_FIX session tags its issue card by display id, falling back to the id", async () => {
+    const inProgressIssue = (id: string, displayId?: string) => (h: Harness) => {
+      h.fs.addFile(`/repo/.story/issues/${id}.json`, JSON.stringify({
+        id, ...(displayId ? { displayId } : {}), title: `Issue ${displayId ?? id}`, severity: "high", status: "inprogress",
+      }));
+    };
+    const cases: [string, Record<string, unknown>, (h: Harness) => void, string, string][] = [
+      ["legacy id", { id: "ISS-001", displayId: "ISS-001", title: "t", severity: "high" }, inProgressIssue("ISS-001", "ISS-001"), "issue:ISS-001", "ISS-001"],
+      ["hash id by key", { id: "i-abc", displayId: "ISS-009", title: "t", severity: "high" }, inProgressIssue("i-abc", "ISS-009"), "issue:i-abc", "ISS-009"],
+      ["no display id", { id: "ISS-001", title: "t", severity: "high" }, inProgressIssue("ISS-001", "ISS-001"), "issue:ISS-001", "ISS-001"],
+      ["display id alone matches", { id: "i-gone", displayId: "ISS-009", title: "t", severity: "high" }, inProgressIssue("i-abc", "ISS-009"), "issue:i-abc", "ISS-009"],
+    ];
+    for (const [name, currentIssue, seed, key, shown] of cases) {
+      const h = await booted(live({ ticket: null, state: "ISSUE_FIX", currentIssue }), seed);
       for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
         const tree = draw(h, width, placement);
-        expect(tagCount(tree), `${name} ${placement}@${width}`).toBe(0);
-        expect(sessionLines(tree), name).toEqual([footer]);
+        const where = `${name} ${placement}@${width}`;
+        const row = findUi(tree, key);
+        expect(textOf(row), where).toBe(`${shown} [Fix] Issue ${shown}`);
+        expect(tagCount(tree), where).toBe(1);
+        expect(headingTags(tree), where).toEqual([]);
+        expect(textOf(findUi(tree, "ticket:T-001")), where).toBe("T-001 Ticket T-001");
       }
     }
+  });
+
+  it("an issue's canonical id picks it out of drawn display-id twins", async () => {
+    const h = await booted(live({ ticket: null, state: "ISSUE_FIX", currentIssue: { id: "i-two", displayId: "ISS-050" } }), (hh) => {
+      hh.fs.addFile("/repo/.story/issues/i-one.json", JSON.stringify({ id: "i-one", displayId: "ISS-050", title: "One", severity: "high", status: "inprogress" }));
+      hh.fs.addFile("/repo/.story/issues/i-two.json", JSON.stringify({ id: "i-two", displayId: "ISS-050", title: "Two", severity: "high", status: "inprogress" }));
+    });
+    const tree = draw(h, 156, "inline");
+    expect(textOf(findUi(tree, "issue:i-two"))).toBe("ISS-050 [Fix] Two");
+    expect(textOf(findUi(tree, "issue:i-one"))).toBe("ISS-050 One");
+    expect(headingTags(tree)).toEqual([]);
+    // By display id alone the twins are ambiguous: the heading, not a guess.
+    const guess = await booted(live({ ticket: null, state: "ISSUE_FIX", currentIssue: { id: "i-gone", displayId: "ISS-050" } }), (hh) => {
+      hh.fs.addFile("/repo/.story/issues/i-one.json", JSON.stringify({ id: "i-one", displayId: "ISS-050", title: "One", severity: "high", status: "inprogress" }));
+      hh.fs.addFile("/repo/.story/issues/i-two.json", JSON.stringify({ id: "i-two", displayId: "ISS-050", title: "Two", severity: "high", status: "inprogress" }));
+    });
+    const guessed = draw(guess, 156, "inline");
+    expect(tagCount(guessed)).toBe(0);
+    expect(headingTags(guessed)).toEqual([" [Fix]"]);
+  });
+
+  it("an issue the status no longer names stops tagging its card", async () => {
+    const h = await booted(live({ ticket: null, state: "ISSUE_FIX", currentIssue: { id: "ISS-001", displayId: "ISS-001" } }), (hh) => {
+      hh.fs.addFile("/repo/.story/issues/ISS-001.json", JSON.stringify({ id: "ISS-001", displayId: "ISS-001", title: "Issue ISS-001", severity: "high", status: "inprogress" }));
+    });
+    expect(textOf(findUi(draw(h, 156, "inline"), "issue:ISS-001"))).toBe("ISS-001 [Fix] Issue ISS-001");
+    h.fs.addFile("/repo/.story/status.json", JSON.stringify(live({ ticket: null, state: "PICK_TICKET" })));
+    await h.fire("turn.complete", {}); await h.settle();
+    const tree = draw(h, 156, "inline");
+    expect(textOf(findUi(tree, "issue:ISS-001"))).toBe("ISS-001 Issue ISS-001");
+    expect(headingTags(tree)).toEqual([" [Pick]"]);
+  });
+
+  it("resolves the session's card against the whole column before asking whether it is drawn", async () => {
+    const filler = (h: Harness, count: number) => {
+      for (let i = 2; i < 2 + count; i += 1) {
+        h.fs.addFile(`/repo/.story/tickets/T-10${i}.json`, JSON.stringify({
+          id: `T-10${i}`, displayId: `T-10${i}`, title: `Filler ${i}`, type: "task", status: "inprogress", phase: "p1", order: i,
+        }));
+      }
+    };
+    // A duplicate display id straddling the cap: T-001 is drawn, its twin is not.
+    const straddle = await booted(live(), (h) => {
+      filler(h, 6);
+      h.fs.addFile("/repo/.story/tickets/t-dup.json", JSON.stringify({
+        id: "t-dup", displayId: "T-001", title: "Twin", type: "task", status: "inprogress", phase: "p1", order: 99,
+      }));
+    });
+    let tree = draw(straddle, 156, "inline");
+    expect(findUi(tree, "ticket:t-dup")).toBeUndefined();
+    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 Ticket T-001");
+    expect(tagCount(tree)).toBe(0);
+    expect(headingTags(tree)).toEqual([" [Code]"]);
+    // A capped canonical issue with a drawn display-id twin: the twin is not it.
+    const capped = await booted(live({ ticket: null, state: "ISSUE_FIX", currentIssue: { id: "i-cap", displayId: "ISS-050" } }), (h) => {
+      filler(h, 4);
+      h.fs.addFile("/repo/.story/issues/i-twin.json", JSON.stringify({ id: "i-twin", displayId: "ISS-050", title: "Twin", severity: "critical", status: "inprogress" }));
+      h.fs.addFile("/repo/.story/issues/i-cap.json", JSON.stringify({ id: "i-cap", displayId: "ISS-050", title: "Capped", severity: "low", status: "inprogress" }));
+    });
+    tree = draw(capped, 156, "inline");
+    expect(findUi(tree, "issue:i-twin")).toBeDefined();
+    expect(findUi(tree, "issue:i-cap")).toBeUndefined();
+    expect(tagCount(tree)).toBe(0);
+    expect(headingTags(tree)).toEqual([" [Fix]"]);
+    // One card leaves the column, the capped issue is drawn, and it carries the tag itself.
+    capped.fs.addFile("/repo/.story/tickets/T-102.json", JSON.stringify({
+      id: "T-102", displayId: "T-102", title: "Filler 2", type: "task", status: "open", phase: "p1", order: 2,
+    }));
+    await capped.fire("turn.complete", {}); await capped.settle();
+    tree = draw(capped, 156, "inline");
+    expect(textOf(findUi(tree, "issue:i-cap"))).toBe("ISS-050 [Fix] Capped");
+    expect(textOf(findUi(tree, "issue:i-twin"))).toBe("ISS-050 Twin");
+    expect(tagCount(tree)).toBe(1);
+    expect(headingTags(tree)).toEqual([]);
+  });
+
+  it("the heading tag drops before the count is cut", async () => {
+    const h = await booted(live({ ticket: "T-404" }));
+    // "In progress 1 [Code]" is twenty cells.
+    expect(textOf(findUi(draw(h, 20, "inline"), "narrow-heading"))).toBe("In progress 1 [Code]");
+    for (const width of [19, 16, 12]) {
+      const tree = draw(h, width, "inline");
+      const text = textOf(findUi(tree, "narrow-heading"));
+      expect(text, String(width)).not.toContain("[Code]");
+      expect(text.endsWith(" 1"), String(width)).toBe(true);
+      expect(headingTags(tree), String(width)).toEqual([]);
+    }
+    // Framed: the column's text width is two cells less than the column.
+    const dock = draw(h, 22, "dock");
+    expect(textOf(findUi(dock, HEADING))).toBe("In progress 1 [Code]");
+    expect(headingTags(draw(h, 21, "dock"))).toEqual([]);
+  });
+
+  it("the three counted rows carry the stage on the In progress row", async () => {
+    const h = await booted(live());
+    const tree = drawCompact(h);
+    expect(findUi(tree, "board-open")).toBeDefined();
+    expect(textOf(findUi(tree, "board-inprogress"))).toBe("In progress 1 [Code]");
+    expect(textOf(findUi(tree, "board-open"))).not.toContain("[");
+    expect(textOf(findUi(tree, "board-done"))).not.toContain("[");
+    expectNoFooter(tree, "compact");
   });
 
   it("marks a status older than the presence TTL as uncertain, dimmed with a question mark", async () => {
@@ -1365,18 +1764,19 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
       const tree = draw(stale, width, placement);
       const row = findUi(tree, "ticket:T-001");
-      expect(textOf(row)).toBe("T-001 [Implementing?] Ticket T-001");
-      expect(row.children[1]).toMatchObject({ children: "[Implementing?] ", dimColor: true });
+      expect(textOf(row)).toBe("T-001 [Code?] Ticket T-001");
+      expect(row.children[1]).toMatchObject({ children: "[Code?] ", dimColor: true });
       expect(row.children[1].color).not.toBe("cyan");
-      expect(sessionLines(tree)).toEqual(["auto: Implementing? T-001"]);
     }
     const fresh = await booted(live({ observedAt: new Date(now - 60 * 60 * 1000).toISOString() }));
-    const tree = draw(fresh, 40, "dock");
-    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Implementing] Ticket T-001");
-    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
-    // Only state parsed, stale: the footer still says so.
+    expect(textOf(findUi(draw(fresh, 40, "dock"), "ticket:T-001"))).toBe("T-001 [Code] Ticket T-001");
+    // Only the state parsed, stale: the heading says so the same way.
     const alone = await booted({ ...without("ticket"), observedAt: new Date(now - 13 * 60 * 60 * 1000).toISOString() });
-    expect(sessionLines(draw(alone, 40, "dock"))).toEqual(["auto: Implementing?"]);
+    const heading = findUi(draw(alone, 40, "dock"), HEADING);
+    expect(textOf(heading)).toBe("In progress 1 [Code?]");
+    const run = headingRun(heading);
+    expect(run).toMatchObject({ children: " [Code?]", dimColor: true });
+    expect(run.color).not.toBe("cyan");
   });
 
   it("the narrow strip truncates the title, never the id or the tag", async () => {
@@ -1389,23 +1789,25 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
     const tree = draw(h, 45, "inline");
     expect(findUi(tree, "narrow-heading")).toBeDefined();
     const text = textOf(findUi(tree, "ticket:T-001"));
-    expect(text.startsWith("T-001 [Implementing] Native canvas")).toBe(true);
+    expect(text.startsWith("T-001 [Code] Native canvas")).toBe(true);
     expect(text.endsWith("…")).toBe(true);
     expect(text.length).toBeLessThanOrEqual(45);
-    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
+    expectNoFooter(tree, "narrow");
   });
 
-  it("drops the tag before the id when the two do not fit", async () => {
+  it("drops the card tag before the id when the two do not fit", async () => {
     const h = await booted(live());
-    // 23 cells hold "T-001 [Implementing] " and the two title cells the row keeps.
-    const fits = textOf(findUi(draw(h, 23, "inline"), "ticket:T-001"));
-    expect(fits.startsWith("T-001 [Implementing] ")).toBe(true);
-    for (const width of [22, 18, 12]) {
+    // 15 cells hold "T-001 [Code] " and the two title cells the row keeps.
+    const fits = textOf(findUi(draw(h, 15, "inline"), "ticket:T-001"));
+    expect(fits.startsWith("T-001 [Code] ")).toBe(true);
+    for (const width of [14, 12, 9]) {
       const tree = draw(h, width, "inline");
       const text = textOf(findUi(tree, "ticket:T-001"));
       expect(text.startsWith("T-001 "), String(width)).toBe(true);
-      expect(text, String(width)).not.toContain("[Implementing");
+      expect(text, String(width)).not.toContain("[Code");
       expect(tagCount(tree), String(width)).toBe(0);
+      // A matched card that cannot hold its tag does not send it to the heading.
+      expect(headingTags(tree), String(width)).toEqual([]);
     }
   });
 
@@ -1416,36 +1818,49 @@ describe("T-531: the autonomous stage on the in-progress card and in the footer"
       }));
     });
     const row = findUi(draw(h, 156, "inline"), "ticket:T-001");
-    expect(textOf(row)).toBe("T-001 [Implementing] [Blocked] Ticket T-001");
+    expect(textOf(row)).toBe("T-001 [Code] [Blocked] Ticket T-001");
     expect(row.children[2]).toMatchObject({ children: "[Blocked] ", color: "yellow" });
-    // Docked at 40 the column holds 38 cells: the title is what gives way.
-    expect(textOf(findUi(draw(h, 40, "dock"), "ticket:T-001"))).toBe("T-001 [Implementing] [Blocked] Ticket…");
-    // The marker counts: 27 cells hold "T-001 [Implementing] [!] " and two
-    // title cells, 26 do not, and the tag goes before the id is shortened.
-    const fits = textOf(findUi(draw(h, 27, "inline"), "ticket:T-001"));
-    expect(fits.startsWith("T-001 [Implementing] [!] ")).toBe(true);
-    const tight = draw(h, 26, "inline");
+    // Docked at 40 the column holds 38 cells.
+    expect(textOf(findUi(draw(h, 40, "dock"), "ticket:T-001"))).toBe("T-001 [Code] [Blocked] Ticket T-001");
+    // The marker counts: 19 cells hold "T-001 [Code] [!] " and two title
+    // cells, 18 do not, and the tag goes before the id is shortened.
+    const fits = textOf(findUi(draw(h, 19, "inline"), "ticket:T-001"));
+    expect(fits.startsWith("T-001 [Code] [!] ")).toBe(true);
+    const tight = draw(h, 18, "inline");
     const text = textOf(findUi(tight, "ticket:T-001"));
     expect(text.startsWith("T-001 [!] ")).toBe(true);
-    expect(text).not.toContain("[Implementing");
+    expect(text).not.toContain("[Code");
     expect(tagCount(tight)).toBe(0);
   });
 
-  it("the narrow Open fallback never carries the tag", async () => {
-    const h = await booted(live(), (hh) => {
-      hh.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "open"));
-    });
+  it("the narrow Open fallback gains an In progress row for an active stage, within five rows", async () => {
+    const openOnly = (hh: Harness) => { hh.fs.addFile("/repo/.story/tickets/T-001.json", ticket("T-001", "open")); };
+    const h = await booted(live({ state: "PICK_TICKET", ticket: null }), openOnly);
     const tree = draw(h, 45, "inline");
-    expect(textOf(findUi(tree, "narrow-heading"))).toContain("Open");
-    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 Ticket T-001");
-    expect(tagCount(tree)).toBe(0);
-    expect(sessionLines(tree)).toEqual(["auto: Implementing T-001"]);
+    const board = findUi(tree, "board");
+    expect(textOf(findUi(tree, "narrow-stage-heading"))).toBe("In progress 0 [Pick]");
+    expect(textOf(findUi(tree, "narrow-heading"))).toMatch(/^Open 3$/);
+    expect(board.children.map((row: any) => row.key)).toEqual(["narrow-stage-heading", "narrow-heading", "narrow-card-0", "narrow-card-1", "narrow-tail"]);
+    expect(textOf(findUi(tree, "narrow-tail"))).toBe("... 1 more");
+    // The Open cards never carry the stage, even the session's own ticket.
+    const same = await booted(live(), openOnly);
+    const sameTree = draw(same, 45, "inline");
+    expect(textOf(findUi(sameTree, "ticket:T-001"))).toBe("T-001 Ticket T-001");
+    expect(tagCount(sameTree)).toBe(0);
+    expect(headingTags(sameTree)).toEqual([" [Code]"]);
+    // Too narrow for the tag, and inactive: exactly today's fallback.
+    const inactive = await booted({ sessionActive: false }, openOnly);
+    for (const width of [45, 19]) {
+      expect(JSON.stringify(draw(inactive, width, "inline")), String(width)).not.toContain("narrow-stage-heading");
+    }
+    expect(JSON.stringify(draw(h, 19, "inline"))).toBe(JSON.stringify(draw(inactive, 19, "inline")));
   });
 
   it("the short docked sidebar tags the card too", async () => {
     const h = await booted(live());
     const tree = draw(h, 40, "dock", 20);
     expect(findUi(tree, "short-sidebar")).toBeDefined();
-    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Implementing] Ticket T-001");
+    expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Code] Ticket T-001");
+    expectNoFooter(tree, "short dock");
   });
 });
