@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { registerSidebar, IDLE_POLL_TICKS, MOD_VERSION, contextLabel } from "../../plugins/storybloq/hooks/sidebar.js";
+import { cellWidth } from "../../plugins/storybloq/hooks/terminal-text.js";
 
 const PANE_ID = "storybloq";
 
@@ -1862,5 +1863,88 @@ describe("T-531 and T-532: the autonomous stage on the in-progress card or headi
     expect(findUi(tree, "short-sidebar")).toBeDefined();
     expect(textOf(findUi(tree, "ticket:T-001"))).toBe("T-001 [Code] Ticket T-001");
     expectNoFooter(tree, "short dock");
+  });
+});
+
+describe("ISS-1306: ledger titles are drawn display-safe", () => {
+  const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+  const TITLES: Record<string, [string, string]> = {
+    "T-001": ["Red \u001b[31malert\u001b[0m", "Red  [31malert [0m"],
+    "T-002": ["abc\u202edcba", "abc dcba"],
+    "ISS-001": ["nul\u0000byte", "nul byte"],
+  };
+
+  function leaves(node: any, out: string[] = []): string[] {
+    if (typeof node === "string") out.push(node);
+    else if (Array.isArray(node)) for (const child of node) leaves(child, out);
+    else if (node && typeof node === "object") leaves(node.children, out);
+    return out;
+  }
+
+  function textOf(node: any): string {
+    return leaves(node).join("");
+  }
+
+  function draw(h: Harness, width: number, placement: "dock" | "inline"): any {
+    return h.handlers.get("ui.render")!(
+      h.$,
+      { component: "Pane", requestId: PANE_ID, viewport: { columns: width + 4, rows: 40 }, props: { bodyColumns: width, placement, scroll: { offset: 0, bodyRows: 30 } } },
+      (e: any) => e,
+    );
+  }
+
+  function seedUnsafe(fs: FakeFs): void {
+    seedLedger(fs, "/repo");
+    const t1 = JSON.parse(ticket("T-001", "inprogress"));
+    t1.title = TITLES["T-001"]![0];
+    fs.addFile("/repo/.story/tickets/T-001.json", JSON.stringify(t1));
+    const t2 = JSON.parse(ticket("T-002", "open"));
+    t2.title = TITLES["T-002"]![0];
+    fs.addFile("/repo/.story/tickets/T-002.json", JSON.stringify(t2));
+    const i1 = JSON.parse(issue("ISS-001", "high"));
+    i1.title = TITLES["ISS-001"]![0];
+    fs.addFile("/repo/.story/issues/ISS-001.json", JSON.stringify(i1));
+  }
+
+  it("draws no raw control, line-break or bidi code point, and every row fits its width", async () => {
+    const h = new Harness();
+    seedUnsafe(h.fs);
+    await h.start("/repo");
+    await h.settle();
+    for (const [width, placement] of [[40, "dock"], [156, "inline"], [45, "inline"]] as const) {
+      const tree = draw(h, width, placement);
+      const where = `${placement}@${width}`;
+      for (const text of leaves(tree)) expect(text, where).not.toMatch(UNSAFE);
+      const row = findUi(tree, "ticket:T-001");
+      expect(row, where).toBeTruthy();
+      expect(textOf(row), where).toContain(TITLES["T-001"]![1].slice(0, 8));
+      expect(cellWidth(textOf(row)), where).toBeLessThanOrEqual(width);
+      const heading = findUi(tree, "board-inprogress-heading") ?? findUi(tree, "narrow-heading");
+      expect(textOf(heading), where).toMatch(/^In progress 1$/);
+    }
+    const wide = draw(h, 156, "inline");
+    expect(textOf(findUi(wide, "ticket:T-001"))).toContain(TITLES["T-001"]![1]);
+    expect(textOf(findUi(wide, "ticket:T-002"))).toContain(TITLES["T-002"]![1]);
+    expect(textOf(findUi(wide, "issue:ISS-001"))).toContain(TITLES["ISS-001"]![1]);
+  });
+
+  it("cleans a title cached by an earlier version, without re-reading the file", async () => {
+    const h = new Harness();
+    seedLedger(h.fs, "/repo");
+    const mtimeMs = (await h.fs.stat("/repo/.story/tickets/T-001.json")).mtimeMs;
+    h.store.set("sidebar-ledger-cache-v1", {
+      ".story/tickets/T-001.json": {
+        mtimeMs,
+        record: {
+          kind: "ticket", id: "T-001", displayId: "T-001", previousDisplayIds: [], title: "Cached\u001b[2Jtitle\u202e",
+          status: "inprogress", phase: "p1", parentTicket: null, blockedBy: [], lifecycle: null, order: 1,
+        },
+      },
+    });
+    await h.start("/repo");
+    await h.settle();
+    const tree = draw(h, 156, "inline");
+    expect(textOf(findUi(tree, "ticket:T-001"))).toContain("Cached [2Jtitle");
+    for (const text of leaves(tree)) expect(text).not.toMatch(UNSAFE);
   });
 });

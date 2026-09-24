@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
-import { mkdirSync, realpathSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -113,14 +113,38 @@ async function makeProjectRoot(
   return testRoot;
 }
 
+/**
+ * ISS-1309: runs a hook handler as if Claude Code started it in `root`, and
+ * nowhere else. The project-root overrides are cleared so discovery starts
+ * from the cwd; the waker is never spawned; the global storybloq dir (limit
+ * ledger, waker lock) points inside `root`. Everything is restored after.
+ */
+const HOOK_ENV = ["STORYBLOQ_PROJECT_ROOT", "CLAUDESTORY_PROJECT_ROOT", "STORYBLOQ_DISABLE_WAKER_SPAWN", "STORYBLOQ_GLOBAL_DIR"] as const;
+
+async function inHookRoot<T>(root: string, fn: () => Promise<T> | T): Promise<T> {
+  const cwd = process.cwd();
+  const saved = HOOK_ENV.map((k) => [k, process.env[k]] as const);
+  try {
+    delete process.env.STORYBLOQ_PROJECT_ROOT;
+    delete process.env.CLAUDESTORY_PROJECT_ROOT;
+    process.env.STORYBLOQ_DISABLE_WAKER_SPAWN = "1";
+    process.env.STORYBLOQ_GLOBAL_DIR = join(root, ".global");
+    process.chdir(root);
+    return await fn();
+  } finally {
+    process.chdir(cwd);
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
 /** Run handleSessionResumePrompt with cwd at root + stdout captured; returns the emitted string. */
 async function runResumePromptCapturing(
   root: string,
   options: Parameters<typeof handleSessionResumePrompt>[0],
 ): Promise<string> {
-  const cwd = process.cwd();
-  const oldStoryRoot = process.env.STORYBLOQ_PROJECT_ROOT;
-  const oldClaudeRoot = process.env.CLAUDESTORY_PROJECT_ROOT;
   const chunks: string[] = [];
   const oldWrite = process.stdout.write;
   process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -128,16 +152,10 @@ async function runResumePromptCapturing(
     return true;
   }) as typeof process.stdout.write;
   try {
-    delete process.env.STORYBLOQ_PROJECT_ROOT;
-    delete process.env.CLAUDESTORY_PROJECT_ROOT;
-    process.chdir(root);
-    await handleSessionResumePrompt(options);
+    await inHookRoot(root, async () => {
+      await handleSessionResumePrompt(options);
+    });
   } finally {
-    process.chdir(cwd);
-    if (oldStoryRoot === undefined) delete process.env.STORYBLOQ_PROJECT_ROOT;
-    else process.env.STORYBLOQ_PROJECT_ROOT = oldStoryRoot;
-    if (oldClaudeRoot === undefined) delete process.env.CLAUDESTORY_PROJECT_ROOT;
-    else process.env.CLAUDESTORY_PROJECT_ROOT = oldClaudeRoot;
     process.stdout.write = oldWrite;
   }
   return chunks.join("");
@@ -147,21 +165,9 @@ async function runCompactPrepare(
   root: string,
   options: Parameters<typeof handleSessionCompactPrepare>[0],
 ): Promise<void> {
-  const cwd = process.cwd();
-  const oldStoryRoot = process.env.STORYBLOQ_PROJECT_ROOT;
-  const oldClaudeRoot = process.env.CLAUDESTORY_PROJECT_ROOT;
-  try {
-    delete process.env.STORYBLOQ_PROJECT_ROOT;
-    delete process.env.CLAUDESTORY_PROJECT_ROOT;
-    process.chdir(root);
+  await inHookRoot(root, async () => {
     await handleSessionCompactPrepare(options);
-  } finally {
-    process.chdir(cwd);
-    if (oldStoryRoot === undefined) delete process.env.STORYBLOQ_PROJECT_ROOT;
-    else process.env.STORYBLOQ_PROJECT_ROOT = oldStoryRoot;
-    if (oldClaudeRoot === undefined) delete process.env.CLAUDESTORY_PROJECT_ROOT;
-    else process.env.CLAUDESTORY_PROJECT_ROOT = oldClaudeRoot;
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -344,9 +350,6 @@ describe("handleSessionResumePrompt", () => {
     writeSessionSync(sessDir, state);
     expect(findResumableSession(testRoot)?.info.state.sessionId).toBe(state.sessionId);
 
-    const cwd = process.cwd();
-    const oldStoryRoot = process.env.STORYBLOQ_PROJECT_ROOT;
-    const oldClaudeRoot = process.env.CLAUDESTORY_PROJECT_ROOT;
     const chunks: string[] = [];
     const oldWrite = process.stdout.write;
     process.stdout.write = ((chunk: string | Uint8Array) => {
@@ -354,17 +357,11 @@ describe("handleSessionResumePrompt", () => {
       return true;
     }) as typeof process.stdout.write;
     try {
-      delete process.env.STORYBLOQ_PROJECT_ROOT;
-      delete process.env.CLAUDESTORY_PROJECT_ROOT;
-      process.chdir(testRoot);
-      expect(discoverProjectRoot()).toBe(realpathSync(testRoot));
-      await handleSessionResumePrompt({ codexHookJson: true, clientTaskId: "codex-task" });
+      await inHookRoot(testRoot, async () => {
+        expect(discoverProjectRoot()).toBe(realpathSync(testRoot));
+        await handleSessionResumePrompt({ codexHookJson: true, clientTaskId: "codex-task" });
+      });
     } finally {
-      process.chdir(cwd);
-      if (oldStoryRoot === undefined) delete process.env.STORYBLOQ_PROJECT_ROOT;
-      else process.env.STORYBLOQ_PROJECT_ROOT = oldStoryRoot;
-      if (oldClaudeRoot === undefined) delete process.env.CLAUDESTORY_PROJECT_ROOT;
-      else process.env.CLAUDESTORY_PROJECT_ROOT = oldClaudeRoot;
       process.stdout.write = oldWrite;
     }
 
@@ -1261,5 +1258,61 @@ describe("evaluatePressure with compaction context", () => {
 
     const pressure = evaluatePressure(state);
     expect(pressure).toBe("critical");
+  });
+});
+
+describe("ISS-1309: hook calls in this file are isolated", () => {
+  it("inHookRoot disables the waker, points the global dir inside the root, and restores everything", async () => {
+    const root = await makeProjectRoot();
+    const before = Object.fromEntries(HOOK_ENV.map((k) => [k, process.env[k]]));
+    const cwd = process.cwd();
+    process.env.STORYBLOQ_GLOBAL_DIR = "/prior/global";
+    try {
+      const seen = await inHookRoot(root, () => ({
+        disable: process.env.STORYBLOQ_DISABLE_WAKER_SPAWN,
+        global: process.env.STORYBLOQ_GLOBAL_DIR,
+        storyRoot: process.env.STORYBLOQ_PROJECT_ROOT,
+        claudeRoot: process.env.CLAUDESTORY_PROJECT_ROOT,
+        cwd: process.cwd(),
+      }));
+      expect(seen).toEqual({
+        disable: "1",
+        global: join(root, ".global"),
+        storyRoot: undefined,
+        claudeRoot: undefined,
+        cwd: realpathSync(root),
+      });
+      expect(process.env.STORYBLOQ_GLOBAL_DIR).toBe("/prior/global");
+      expect(process.env.STORYBLOQ_DISABLE_WAKER_SPAWN).toBe(before.STORYBLOQ_DISABLE_WAKER_SPAWN);
+      expect(process.cwd()).toBe(cwd);
+
+      await expect(inHookRoot(root, () => { throw new Error("boom"); })).rejects.toThrow("boom");
+      expect(process.env.STORYBLOQ_GLOBAL_DIR).toBe("/prior/global");
+      expect(process.env.STORYBLOQ_DISABLE_WAKER_SPAWN).toBe(before.STORYBLOQ_DISABLE_WAKER_SPAWN);
+      expect(process.cwd()).toBe(cwd);
+    } finally {
+      for (const [k, v] of Object.entries(before)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it("every resume-prompt and compact-prepare call in this file runs inside inHookRoot", () => {
+    const lines = readFileSync(new URL(import.meta.url), "utf8").split("\n");
+    // Built, not written out, so this test does not find itself.
+    const resume = ["await handleSessionResumePrompt", "("].join("");
+    const prepare = ["await handleSessionCompactPrepare", "("].join("");
+    const calls = { resume: 0, prepare: 0 };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      const kind = line.includes(resume) ? "resume" : line.includes(prepare) ? "prepare" : null;
+      if (kind === null) continue;
+      calls[kind] += 1;
+      const window = lines.slice(Math.max(0, i - 3), i + 1).join("\n");
+      expect(window, `line ${i + 1}`).toContain("inHookRoot(");
+    }
+    expect(calls.resume).toBeGreaterThan(0);
+    expect(calls.prepare).toBeGreaterThan(0);
   });
 });

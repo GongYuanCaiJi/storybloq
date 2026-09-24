@@ -21,9 +21,12 @@
  *     displayId; one that is missing or ambiguous counts as blocking, which is
  *     the conservative reading the CLI takes
  *
- * Pure: no imports, no clock, no I/O. The caller reads the files (`$.fs`) and
- * caches what `extractRecord` returns; this module only counts.
+ * Pure: no clock, no I/O, and one import, the plugin's own display-safety
+ * function. The caller reads the files (`$.fs`) and caches what
+ * `extractRecord` returns; this module only counts.
  */
+
+import { displaySafe } from "./stage-label.js";
 
 /** How long a title may be once cached. The store holds 4 MiB for the whole plugin. */
 const TITLE_CAP = 80;
@@ -183,7 +186,9 @@ export function extractRecord(kind: LedgerKind, text: string): SidebarRecord | n
   if (id === null || status === null) return null;
 
   const displayId = asString(raw["displayId"]);
-  const title = (asString(raw["title"]) ?? "").slice(0, TITLE_CAP);
+  // ISS-1306: a title is ledger text any teammate or tool wrote. Made safe to
+  // draw before the cap, so the cap counts what the pane shows.
+  const title = displaySafe(asString(raw["title"]) ?? "").slice(0, TITLE_CAP);
   const lifecycle = asString(raw["lifecycle"]);
   const previousDisplayIds = asStringArray(raw["previousDisplayIds"]);
 

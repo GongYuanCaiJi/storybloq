@@ -11,6 +11,7 @@ import {
   type SidebarTicket,
   type SidebarIssue,
 } from "../../plugins/storybloq/hooks/sidebar-projection.js";
+import { cellWidth, graphemes } from "../../plugins/storybloq/hooks/terminal-text.js";
 
 /**
  * T-508: the ledger sidebar Mod's projection, checked against the one the CLI
@@ -534,6 +535,37 @@ describe("sidebar projection (T-508)", () => {
     const record = extractRecord("ticket", JSON.stringify(ticket({ id: "T-100", title: long })));
     expect(record).not.toBeNull();
     expect(record!.title.length).toBeLessThanOrEqual(80);
+  });
+
+  it("ISS-1306: cleans a title for display before capping it", () => {
+    const title = (raw: string, kind: "ticket" | "issue" = "ticket") => {
+      const text = JSON.stringify(kind === "ticket" ? ticket({ id: "T-100", title: raw }) : { id: "ISS-9", title: raw, severity: "high", status: "open" });
+      return extractRecord(kind, text)!.title;
+    };
+    expect(title("Red \u001b[31malert\u001b[0m")).toBe("Red  [31malert [0m");
+    expect(title("abc\u202edcba")).toBe("abc dcba");
+    expect(title("nul\u0000byte", "issue")).toBe("nul byte");
+    expect(title("a\r\nb")).toBe("a b");
+    expect(title("\u001b\u0007\u009b")).toBe("");
+    expect(title("Plain title, unchanged")).toBe("Plain title, unchanged");
+    // The cap counts the cleaned string: a 40-unit control run collapses to
+    // one space, so all 80 drawn characters survive, ending in "y".
+    const long = title(`x${"\u0000".repeat(40)}${"y".repeat(200)}`);
+    expect(long).toBe(`x ${"y".repeat(78)}`);
+  });
+
+  it("ISS-1306: removes invisible code points from a title and keeps ZWNJ and ZWJ", () => {
+    const title = (raw: string) => extractRecord("ticket", JSON.stringify(ticket({ id: "T-100", title: raw })))!.title;
+    expect(title("hid\u200bden\u2060text\ufeff")).toBe("hiddentext");
+    expect(title("\u200eLTR\u200f RTL\u061c")).toBe("LTR RTL");
+    // A Persian title with ZWNJ (U+200C) comes through byte-identical.
+    const persian = "\u062a\u06a9\u0645\u06cc\u0644 \u0628\u0631\u0646\u0627\u0645\u0647\u200c\u0647\u0627";
+    expect(title(persian)).toBe(persian);
+    // A ZWJ emoji title keeps one grapheme cluster, drawn in two cells.
+    const coder = title("\u{1f469}\u200d\u{1f4bb}");
+    expect(coder).toBe("\u{1f469}\u200d\u{1f4bb}");
+    expect(graphemes(coder)).toHaveLength(1);
+    expect(cellWidth(coder)).toBe(2);
   });
 
   it("returns null for a text that is not a record, rather than throwing", () => {

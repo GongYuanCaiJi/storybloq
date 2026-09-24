@@ -16,6 +16,7 @@ import {
   STAGE_STALE_MS,
   displaySafe,
   stageLabel,
+  statusField,
   stageStale,
 } from "../../plugins/storybloq/hooks/stage-label.js";
 
@@ -96,6 +97,33 @@ describe("T-531 display safety", () => {
     for (const text of ["T-001", "Implementing", "Plan review", "ISS-12", "naïve 日本 ✓"]) {
       expect(displaySafe(text)).toBe(text);
     }
+  });
+
+  it("ISS-1306: removes each invisible code point without a space", () => {
+    expect(displaySafe("zero\u200bwidth")).toBe("zerowidth");
+    expect(displaySafe("word\u2060joiner")).toBe("wordjoiner");
+    expect(displaySafe("\ufeffBOM")).toBe("BOM");
+    expect(displaySafe("left\u200emark")).toBe("leftmark");
+    expect(displaySafe("right\u200fmark")).toBe("rightmark");
+    expect(displaySafe("arabic\u061cmark")).toBe("arabicmark");
+    expect(displaySafe("a\u200b\u200b\ufeffb")).toBe("ab");
+    // Removed before the control collapse, so a mixed run is still one space.
+    expect(displaySafe("a\u001b\u200b\u0007b")).toBe("a b");
+    expect(displaySafe("\u200b T-001 \u200f")).toBe("T-001");
+    expect(displaySafe("\u200b\u2060\ufeff")).toBe("");
+  });
+
+  it("ISS-1306: keeps ZWNJ and ZWJ, which are real text", () => {
+    const persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645";
+    expect(displaySafe(persian)).toBe(persian);
+    const coder = "\u{1f469}\u200d\u{1f4bb} pair";
+    expect(displaySafe(coder)).toBe(coder);
+  });
+
+  it("ISS-1306: a status field of invisible code points only is unset", () => {
+    expect(statusField("\u200b\ufeff")).toBeNull();
+    expect(statusField("_\u2060_")).toBeNull();
+    expect(statusField("\u200bT-001")).toBe("\u200bT-001");
   });
 });
 

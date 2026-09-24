@@ -54,23 +54,35 @@ const UNSAFE_RUN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\
 const UNSAFE_ONE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
 /**
- * A status string made fit to draw on one line: each run of unsafe code
- * points becomes one space, then the ends are trimmed. status.json is read,
- * never trusted, so nothing in it reaches the pane as a control sequence or
- * a line break, and the width arithmetic measures what is actually drawn.
+ * ISS-1306: invisible code points that hide text or flip its direction: the
+ * zero-width space, word joiner and byte-order mark, and the LRM, RLM and
+ * ALM marks. They take no cell, so they are removed, not spaced. U+200C
+ * (ZWNJ, part of Persian and Indic words) and U+200D (ZWJ, which joins an
+ * emoji sequence into one cluster) are real text and stay.
+ */
+const INVISIBLE = /[\u200b\u200e\u200f\u2060\ufeff\u061c]/g;
+const INVISIBLE_ONE = /[\u200b\u200e\u200f\u2060\ufeff\u061c]/;
+
+/**
+ * A string made fit to draw on one line: the invisible code points go, each
+ * run of unsafe code points becomes one space, then the ends are trimmed.
+ * status.json and ledger titles are read, never trusted, so nothing in them
+ * reaches the pane as a control sequence, a line break or hidden text, and
+ * the width arithmetic measures what is actually drawn.
  */
 export function displaySafe(text: string): string {
-  return text.replace(UNSAFE_RUN, " ").trim();
+  return text.replace(INVISIBLE, "").replace(UNSAFE_RUN, " ").trim();
 }
 
 /**
  * A status.json field worth keeping: a string with something in it besides
- * whitespace, underscores and unsafe code points. Anything else is unset.
+ * whitespace, underscores, unsafe and invisible code points. Anything else
+ * is unset.
  */
 export function statusField(value: unknown): string | null {
   if (typeof value !== "string") return null;
   for (const char of value) {
-    if (char !== "_" && char.trim() !== "" && !UNSAFE_ONE.test(char)) return value;
+    if (char !== "_" && char.trim() !== "" && !UNSAFE_ONE.test(char) && !INVISIBLE_ONE.test(char)) return value;
   }
   return null;
 }

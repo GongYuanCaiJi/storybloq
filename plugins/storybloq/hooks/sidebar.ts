@@ -3,7 +3,7 @@ import { inProgressBoard, compactLineNode, paneText, panePlacement, boardLayout,
 export { contextLabel, MOD_VERSION } from "./dashboard-view.js";
 import { wroteLedger } from "./ledger-write-detection.js";
 import { cellWidth, truncate } from "./terminal-text.js";
-import { statusField } from "./stage-label.js";
+import { displaySafe, statusField } from "./stage-label.js";
 /**
 * T-508: the ledger sidebar Mod. Draws `.story/` beside the transcript.
 *
@@ -343,6 +343,12 @@ async function loadCache(dashboard: DashboardState, $: any): Promise<void> {
     const stored = await $.store.get(STORE_KEY);
     if (stored && typeof stored === "object" && !Array.isArray(stored)) {
       dashboard.cache = stored as Record<string, CachedRecord>;
+      // ISS-1306: a record cached before titles were made safe is served until
+      // its file changes, so its title is cleaned here too.
+      for (const entry of Object.values(dashboard.cache)) {
+        const record = entry?.record as { title?: unknown } | undefined;
+        if (record && typeof record.title === "string") record.title = displaySafe(record.title);
+      }
       // A cache from an earlier session is enough to draw real numbers while
       // this session's scan confirms them.
       dashboard.warm = Object.keys(dashboard.cache).length > 0;
