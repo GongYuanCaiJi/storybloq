@@ -27,7 +27,7 @@ import { dirname, join } from "node:path";
 import { openTranscriptReadOnly } from "./limit-transcript.js";
 import { findResumableSession } from "./session.js";
 import { authorizeTranscriptPath } from "../core/session-intel/transcript-locate.js";
-import { MAX_LINE_BYTES, parseTranscriptObject } from "../core/session-intel/transcript-scan.js";
+import { MAX_LINE_BYTES, isSyntheticAssistantRecord, parseTranscriptObject } from "../core/session-intel/transcript-scan.js";
 
 /**
  * Fill below this is a subagent's compaction; exactly this or above is the
@@ -249,9 +249,9 @@ function scanLine(
 
   if (mainThread && raw.type === "assistant" && raw.isMeta !== true) {
     const message = isRecord(raw.message) ? raw.message : {};
-    // A `<synthetic>` or API-error record carries zero usage; it is not a
-    // measurement of the context.
-    if (message.model === "<synthetic>" || raw.isApiErrorMessage === true) return { kind: "continue" };
+    // A synthetic or API-error record carries zero usage; it is not a
+    // measurement of the context (ISS-1308: one rule, shared with the parser).
+    if (isSyntheticAssistantRecord(raw)) return { kind: "continue" };
     if (parsed.kind !== "assistant" || parsed.contextTokens === null || !usageIsWellFormed(message)) return unknown("malformed");
     if (st.contextTokens === null) {
       st.contextTokens = parsed.contextTokens;

@@ -157,6 +157,17 @@ export function parseTranscriptRecord(line: string, expectedSessionId: string): 
 }
 
 /**
+ * ISS-1308: Claude Code's API-error and "Not logged in" placeholders are
+ * assistant records with all-zero usage. They are not a measurement of the
+ * context, a turn or a model, so every reader skips them.
+ */
+export function isSyntheticAssistantRecord(r: Record<string, unknown>): boolean {
+  if (r.isApiErrorMessage === true) return true;
+  const message = r.message;
+  return !!message && typeof message === "object" && (message as Record<string, unknown>).model === "<synthetic>";
+}
+
+/**
  * ISS-1307: the classification half of `parseTranscriptRecord`, for a
  * caller that parsed the line itself and must tell a malformed line from an
  * ignored one (the subagent-compaction fill scan fails safe on the former).
@@ -210,6 +221,7 @@ export function parseTranscriptObject(raw: unknown, expectedSessionId: string): 
 
   if (type === "assistant") {
     if (r.isMeta === true) return { kind: "skip" };
+    if (isSyntheticAssistantRecord(r)) return { kind: "skip" };
     const message = (r.message && typeof r.message === "object" ? r.message : {}) as Record<string, unknown>;
     const usage = (message.usage && typeof message.usage === "object" ? message.usage : null) as Record<string, unknown> | null;
     let contextTokens: number | null = null;

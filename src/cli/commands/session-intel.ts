@@ -17,7 +17,7 @@ import { COMPACT_NEEDED_ADVICE, basisText, renderUsageAdvisory } from "../../cor
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
 import { scanTail } from "../../core/session-intel/transcript-scan.js";
-import type { SubagentHookSignal } from "../../autonomous/subagent-compaction.js";
+import { classifySessionStart, type ClassifyOptions, type SubagentCompactionVerdict, type SubagentHookSignal } from "../../autonomous/subagent-compaction.js";
 
 export interface SessionIntelOptions {
   readonly cwd?: string;
@@ -165,6 +165,7 @@ export interface SessionIntelStartOptions {
   /** Test seams. */
   readonly projectsDir?: string;
   readonly userSettingsPath?: string;
+  readonly classify?: ClassifyOptions;
 }
 
 export interface SessionIntelStartOutcome {
@@ -199,6 +200,22 @@ export function handleSessionIntelStart(options: SessionIntelStartOptions = {}):
     const cfg = readSessionIntelConfig(root);
     if (!cfg.enabled) return skipped("sessionIntel disabled");
     const now = options.now ?? Date.now();
+
+    // ISS-1310: a subagent's compaction fires the parent's SessionStart(compact)
+    // with the parent's ids. The ISS-1307 classifier decides; on any doubt,
+    // including a throw, this is the parent's own compaction and is recorded.
+    if (source === "compact") {
+      let verdict: SubagentCompactionVerdict | null = null;
+      try {
+        verdict = classifySessionStart(
+          { root, client: "claude", source, subagent: options.subagent, transcriptPath: options.transcriptPath, sessionId },
+          { projectsDir: options.projectsDir, ...options.classify },
+        );
+      } catch {
+        verdict = null;
+      }
+      if (verdict) return skipped(`subagent compaction (${verdict.signal})`);
+    }
 
     const capture = ensureCapture({ root, sessionId, source: source as CaptureSource, now, userSettingsPath: options.userSettingsPath });
     if (source !== "compact") return { status: "done", reason: null, capture, reconcile: null };

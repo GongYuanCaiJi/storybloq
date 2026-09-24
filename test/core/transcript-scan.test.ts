@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, statSync, appendFileSync, truncateSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, statSync, appendFileSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import {
   anchorStillMatches,
+  isSyntheticAssistantRecord,
   parseSetModel,
   parseTranscriptRecord,
   scanBackwardForBoundary,
@@ -26,6 +27,14 @@ function withDir(fn: (dir: string) => void): void {
 
 function req(path: string, over: Partial<ScanRequest> = {}): ScanRequest {
   return { path, sessionId: SID, era: "1:2", revisionSeen: 3, epochSince: null, ...over };
+}
+
+/** ISS-1308: Claude Code's API-error / "Not logged in" placeholder: an assistant record with all-zero usage. */
+function syntheticRecord(o: { ts: string; apiError?: boolean; model?: string }): string {
+  const rec = JSON.parse(assistantRecord({ ts: o.ts, model: o.model ?? "<synthetic>", input: 0 })) as Record<string, unknown>;
+  if (o.apiError) rec.isApiErrorMessage = true;
+  (rec.message as Record<string, unknown>).usage = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
+  return JSON.stringify(rec);
 }
 
 const T = (m: number) => new Date(Date.parse("2026-09-09T12:00:00Z") + m * 60_000).toISOString();
@@ -84,6 +93,81 @@ describe("parseTranscriptRecord", () => {
   it("boundary carries trigger, pre and post", () => {
     const p = parseTranscriptRecord(boundaryRecord({ ts: T(1), trigger: "manual", pre: 331_000, post: 20_000 }), SID);
     expect(p).toMatchObject({ kind: "boundary", boundary: { timestamp: T(1), trigger: "manual", preTokens: 331_000, postTokens: 20_000 } });
+  });
+});
+
+describe("ISS-1308: synthetic and API-error assistant records are not measurements", () => {
+  it("isSyntheticAssistantRecord: the <synthetic> model or a literal true isApiErrorMessage, nothing else", () => {
+    expect(isSyntheticAssistantRecord({ type: "assistant", message: { model: "<synthetic>" } })).toBe(true);
+    expect(isSyntheticAssistantRecord({ type: "assistant", isApiErrorMessage: true, message: { model: "claude-opus-5" } })).toBe(true);
+    expect(isSyntheticAssistantRecord({ type: "assistant", message: { model: "claude-opus-5" } })).toBe(false);
+    expect(isSyntheticAssistantRecord({ type: "assistant" })).toBe(false);
+    expect(isSyntheticAssistantRecord({ type: "assistant", message: "<synthetic>" })).toBe(false);
+    expect(isSyntheticAssistantRecord({ type: "assistant", isApiErrorMessage: "true", message: { model: "claude-opus-5" } })).toBe(false);
+  });
+
+  it("the parser skips both forms", () => {
+    expect(parseTranscriptRecord(syntheticRecord({ ts: T(0) }), SID).kind).toBe("skip");
+    expect(parseTranscriptRecord(syntheticRecord({ ts: T(0), apiError: true, model: "claude-opus-5" }), SID).kind).toBe("skip");
+  });
+
+  it("a transcript ending on a synthetic record reports the preceding real context, not 0, and no <synthetic> model", () => {
+    for (const apiError of [false, true]) {
+      withDir((dir) => {
+        const lines = [
+          assistantRecord({ ts: T(0), read: 80_000 }),
+          syntheticRecord({ ts: T(1), apiError, model: apiError ? "claude-opus-5" : undefined }),
+        ];
+        const path = writeTranscript(dir, "p", SID, lines);
+        const r = scanTail(req(path))!;
+        expect(r.contextTokens).toBe(80_002);
+        expect(r.lastAssistantAt).toBe(T(0));
+        expect(r.lastAssistantModel).toBe("claude-opus-5");
+        expect(r.session.turns?.assistant).toBe(1);
+        expect(r.session.models.map((m) => m.model)).toEqual(["claude-opus-5"]);
+      });
+    }
+  });
+
+  it("a synthetic record between two real ones leaves only the real growth in deltas", () => {
+    withDir((dir) => {
+      const lines = [
+        assistantRecord({ ts: T(0), read: 80_000 }),
+        syntheticRecord({ ts: T(1) }),
+        assistantRecord({ ts: T(2), read: 85_000 }),
+      ];
+      const path = writeTranscript(dir, "p", SID, lines);
+      const r = scanFull(req(path))!;
+      expect(r.contextTokens).toBe(85_002);
+      expect(r.deltas).toEqual([5_000]);
+      expect(r.highWaterMark).toBe(85_002);
+      expect(r.session.turns?.assistant).toBe(2);
+      expect(r.lastAssistantModel).toBe("claude-opus-5");
+    });
+  });
+
+  it("a synthetic record does not mark a pending set-model as applied", () => {
+    withDir((dir) => {
+      const lines = [
+        assistantRecord({ ts: T(0), read: 80_000, model: "claude-opus-5" }),
+        localCommandRecord({ ts: T(1), form: "backtick", oneMillion: true }),
+        syntheticRecord({ ts: T(2) }),
+        assistantRecord({ ts: T(3), read: 81_000, model: "claude-opus-5-1m" }),
+        assistantRecord({ ts: T(4), read: 82_000, model: "claude-opus-5-1m" }),
+      ];
+      const path = writeTranscript(dir, "p", SID, lines);
+      const r = scanTail(req(path))!;
+      // Had the placeholder applied the command, the real transition to the
+      // 1M model would be "unrelated" and discard the flag.
+      expect(r.oneMillionFlag).toBe(true);
+    });
+  });
+
+  it("the fill scan imports the predicate instead of carrying a second copy of the rule", () => {
+    const src = readFileSync(new URL("../../src/autonomous/subagent-compaction.ts", import.meta.url), "utf8");
+    expect(src).toContain("isSyntheticAssistantRecord");
+    expect(src).not.toContain('"<synthetic>"');
+    expect(src).not.toContain("isApiErrorMessage");
   });
 });
 

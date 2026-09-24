@@ -18,6 +18,7 @@ import {
 } from "../../src/cli/commands/session-compact.js";
 import { handleSessionIntelStart } from "../../src/cli/commands/session-intel.js";
 import type { ClassifyOptions } from "../../src/autonomous/subagent-compaction.js";
+import { readPresenceRecord } from "../../src/core/session-intel/presence-bridge.js";
 
 // Loaded lazily so the handler tests run (and fail on behaviour) against a
 // tree that predates the module.
@@ -718,5 +719,141 @@ describe("session intel-start, subagent guard (ISS-1307)", () => {
     expect(r).toMatchObject({ status: "skipped", reason: "subagent hook" });
     const t = handleSessionIntelStart({ client: "claude", source: "compact", sessionId: SID, cwd: f.root, subagent: { viaTranscriptPath: true }, projectsDir: f.projects });
     expect(t).toMatchObject({ status: "skipped", reason: "subagent hook" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20-27: session intel-start through the classifier (ISS-1310)
+// ---------------------------------------------------------------------------
+
+function intelStart(
+  f: Fixture,
+  o: Partial<Parameters<typeof handleSessionIntelStart>[0]> = {},
+): ReturnType<typeof handleSessionIntelStart> {
+  return handleSessionIntelStart({
+    client: "claude",
+    source: "compact",
+    sessionId: SID,
+    cwd: f.root,
+    transcriptPath: f.transcript,
+    projectsDir: f.projects,
+    userSettingsPath: join(f.root, "no-user-settings.json"),
+    classify: f.classify,
+    ...o,
+  });
+}
+
+function expectIntelUntouched(f: Fixture, r: ReturnType<typeof handleSessionIntelStart>): void {
+  expect(r).toEqual({ status: "skipped", reason: "subagent compaction (fill)", capture: null, reconcile: null });
+  expect(readPresenceRecord(f.root, SID)?.sessionIntel ?? null).toBeNull();
+}
+
+function expectIntelRecorded(f: Fixture, r: ReturnType<typeof handleSessionIntelStart>): void {
+  expect(r.status).toBe("done");
+  expect(r.capture).not.toBeNull();
+  expect(readPresenceRecord(f.root, SID)?.sessionIntel ?? null).not.toBeNull();
+}
+
+describe("session intel-start, classified subagent compaction (ISS-1310)", () => {
+  it("20: low fill with a fresh subagent boundary and no resumable session records nothing", async () => {
+    const f = await makeFixture();
+    writeFill(f, 35_000);
+    writeSubagent(f, { withBoundary: true });
+    expectIntelUntouched(f, intelStart(f));
+  });
+
+  it("21: low fill without a fresh subagent boundary captures and reconciles as today", async () => {
+    const f = await makeFixture();
+    writeFill(f, 35_000);
+    writeSubagent(f); // active, but no boundary of its own
+    const r = intelStart(f);
+    expectIntelRecorded(f, r);
+    expect(r.reconcile).not.toBeNull();
+
+    const g = await makeFixture();
+    writeFill(g, 35_000);
+    writeSubagent(g, { withBoundary: true, boundaryTs: iso(-10 * 60_000) }); // stale boundary
+    expectIntelRecorded(g, intelStart(g));
+  });
+
+  it("22: low fill with a resumable COMPACT session is the parent's own compaction", async () => {
+    const f = await makeFixture();
+    plantSession(f, { compactPending: true });
+    writeFill(f, 35_000);
+    writeSubagent(f, { withBoundary: true });
+    const r = intelStart(f);
+    expectIntelRecorded(f, r);
+    expect(r.reconcile).not.toBeNull();
+  });
+
+  it("23: fill at or above 0.6 is the parent's own compaction", async () => {
+    for (const tokens of [60_000, 90_000]) {
+      const f = await makeFixture();
+      writeFill(f, tokens);
+      writeSubagent(f, { withBoundary: true });
+      expectIntelRecorded(f, intelStart(f));
+    }
+  });
+
+  describe("24: every doubt case records as today", () => {
+    const cases: Array<[string, (f: Fixture) => void, Partial<ClassifyOptions>?]> = [
+      ["transcript missing", () => undefined],
+      ["transcript a symlink", (f) => {
+        const target = join(f.projects, "-proj", "real.jsonl");
+        writeFileSync(target, [boundary(), assistant(30_000)].join("\n") + "\n");
+        symlinkSync(target, f.transcript);
+      }],
+      ["transcript outside projectsDir", (f) => writeFill(f, 30_000), { projectsDir: "/nonexistent-projects" }],
+      ["byte cap", (f) => writeFill(f, 30_000, { before: Array.from({ length: 64 }, (_, i) => userText(`filler ${i} ${"x".repeat(64)}`)) }), { maxBytes: 1024, chunkBytes: 256 }],
+      ["time cap", (f) => writeFill(f, 30_000), { deadline: { expired: () => true } }],
+      ["no active subagent", (f) => writeFill(f, 30_000)],
+    ];
+    for (const [name, arrange, extra] of cases) {
+      it(name, async () => {
+        const f = await makeFixture();
+        arrange(f);
+        if (name !== "no active subagent") writeSubagent(f, { withBoundary: true });
+        const r = intelStart(f, { classify: { ...f.classify, ...extra } });
+        expect(r.status).toBe("done");
+        expect(r.reason).toBeNull();
+      });
+    }
+  });
+
+  it("25: startup, resume and clear are never classified", async () => {
+    for (const source of ["startup", "resume", "clear"]) {
+      const f = await makeFixture();
+      writeFill(f, 35_000);
+      writeSubagent(f, { withBoundary: true });
+      expectIntelRecorded(f, intelStart(f, { source }));
+    }
+  });
+
+  it("26: a deadline that passes at any check records as today", async () => {
+    const arrange = async (): Promise<Fixture> => {
+      const f = await makeFixture();
+      writeFill(f, 35_000);
+      writeSubagent(f, { withBoundary: true });
+      return f;
+    };
+    const live = expiresAfter(Infinity);
+    const f = await arrange();
+    expectIntelUntouched(f, intelStart(f, { classify: { ...f.classify, deadline: live } }));
+    expect(live.checks()).toBeGreaterThan(1);
+    for (let n = 0; n < live.checks(); n++) {
+      const g = await arrange();
+      expectIntelRecorded(g, intelStart(g, { classify: { ...g.classify, deadline: expiresAfter(n) } }));
+    }
+  });
+
+  it("27: a classifier throw is doubt and records as today", async () => {
+    const f = await makeFixture();
+    writeFill(f, 35_000);
+    writeSubagent(f, { withBoundary: true });
+    // The scan swallows its own I/O errors; this throw escapes the classifier.
+    const throwing: ClassifyOptions = { ...f.classify, get now(): number { throw new Error("boom"); } };
+    const r = intelStart(f, { classify: throwing });
+    expect(r.reason).toBeNull();
+    expectIntelRecorded(f, r);
   });
 });
