@@ -4,9 +4,11 @@
  *
  *   advisory    contextTokens >= advisoryPct x ceiling, or the ceiling
  *               carries a conflict;
- *   imperative  contextTokens + jumpAllowance >= imperativePct x ceiling,
- *               jumpAllowance = clamp(p90 of per-assistant deltas since
- *               the epoch, floor, cap), floor when fewer than 5 deltas;
+ *   imperative  ceiling - contextTokens <= max(imperativeHeadroomTokens,
+ *               jumpAllowance) or contextTokens >= imperativePct x ceiling,
+ *               whichever first (T-533); jumpAllowance = clamp(p90 of
+ *               per-assistant deltas since the epoch, floor, cap), floor
+ *               when fewer than 5 deltas;
  *   compact-needed
  *               contextTokens >= compactNeededPct x ceiling, decided before
  *               the imperative rule and without the jump allowance, and never
@@ -156,8 +158,15 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   // and imperative would otherwise win every time; and without the jump
   // allowance, because the allowance is headroom reserved for the NEXT turn,
   // while this line is about where the context already is.
+  // T-533: the imperative fires at a headroom floor (or the jump allowance,
+  // if larger, so a turn's worth of room is kept) or at imperativePct of the
+  // ceiling, whichever comes first. The allowance lives only in the headroom
+  // term; the raw difference is compared, not the rounded `headroom` field.
+  const headroomLimit = Math.max(cfg.imperativeHeadroomTokens, jump.value);
+  const byHeadroom = c - tokens <= headroomLimit;
+  const byPct = tokens >= cfg.imperativePct * c;
   if (tokens >= cfg.compactNeededPct * c) rawState = "compact-needed";
-  else if (tokens + jump.value >= cfg.imperativePct * c) rawState = "imperative";
+  else if (byHeadroom || byPct) rawState = "imperative";
   else if (tokens >= cfg.advisoryPct * c || ceiling.conflict !== null) rawState = "advisory";
 
   let state = rawState;
@@ -175,11 +184,17 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   // alone already clear the higher line), so the stamp continues rather than
   // being cleared and re-taken on the way past.
   const imperativeSince = rawState === "imperative" || rawState === "compact-needed" ? previousSince ?? input.sampledAt : null;
+  // When both clauses hold, the reason names the one whose line is lower in
+  // tokens: the one that fired first as the context grew, so it never flips.
+  const pctFirst = cfg.imperativePct * c <= c - headroomLimit;
+  const imperativeBasis = byPct && (pctFirst || !byHeadroom)
+    ? `${tokens} >= ${cfg.imperativePct} x ${Math.round(c)}`
+    : `${tokens} leaves headroom ${Math.round(c - tokens)} <= ${headroomLimit} (the larger of imperativeHeadroomTokens ${cfg.imperativeHeadroomTokens} and jump allowance ${jump.value})`;
   const reason =
     rawState === "compact-needed"
       ? `${tokens} >= ${cfg.compactNeededPct} x ${Math.round(c)}; past this point a handover does not help and only /compact does`
       : rawState === "imperative"
-        ? `${tokens} + jump allowance ${jump.value} >= ${cfg.imperativePct} x ${Math.round(c)}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
+        ? `${imperativeBasis}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
         : rawState === "advisory"
           ? ceiling.conflict && tokens < cfg.advisoryPct * c
             ? `ceiling conflict: ${ceiling.conflict}`

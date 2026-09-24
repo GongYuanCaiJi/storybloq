@@ -102,9 +102,9 @@ const T0 = Date.parse("2026-09-09T12:00:00Z");
 const at = (m: number) => new Date(T0 + m * 60_000).toISOString();
 const CEILING = 0.925 * 450_000;
 const ADVISORY_TOKENS = Math.ceil(0.7 * CEILING) + 1_000;
-const IMPERATIVE_TOKENS = Math.ceil(0.9 * CEILING) - 25_000 + 1_000;
-/** ISS-1197 commit 2: past the default compactNeededPct of 0.95. */
-const COMPACT_TOKENS = Math.ceil(0.95 * CEILING) + 1_000;
+const IMPERATIVE_TOKENS = Math.ceil(CEILING) - 60_000 + 1_000;
+/** ISS-1197 commit 2: past the default compactNeededPct of 0.98 (T-533). */
+const COMPACT_TOKENS = Math.ceil(0.98 * CEILING) + 1_000;
 
 interface Fx { base: string; root: string; projects: string; userSettings: string }
 
@@ -166,13 +166,14 @@ describe("basisText (ISS-1249)", () => {
   // Only the sampler-reason shape is reachable from renderPromptDirective today
   // (a suppressed sample is advisory and a null reason is state ok, both silent);
   // the other two shapes are pinned here so they cannot rot unnoticed.
-  it("wraps a sampler reason with the rule it applied", () => {
-    expect(basisText("350625 + jump allowance 25000 >= 0.9 x 416250")).toBe(
-      " Basis: 350625 + jump allowance 25000 >= 0.9 x 416250 (threshold minus the next-turn jump allowance).",
+  it("states a sampler reason as written, since it names the clause that fired (T-533)", () => {
+    expect(basisText("356250 leaves headroom 60000 <= 60000 (the larger of imperativeHeadroomTokens 60000 and jump allowance 25000)")).toBe(
+      " Basis: 356250 leaves headroom 60000 <= 60000 (the larger of imperativeHeadroomTokens 60000 and jump allowance 25000).",
     );
+    expect(basisText("1900000 >= 0.95 x 2000000")).toBe(" Basis: 1900000 >= 0.95 x 2000000.");
   });
   it("states the rule in words when the sample carries no reason", () => {
-    expect(basisText(null)).toBe(" Basis: the imperative threshold minus the next-turn jump allowance.");
+    expect(basisText(null)).toBe(" Basis: the imperative fires at the headroom floor (or the next-turn jump allowance, if larger) or at the imperative share of the expected auto-compact point, whichever comes first.");
     expect(basisText(undefined)).toBe(basisText(null));
   });
   it("states a suppression reason without the threshold parenthetical", () => {
@@ -411,9 +412,9 @@ describe("guide directive and handover stamp", () => {
   it("ISS-1197 commit 2: a handover stamped at compact-needed never claims the pressure is held at advisory", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
-      // Ceiling 416,250 (0.925 x 450,000); 400,000 tokens is 96%, past the
-      // 395,438 compact line.
-      primed(f, 400_000, now);
+      // Ceiling 416,250 (0.925 x 450,000); 410,000 tokens is 98.5%, past the
+      // 407,925 compact line (T-533).
+      primed(f, 410_000, now);
       expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
       const r = await handleHandoverCreate("# Handover\nDone.", "session", "md", f.root, { now, projectsDir: f.projects });
       expect(r.output).toContain("Created handover:");
@@ -448,7 +449,7 @@ describe("guide directive and handover stamp", () => {
   it("ISS-1197 commit 2 round 3: an OLD stored compact-needed sample still gets the compact line, and the banner on the same response agrees", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
-      primed(f, 400_000, now);
+      primed(f, 410_000, now);
       expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
       // 31 s on: past maxSampleAgeMs, so the banner will re-sample rather than
       // reuse the stored reading.
@@ -466,7 +467,7 @@ describe("guide directive and handover stamp", () => {
   it("ISS-1197 commit 2 round 3: an EXPIRED pending event reconciles to complete with the sample CLEARED, and only the identity clause catches it", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
-      const era = primed(f, 400_000, now);
+      const era = primed(f, 410_000, now);
       expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
       // Older than compactPendingTtlMs (300,000 ms): reconcileIntel takes the
       // ASSUMED reset, which reports status "complete" while nulling the
@@ -504,7 +505,7 @@ describe("guide directive and handover stamp", () => {
   it("ISS-1197 commit 2 round 2: a pending compaction over a fresh compact-needed sample falls back to the continuation line", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
-      const era = primed(f, 400_000, now);
+      const era = primed(f, 410_000, now);
       expect(intelOf(f.root).lastSample?.state).toBe("compact-needed");
       markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 1000).toISOString() });
       const pending = await handleHandoverCreate("# Pending", "pending", "md", f.root, { now: now + 2000, projectsDir: f.projects });

@@ -65,16 +65,16 @@ export const COMPACT_NEEDED_ADVICE =
   "Context is past the point where another handover helps: write no further handovers. A session cannot compact itself; finish the step in flight and keep working, auto-compaction is expected and the session continues through it. If the user wants it sooner, they can run /compact in this session.";
 
 /**
- * ISS-1249: the imperative fires at imperativePct MINUS the next-turn jump
- * allowance, so the printed percentage sits below the configured threshold.
- * Saying so on the line is what stops it reading as a bug. Used by the
- * UserPromptSubmit directive, which holds the live sample; the MCP banner is
- * built from the persisted presence sample, which carries no reason.
+ * ISS-1249: the printed percentage can sit below the configured share, so the
+ * line states its basis; that is what stops it reading as a bug. T-533: the
+ * sampler reason names the clause that fired (the headroom floor or the
+ * share), so it is stated as written. Used by the UserPromptSubmit directive,
+ * which holds the live sample; the MCP banner is built from the persisted
+ * presence sample, which carries no reason.
  */
 export function basisText(reason: string | null | undefined): string {
-  if (!reason) return " Basis: the imperative threshold minus the next-turn jump allowance.";
-  if (reason.includes("suppressed")) return ` Basis: ${reason}.`;
-  return ` Basis: ${reason} (threshold minus the next-turn jump allowance).`;
+  if (!reason) return " Basis: the imperative fires at the headroom floor (or the next-turn jump allowance, if larger) or at the imperative share of the expected auto-compact point, whichever comes first.";
+  return ` Basis: ${reason}.`;
 }
 
 export function renderBannerText(sample: SessionIntelSample, surface: "mcp" | "cli"): string {

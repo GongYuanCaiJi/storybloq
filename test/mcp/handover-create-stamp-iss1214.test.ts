@@ -25,7 +25,7 @@ import { HANDOVER_STAMP_RESTART_HINT, HANDOVER_STAMP_UNBOUND_LINE } from "../../
 import { SID, assistantRecord, userRecord, writeTranscript } from "../core/session-intel-fixtures.js";
 
 const CEILING = 0.925 * 450_000;
-/** Inside the imperative band (90% to 95% of the ceiling), clear of the 25,000-token re-arm cap. */
+/** Inside the imperative band (60,000 tokens of headroom to 98% of the ceiling, T-533), clear of the 25,000-token re-arm cap. */
 const IMPERATIVE_TOKENS = Math.ceil(0.9 * CEILING) + 5_000;
 
 interface RegisteredTool {

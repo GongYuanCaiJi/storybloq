@@ -93,7 +93,8 @@ export type StatusWriterConfig = z.infer<typeof StatusWriterConfigSchema>;
 export const SessionIntelConfigSchema = z.object({
   enabled: z.boolean().optional(),                                   // default true
   advisoryPct: z.number().min(0.5).max(0.95).optional(),             // default 0.70
-  imperativePct: z.number().min(0.6).max(0.99).optional(),           // default 0.90; must exceed advisoryPct
+  imperativePct: z.number().min(0.6).max(0.99).optional(),           // default 0.95; must exceed advisoryPct
+  imperativeHeadroomTokens: z.number().int().min(10_000).max(500_000).optional(), // default 60000 (T-533)
   ceilingFraction: z.number().min(0.8).max(1).optional(),            // default 0.925 (measured, T-499)
   boundarySampleCount: z.number().int().min(1).max(50).optional(),   // default 20; also per-session ledger retention
   jumpAllowanceFloorTokens: z.number().int().min(0).max(10_000_000).optional(), // default 25000
@@ -108,7 +109,7 @@ export const SessionIntelConfigSchema = z.object({
   handoverRearmPrompts: z.number().int().min(0).max(50).optional(),                  // default 3
   // ISS-1197 commit 2: the compact-needed line. Must exceed imperativePct;
   // that pair rule lives in the reader, not here, like the other two.
-  compactNeededPct: z.number().min(0.85).max(1).optional(),                          // default 0.95
+  compactNeededPct: z.number().min(0.85).max(1).optional(),                          // default 0.98
   // T-501: 0 disables the usage-cost advisory; any other value is a
   // threshold compared as written. The union mirrors the hot-path reader's
   // `allowZero` rule exactly (the agreement test pins both ends).

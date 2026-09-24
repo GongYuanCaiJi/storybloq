@@ -19,6 +19,13 @@ export interface SessionIntelConfig {
   readonly enabled: boolean;
   readonly advisoryPct: number;
   readonly imperativePct: number;
+  /**
+   * T-533: the imperative also fires once the headroom (ceiling minus tokens)
+   * is at or below the larger of this and the next-turn jump allowance,
+   * whichever of that and `imperativePct` comes first. It joins no pair rule:
+   * a token count has no ordering against the percentages.
+   */
+  readonly imperativeHeadroomTokens: number;
   readonly ceilingFraction: number;
   readonly boundarySampleCount: number;
   readonly jumpAllowanceFloorTokens: number;
@@ -64,7 +71,8 @@ export interface SessionIntelConfig {
 export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
   enabled: true,
   advisoryPct: 0.7,
-  imperativePct: 0.9,
+  imperativePct: 0.95,
+  imperativeHeadroomTokens: 60_000,
   ceilingFraction: 0.925,
   boundarySampleCount: 20,
   jumpAllowanceFloorTokens: 25_000,
@@ -75,7 +83,7 @@ export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
   handoverRearmStepCapTokens: 25_000,
   handoverRearmIntervalMs: 600_000,
   handoverRearmPrompts: 3,
-  compactNeededPct: 0.95,
+  compactNeededPct: 0.98,
   recommendedWindowMax: 450_000,
   banner: true,
   promptHook: true,
@@ -86,6 +94,7 @@ export const DEFAULT_SESSION_INTEL_CONFIG: Omit<SessionIntelConfig, "notes"> = {
 export const SESSION_INTEL_BOUNDS = {
   advisoryPct: { min: 0.5, max: 0.95, integer: false },
   imperativePct: { min: 0.6, max: 0.99, integer: false },
+  imperativeHeadroomTokens: { min: 10_000, max: 500_000, integer: true },
   ceilingFraction: { min: 0.8, max: 1, integer: false },
   boundarySampleCount: { min: 1, max: 50, integer: true },
   jumpAllowanceFloorTokens: { min: 0, max: 10_000_000, integer: true },
@@ -148,9 +157,9 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
   // the two pair rules below can each MOVE imperativePct, so neither one alone
   // establishes it. The compact rule runs first (it can lower imperativePct to
   // the default, which the advisory rule then judges); the advisory rule can
-  // RAISE imperativePct to the default 0.9, which is inside compactNeededPct's
+  // RAISE imperativePct to the default 0.95, which is inside compactNeededPct's
   // legal range, so a third check repairs that case afterwards. The defaults
-  // (0.7 / 0.9 / 0.95) satisfy the chain, so the repair always terminates.
+  // (0.7 / 0.95 / 0.98) satisfy the chain, so the repair always terminates.
   if (compactNeededPct <= imperativePct) {
     notes.push(`sessionIntel.compactNeededPct (${compactNeededPct}) must exceed imperativePct (${imperativePct}); defaults ${d.imperativePct}/${d.compactNeededPct} used for the pair`);
     imperativePct = d.imperativePct;
@@ -181,6 +190,7 @@ export function resolveSessionIntelConfig(rawBlock: unknown): SessionIntelConfig
     enabled: boolOr(raw, "enabled"),
     advisoryPct,
     imperativePct,
+    imperativeHeadroomTokens: numberOr(raw, "imperativeHeadroomTokens", notes),
     ceilingFraction: numberOr(raw, "ceilingFraction", notes),
     boundarySampleCount: numberOr(raw, "boundarySampleCount", notes),
     jumpAllowanceFloorTokens,
