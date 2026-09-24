@@ -527,6 +527,10 @@ export function applyBoundaryReset(intel: SessionIntelPresence, ts: string): Ses
     handoverBoundaryAt: handoverAfter ? ts : null,
     promptsSinceHandover: handoverAfter ? intel.promptsSinceHandover : 0,
     lastImperativeAt: handoverAfter ? intel.lastImperativeAt : null,
+    handoverStampBinding: handoverAfter ? intel.handoverStampBinding : null,
+    // ISS-1263: a new compaction is a new epoch; its first imperative is a
+    // real event and may be shown.
+    lastImperativeEmittedAt: null,
   };
 }
 
@@ -544,6 +548,8 @@ export function applyAssumedReset(intel: SessionIntelPresence, at: string): Sess
     handoverBoundaryAt: null,
     promptsSinceHandover: 0,
     lastImperativeAt: null,
+    handoverStampBinding: null,
+    lastImperativeEmittedAt: null,
   };
 }
 
@@ -839,12 +845,19 @@ export interface HandoverStampObserve {
  * revalidated against the locked record: the session must not have ended
  * and its era must be the caller's live (non-null) era. Never creates a
  * subtree for an unbound record.
+ *
+ * ISS-1263: `mode` "unbound-era" skips ONLY the era-equality check, for a
+ * caller whose process era could not be proven (unknown, or unverifiable
+ * under load) on a live record with the same session id. Every other refusal
+ * stands. The stamp's identity then rests on the session id alone; its worst
+ * case is one withheld imperative, where the missing stamp produced a flood.
  */
-export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number, observe?: HandoverStampObserve): HandoverStampOutcome {
+export function stampHandover(root: string, sessionId: string, expectedEra: string | null, tokensAtHandover: number | null, now: number, observe?: HandoverStampObserve, mode: "bound" | "unbound-era" = "bound"): HandoverStampOutcome {
   let refused: string | null = null;
   const outcome = applyPresenceEnrichment(root, sessionId, LIFECYCLE_LOCK_BUDGET_MS, "session-intel", (base, nowIso) => {
     const intel = base.sessionIntel;
-    if (expectedEra === null || !intel || intel.era === null || intel.era !== expectedEra) { refused = "record era differs from the caller's live era"; return base; }
+    if (!intel) { refused = mode === "bound" ? "record era differs from the caller's live era" : "no session intel on the record"; return base; }
+    if (mode === "bound" && (expectedEra === null || intel.era === null || intel.era !== expectedEra)) { refused = "record era differs from the caller's live era"; return base; }
     if (base.endedAt !== null) { refused = "caller session has ended"; return base; }
     // The stored sample is rewritten to its suppressed form in the same
     // write: the stamp records the sample's own token count, so the step
@@ -879,10 +892,57 @@ export function stampHandover(root: string, sessionId: string, expectedEra: stri
         // ISS-1197: the stamp starts both re-arm latches from zero.
         promptsSinceHandover: 0,
         lastImperativeAt: null,
+        // ISS-1263: lastImperativeEmittedAt is deliberately untouched: the
+        // rate limit is independent of the stamp.
+        handoverStampBinding: mode,
       },
     };
   }, () => new Date(now));
   return refused !== null && outcome.status === "written" ? { status: "refused", reason: refused } : outcome;
+}
+
+// ---------------------------------------------------------------------------
+// Imperative emission claim (ISS-1263)
+// ---------------------------------------------------------------------------
+
+/** The identity of the record a delivering surface acquired its imperative sample from. */
+export interface ImperativeSeen {
+  readonly revision: number;
+  readonly lastBoundaryAt: string | null;
+  readonly handoverWrittenAt: string | null;
+}
+
+/**
+ * ISS-1263: the one right to put the imperative line in front of the model,
+ * taken by every delivering surface immediately before it attaches the text.
+ * Sampling never claims. True means deliver; false means degrade (or omit)
+ * for this delivery, and the next delivery samples again.
+ *
+ * Refused, with nothing written, when the record is gone, has no subtree or
+ * has ended; when the sample is obsolete (a revision bump or a boundary
+ * reset since acquisition, so the new epoch's allowance is not spent on it);
+ * when a handover was stamped since acquisition (the imperative was just
+ * answered); when a pending compaction exists or cannot be ruled out; and
+ * when the line was already delivered inside the interval. A busy lock or a
+ * failed write is also false: the line fails toward quiet for one delivery.
+ */
+export function claimImperativeEmission(root: string, sessionId: string, seen: ImperativeSeen, now: number, intervalMs: number): boolean {
+  let granted = false;
+  const outcome = applyPresenceEnrichment(root, sessionId, TRY_LOCK_BUDGET_MS, "session-intel", (base, nowIso) => {
+    const intel = base.sessionIntel;
+    if (!intel || base.endedAt !== null) return ABORT_ENRICHMENT;
+    if (intel.revision !== seen.revision || intel.lastBoundaryAt !== seen.lastBoundaryAt) return ABORT_ENRICHMENT;
+    if (intel.handoverWrittenAt !== seen.handoverWrittenAt) return ABORT_ENRICHMENT;
+    const pending = peekPending(root, sessionId, now);
+    if (!pending.complete || pending.files.length > 0) return ABORT_ENRICHMENT;
+    if (intel.lastImperativeEmittedAt !== null) {
+      const elapsed = now - Date.parse(intel.lastImperativeEmittedAt);
+      if (!Number.isFinite(elapsed) || elapsed < intervalMs) return ABORT_ENRICHMENT;
+    }
+    granted = true;
+    return { ...base, sessionIntel: { ...intel, lastImperativeEmittedAt: nowIso } };
+  }, () => new Date(now));
+  return granted && outcome.status === "written";
 }
 
 // ---------------------------------------------------------------------------

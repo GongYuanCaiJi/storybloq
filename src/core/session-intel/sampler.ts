@@ -97,6 +97,31 @@ export function handoverSuppresses(
 }
 
 /**
+ * ISS-1263: milliseconds since the imperative line was last delivered, when
+ * that is inside `handoverRearmIntervalMs`; null when the line may be shown.
+ * Delivery is claimed under the record lock by `claimImperativeEmission`;
+ * this reads the same field so the sample describes what the surfaces do.
+ */
+/**
+ * ISS-1263: a repeat interval as a reader should read it, never rounded:
+ * whole minutes when exact, else whole seconds when exact, else
+ * milliseconds. Zero is the caller's to phrase (there is no interval).
+ */
+export function describeRepeatInterval(ms: number): string {
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (ms % 60_000 === 0) return unit(ms / 60_000, "minute");
+  if (ms % 1_000 === 0) return unit(ms / 1_000, "second");
+  return unit(ms, "millisecond");
+}
+
+export function rateLimitedFor(record: SessionIntelPresence | null, cfg: SessionIntelConfig, sampledAt: string): number | null {
+  const last = record?.lastImperativeEmittedAt ?? null;
+  if (last === null) return null;
+  const elapsed = Date.parse(sampledAt) - Date.parse(last);
+  return Number.isFinite(elapsed) && elapsed < cfg.handoverRearmIntervalMs ? Math.max(0, elapsed) : null;
+}
+
+/**
  * T-501: the usage-cost advisory as a pure function of the resolved inputs
  * and the CURRENT config, so raising, lowering or zeroing
  * `recommendedWindowMax` changes the outcome without a new sample.
@@ -170,7 +195,7 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   else if (tokens >= cfg.advisoryPct * c || ceiling.conflict !== null) rawState = "advisory";
 
   let state = rawState;
-  let suppressedBy: "handover" | null = null;
+  let suppressedBy: "handover" | "rate-limit" | null = null;
   // Only an imperative is ever held. A handover cannot answer compact-needed:
   // the whole point of the state is that writing one more is not the fix, so
   // routing it through the re-arm gates would hide the one state the surfaces
@@ -179,6 +204,15 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
   if (heldBy !== null) {
     state = "advisory";
     suppressedBy = "handover";
+  }
+  // ISS-1263: the hard rate limit, independent of any stamp. Whatever the
+  // re-arm gates let through still reads advisory while the line was
+  // delivered inside the interval, so every reader (banner, guide, status
+  // projection, `session intel`) agrees the line is quiet and says why.
+  const limitedFor = rawState === "imperative" && heldBy === null ? rateLimitedFor(record, cfg, input.sampledAt) : null;
+  if (limitedFor !== null) {
+    state = "advisory";
+    suppressedBy = "rate-limit";
   }
   // At compact-needed the imperative condition is satisfied too (the tokens
   // alone already clear the higher line), so the stamp continues rather than
@@ -194,7 +228,7 @@ export function computeSample(input: ComputeSampleInput): TokenPressureSample {
     rawState === "compact-needed"
       ? `${tokens} >= ${cfg.compactNeededPct} x ${Math.round(c)}; past this point a handover does not help and only /compact does`
       : rawState === "imperative"
-        ? `${imperativeBasis}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}`
+        ? `${imperativeBasis}${heldBy ? `; suppressed by a handover written for this compaction (the ${heldBy} gate holds the re-arm)` : ""}${limitedFor !== null ? `; rate-limited: the imperative was shown ${Math.round(limitedFor / 1000)} s ago; it repeats at most once every ${describeRepeatInterval(cfg.handoverRearmIntervalMs)}` : ""}`
         : rawState === "advisory"
           ? ceiling.conflict && tokens < cfg.advisoryPct * c
             ? `ceiling conflict: ${ceiling.conflict}`

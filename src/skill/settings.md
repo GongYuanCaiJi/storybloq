@@ -122,7 +122,7 @@ Do NOT search source code for this. The full config.json schema is shown below. 
     "compactPendingTtlMs": "integer 10000-3600000 (default 300000); a PreCompact event with no boundary seen within this window is treated as an assumed compaction",
     "stepPct": "number 0.01-0.5 (default 0.05); context growth after a handover that re-arms imperative",
     "handoverRearmStepCapTokens": "integer 1000-1000000 (default 25000); the growth step is min(stepPct x ceiling, this)",
-    "handoverRearmIntervalMs": "integer 0-3600000 (default 600000); wall time since the handover or the last imperative before imperative can re-arm",
+    "handoverRearmIntervalMs": "integer 0-3600000 (default 600000); wall time from the handover or the last imperative line until imperative re-arms or repeats",
     "handoverRearmPrompts": "integer 0-50 (default 3); prompt-hook samples since the handover before imperative can re-arm; skipped when promptHook is false. All three gates must clear",
     "recommendedWindowMax": "integer 0 or 100000-1000000 (default 450000); the auto-compact window at or below which no usage advisory is shown. A threshold, not a sentinel: a 2000000 window against a 1000000 max still fires. 0 disables the advisory entirely",
     "banner": "boolean (default true) MCP/CLI response banner",

@@ -155,7 +155,8 @@ export interface TokenPressureSample {
   readonly jumpAllowanceBasis: string;
   readonly state: TokenPressureState;
   readonly rawState: TokenPressureState;
-  readonly suppressedBy: "handover" | null;
+  /** ISS-1263: "rate-limit" when the imperative line was delivered inside the re-arm interval. */
+  readonly suppressedBy: "handover" | "rate-limit" | null;
   readonly imperativeSince: string | null;
   readonly reason: string | null;
   /** T-501: the advisory's inputs, kept so the record can store them and the decision can be recomputed under the current config. */

@@ -18,7 +18,7 @@ import { isPresenceEnabled } from "../../presence/handler.js";
 import type { SessionIntelPresence, SessionIntelSample, TokenPressureState } from "../../presence/session-intel-fields.js";
 import { LIFECYCLE_LOCK_BUDGET_MS } from "../presence-enrichment.js";
 import { readSessionIntelConfig, type SessionIntelConfig } from "./config.js";
-import { consumeUsageAdvisory, findPresenceRecordAcrossWorktrees, peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, revalidateCandidateIdentity, stampHandover, type CandidateIdentity, type HandoverStampObservation, type HandoverStampOutcome } from "./presence-bridge.js";
+import { claimImperativeEmission, consumeUsageAdvisory, findPresenceRecordAcrossWorktrees, peekPending, readPresenceRecord, reconcileIntel, reconcileUnderLock, resolveCallerBinding, revalidateCandidateIdentity, stampHandover, type CallerBinding, type CandidateIdentity, type HandoverStampObservation, type HandoverStampOutcome } from "./presence-bridge.js";
 import { sampleSession } from "./query.js";
 import { usageAdvisoryFrom } from "./sampler.js";
 import type { UsageAdvisory } from "./types.js";
@@ -36,8 +36,16 @@ export interface TokenPressureBanner {
   readonly ceilingSource: SessionIntelSample["ceilingSource"];
   readonly ceilingConfidence: SessionIntelSample["ceilingConfidence"];
   readonly sampledAt: string;
-  readonly suppressedBy: "handover" | null;
+  readonly suppressedBy: "handover" | "rate-limit" | null;
   readonly text: string;
+  /**
+   * ISS-1263: present only on an imperative banner that has not been
+   * delivered yet. `deliverBanner` calls it once, immediately before the
+   * text is attached, and swaps in `degraded` when the claim is refused.
+   * Neither ever reaches output (`bannerJson` drops both).
+   */
+  readonly claim?: () => boolean;
+  readonly degraded?: TokenPressureBanner;
 }
 
 export interface BannerOptions {
@@ -86,6 +94,7 @@ export function renderBannerText(sample: SessionIntelSample, surface: "mcp" | "c
   // user can do (bring it forward with /compact).
   if (sample.state === "compact-needed") return `${head} ${COMPACT_NEEDED_ADVICE}`;
   if (sample.state === "imperative") return `${head} Write a handover now via ${where}, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
+  if (sample.suppressedBy === "rate-limit") return `${head} The imperative line was shown recently and will not repeat for a while: keep working.`;
   return `${head}${sample.suppressedBy === "handover" ? " A recent handover holds this at advisory: keep working." : ""} Plan a handover before the next large step, and keep working.`;
 }
 
@@ -176,15 +185,49 @@ export function tokenPressureBannerFor(root: string, opts: BannerOptions = {}, s
     if (!cfg.enabled || !cfg.banner) return null;
     const acquired = acquireCallerSample(root, opts, cfg, { startedAt, softMs, clock });
     if (!acquired) return null;
-    return bannerFromSample(acquired.sample, surface);
+    return bannerFromSample(acquired.sample, surface, claimFor(acquired, cfg, opts.now ?? startedAt));
   } catch {
     return null;
   }
 }
 
+/**
+ * ISS-1263: the delivery claim for an acquired imperative sample, bound to
+ * the identity of the record it was read from. A write, so a record found by
+ * the ISS-1185 worktree walk is revalidated first; any throw is a refusal.
+ */
+function claimFor(acquired: CallerSample, cfg: SessionIntelConfig, now: number): () => boolean {
+  const seen = { revision: acquired.intel.revision, lastBoundaryAt: acquired.intel.lastBoundaryAt, handoverWrittenAt: acquired.intel.handoverWrittenAt };
+  return () => {
+    try {
+      if (acquired.recordRootIdentity && !revalidateCandidateIdentity(acquired.root, acquired.recordRootIdentity)) return false;
+      return claimImperativeEmission(acquired.root, acquired.sessionId, seen, now, cfg.handoverRearmIntervalMs);
+    } catch {
+      return false;
+    }
+  };
+}
+
+/**
+ * ISS-1263: resolves a banner for delivery, claiming the imperative line at
+ * most once. Call it only once the response is PROVEN to carry the banner,
+ * so a response that cannot carry it spends nothing. The result carries no
+ * claim, so resolving it again is a no-op.
+ */
+export function deliverBanner(banner: TokenPressureBanner | null): TokenPressureBanner | null {
+  if (!banner || !banner.claim) return banner;
+  const { claim, degraded, ...plain } = banner;
+  return claim() ? plain : (degraded ?? null);
+}
+
 /** The pressure gate on top of an acquired sample: only advisory, imperative and compact-needed are pushed. */
-function bannerFromSample(sample: SessionIntelSample, surface: "mcp" | "cli"): TokenPressureBanner | null {
+function bannerFromSample(sample: SessionIntelSample, surface: "mcp" | "cli", claim?: () => boolean): TokenPressureBanner | null {
   if (sample.state !== "advisory" && sample.state !== "imperative" && sample.state !== "compact-needed") return null;
+  if (sample.state === "imperative" && claim) {
+    const plain = bannerFromSample(sample, surface)!;
+    const degraded = bannerFromSample({ ...sample, state: "advisory", suppressedBy: "rate-limit" }, surface)!;
+    return { ...plain, claim, degraded };
+  }
   return {
     state: sample.state,
     pct: sample.pct,
@@ -347,7 +390,7 @@ export function statusPushesFor(root: string, opts: BannerOptions = {}, surface:
     const acquired = acquireCallerSample(root, opts, cfg, { startedAt, softMs, clock });
     if (!acquired) return none;
     return {
-      banner: bannerFromSample(acquired.sample, surface),
+      banner: bannerFromSample(acquired.sample, surface, claimFor(acquired, cfg, opts.now ?? startedAt)),
       usage: usageAdvisoryGate(cfg) ? usageAdvisoryFrom_(acquired, cfg, { startedAt, softMs, clock }, opts.now ?? startedAt) : null,
     };
   } catch {
@@ -362,7 +405,7 @@ export function usageAdvisoryJson(push: UsageAdvisoryPush): Record<string, unkno
 
 /** The JSON sibling shape (the rendered text is left out of machine output). */
 export function bannerJson(b: TokenPressureBanner): Record<string, unknown> {
-  const { text: _text, ...rest } = b;
+  const { text: _text, claim: _claim, degraded: _degraded, ...rest } = b;
   return rest;
 }
 
@@ -377,9 +420,11 @@ export function applyBannerToMcpText(text: string, format: "md" | "json", banner
     try {
       const parsed: unknown = JSON.parse(text);
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return text;
+      // ISS-1263: claimed only now, once the response is proven to carry it.
+      const delivered = deliverBanner(banner);
       return JSON.stringify({
         ...(parsed as Record<string, unknown>),
-        ...(banner ? { tokenPressure: bannerJson(banner) } : {}),
+        ...(delivered ? { tokenPressure: bannerJson(delivered) } : {}),
         ...(usage ? { usageAdvisory: usageAdvisoryJson(usage) } : {}),
       }, null, 2);
     } catch {
@@ -388,8 +433,19 @@ export function applyBannerToMcpText(text: string, format: "md" | "json", banner
   }
   // T-501: its own block, never folded into the pressure line -- a user at 20
   // percent of a one-million window sees no pressure banner at all.
-  const blocks = [usage?.text, banner?.text, text].filter((b): b is string => b !== undefined && b !== null);
+  const blocks = [usage?.text, deliverBanner(banner)?.text, text].filter((b): b is string => b !== undefined && b !== null);
   return blocks.join("\n\n");
+}
+
+/** Whether an MCP response can carry a push at all: md always, json only as a top-level object. */
+function canCarryPushes(text: string, format: "md" | "json"): boolean {
+  if (format !== "json") return true;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return !!parsed && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -407,9 +463,12 @@ export function applyStatusPushesToMcpText(
   banner: TokenPressureBanner | null,
   usage: UsageAdvisoryPush | null,
 ): string {
-  const bannerOnly = applyBannerToMcpText(text, format, banner);
+  // ISS-1263: the two renderings below would each claim the imperative line;
+  // it is resolved once here, when the response can carry it at all.
+  const resolved = canCarryPushes(text, format) ? deliverBanner(banner) : banner;
+  const bannerOnly = applyBannerToMcpText(text, format, resolved);
   if (!usage) return bannerOnly;
-  const withUsage = applyBannerToMcpText(text, format, banner, usage);
+  const withUsage = applyBannerToMcpText(text, format, resolved, usage);
   if (withUsage === bannerOnly) return bannerOnly; // this response cannot carry it
   return usage.commit() ? withUsage : bannerOnly;
 }
@@ -425,7 +484,9 @@ export function cliStatusPushesFor(root: string, format: "md" | "json", opts: Ba
   // The advisory goes first when both are present: the banner is about this
   // turn, the advisory about the session's whole cost.
   if (usage && usage.commit()) lines.push(usage.text);
-  if (banner) lines.push(banner.text);
+  // ISS-1263: a CLI line is always printed, so the claim is taken here.
+  const delivered = deliverBanner(banner);
+  if (delivered) lines.push(delivered.text);
   return format === "json"
     ? { stdout: [], stderr: lines.map((l) => `[storybloq] ${l}`) }
     : { stdout: lines, stderr: [] };
@@ -433,7 +494,7 @@ export function cliStatusPushesFor(root: string, format: "md" | "json", opts: Ba
 
 /** CLI: md is appended to stdout; json gets ONE line on stderr so the stdout envelope and `--raw` stay parseable. */
 export function cliBannerFor(root: string, format: "md" | "json", opts: BannerOptions = {}): { readonly stdout: string | null; readonly stderr: string | null } {
-  const banner = tokenPressureBannerFor(root, { sampledBy: "query", ...opts }, "cli");
+  const banner = deliverBanner(tokenPressureBannerFor(root, { sampledBy: "query", ...opts }, "cli"));
   if (!banner) return { stdout: null, stderr: null };
   return format === "json" ? { stdout: null, stderr: `[storybloq] ${banner.text}` } : { stdout: banner.text, stderr: null };
 }
@@ -454,12 +515,14 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
     if (!isPresenceEnabled(root)) return null;
     // ISS-1185: symmetric worktree fallback -- find only, never create.
     let resolvedRoot = root;
+    let walkedIdentity: CandidateIdentity | null = null;
     let record = readPresenceRecord(root, ownerClaudeSessionId);
     if (!record) {
       const match = findPresenceRecordAcrossWorktrees(root, ownerClaudeSessionId);
       if (match && revalidateCandidateIdentity(match.root, match.identity)) {
         record = match.record;
         resolvedRoot = match.root;
+        walkedIdentity = match.identity;
       }
     }
     const intel = record?.sessionIntel ?? null;
@@ -471,6 +534,11 @@ export function guideDirectiveFor(root: string, ownerClaudeSessionId: string | n
     // ISS-1197 commit 2: the guide is an autonomous driver, so this is exactly
     // where a handover demand past the compact line would loop forever.
     if (sample.state === "compact-needed") return `${head}: ${COMPACT_NEEDED_ADVICE}`;
+    // ISS-1263: the guide delivers the imperative too, so it claims the one
+    // line per interval like every other surface; refused means no directive.
+    if (walkedIdentity && !revalidateCandidateIdentity(resolvedRoot, walkedIdentity)) return null;
+    const seen = { revision: intel.revision, lastBoundaryAt: intel.lastBoundaryAt, handoverWrittenAt: intel.handoverWrittenAt };
+    if (!claimImperativeEmission(resolvedRoot, ownerClaudeSessionId, seen, now, cfg.handoverRearmIntervalMs)) return null;
     return `${head}: write a handover now via storybloq_handover_create, then keep working in this same turn. The handover makes compaction safe: do not stop, do not defer the next step to a later turn, and do not ask the user whether to continue. Any auto-compaction that follows is expected and safe: the session continues through it, and one handover covers it.`;
   } catch {
     return null;
@@ -493,6 +561,8 @@ export type HandoverStampResult =
        * there was no sample, or when the write never reached one.
        */
       readonly pressureState: TokenPressureState | null;
+      /** ISS-1263: "unbound-era" when the stamp landed without a proven process era. */
+      readonly binding: "bound" | "unbound-era";
     }
   | {
       readonly status: "skipped";
@@ -563,6 +633,21 @@ export function describeStampFailure(
 }
 
 /**
+ * ISS-1263: which stamp a binding permits. A bound caller stamps as before.
+ * A caller whose era could not be PROVEN (unknown, or unverifiable because
+ * the ps probe failed under load) stamps "unbound-era", but only when the
+ * record branch passed: a live, non-ended record exists for its session id.
+ * Positive evidence still refuses: "process era ended" (the process is
+ * proven gone) and "record era differs from the live process era" (a live,
+ * different era says the record is another process's). Null means skip.
+ */
+function stampModeFor(binding: CallerBinding): "bound" | "unbound-era" | null {
+  if (binding.bound && binding.era) return "bound";
+  if (!binding.sessionId || binding.recordRoot === null) return null;
+  return binding.reason === "process era unknown" || binding.reason === "process era unverifiable" ? "unbound-era" : null;
+}
+
+/**
  * After a successful `handover create`: reconcile the caller's record (a
  * boundary the tail shows is applied first, so the stamp lands on the
  * CURRENT compaction), then stamp it under the binding rule. Best-effort.
@@ -582,7 +667,8 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     if (!cfg.enabled) return { status: "skipped", reason: "sessionIntel disabled", kind: "config" };
     if (!isPresenceEnabled(root)) return { status: "skipped", reason: "presence disabled", kind: "config" };
     const binding = resolveCallerBinding(root, opts.explicitTaskId, undefined, {});
-    if (!binding.bound || !binding.sessionId || !binding.era) return { status: "skipped", reason: binding.reason, kind: "binding" };
+    const mode = stampModeFor(binding);
+    if (mode === null || !binding.sessionId) return { status: "skipped", reason: binding.reason, kind: "binding" };
     const now = opts.now ?? Date.now();
     const sessionId = binding.sessionId;
     const resolvedRoot = binding.recordRoot ?? root;
@@ -609,8 +695,8 @@ export function stampHandoverForCaller(root: string, opts: { explicitTaskId?: st
     // sampler or compaction landing between the reconcile and the stamp
     // cannot pair an old count with a newer boundary.
     const observed: HandoverStampObservation = { state: null };
-    const outcome = stampHandover(resolvedRoot, sessionId, binding.era, null, now, { out: observed, cfg });
-    return { status: "stamped", sessionId, outcome, root: resolvedRoot, pressureState: observed.state };
+    const outcome = stampHandover(resolvedRoot, sessionId, mode === "bound" ? binding.era : null, null, now, { out: observed, cfg }, mode);
+    return { status: "stamped", sessionId, outcome, root: resolvedRoot, pressureState: observed.state, binding: mode };
   } catch (err) {
     return { status: "skipped", reason: err instanceof Error ? err.message : String(err), kind: "error" };
   }

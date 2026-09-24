@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { computeSample, handoverSuppresses, jumpAllowanceFor, p90, usageAdvisoryFrom } from "../../src/core/session-intel/sampler.js";
+import { computeSample, describeRepeatInterval, handoverSuppresses, jumpAllowanceFor, p90, usageAdvisoryFrom } from "../../src/core/session-intel/sampler.js";
 import { resolveSessionIntelConfig, type SessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { emptySessionIntel, type SessionIntelPresence } from "../../src/presence/session-intel-fields.js";
 import type { CeilingResolution, ScanResult, UsageAdvisoryInput } from "../../src/core/session-intel/types.js";
@@ -437,5 +437,63 @@ describe("computeSample carries the advisory on every path", () => {
   it("the model kind reads oneMillionFlag from the scan", () => {
     const withFlag = computeSample({ scan: { ...scan(10), oneMillionFlag: true }, ceiling: ceiling(), cfg, sampledBy: "query", sampledAt: NOW, record: null, usage: NO_USAGE });
     expect(withFlag.usageAdvisory).toEqual({ kind: "model", nativeWindow: 1_000_000, recommendedMax: 450_000 });
+  });
+});
+
+describe("ISS-1263: an unbound-era stamp and the imperative rate limit", () => {
+  const imperativeTokens = 417_737 - 60_000;
+  const minutesBefore = (m: number) => new Date(Date.parse(NOW) - m * 60_000).toISOString();
+  const stamped = (binding: "bound" | "unbound-era" | null): SessionIntelPresence => ({
+    ...emptySessionIntel(),
+    handoverWrittenAt: "2026-09-09T12:20:00.000Z",
+    tokensAtHandover: imperativeTokens,
+    handoverBoundaryAt: null,
+    lastBoundaryAt: null,
+    handoverStampBinding: binding,
+  });
+
+  it("an unbound-era stamp holds the imperative exactly as a bound one does", () => {
+    const bound = sample(imperativeTokens, { record: stamped("bound") });
+    const unbound = sample(imperativeTokens, { record: stamped("unbound-era") });
+    const legacy = sample(imperativeTokens, { record: stamped(null) });
+    for (const s of [bound, unbound, legacy]) expect(s).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "handover" });
+    expect(unbound.reason).toBe(bound.reason);
+  });
+
+  it("an imperative shown inside the interval reads advisory, rate-limited, and says so", () => {
+    const record: SessionIntelPresence = { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(5) };
+    const s = sample(imperativeTokens, { record });
+    expect(s).toMatchObject({ rawState: "imperative", state: "advisory", suppressedBy: "rate-limit" });
+    expect(s.reason).toMatch(/rate-limited: the imperative was shown 300 s ago; it repeats at most once every 10 minutes/);
+  });
+
+  it("the interval is the configured handoverRearmIntervalMs, and at or past it the imperative stands", () => {
+    const at10 = sample(imperativeTokens, { record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(10) } });
+    expect(at10).toMatchObject({ state: "imperative", suppressedBy: null });
+    const at11 = sample(imperativeTokens, { record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(11) } });
+    expect(at11).toMatchObject({ state: "imperative", suppressedBy: null });
+    const short = resolveSessionIntelConfig({ handoverRearmIntervalMs: 60_000 });
+    expect(sample(imperativeTokens, { cfg: short, record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(2) } })).toMatchObject({ state: "imperative" });
+    expect(sample(imperativeTokens, { cfg: short, record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(0.5) } })).toMatchObject({ state: "advisory", suppressedBy: "rate-limit" });
+    // The reason quotes the configured interval exactly, never rounded up to minutes.
+    const odd = resolveSessionIntelConfig({ handoverRearmIntervalMs: 90_000 });
+    expect(sample(imperativeTokens, { cfg: odd, record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(0.5) } }).reason).toMatch(/it repeats at most once every 90 seconds$/);
+    // Zero is no interval: nothing is ever rate-limited.
+    const zero = resolveSessionIntelConfig({ handoverRearmIntervalMs: 0 });
+    expect(sample(imperativeTokens, { cfg: zero, record: { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(0) } })).toMatchObject({ state: "imperative", suppressedBy: null });
+  });
+
+  it("describeRepeatInterval renders minutes, seconds and milliseconds exactly", () => {
+    expect([600_000, 60_000, 90_000, 1_000, 1_500].map(describeRepeatInterval)).toEqual(["10 minutes", "1 minute", "90 seconds", "1 second", "1500 milliseconds"]);
+  });
+
+  it("compact-needed is never rate-limited", () => {
+    const record: SessionIntelPresence = { ...emptySessionIntel(), lastImperativeEmittedAt: minutesBefore(1) };
+    expect(sample(Math.ceil(0.98 * 417_737) + 10, { record })).toMatchObject({ state: "compact-needed", suppressedBy: null });
+  });
+
+  it("a handover hold is reported first; the rate limit applies only to what the re-arm gates let through", () => {
+    const both = sample(imperativeTokens, { record: { ...stamped("bound"), lastImperativeEmittedAt: minutesBefore(1) } });
+    expect(both).toMatchObject({ state: "advisory", suppressedBy: "handover" });
   });
 });

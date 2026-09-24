@@ -19,6 +19,7 @@ import type { LedgerIntegrityResult } from "./ledger-integrity.js";
 import type { NextTicketOutcome, NextTicketsOutcome } from "./queries.js";
 import type { RecommendResult } from "./recommend.js";
 import { isHandoverWindowIncomplete } from "./recommend.js";
+import { describeRepeatInterval } from "./session-intel/sampler.js";
 import type { HandoverBriefResult, HandoverBriefEntry } from "./handover-brief.js";
 import type { SectionRecord, TrajectoryEntry } from "./markdown-sections.js";
 import type { ReconcileResult } from "./reconcile.js";
@@ -2670,23 +2671,21 @@ export const HANDOVER_STAMPED_COMPACT_NEEDED_LINE =
   "Handover recorded, but context is past the compact line, so this does not lower the pressure. Auto-compaction will follow and is expected: keep working through it, and write no further handovers.";
 
 /**
- * ISS-1214: the one action a reader can take when the stamp failed because
- * the process that tried to write it cannot bind the caller at all -- the
- * stale-server shape from the field report, where the MCP server predates the
- * on-disk build and the prompt hook (which runs the new binary) disagrees
- * with it about the era.
+ * ISS-1263: a binding failure on a server that is ALSO stale. The staleness
+ * is a coincident condition, never the cause: the stamp path never consults
+ * it, and a restart loads the new build without binding the caller (the
+ * field reports reproduced the skip on a freshly started server). Printed
+ * only where staleness was positively established, in place of the line below.
  */
-export const HANDOVER_STAMP_RESTART_HINT =
-  "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
+export const HANDOVER_STAMP_STALE_NOTE =
+  "Also: the server binary is stale; a restart loads the new build but does not fix the binding.";
 
 /**
- * The same situation without the cause. A binding failure has many possible
- * causes and a stale server is only one of them, so the hint above is printed
- * ONLY where staleness was positively established; everywhere else the reader
- * gets what is known plus a remedy that costs nothing if the guess is wrong.
+ * A binding failure without positive staleness: what is known, and no remedy
+ * (ISS-1263: the old "restart the client" advice was wrong for a live pen).
  */
 export const HANDOVER_STAMP_UNBOUND_LINE =
-  "The caller could not be bound to a live presence record; if this repeats, restart the client.";
+  "The caller could not be bound to a live presence record.";
 
 /**
  * ISS-1214: why an attempted stamp did not land. `reason` is display text;
@@ -2710,13 +2709,20 @@ export interface HandoverStampFailure {
  * a causal claim, and a false one sends a reader to restart a client that was
  * never the problem.
  */
-export function formatHandoverStampFailure(failure: HandoverStampFailure, serverStale = false): string {
-  const base = `Handover stamp did not land (${failure.reason}): context pressure is not held; the next imperative is expected.`;
+/** ISS-1263: the line quoting the re-arm interval; zero means there is none. */
+const NO_REPEAT_INTERVAL = "The pressure line has no minimum repeat interval (handoverRearmIntervalMs is 0).";
+
+export function formatHandoverStampFailure(failure: HandoverStampFailure, serverStale = false, rearmIntervalMs = 600_000): string {
+  // ISS-1263: the reply never promises another imperative. The line is rate
+  // limited at delivery whether or not a stamp lands, and the old promise is
+  // what sent a worker into a handover every turn.
+  const interval = rearmIntervalMs > 0 ? `The pressure line repeats at most once every ${describeRepeatInterval(rearmIntervalMs)}.` : NO_REPEAT_INTERVAL;
+  const base = `Handover stamp did not land (${failure.reason}). ${interval}`;
   // Only a binding failure is about the caller's link to a record at all; an
   // outcome, a refusal and a thrown error each have their own causes, and a
   // restart addresses none of them.
   if (failure.kind !== "binding") return base;
-  return `${base} ${serverStale ? HANDOVER_STAMP_RESTART_HINT : HANDOVER_STAMP_UNBOUND_LINE}`;
+  return `${base} ${serverStale ? HANDOVER_STAMP_STALE_NOTE : HANDOVER_STAMP_UNBOUND_LINE}`;
 }
 
 /**
@@ -2744,21 +2750,34 @@ export function formatHandoverCreateResult(
    * that cannot must leave it false rather than infer it.
    */
   serverStale = false,
+  /**
+   * ISS-1263: how the landed stamp was bound. "unbound-era" (the caller's
+   * process era could not be proven) gets the acknowledgement by artifact
+   * instead of the bound continuation line.
+   */
+  stampBinding: "bound" | "unbound-era" = "bound",
+  /** ISS-1263: the configured re-arm interval, quoted exactly in the reply. */
+  rearmIntervalMs = 600_000,
 ): string {
   const diverged = stamped && stampedRoot !== null && mcpRoot !== null && stampedRoot !== mcpRoot;
   const failure = stamped ? null : stampFailure;
   if (format === "json") {
     const data: Record<string, unknown> = stamped ? { filename, tokenPressureStamped: true } : { filename };
+    if (stamped && stampBinding === "unbound-era") data.tokenPressureStampBinding = "unbound-era";
     if (diverged) data.tokenPressureStampedRoot = stampedRoot;
     if (failure !== null) data.tokenPressureStampReason = failure.reason;
     return JSON.stringify(successEnvelope(data), null, 2);
   }
   if (!stamped) {
     const base = `Created handover: ${filename}`;
-    return failure === null ? base : `${base}\n\n${formatHandoverStampFailure(failure, serverStale)}`;
+    return failure === null ? base : `${base}\n\n${formatHandoverStampFailure(failure, serverStale, rearmIntervalMs)}`;
   }
   const note = diverged ? ` (stamped under a different root: ${stampedRoot})` : "";
-  const line = compactNeeded ? HANDOVER_STAMPED_COMPACT_NEEDED_LINE : HANDOVER_STAMPED_CONTINUE_LINE;
+  const line = compactNeeded
+    ? HANDOVER_STAMPED_COMPACT_NEEDED_LINE
+    : stampBinding === "unbound-era"
+      ? `Handover recorded at ${filename}. ${rearmIntervalMs > 0 ? `The pressure line will not repeat for ${describeRepeatInterval(rearmIntervalMs)}.` : NO_REPEAT_INTERVAL}`
+      : HANDOVER_STAMPED_CONTINUE_LINE;
   return `Created handover: ${filename}\n\n${line}${note}`;
 }
 

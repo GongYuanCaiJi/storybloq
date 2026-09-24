@@ -93,6 +93,8 @@ function full(): SessionIntelPresence {
     promptsSinceHandover: 4,
     lastImperativeAt: "2026-09-09T09:50:00.000Z",
     usageAdvisoryShownAt: "2026-09-09T09:00:00.000Z",
+    handoverStampBinding: "unbound-era",
+    lastImperativeEmittedAt: "2026-09-09T09:51:00.000Z",
   };
 }
 

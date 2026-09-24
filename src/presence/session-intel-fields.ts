@@ -97,7 +97,7 @@ export interface SessionIntelSample {
   readonly ceilingConfidence: CeilingConfidence | null;
   readonly observation: SessionIntelObservation;
   readonly imperativeSince: string | null;
-  readonly suppressedBy: "handover" | null;
+  readonly suppressedBy: "handover" | "rate-limit" | null;
   /** T-501: null on an older record, or when a malformed value was refused. */
   readonly usageInput: SessionIntelUsageInput | null;
 }
@@ -131,6 +131,23 @@ export interface SessionIntelPresence {
    */
   readonly promptsSinceHandover: number;
   readonly lastImperativeAt: string | null;
+  /**
+   * ISS-1263: how the handover stamp was bound. "unbound-era" is a stamp the
+   * MCP server wrote without proving its process era (unknown, or unverifiable
+   * under load) on a live record for the same session id; it holds the
+   * imperative exactly like a bound one. Null is a stamp written before the
+   * field existed, or none.
+   */
+  readonly handoverStampBinding: "bound" | "unbound-era" | null;
+  /**
+   * ISS-1263: when a surface last DELIVERED the imperative line to the model,
+   * claimed under the record lock by `claimImperativeEmission`. The hard rate
+   * limit reads it: the line is delivered at most once per
+   * `handoverRearmIntervalMs`, whether or not any stamp lands. A stamp never
+   * clears it; a new compaction does. Never shed: shedding it would let the
+   * line fire again at once.
+   */
+  readonly lastImperativeEmittedAt: string | null;
   /**
    * T-501: when the usage-cost advisory was shown for this session. Written
    * once, inside the record lock, and never shed: shedding it would show the
@@ -167,6 +184,8 @@ export function emptySessionIntel(): SessionIntelPresence {
     handoverBoundaryAt: null,
     promptsSinceHandover: 0,
     lastImperativeAt: null,
+    handoverStampBinding: null,
+    lastImperativeEmittedAt: null,
     usageAdvisoryShownAt: null,
   };
 }
@@ -204,6 +223,8 @@ export function parseSessionIntel(value: unknown): SessionIntelPresence | null {
     handoverBoundaryAt: isoOrNull(v.handoverBoundaryAt),
     promptsSinceHandover: safeInt(v.promptsSinceHandover, 0),
     lastImperativeAt: isoOrNull(v.lastImperativeAt),
+    handoverStampBinding: v.handoverStampBinding === "bound" || v.handoverStampBinding === "unbound-era" ? v.handoverStampBinding : null,
+    lastImperativeEmittedAt: isoOrNull(v.lastImperativeEmittedAt),
     usageAdvisoryShownAt: isoOrNull(v.usageAdvisoryShownAt),
   };
   return fitSessionIntel(parsed);
@@ -341,7 +362,7 @@ function parseSample(value: unknown): SessionIntelSample | null {
     ceilingConfidence: typeof v.ceilingConfidence === "string" && CONFIDENCES.has(v.ceilingConfidence) ? (v.ceilingConfidence as CeilingConfidence) : null,
     observation,
     imperativeSince: isoOrNull(v.imperativeSince),
-    suppressedBy: v.suppressedBy === "handover" ? "handover" : null,
+    suppressedBy: v.suppressedBy === "handover" || v.suppressedBy === "rate-limit" ? v.suppressedBy : null,
     // A malformed input is refused on its own; it must never cost the record
     // the sample around it (the same rule the sample gets inside the subtree).
     usageInput: parseUsageInput(v.usageInput),

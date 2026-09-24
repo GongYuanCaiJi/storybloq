@@ -21,7 +21,7 @@ import { readPresenceRecord } from "../../src/core/session-intel/presence-bridge
 import { processEra } from "../../src/core/session-intel/process-era.js";
 import { handleSessionIntelPrompt } from "../../src/cli/commands/session-intel.js";
 import { registerAllTools } from "../../src/mcp/tools.js";
-import { HANDOVER_STAMP_RESTART_HINT, HANDOVER_STAMP_UNBOUND_LINE } from "../../src/core/output-formatter.js";
+import { HANDOVER_STAMP_STALE_NOTE, HANDOVER_STAMP_UNBOUND_LINE } from "../../src/core/output-formatter.js";
 import { SID, assistantRecord, userRecord, writeTranscript } from "../core/session-intel-fixtures.js";
 
 const CEILING = 0.925 * 450_000;
@@ -137,9 +137,9 @@ describe("ISS-1214 (c): the registered storybloq_handover_create stamps the boun
     expect(reply.isError, reply.content[0]?.text).toBeUndefined();
     const text = reply.content[0]!.text;
     expect(text).toMatch(/Created handover: /);
-    expect(text).toMatch(/Handover stamp did not land \(skipped: no caller session id\): context pressure is not held; the next imperative is expected\./);
+    expect(text).toMatch(/Handover stamp did not land \(skipped: no caller session id\)\. The pressure line repeats at most once every 10 minutes\./);
     expect(text, "the hedged line, not the causal one").toContain(HANDOVER_STAMP_UNBOUND_LINE);
-    expect(text, "a fresh server is never told it is stale").not.toContain(HANDOVER_STAMP_RESTART_HINT);
+    expect(text, "a fresh server is never told it is stale").not.toContain(HANDOVER_STAMP_STALE_NOTE);
     expect(text).not.toMatch(/held at advisory/);
     expect(intelOf(fx.root).handoverWrittenAt, "nothing was stamped").toBeNull();
   });

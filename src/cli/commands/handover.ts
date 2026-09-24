@@ -415,9 +415,14 @@ export async function handleHandoverCreate(
   // prompt hook re-fires the imperative with no visible cause.
   let stampFailure: HandoverStampFailure | null = null;
   let serverStale = false;
+  // ISS-1263: how the stamp bound, and the re-arm interval the reply quotes.
+  let stampBinding: "bound" | "unbound-era" = "bound";
+  let rearmIntervalMs = 600_000;
   if (intel.stamp !== false) {
     try {
       const { describeStampFailure, stampHandoverForCaller } = await import("../../core/session-intel/push.js");
+      const { readSessionIntelConfig } = await import("../../core/session-intel/config.js");
+      rearmIntervalMs = readSessionIntelConfig(root).handoverRearmIntervalMs;
       const r = stampHandoverForCaller(root, { explicitTaskId: intel.clientTaskId, cwd: root, now: intel.now, projectsDir: intel.projectsDir });
       // Only a stamp whose locked write LANDED counts: a busy lock, a failed
       // write, or a refusal under the lock leaves the record unchanged.
@@ -425,6 +430,7 @@ export async function handleHandoverCreate(
       if (stamped && r.status === "stamped") {
         stampedRoot = r.root;
         compactNeeded = r.pressureState === "compact-needed";
+        stampBinding = r.binding;
       } else {
         stampFailure = describeStampFailure(r, intel.surface ?? "cli");
       }
@@ -452,5 +458,5 @@ export async function handleHandoverCreate(
   // a suppression that did not happen. ISS-1185: stampedRoot is reported
   // only when it diverges from the MCP root (formatHandoverCreateResult
   // gates on that itself).
-  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded, stampFailure, serverStale) };
+  return { output: formatHandoverCreateResult(filename!, format, stamped, stampedRoot, absRoot, compactNeeded, stampFailure, serverStale, stampBinding, rearmIntervalMs) };
 }

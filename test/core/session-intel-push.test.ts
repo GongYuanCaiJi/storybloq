@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync, renameSync } from "node:fs";
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, realpathSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { initProject } from "../../src/core/init.js";
 import { ensureCapture } from "../../src/core/session-intel/capture.js";
@@ -312,6 +313,11 @@ describe("MCP and CLI pipelines", () => {
 
   it("CLI: md appends the line to stdout; json emits one stderr line and leaves the stdout envelope untouched", async () => {
     await withFixture(async (f) => {
+      // ISS-1263: this pins the pipelines' formats across three deliveries, not
+      // the rate limit, so the interval is zero and every delivery may claim.
+      const configPath = join(f.root, ".story", "config.json");
+      const config = JSON.parse(readFileSync(configPath, "utf-8")) as Record<string, unknown>;
+      writeFileSync(configPath, JSON.stringify({ ...config, sessionIntel: { handoverRearmIntervalMs: 0 } }));
       primed(f, IMPERATIVE_TOKENS, Date.now());
       const cli = cliBannerFor(f.root, "json", seams(f));
       expect(cli.stdout).toBeNull();
@@ -359,9 +365,12 @@ describe("guide directive and handover stamp", () => {
       expect(guideDirectiveFor(f.root, SID, now)).toBeNull();
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(3), read: IMPERATIVE_TOKENS - 2 })]);
       handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 1000, projectsDir: f.projects, userSettingsPath: f.userSettings });
-      expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/^Context pressure imperative \([78][0-9]% of ceiling, source setting, high confidence\): write a handover now via storybloq_handover_create, then keep working in this same turn\./);
+      // ISS-1263: the directive claims the one imperative line, so it is read
+      // once and both properties are checked on that one delivery.
+      const directive = guideDirectiveFor(f.root, SID, now + 1000);
+      expect(directive).toMatch(/^Context pressure imperative \([78][0-9]% of ceiling, source setting, high confidence\): write a handover now via storybloq_handover_create, then keep working in this same turn\./);
       // ISS-1197: the directive says compaction after the handover is expected.
-      expect(guideDirectiveFor(f.root, SID, now + 1000)).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
+      expect(directive).toMatch(/auto-compaction that follows is expected and safe: the session continues through it/);
       expect(guideDirectiveFor(f.root, null, now + 1000)).toBeNull();
       markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 2000).toISOString() });
       expect(guideDirectiveFor(f.root, SID, now + 3000)).toBeNull();
@@ -1241,8 +1250,8 @@ describe("T-320 commit 3: --compact/compact forces json even when format is omit
  * binary older than the on-disk build must say so on every write tool.
  */
 describe("ISS-1214: the reply names a stamp that did not land", () => {
-  const HINT = "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
-  const NEUTRAL = "The caller could not be bound to a live presence record; if this repeats, restart the client.";
+  const HINT = "Also: the server binary is stale; a restart loads the new build but does not fix the binding.";
+  const NEUTRAL = "The caller could not be bound to a live presence record.";
 
   it("describeStampFailure classifies every shape; the formatter is never asked to read the text", () => {
     // Every enrichment outcome a stamp can end on, plus the fallback.
@@ -1292,19 +1301,55 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
     }
   });
 
-  it("a real process-era binding failure is tagged binding end to end", async () => {
+  it("ISS-1263: a real unresolvable process era no longer skips the stamp; it lands unbound-era and the reply says the line will not repeat", async () => {
     await withFixture(async (f) => {
       const now = T0 + 5 * 60_000;
       primed(f, IMPERATIVE_TOKENS, now);
       delete process.env.CLAUDE_PID;
       processEra.reset();
       const r = stampHandoverForCaller(f.root, { now, projectsDir: f.projects });
-      expect(r).toMatchObject({ status: "skipped", kind: "binding" });
-      expect((r as { reason: string }).reason).toMatch(/^process era /);
+      expect(r).toMatchObject({ status: "stamped", binding: "unbound-era", outcome: { status: "written" } });
       const md = await handleHandoverCreate("# H", "h-1214-era-real", "md", f.root, { now, projectsDir: f.projects });
-      expect(md.output).toContain("Handover stamp did not land (skipped: process era ");
-      expect(md.output).toContain(NEUTRAL);
+      expect(md.output).toMatch(/^Created handover: ([^\n]+)\n\nHandover recorded at \1\. The pressure line will not repeat for 10 minutes\.$/);
+      expect(md.output).not.toContain("did not land");
+      const json = await handleHandoverCreate("# H", "h-1214-era-real-json", "json", f.root, { now, projectsDir: f.projects });
+      expect(JSON.parse(json.output as string).data).toEqual({ filename: expect.any(String), tokenPressureStamped: true, tokenPressureStampBinding: "unbound-era" });
     });
+  });
+
+  it("ISS-1263: the unbound-era reply uses the configured interval, and compact-needed still wins", async () => {
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      const cfgPath = join(f.root, ".story", "config.json");
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+      writeFileSync(cfgPath, JSON.stringify({ ...cfg, sessionIntel: { handoverRearmIntervalMs: 150_000 } }));
+      primed(f, IMPERATIVE_TOKENS, now);
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      const md = await handleHandoverCreate("# H", "h-1263-interval", "md", f.root, { now, projectsDir: f.projects });
+      expect(md.output).toMatch(/The pressure line will not repeat for 150 seconds\.$/);
+    });
+    await withFixture(async (f) => {
+      const now = T0 + 5 * 60_000;
+      // The first fixture left the server unable to resolve its era; the
+      // hook side of this one binds again before priming.
+      process.env.CLAUDE_PID = String(process.pid);
+      processEra.reset();
+      primed(f, 410_000, now);
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      const md = await handleHandoverCreate("# H", "h-1263-compact", "md", f.root, { now, projectsDir: f.projects });
+      expect(md.output).toMatch(/context is past the compact line/);
+      expect(md.output).not.toMatch(/will not repeat/);
+    });
+  });
+
+  it("ISS-1263: no source file tells the caller the next imperative is expected, and none advises a restart for a binding failure", () => {
+    const src = fileURLToPath(new URL("../../src", import.meta.url));
+    const hits = (readdirSync(src, { recursive: true }) as string[])
+      .filter((rel) => rel.endsWith(".ts"))
+      .filter((rel) => /next imperative is expected|if this repeats, restart/.test(readFileSync(join(src, rel), "utf8")));
+    expect(hits).toEqual([]);
   });
 
   it("a throw inside the stamp is reported as an error kind, message kept", async () => {
@@ -1314,7 +1359,7 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       locateSwap.hook = () => { throw new Error("injected stamp failure"); };
       const md = await handleHandoverCreate("# H", "h-1214-throw", "md", f.root, { now, projectsDir: f.projects });
       expect(locateSwap.hook).toBeNull();
-      expect(md.output).toContain("Handover stamp did not land (error: injected stamp failure): context pressure is not held; the next imperative is expected.");
+      expect(md.output).toContain("Handover stamp did not land (error: injected stamp failure). The pressure line repeats at most once every 10 minutes.");
       // An error is not a binding failure: neither sentence belongs on it.
       expect(md.output).not.toContain(NEUTRAL);
       expect(md.output).not.toContain(HINT);
@@ -1336,7 +1381,7 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       const result = await client.callTool({ name: "storybloq_handover_create", arguments: { content: "# H", slug: "h-1214-nosid-mcp" } });
       await client.close();
       const text = (result.content as { text: string }[])[0]!.text;
-      expect(text).toContain("Handover stamp did not land (skipped: no caller session id): context pressure is not held; the next imperative is expected.");
+      expect(text).toContain("Handover stamp did not land (skipped: no caller session id). The pressure line repeats at most once every 10 minutes.");
       // A fresh server: the neutral sentence, never the causal claim.
       expect(text).toContain(NEUTRAL);
       expect(text).not.toContain(HINT);
@@ -1353,7 +1398,7 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       inject.forceOutcome = { status: "skipped-lock-busy" };
       const md = await handleHandoverCreate("# H", "h-1214-busy", "md", f.root, { now, projectsDir: f.projects });
       expect(inject.forceOutcome).toBeNull();
-      expect(md.output).toMatch(/^Created handover: [^\n]+\n\nHandover stamp did not land \(lock busy\): context pressure is not held; the next imperative is expected\.$/);
+      expect(md.output).toMatch(/^Created handover: [^\n]+\n\nHandover stamp did not land \(lock busy\)\. The pressure line repeats at most once every 10 minutes\.$/);
       expect(intelOf(f.root).handoverWrittenAt).toBeNull();
 
       inject.calls = 0;
@@ -1374,7 +1419,7 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       inject.transformBase = (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, era: "999:1" } });
       const md = await handleHandoverCreate("# H", "h-1214-refused", "md", f.root, { now, projectsDir: f.projects });
       expect(inject.transformBase).toBeNull();
-      expect(md.output).toContain("Handover stamp did not land (refused: record era differs from the caller's live era): context pressure is not held; the next imperative is expected.");
+      expect(md.output).toContain("Handover stamp did not land (refused: record era differs from the caller's live era). The pressure line repeats at most once every 10 minutes.");
       expect(md.output).not.toContain(NEUTRAL);
       expect(md.output).not.toContain(HINT);
       expect(intelOf(f.root).handoverWrittenAt).toBeNull();
@@ -1387,13 +1432,13 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       primed(f, IMPERATIVE_TOKENS, now);
       applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(5) }));
       const ended = await handleHandoverCreate("# H", "h-1214-ended", "md", f.root, { now, projectsDir: f.projects });
-      expect(ended.output).toContain("Handover stamp did not land (skipped: caller session has ended): context pressure is not held; the next imperative is expected.");
+      expect(ended.output).toContain("Handover stamp did not land (skipped: caller session has ended). The pressure line repeats at most once every 10 minutes.");
       expect(ended.output).toContain(NEUTRAL);
       expect(ended.output).not.toContain(HINT);
 
       applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: null, sessionIntel: { ...b.sessionIntel!, era: "9:9" } }));
       const era = await handleHandoverCreate("# H", "h-1214-era", "md", f.root, { now, projectsDir: f.projects });
-      expect(era.output).toContain("Handover stamp did not land (skipped: record era differs from the live process era): context pressure is not held; the next imperative is expected.");
+      expect(era.output).toContain("Handover stamp did not land (skipped: record era differs from the live process era). The pressure line repeats at most once every 10 minutes.");
       expect(era.output).toContain(NEUTRAL);
       expect(era.output).not.toContain(HINT);
     });
@@ -1442,6 +1487,150 @@ describe("ISS-1214: the reply names a stamp that did not land", () => {
       expect(text).toContain("Handover stamp did not land (skipped: no presence record for the caller)");
       expect(text).toContain(HINT);
       expect(text).not.toContain(NEUTRAL);
+    });
+  });
+});
+
+describe("ISS-1263: the unbound-era stamp through stampHandoverForCaller", () => {
+  it("process era unknown on a live record: the stamp lands, marked unbound-era", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      const r = stampHandoverForCaller(f.root, { now, projectsDir: f.projects });
+      expect(r).toMatchObject({ status: "stamped", binding: "unbound-era", outcome: { status: "written" } });
+      expect(intelOf(f.root)).toMatchObject({ handoverWrittenAt: new Date(now).toISOString(), handoverStampBinding: "unbound-era" });
+      expect(intelOf(f.root).lastSample).toMatchObject({ state: "advisory", suppressedBy: "handover" });
+    });
+  });
+
+  it("process era unverifiable (ps timed out): the stamp lands, marked unbound-era", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      vi.spyOn(processEra, "revalidate").mockReturnValue("unverifiable");
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "stamped", binding: "unbound-era", outcome: { status: "written" } });
+    });
+  });
+
+  it("a bound caller's stamp is marked bound", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "stamped", binding: "bound" });
+      expect(intelOf(f.root).handoverStampBinding).toBe("bound");
+    });
+  });
+
+  it("positive evidence refuses: a proven-ended process, a live different era, an ended record, no record", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", kind: "binding", reason: "no presence record for the caller" });
+      primed(f, IMPERATIVE_TOKENS, now);
+      const spy = vi.spyOn(processEra, "revalidate").mockReturnValue("ended");
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", kind: "binding", reason: "process era ended" });
+      spy.mockRestore();
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, era: "9:9" } }));
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", kind: "binding", reason: "record era differs from the live process era" });
+      applyPresenceEnrichment(f.root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(9) }));
+      delete process.env.CLAUDE_PID;
+      processEra.reset();
+      expect(stampHandoverForCaller(f.root, { now, projectsDir: f.projects })).toMatchObject({ status: "skipped", kind: "binding", reason: "caller session has ended" });
+      expect(intelOf(f.root).handoverWrittenAt).toBeNull();
+    });
+  });
+});
+
+describe("ISS-1263: every delivery path claims the one imperative line", () => {
+  it("MCP md: repeated reads of one fresh cached imperative sample show it once, then the rate-limited advisory", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      const first = applyBannerToMcpText("body", "md", tokenPressureBannerFor(f.root, { now, ...seams(f) }));
+      expect(first).toMatch(/^Context pressure IMPERATIVE/);
+      expect(intelOf(f.root).lastImperativeEmittedAt).toBe(new Date(now).toISOString());
+      const second = applyBannerToMcpText("body", "md", tokenPressureBannerFor(f.root, { now: now + 1000, ...seams(f) }));
+      expect(second).toMatch(/^Context pressure ADVISORY/);
+      expect(second).toMatch(/shown recently/);
+      expect(second).not.toMatch(/Write a handover now/);
+      expect(intelOf(f.root).lastImperativeEmittedAt).toBe(new Date(now).toISOString());
+    });
+  });
+
+  it("MCP json: a response that cannot carry the banner consumes no claim; a json object carries the degraded shape after a claim", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      expect(applyBannerToMcpText("[1,2]", "json", tokenPressureBannerFor(f.root, { now, ...seams(f) }))).toBe("[1,2]");
+      expect(intelOf(f.root).lastImperativeEmittedAt).toBeNull();
+      const one = JSON.parse(applyBannerToMcpText("{\"a\":1}", "json", tokenPressureBannerFor(f.root, { now, ...seams(f) })));
+      expect(one.tokenPressure).toMatchObject({ state: "imperative" });
+      expect(one.tokenPressure).not.toHaveProperty("claim");
+      const two = JSON.parse(applyBannerToMcpText("{\"a\":1}", "json", tokenPressureBannerFor(f.root, { now: now + 1000, ...seams(f) })));
+      expect(two.tokenPressure).toMatchObject({ state: "advisory", suppressedBy: "rate-limit" });
+    });
+  });
+
+  it("status pushes claim once per response, not once per rendering attempt", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      const pushes = statusPushesFor(f.root, { now, ...seams(f) });
+      const text = applyStatusPushesToMcpText("body", "md", pushes.banner, pushes.usage);
+      expect(text.match(/Context pressure IMPERATIVE/g)?.length).toBe(1);
+      expect(intelOf(f.root).lastImperativeEmittedAt).toBe(new Date(now).toISOString());
+    });
+  });
+
+  it("CLI: the banner prints once, then the degraded line", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      expect(cliBannerFor(f.root, "md", { now, ...seams(f) }).stdout).toMatch(/^Context pressure IMPERATIVE/);
+      expect(cliBannerFor(f.root, "md", { now: now + 1000, ...seams(f) }).stdout).toMatch(/^Context pressure ADVISORY.*shown recently/);
+      expect(cliStatusPushesFor(f.root, "md", { now: now + 2000, ...seams(f) }).stdout.join("\n")).not.toMatch(/IMPERATIVE/);
+    });
+  });
+
+  it("the guide directive claims too: after it, the banner is degraded; after a banner delivery, the directive is null", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      primed(f, IMPERATIVE_TOKENS, now);
+      expect(guideDirectiveFor(f.root, SID, now)).toMatch(/write a handover now/);
+      expect(applyBannerToMcpText("b", "md", tokenPressureBannerFor(f.root, { now: now + 1000, ...seams(f) }))).toMatch(/^Context pressure ADVISORY/);
+      expect(guideDirectiveFor(f.root, SID, now + 2000)).toBeNull();
+      // compact-needed is never limited.
+      writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(6), read: COMPACT_TOKENS - 2 })]);
+      handleStopHookSample({ root: f.root, sessionId: SID, cwd: f.root, now: now + 3000, projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(guideDirectiveFor(f.root, SID, now + 3000)).toMatch(/compact-needed/);
+      expect(guideDirectiveFor(f.root, SID, now + 4000)).toMatch(/compact-needed/);
+    });
+  });
+
+  it("an acquisition that fails a later gate consumes nothing", async () => {
+    await withFixture((f) => {
+      const now = T0 + 5 * 60_000;
+      const era = primed(f, IMPERATIVE_TOKENS, now);
+      markCompactPending(f.root, SID, { eventId: "p", era, at: new Date(now + 500).toISOString() });
+      expect(tokenPressureBannerFor(f.root, { now: now + 1000, ...seams(f) })).toBeNull();
+      expect(guideDirectiveFor(f.root, SID, now + 1000)).toBeNull();
+      expect(intelOf(f.root).lastImperativeEmittedAt).toBeNull();
+    });
+  });
+});
+
+describe("ISS-1263: session intel says why the line is quiet", () => {
+  it("after a delivery, the diagnostic reports the rate limit and its reason", async () => {
+    await withFixture((f) => {
+      // handleSessionIntel samples at the real clock (it takes no `now`), so
+      // the delivery is made at the real clock too.
+      const now = Date.now();
+      primed(f, IMPERATIVE_TOKENS, now);
+      expect(applyBannerToMcpText("b", "md", tokenPressureBannerFor(f.root, { now, ...seams(f) }))).toMatch(/IMPERATIVE/);
+      const md = handleSessionIntel({ cwd: f.root, format: "md", projectsDir: f.projects, userSettingsPath: f.userSettings });
+      expect(md.output).toMatch(/Token pressure: ADVISORY \(imperative rate-limited: shown recently\)/);
+      expect(md.output).toMatch(/- Why: .*rate-limited: the imperative was shown \d+ s ago; it repeats at most once every 10 minutes/);
     });
   });
 });

@@ -75,6 +75,7 @@ import {
   compactSample,
   consumeUsageAdvisory,
   stampHandover,
+  claimImperativeEmission,
 } from "../../src/core/session-intel/presence-bridge.js";
 import { resolveSessionIntelConfig } from "../../src/core/session-intel/config.js";
 import { computeSample } from "../../src/core/session-intel/sampler.js";
@@ -867,6 +868,168 @@ describe("consumeUsageAdvisory", () => {
       expect(r.stamped).toBe(false);
       expect(r.reason).toBe("already shown");
       expect(intelOf(root).usageAdvisoryShownAt).toBe(racing);
+    });
+  });
+});
+
+describe("ISS-1263: the unbound-era stamp and the emission record", () => {
+  it("stampHandover in unbound-era mode lands on a live record whose era is null or differs, writes the same fields as a bound stamp and records the binding", () => {
+    withRoot((root) => {
+      seed(root, { era: "1:2", lastBoundaryAt: at(1), promptsSinceHandover: 4, lastImperativeAt: at(2), lastImperativeEmittedAt: at(2) });
+      expect(stampHandover(root, SID, null, 123, T0, undefined, "unbound-era").status).toBe("written");
+      expect(intelOf(root)).toMatchObject({
+        handoverWrittenAt: new Date(T0).toISOString(),
+        tokensAtHandover: 123,
+        handoverBoundaryAt: at(1),
+        promptsSinceHandover: 0,
+        lastImperativeAt: null,
+        handoverStampBinding: "unbound-era",
+        // A stamp never resets the rate limit: the two are independent.
+        lastImperativeEmittedAt: at(2),
+      });
+      seed(root, { era: null });
+      expect(stampHandover(root, SID, null, 5, T0 + 1000, undefined, "unbound-era").status).toBe("written");
+      expect(intelOf(root).handoverStampBinding).toBe("unbound-era");
+    });
+  });
+
+  it("a bound stamp records its binding; the default mode still refuses a null or mismatched era", () => {
+    withRoot((root) => {
+      seed(root, { era: "1:2" });
+      expect(stampHandover(root, SID, null, 1, T0)).toMatchObject({ status: "refused" });
+      expect(stampHandover(root, SID, "9:9", 1, T0)).toMatchObject({ status: "refused" });
+      expect(stampHandover(root, SID, "1:2", 1, T0).status).toBe("written");
+      expect(intelOf(root).handoverStampBinding).toBe("bound");
+    });
+  });
+
+  it("unbound-era mode still refuses an ended record and a record without a subtree, and never creates one", () => {
+    withRoot((root) => {
+      expect(stampHandover(root, SID, null, 1, T0, undefined, "unbound-era")).toMatchObject({ status: "refused" });
+      expect(readPresenceRecord(root, SID)?.sessionIntel ?? null).toBeNull();
+      seed(root, { era: "1:2" });
+      applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(0) }));
+      expect(stampHandover(root, SID, null, 1, T0, undefined, "unbound-era")).toMatchObject({ status: "refused", reason: expect.stringMatching(/ended/) });
+      expect(intelOf(root).handoverWrittenAt).toBeNull();
+    });
+  });
+
+  it("the boundary resets clear the emission record and the stamp binding with the handover", () => {
+    const base: SessionIntelPresence = { ...emptySessionIntel(), era: "1:2", handoverWrittenAt: at(5), tokensAtHandover: 100, handoverStampBinding: "unbound-era", lastImperativeEmittedAt: at(5) };
+    expect(applyBoundaryReset(base, at(6))).toMatchObject({ handoverStampBinding: null, lastImperativeEmittedAt: null });
+    expect(applyAssumedReset(base, at(6))).toMatchObject({ handoverStampBinding: null, lastImperativeEmittedAt: null });
+    // A handover written after the boundary migrates with its binding.
+    expect(applyBoundaryReset(base, at(4))).toMatchObject({ handoverStampBinding: "unbound-era", handoverWrittenAt: at(5) });
+  });
+
+  it("the stamp binding and the emission record round-trip through the lenient parse; an unknown binding reads null", () => {
+    withRoot((root) => {
+      seed(root, { era: "1:2", handoverStampBinding: "unbound-era", lastImperativeEmittedAt: at(3) });
+      expect(intelOf(root)).toMatchObject({ handoverStampBinding: "unbound-era", lastImperativeEmittedAt: at(3) });
+      applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, handoverStampBinding: "sideways" as never, lastImperativeEmittedAt: "not a date" } }));
+      expect(intelOf(root)).toMatchObject({ handoverStampBinding: null, lastImperativeEmittedAt: null });
+    });
+  });
+
+  describe("claimImperativeEmission: the one right to deliver the imperative line", () => {
+    const INTERVAL = 600_000;
+    const seenOf = (root: string) => { const i = intelOf(root); return { revision: i.revision, lastBoundaryAt: i.lastBoundaryAt, handoverWrittenAt: i.handoverWrittenAt, sampledAt: i.lastSample?.sampledAt ?? null }; };
+
+    it("the first claim writes now; a second inside the interval refuses and writes nothing; at the interval it claims again", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2" });
+        expect(claimImperativeEmission(root, SID, seenOf(root), T0, INTERVAL)).toBe(true);
+        expect(intelOf(root).lastImperativeEmittedAt).toBe(new Date(T0).toISOString());
+        expect(claimImperativeEmission(root, SID, seenOf(root), T0 + INTERVAL - 1, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBe(new Date(T0).toISOString());
+        expect(claimImperativeEmission(root, SID, seenOf(root), T0 + INTERVAL, INTERVAL)).toBe(true);
+        expect(intelOf(root).lastImperativeEmittedAt).toBe(new Date(T0 + INTERVAL).toISOString());
+      });
+    });
+
+    it("refuses with nothing created for no record and no subtree, and refuses an ended record", () => {
+      withRoot((root) => {
+        const none = { revision: 0, lastBoundaryAt: null, handoverWrittenAt: null, sampledAt: null };
+        expect(claimImperativeEmission(root, SID, none, T0, INTERVAL)).toBe(false);
+        expect(readPresenceRecord(root, SID)).toBeNull();
+        applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b }));
+        expect(claimImperativeEmission(root, SID, none, T0, INTERVAL)).toBe(false);
+        expect(readPresenceRecord(root, SID)?.sessionIntel ?? null).toBeNull();
+        seed(root, { era: "1:2" });
+        applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, endedAt: at(0) }));
+        expect(claimImperativeEmission(root, SID, seenOf(root), T0, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+      });
+    });
+
+    it("acquisition, then a handover stamp, then the claim: refused, nothing written", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2" });
+        const seen = seenOf(root);
+        expect(stampHandover(root, SID, "1:2", 1, T0).status).toBe("written");
+        expect(claimImperativeEmission(root, SID, seen, T0 + 1, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+      });
+    });
+
+    it("acquisition, then a boundary reset, then the claim: refused, and the new epoch's first imperative still claims", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2", lastBoundaryAt: at(0) });
+        const seen = seenOf(root);
+        applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: applyBoundaryReset(b.sessionIntel!, at(1)) }));
+        expect(claimImperativeEmission(root, SID, seen, T0 + 1, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+        expect(claimImperativeEmission(root, SID, seenOf(root), T0 + 2, INTERVAL)).toBe(true);
+      });
+    });
+
+    it("a revision bump between acquisition and claim refuses", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2", revision: 3 });
+        const seen = seenOf(root);
+        applyPresenceEnrichment(root, SID, LIFECYCLE_LOCK_BUDGET_MS, "t", (b) => ({ ...b, sessionIntel: { ...b.sessionIntel!, revision: 4 } }));
+        expect(claimImperativeEmission(root, SID, seen, T0, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+      });
+    });
+
+    it("a pending compaction, or a pending listing that cannot rule one out, refuses", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2" });
+        const seen = seenOf(root);
+        markCompactPending(root, SID, { eventId: "p1", era: "1:2", at: at(0) });
+        expect(claimImperativeEmission(root, SID, seen, T0, INTERVAL)).toBe(false);
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+      });
+      withRoot((root) => {
+        seed(root, { era: "1:2" });
+        const seen = seenOf(root);
+        const dir = join(root, ".story", "telemetry", "session-intel-pending", presenceFileBase(SID));
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, "x.json"), "{}");
+        chmodSync(dir, 0o000);
+        try {
+          expect(claimImperativeEmission(root, SID, seen, T0, INTERVAL)).toBe(false);
+        } finally {
+          chmodSync(dir, 0o755);
+        }
+        expect(intelOf(root).lastImperativeEmittedAt).toBeNull();
+      });
+    });
+
+    it("persistSample never writes the emission record, whoever sampled", () => {
+      withRoot((root) => {
+        seed(root, { era: "1:2" });
+        const tokens = 417_737 - 60_000;
+        const path = writeTranscript(join(root, "projects"), "p", SID, [assistantRecord({ ts: at(0), read: tokens - 2 })]);
+        for (const sampledBy of ["prompt-hook", "mcp-refresh", "stop-hook", "query"] as const) {
+          const scan = scanTail({ path, sessionId: SID, era: "1:2", revisionSeen: intelOf(root).revision, epochSince: null })!;
+          const recompute = (rec: SessionIntelPresence) => computeSample({ scan, ceiling: ceiling(), cfg, sampledBy, sampledAt: at(0), record: rec, usage: USAGE });
+          persistSample({ root, sessionId: SID, sample: recompute(intelOf(root)), transcriptPath: path, cfg, now: T0, recompute });
+          expect(intelOf(root).lastSample?.state, sampledBy).toBe("imperative");
+          expect(intelOf(root).lastImperativeEmittedAt, sampledBy).toBeNull();
+        }
+      });
     });
   });
 });

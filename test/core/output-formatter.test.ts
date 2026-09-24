@@ -1640,8 +1640,8 @@ describe("T-476 binding ruling: every attribution-displaying ruling formatter ou
  */
 describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did not land", () => {
   const FILE = "2026-09-14-01-session.md";
-  const HINT = "Restart the client: an MCP server older than the on-disk build cannot bind the caller, so the stamp has nowhere to land.";
-  const NEUTRAL = "The caller could not be bound to a live presence record; if this repeats, restart the client.";
+  const HINT = "Also: the server binary is stale; a restart loads the new build but does not fix the binding.";
+  const NEUTRAL = "The caller could not be bound to a live presence record.";
   const busy = { reason: "lock busy", kind: "outcome" } as const;
   const unbound = { reason: "skipped: no presence record for the caller", kind: "binding" } as const;
 
@@ -1649,13 +1649,13 @@ describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did 
     expect(outputFormatter.formatHandoverCreateResult(FILE, "md")).toBe(`Created handover: ${FILE}`);
     expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, null)).toBe(`Created handover: ${FILE}`);
     expect(outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, busy)).toBe(
-      `Created handover: ${FILE}\n\nHandover stamp did not land (lock busy): context pressure is not held; the next imperative is expected.`,
+      `Created handover: ${FILE}\n\nHandover stamp did not land (lock busy). The pressure line repeats at most once every 10 minutes.`,
     );
   });
 
   it("md: the causal restart hint requires POSITIVE staleness; an unbound caller on a fresh server gets the neutral sentence", () => {
     const fresh = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, unbound, false);
-    expect(fresh).toContain("Handover stamp did not land (skipped: no presence record for the caller): context pressure is not held; the next imperative is expected.");
+    expect(fresh).toContain("Handover stamp did not land (skipped: no presence record for the caller). The pressure line repeats at most once every 10 minutes.");
     expect(fresh).toContain(NEUTRAL);
     expect(fresh).not.toContain(HINT);
 
@@ -1672,7 +1672,7 @@ describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did 
       for (const stale of [false, true]) {
         const out = outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, { reason: `r-${kind}`, kind }, stale);
         expect(out, `${kind}/${String(stale)}`).toBe(
-          `Created handover: ${FILE}\n\nHandover stamp did not land (r-${kind}): context pressure is not held; the next imperative is expected.`,
+          `Created handover: ${FILE}\n\nHandover stamp did not land (r-${kind}). The pressure line repeats at most once every 10 minutes.`,
         );
       }
     }
@@ -1685,6 +1685,27 @@ describe("ISS-1214: formatHandoverCreateResult names why an attempted stamp did 
     expect(none.data).toEqual({ filename: FILE });
     const landed = JSON.parse(outputFormatter.formatHandoverCreateResult(FILE, "json", true)) as { data: Record<string, unknown> };
     expect(landed.data).toEqual({ filename: FILE, tokenPressureStamped: true });
+  });
+});
+
+describe("ISS-1263: the reply quotes the configured re-arm interval exactly", () => {
+  const FILE = "2026-09-24-01-session.md";
+  const busy = { reason: "lock busy", kind: "outcome" } as const;
+  const acked = (ms: number) => outputFormatter.formatHandoverCreateResult(FILE, "md", true, null, null, false, null, false, "unbound-era", ms);
+  const failed = (ms: number) => outputFormatter.formatHandoverCreateResult(FILE, "md", false, null, null, false, busy, false, "bound", ms);
+
+  it("whole minutes, whole seconds and milliseconds are each rendered without rounding", () => {
+    expect(acked(600_000)).toBe(`Created handover: ${FILE}\n\nHandover recorded at ${FILE}. The pressure line will not repeat for 10 minutes.`);
+    expect(acked(60_000)).toMatch(/will not repeat for 1 minute\.$/);
+    expect(acked(90_000)).toMatch(/will not repeat for 90 seconds\.$/);
+    expect(acked(1_500)).toMatch(/will not repeat for 1500 milliseconds\.$/);
+    expect(failed(90_000)).toMatch(/\(lock busy\)\. The pressure line repeats at most once every 90 seconds\.$/);
+  });
+
+  it("an interval of zero promises no hold at all", () => {
+    expect(acked(0)).toBe(`Created handover: ${FILE}\n\nHandover recorded at ${FILE}. The pressure line has no minimum repeat interval (handoverRearmIntervalMs is 0).`);
+    expect(failed(0)).toMatch(/\(lock busy\)\. The pressure line has no minimum repeat interval \(handoverRearmIntervalMs is 0\)\.$/);
+    expect(acked(0)).not.toMatch(/minute|will not repeat/);
   });
 });
 

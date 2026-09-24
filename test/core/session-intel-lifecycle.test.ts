@@ -577,6 +577,9 @@ describe("handleSessionIntelPrompt (UserPromptSubmit)", () => {
 
   it("an unbound caller never emits, even from a usable imperative sample: null era, ended record, era mismatch", () => {
     withFixture((f) => {
+      // ISS-1263: this pins binding, not the rate limit, so the interval is
+      // zero and the read-only sample after the first delivery stays imperative.
+      writeFileSync(join(f.root, ".story", "config.json"), JSON.stringify({ sessionIntel: { handoverRearmIntervalMs: 0 } }));
       ensureCapture({ root: f.root, sessionId: SID, source: "startup", now: T0 - 30 * 60_000, userSettingsPath: f.userSettings });
       writeTranscript(f.projects, encoded(f.root), SID, [assistantRecord({ ts: at(2), read: IMPERATIVE_TOKENS - 2 })]);
       expect(handleSessionIntelPrompt({ sessionId: SID, now: T0 + 5 * 60_000, ...seams(f) }).status).toBe("emitted");

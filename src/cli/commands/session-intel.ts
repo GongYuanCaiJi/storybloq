@@ -12,7 +12,7 @@ import { LIFECYCLE_LOCK_BUDGET_MS } from "../../core/presence-enrichment.js";
 import { isPresenceEnabled } from "../../presence/handler.js";
 import { ensureCapture, type CaptureOutcome, type CaptureSource } from "../../core/session-intel/capture.js";
 import { readSessionIntelConfig } from "../../core/session-intel/config.js";
-import { findPresenceRecordAcrossWorktrees, readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
+import { claimImperativeEmission, findPresenceRecordAcrossWorktrees, readPresenceRecord, reconcileUnderLock, type ReconcileOutcome } from "../../core/session-intel/presence-bridge.js";
 import { COMPACT_NEEDED_ADVICE, basisText, renderUsageAdvisory } from "../../core/session-intel/push.js";
 import { sampleSession, type SessionIntelResult } from "../../core/session-intel/query.js";
 import { authorizeTranscriptPath, locateTranscript } from "../../core/session-intel/transcript-locate.js";
@@ -62,7 +62,7 @@ export function formatSessionIntelMd(r: SessionIntelResult, root: string | null 
     lines.push(`Token pressure: unknown (${r.unusableReason ?? "no pressure available"})`);
   } else {
     const c = p.ceiling;
-    lines.push(`Token pressure: ${p.state.toUpperCase()}${p.suppressedBy ? " (imperative suppressed by a recent handover)" : ""}`);
+    lines.push(`Token pressure: ${p.state.toUpperCase()}${p.suppressedBy === "rate-limit" ? " (imperative rate-limited: shown recently)" : p.suppressedBy ? " (imperative suppressed by a recent handover)" : ""}`);
     lines.push(`- Context in use: ${p.contextTokens?.toLocaleString() ?? "n/a"} tokens (${pctText(p.pct)} of the expected auto-compact point)`);
     lines.push(`- Expected auto-compact at: ${c.ceiling === null ? "unknown" : Math.round(c.ceiling).toLocaleString()} tokens, source ${c.source}${c.confidence ? ` (${c.confidence} confidence)` : ""}`);
     lines.push(`- Basis: ${c.basis}`);
@@ -380,7 +380,20 @@ export function handleSessionIntelPrompt(options: SessionIntelPromptOptions = {}
       return { status: "silent", reason: `unbound caller: ${result.bindingReason}`, capture, result, output: null };
     }
     if (!result.usable || !pressure || (pressure.state !== "imperative" && pressure.state !== "compact-needed")) {
-      return { status: "silent", reason: result.usable ? `state ${pressure?.state ?? "unknown"}` : (result.unusableReason ?? "unusable"), capture, result, output: null };
+      const quiet = pressure?.suppressedBy === "rate-limit" ? "state advisory (imperative rate-limited)" : `state ${pressure?.state ?? "unknown"}`;
+      return { status: "silent", reason: result.usable ? quiet : (result.unusableReason ?? "unusable"), capture, result, output: null };
+    }
+    // ISS-1263: the imperative line is delivered at most once per re-arm
+    // interval, claimed under the lock against the record this sample was
+    // persisted into. The record must still hold THIS sample (a newer sample,
+    // reset or handover since means the claim is not ours to take); a refusal
+    // of any kind is silent for this prompt, and the next prompt samples again.
+    if (pressure.state === "imperative") {
+      const intel = readPresenceRecord(root, sessionId)?.sessionIntel ?? null;
+      const ours = intel !== null && intel.lastSample?.sampledAt === pressure.sampledAt && intel.lastSample?.state === "imperative";
+      if (!ours || !claimImperativeEmission(root, sessionId, { revision: intel.revision, lastBoundaryAt: intel.lastBoundaryAt, handoverWrittenAt: intel.handoverWrittenAt }, now, cfg.handoverRearmIntervalMs)) {
+        return { status: "silent", reason: "imperative not claimed (rate-limited or superseded)", capture, result, output: null };
+      }
     }
     const output = JSON.stringify({ hookSpecificOutput: { hookEventName: PROMPT_HOOK_EVENT_NAME, additionalContext: renderPromptDirective(pressure) } });
     return { status: "emitted", reason: null, capture, result, output };
