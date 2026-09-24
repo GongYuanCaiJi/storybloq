@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, symlinkSync, readdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -10,12 +10,14 @@ import {
   parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, environmentSecrets, ambiguousEnvironmentSecrets,
   diffLedger, decideCell, qualifies, expectedCellKeys, experimentHash, materialize, variantDiscoveryViolations, skillPayloadDiff, hashInputs, hashTree, sha256,
   verifyAttemptDir, isWellFormedEvent, TASKS, REPEATS, MAX_INVALID_RETRIES, type ValidityInputs,
+  TASK_MATERIAL, taskMaterialEntries, taskMaterial, hashInputsByPath, driftedPaths, classifyInputDrift, NON_EXECUTED_INPUTS, INPUT_PATHS as LIB_INPUT_PATHS,
 } from "../../scripts/continuity-lib.js";
 import {
   buildClaudeArgs, parseArgs, buildManifestHash, readAttempts, INPUT_PATHS, checkOutputPaths, validateOwnerException, effectiveConfigHash, commandTokens,
-  provisionFreshConfig, runAttempt, runMatrix, type Preflight, type RunOptions, type SpawnFn,
+  provisionFreshConfig, runAttempt, runMatrix, bracketedInputs, type Preflight, type RunOptions, type SpawnFn,
 } from "../../scripts/continuity-run.js";
-import { aggregate, COMPARISON_CHECKPOINT, scoringRequest, validateScore, mechanicalFailureScore, selectObservations, renderReport, loadScore, publishText, type AttemptRecord, type Observation } from "../../scripts/continuity-score.js";
+import { aggregate, COMPARISON_CHECKPOINT, scoringRequest, validateScore, mechanicalFailureScore, selectObservations, renderReport, loadScore, publishText, type AttemptRecord, type Observation,
+  taskMaterialOf, experimentTaskMaterial, compareTaskMaterial, type TaskMaterialResult } from "../../scripts/continuity-score.js";
 import { SessionKilledError } from "../../scripts/headless-common.js";
 
 const PKG = resolve(__dirname, "../..");
@@ -156,7 +158,7 @@ describe("validity", () => {
   const base: ValidityInputs = {
     stateBinaryFingerprintSha256: "abc", builtMcpSha256: "abc", toolResults: ["ok"], mainModels: ["claude-opus-5"], pinnedModel: "claude-opus-5",
     distHashesExpected: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, distHashesBefore: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, distHashesAfter: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, configHashExpected: "c", configHashBefore: "c", configHashAfter: "c",
-    streamCorrupt: false, initMcpServers: [{ name: "storybloq", status: "connected" }], interrupted: false,
+    streamCorrupt: false, initMcpServers: [{ name: "storybloq", status: "connected" }], interrupted: false, inputDriftInvalidating: [],
   };
   it("a clean run is valid", () => expect(validity(base)).toEqual({ valid: true, reasons: [] }));
   it("null fingerprint fails closed", () => expect(validity({ ...base, stateBinaryFingerprintSha256: null }).reasons).toEqual(["no-fingerprint"]));
@@ -183,6 +185,10 @@ describe("validity", () => {
     expect(validity({ ...base, configHashBefore: "d", configHashAfter: "d" }).reasons).toEqual(["config-drift"]);
     expect(validity({ ...base, streamCorrupt: true }).reasons).toEqual(["stream-corrupt"]);
     expect(validity({ ...base, interrupted: true }).reasons).toEqual(["interrupted"]);
+  });
+  it("ISS-1274: an invalidating input drift is its own reason; an empty list leaves the run valid", () => {
+    expect(validity({ ...base, inputDriftInvalidating: ["src"] }).reasons).toEqual(["input-drift"]);
+    expect(validity({ ...base, inputDriftInvalidating: [] })).toEqual({ valid: true, reasons: [] });
   });
 });
 
@@ -773,6 +779,11 @@ interface FakeBehaviour {
 /** Deterministic dist hashes: the lifecycle tests never need a build. */
 const FAKE_DIST: Record<string, string> = { "dist/mcp.js": "1".repeat(64), "dist/cli.js": "2".repeat(64), "dist/index.js": "3".repeat(64), "dist/presence.js": "4".repeat(64) };
 const fakeDist = (): Record<string, string> => ({ ...FAKE_DIST });
+/** The five task-material labels (ISS-1273), spelled out so a wrong TASK_MATERIAL cannot agree with itself. */
+const TM_LABELS = ["test/fixtures/continuity/core", "test/fixtures/continuity/variants", "test/fixtures/continuity/facts.json", "test/fixtures/continuity/fixture-map.json", "test/fixtures/continuity/rubric.md"];
+/** Deterministic per-path input hashes: the lifecycle tests never rehash the real source tree. */
+const FAKE_INPUTS: Record<string, string> = Object.fromEntries(INPUT_PATHS.map((p, i) => [p, String(i % 10).repeat(64)]));
+const fakeInputs = (): { hashes: Record<string, string>; errors: Record<string, string> } => ({ hashes: { ...FAKE_INPUTS }, errors: {} });
 
 function fakeSpawn(behaviour: FakeBehaviour, seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[]): SpawnFn {
   return (_cmd, args, options) => {
@@ -823,6 +834,7 @@ function fakePreflight(over: Partial<Preflight> = {}): Preflight {
     build: { workspaceHead: "h", nodeVersion: process.version, packageJsonSha256: "p", lockfileSha256: "l", installedLockSha256: null, tsupConfigSha256: "t", dist, storybloqVersion: "1.15.9", storybloqExecutable: join(PKG, "dist", "cli.js"), claudeVersion: "2.1.278 (Claude Code)" },
     // distHashes is injected per call (see deps()); the manifest carries the same synthetic values.
     buildManifestHash: "bmh", inputTreeHash: "ith", experiment: "e".repeat(64), isolation: "fresh", sharedConfigDir: null, configHash: cfg.sha256, configInventory: cfg.inventory,
+    inputHashes: { ...FAKE_INPUTS }, taskMaterialHash: "a".repeat(64), taskMaterialHashes: Object.fromEntries(TM_LABELS.map((l) => [l, "b".repeat(64)])),
     skillMarker: null, allowlist: fixtureCredentialAllowlist(join(FIXTURE, "core")), ownerException: null, ...over,
   };
 }
@@ -832,7 +844,7 @@ function options(over: Partial<RunOptions> = {}): RunOptions {
 }
 
 /** Every lifecycle call goes through here so no test depends on a built dist/. */
-const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter }): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string> } => ({ ...extra, distHashes: fakeDist });
+const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter }): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string>; inputHashes: typeof fakeInputs } => ({ ...extra, distHashes: fakeDist, inputHashes: fakeInputs });
 
 const pubDirOf = (o: RunOptions, pf: Preflight, task = "T-4", repeat = 1, attempt = "attempt-001"): string => join(o.out, pf.experiment.slice(0, 12), task, `repeat-${repeat}`, attempt);
 const rawDirOf = (o: RunOptions, pf: Preflight, task = "T-4", repeat = 1, attempt = "attempt-001"): string => join(o.rawOut, pf.experiment.slice(0, 12), task, `repeat-${repeat}`, attempt);
@@ -841,7 +853,7 @@ describe("attempt lifecycle (fake child process, no model)", () => {
   it("a completed session is valid, completed, evidence-complete, and every published byte is sanitised", async () => {
     const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
-    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, evidenceComplete: true });
+    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, evidenceComplete: true, inputDrift: { invalidating: [], disclosed: [], errors: {} } });
     const pub = pubDirOf(o, pf); const raw = rawDirOf(o, pf);
     for (const f of ["record.json", "completed", "artefacts.sha256.json", "evidence.jsonl", "plan.initial.md", "plan.md", "plan-context.md", "manifest.json", "usage.json", "redaction.json", "task.json", "handover.md", "ledger.changes.json"]) expect(existsSync(join(pub, f)), f).toBe(true);
     expect(existsSync(join(raw, "transcript.jsonl"))).toBe(true);
@@ -986,12 +998,12 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     const o = options({ repeats: 2 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     let calls = 0;
     const drifting = (): Record<string, string> => { calls++; return calls > 2 ? { ...FAKE_DIST, "dist/cli.js": "9".repeat(64) } : fakeDist(); };
-    await expect(runMatrix(o, pf, { spawnFn: fakeSpawn({ complete: true }, seen), distHashes: drifting })).rejects.toThrow(/dist\/ changed since preflight \(dist\/cli.js\)/);
+    await expect(runMatrix(o, pf, { spawnFn: fakeSpawn({ complete: true }, seen), distHashes: drifting, inputHashes: fakeInputs })).rejects.toThrow(/dist\/ changed since preflight \(dist\/cli.js\)/);
     expect(seen).toHaveLength(1);
     const o2 = options(); const seen2: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     let n = 0;
     const midRun = (): Record<string, string> => { n++; return n === 2 ? { ...FAKE_DIST, "dist/presence.js": "8".repeat(64) } : fakeDist(); };
-    const r = await runAttempt(o2, pf, "T-4", 1, 1, { spawnFn: fakeSpawn({ complete: true }, seen2), distHashes: midRun });
+    const r = await runAttempt(o2, pf, "T-4", 1, 1, { spawnFn: fakeSpawn({ complete: true }, seen2), distHashes: midRun, inputHashes: fakeInputs });
     expect(r.validity).toBe("invalid");
     expect((JSON.parse(readFileSync(join(pubDirOf(o2, pf), "record.json"), "utf-8")) as { invalidReasons: string[] }).invalidReasons).toEqual(["build-drift"]);
   });
@@ -1236,5 +1248,264 @@ describe("scoring", () => {
     expect(dup.failures).toEqual(["T-2.a#1: listed twice in experiment.json", "T-4#3: absent from experiment.json"]);
     expect(dup.observations).toHaveLength(15);
     expect(renderReport({ ...base, cells: [...allCells.slice(0, 14), allCells[0]!] }, aggregate(dup.observations), dup.observations, dup.failures, "1")).toContain("NOT citable");
+  });
+});
+
+// --- ISS-1273 / ISS-1274: per-path input identity, task material, drift under the run -------------
+
+/** The arm-1 task material (experiment 0b1a4420, all five paths as committed at ea3ca8ec), pinned by hand in ISS-1273. */
+const ARM1_TASK_MATERIAL = "8b4eb43e3a2667df559a7716f0b653c67c415cd8d194662cdec4f55d63b0cb05";
+const ARM1_TASK_MATERIAL_PREFIXES: Record<string, string> = {
+  "test/fixtures/continuity/core": "bc6a11e6f243bcb3",
+  "test/fixtures/continuity/variants": "3ac441d1fde70db5",
+  "test/fixtures/continuity/facts.json": "baccfe6cbc80e20c",
+  "test/fixtures/continuity/fixture-map.json": "1f556f25be96409b",
+  "test/fixtures/continuity/rubric.md": "57a91204fa90295c",
+};
+const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+const git = (cwd: string, args: string[]): string => execFileSync("git", args, { cwd, env: gitEnv, encoding: "utf-8" }).trim();
+
+describe("ISS-1273: task material identity", () => {
+  it("preflight's hash passes are bracketed: a path that moves or fails between the reads refuses the baseline", () => {
+    const seq = (...rs: { hashes: Record<string, string>; errors: Record<string, string> }[]) => { let i = 0; return () => rs[Math.min(i++, rs.length - 1)]!; };
+    const steady = { hashes: { src: "1".repeat(64), plugins: "2".repeat(64) }, errors: {} };
+    const order: string[] = [];
+    const ok = bracketedInputs(() => { order.push("read"); return steady; }, () => { order.push("compute"); return 7; });
+    expect(order).toEqual(["read", "compute", "read"]);
+    expect(ok).toEqual({ hashes: steady.hashes, value: 7 });
+    expect(() => bracketedInputs(seq(steady, { hashes: { ...steady.hashes, src: "9".repeat(64) }, errors: {} }), () => 0)).toThrow(/input tree changed during preflight \(src\); rerun preflight/);
+    expect(() => bracketedInputs(seq(steady, { hashes: { src: steady.hashes.src }, errors: { plugins: "EACCES" } }), () => 0)).toThrow(/input paths could not be hashed \(plugins\)/);
+    expect(() => bracketedInputs(seq({ hashes: { src: steady.hashes.src }, errors: { plugins: "EACCES" } }, steady), () => 0)).toThrow(/input paths could not be hashed \(plugins\)/);
+  });
+  it("TRIPWIRE: the live fixture's task material is still arm 1's; an intentional edit re-pins this value and records it on the T-525 ledger item", () => {
+    const tm = taskMaterial(PKG);
+    const gate = "Deliberate gate (ISS-1273): the continuity task material (fixture core, variants, facts.json, fixture-map.json, rubric.md) no longer matches arm 1's, " +
+      "so a cross-arm comparison against arm 1 would compare different tasks and is void. If the fixture edit is intentional, re-pin ARM1_TASK_MATERIAL here " +
+      "and record the new value on the T-525 ledger item; otherwise revert the edit.";
+    expect(tm.sha256, gate).toBe(ARM1_TASK_MATERIAL);
+    expect(Object.keys(tm.paths)).toEqual(TM_LABELS);
+    for (const [label, prefix] of Object.entries(ARM1_TASK_MATERIAL_PREFIXES)) expect(tm.paths[label]!.startsWith(prefix), `${label}: ${gate}`).toBe(true);
+  });
+  it("the task material is exactly the five fixture paths, all inside INPUT_PATHS, and the runner re-exports the lib's INPUT_PATHS", () => {
+    expect([...TASK_MATERIAL]).toEqual(["core", "variants", "facts.json", "fixture-map.json", "rubric.md"]);
+    expect(taskMaterialEntries("/p").map((e) => e.label)).toEqual(TM_LABELS);
+    expect(taskMaterialEntries("/p")[0]!.path).toBe(join("/p", "test/fixtures/continuity/core"));
+    for (const l of TM_LABELS) expect(INPUT_PATHS).toContain(l);
+    expect(INPUT_PATHS).toBe(LIB_INPUT_PATHS);
+  });
+  it("per-path hashes move only the changed label; an absent path is a stable value, not a crash", () => {
+    const d = tmp("cont-bypath-");
+    mkdirSync(join(d, "a")); writeFileSync(join(d, "a", "x.txt"), "1"); writeFileSync(join(d, "b.txt"), "2");
+    const entries = [{ label: "a", path: join(d, "a") }, { label: "b.txt", path: join(d, "b.txt") }, { label: "gone", path: join(d, "gone") }];
+    const one = hashInputsByPath(entries);
+    expect(one.errors).toEqual({});
+    expect(Object.keys(one.hashes)).toEqual(["a", "b.txt", "gone"]);
+    expect(one.hashes.a).toBe(hashInputs([entries[0]!]));
+    expect(hashInputsByPath(entries).hashes.gone).toBe(one.hashes.gone);
+    writeFileSync(join(d, "a", "x.txt"), "changed");
+    const two = hashInputsByPath(entries);
+    expect(driftedPaths(one.hashes, two.hashes)).toEqual(["a"]);
+  });
+  it("a per-path walk error is captured for its label instead of escaping", () => {
+    const d = tmp("cont-bypath-err-");
+    mkdirSync(join(d, "ok")); writeFileSync(join(d, "ok", "x.txt"), "1");
+    mkdirSync(join(d, "locked")); writeFileSync(join(d, "locked", "x.txt"), "1");
+    chmodSync(join(d, "locked"), 0o000);
+    try {
+      const r = hashInputsByPath([{ label: "ok", path: join(d, "ok") }, { label: "locked", path: join(d, "locked") }]);
+      expect(Object.keys(r.hashes)).toEqual(["ok"]);
+      expect(Object.keys(r.errors)).toEqual(["locked"]);
+      expect(r.errors.locked).toMatch(/EACCES/);
+    } finally { chmodSync(join(d, "locked"), 0o755); }
+  });
+  it("driftedPaths reports a changed value, an added key and a removed key, sorted", () => {
+    expect(driftedPaths({ b: "1", a: "1", c: "1" }, { a: "2", b: "1", d: "1" })).toEqual(["a", "c", "d"]);
+    expect(driftedPaths({ a: "1" }, { a: "1" })).toEqual([]);
+  });
+  it("ISS-1274 item 3: a plugins-source edit with dist unchanged is disclosed; every executed or unknown input invalidates", () => {
+    expect([...NON_EXECUTED_INPUTS]).toEqual(["plugins"]);
+    expect(classifyInputDrift(["plugins"], true)).toEqual({ invalidating: [], disclosed: ["plugins"] });
+    expect(classifyInputDrift(["plugins"], false)).toEqual({ invalidating: ["plugins"], disclosed: [] });
+    expect(classifyInputDrift(["src", "test/fixtures/continuity/rubric.md", "test/fixtures/continuity/overlays", "package.json", "scripts", "plugins"], true))
+      .toEqual({ invalidating: ["src", "test/fixtures/continuity/rubric.md", "test/fixtures/continuity/overlays", "package.json", "scripts"], disclosed: ["plugins"] });
+    expect(classifyInputDrift(["something-new"], true)).toEqual({ invalidating: ["something-new"], disclosed: [] });
+  });
+});
+
+describe("ISS-1274: inputs are rechecked around every attempt", () => {
+  const drifted = (label: string): Record<string, string> => ({ ...FAKE_INPUTS, [label]: "f".repeat(64) });
+  /** Returns preflight values for the first `clean` calls, then `after`. */
+  const provider = (clean: number, after: () => { hashes: Record<string, string>; errors: Record<string, string> }) => {
+    let n = 0;
+    return () => (++n <= clean ? fakeInputs() : after());
+  };
+  it("an unchanged tree records the per-path identity and an empty drift", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
+    expect(r.validity).toBe("valid");
+    expect(r.inputDrift).toEqual({ invalidating: [], disclosed: [], errors: {} });
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as { inputDrift: unknown };
+    expect(record.inputDrift).toEqual({ invalidating: [], disclosed: [], errors: {} });
+    const manifest = JSON.parse(readFileSync(join(pubDirOf(o, pf), "manifest.json"), "utf-8")) as { inputHashes: unknown; taskMaterialHash: string; taskMaterialHashes: unknown; post: { inputHashesAfter: unknown } };
+    expect(manifest.inputHashes).toEqual(FAKE_INPUTS);
+    expect(manifest.taskMaterialHash).toBe(pf.taskMaterialHash);
+    expect(manifest.taskMaterialHashes).toEqual(pf.taskMaterialHashes);
+    expect(manifest.post.inputHashesAfter).toEqual(FAKE_INPUTS);
+  });
+  it("an executed input edited during the attempt invalidates it, naming the path", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const r = await runAttempt(o, pf, "T-4", 1, 1, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: provider(1, () => ({ hashes: drifted("src"), errors: {} })) });
+    expect(r.validity).toBe("invalid");
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as { invalidReasons: string[]; inputDrift: { invalidating: string[]; disclosed: string[] } };
+    expect(record.invalidReasons).toEqual(["input-drift"]);
+    expect(record.inputDrift.invalidating).toEqual(["src"]);
+    expect(JSON.parse(readFileSync(join(pubDirOf(o, pf), "manifest.json"), "utf-8")).post.inputHashesAfter.src).toBe("f".repeat(64));
+  });
+  it("a plugins-only edit with dist unchanged leaves the attempt valid and discloses it", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const r = await runAttempt(o, pf, "T-4", 1, 1, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: provider(1, () => ({ hashes: drifted("plugins"), errors: {} })) });
+    expect(r.validity).toBe("valid");
+    expect(r.inputDrift).toEqual({ invalidating: [], disclosed: ["plugins"], errors: {} });
+  });
+  it("a hash-walk error after the attempt invalidates it and the invalid record is still published", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const after = (): { hashes: Record<string, string>; errors: Record<string, string> } => { const h = { ...FAKE_INPUTS }; delete h.scripts; return { hashes: h, errors: { scripts: "EACCES" } }; };
+    const r = await runAttempt(o, pf, "T-4", 1, 1, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: provider(1, after) });
+    expect(r.validity).toBe("invalid");
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as { invalidReasons: string[]; inputDrift: { invalidating: string[]; errors: Record<string, string> } };
+    expect(record.invalidReasons).toEqual(["input-drift"]);
+    expect(record.inputDrift.invalidating).toEqual(["scripts"]);
+    expect(record.inputDrift.errors).toEqual({ scripts: "EACCES" });
+    expect(existsSync(join(pubDirOf(o, pf), "completed"))).toBe(true);
+  });
+  it("a walk error on plugins invalidates even with dist unchanged: an unreadable tree is never disclosed", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const after = (): { hashes: Record<string, string>; errors: Record<string, string> } => { const h = { ...FAKE_INPUTS }; delete h.plugins; return { hashes: h, errors: { plugins: "EACCES" } }; };
+    const r = await runAttempt(o, pf, "T-4", 1, 1, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: provider(1, after) });
+    expect(r.validity).toBe("invalid");
+    expect(r.inputDrift).toEqual({ invalidating: ["plugins"], disclosed: [], errors: { plugins: "EACCES" } });
+  });
+  it("an invalidating drift or a walk error before the spawn refuses the attempt without spending it", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    await expect(runMatrix(o, pf, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: () => ({ hashes: drifted("src"), errors: {} }) })).rejects.toThrow(/input tree changed since preflight \(src\); rerun preflight/);
+    expect(seen).toHaveLength(0);
+    const errored = (): { hashes: Record<string, string>; errors: Record<string, string> } => { const h = { ...FAKE_INPUTS }; delete h["test/fixtures/continuity/rubric.md"]; return { hashes: h, errors: { "test/fixtures/continuity/rubric.md": "ENOENT" } }; };
+    await expect(runMatrix(options(), pf, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: errored })).rejects.toThrow(/input tree changed since preflight \(test\/fixtures\/continuity\/rubric.md\)/);
+    expect(seen).toHaveLength(0);
+    // A disclosed-only drift before the spawn proceeds.
+    const r = await runAttempt(options(), pf, "T-4", 1, 1, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: () => ({ hashes: drifted("plugins"), errors: {} }) });
+    expect(r.validity).toBe("valid");
+    expect(r.inputDrift.disclosed).toEqual(["plugins"]);
+  });
+  it("a mid-cell edit that is then reverted invalidates that attempt only; the cell re-runs and the summary names the path", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    let n = 0;
+    const inputs = (): { hashes: Record<string, string>; errors: Record<string, string> } => (++n === 2 ? { hashes: drifted("test/fixtures/continuity/variants"), errors: {} } : fakeInputs());
+    const r = await runMatrix(o, pf, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: inputs });
+    expect(seen).toHaveLength(2);
+    expect(r.summary).toContain("T-4#1 attempt-001: invalid completed INPUT DRIFT (test/fixtures/continuity/variants)");
+    expect(r.summary).toContain("T-4#1: satisfied by attempt-002");
+    const exp = JSON.parse(readFileSync(join(o.out, pf.experiment.slice(0, 12), "experiment.json"), "utf-8")) as { inputHashes: unknown; taskMaterialHash: string; taskMaterialHashes: unknown; inputTreeHash: string };
+    expect(exp.inputHashes).toEqual(FAKE_INPUTS);
+    expect(exp.taskMaterialHash).toBe(pf.taskMaterialHash);
+    expect(exp.taskMaterialHashes).toEqual(pf.taskMaterialHashes);
+    expect(exp.inputTreeHash).toBe("ith");
+  });
+  it("a disclosed drift is named on the summary line without invalidating", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const r = await runMatrix(o, pf, { ...deps({ spawnFn: fakeSpawn({ complete: true }, seen) }), inputHashes: provider(1, () => ({ hashes: drifted("plugins"), errors: {} })) });
+    expect(r.summary).toContain("T-4#1 attempt-001: valid completed input drift disclosed (plugins)");
+  });
+});
+
+describe("ISS-1273: cross-arm comparison refuses differing task material", () => {
+  const TM = (over: Record<string, string> = {}): Record<string, string> => ({ ...Object.fromEntries(TM_LABELS.map((l) => [l, "1".repeat(64)])), ...over });
+  const E = "e".repeat(64);
+  /** An experiment directory whose manifests carry the given task material (or none, for a legacy capture). */
+  function experiment(dir: string, perCell: (task: string, repeat: number) => Record<string, unknown>, cells = TASKS.flatMap((task) => [1, 2, 3].map((repeat) => ({ task, repeat })))): { expDir: string; exp: Parameters<typeof selectObservations>[1] } {
+    for (const c of cells) {
+      writeAttempt(join(dir, c.task, `repeat-${c.repeat}`, "attempt-001"), baseRecord({ task: c.task, repeat: c.repeat, experimentHash: E, requiredArtefacts: ["manifest.json"] }), { "manifest.json": JSON.stringify({ ...MANIFEST, ...perCell(c.task, c.repeat) }) });
+    }
+    const exp = { experimentHash: E, arm: 1, model: "m", effort: "high", isolation: "fresh", ownerException: null, build: { storybloqVersion: "1.15.9" }, cells: cells.map((c) => ({ ...c, satisfied: true, evidenceComplete: true, attempt: "attempt-001" })), qualification: { qualifying: true, reason: "all", shortCells: [] } };
+    writeFileSync(join(dir, "experiment.json"), JSON.stringify(exp));
+    return { expDir: dir, exp };
+  }
+  const recorded = (paths: Record<string, string>, sha = "a".repeat(64)) => () => ({ taskMaterialHash: sha, taskMaterialHashes: paths });
+
+  it("recorded task material is read from the verified manifests, never from experiment.json", () => {
+    const { expDir, exp } = experiment(tmp("cont-tm-"), recorded(TM()));
+    writeFileSync(join(expDir, "experiment.json"), JSON.stringify({ ...exp, taskMaterialHash: "b".repeat(64) }));
+    const r = experimentTaskMaterial(expDir, "1");
+    expect(r).toEqual({ ok: true, sha256: "a".repeat(64), paths: TM(), source: "manifest" });
+  });
+  it("disagreeing, mixed or incomplete manifest metadata is UNVERIFIED", () => {
+    const disagree = experiment(tmp("cont-tm-dis-"), (task, repeat) => ({ taskMaterialHash: task === "T-4" && repeat === 3 ? "c".repeat(64) : "a".repeat(64), taskMaterialHashes: TM() }));
+    expect(experimentTaskMaterial(disagree.expDir, "1")).toMatchObject({ ok: false, problem: expect.stringMatching(/observations disagree on task material/) });
+    const mixed = experiment(tmp("cont-tm-mix-"), (task) => (task === "T-3" ? {} : { taskMaterialHash: "a".repeat(64), taskMaterialHashes: TM() }));
+    expect(experimentTaskMaterial(mixed.expDir, "1")).toMatchObject({ ok: false, problem: expect.stringMatching(/some observations record task material and some do not/) });
+    const partial = TM(); delete partial["test/fixtures/continuity/rubric.md"];
+    const incomplete = experiment(tmp("cont-tm-inc-"), recorded(partial));
+    expect(experimentTaskMaterial(incomplete.expDir, "1")).toMatchObject({ ok: false, problem: expect.stringMatching(/per-path task material is incomplete/) });
+    // Checksums prove the manifest's bytes, not that its fields are hashes: empty, truncated or non-hex values are refused.
+    for (const [name, bad] of [["empty", ""], ["short", "a".repeat(63)], ["upper", "A".repeat(64)], ["non-hex", "g".repeat(64)]] as const) {
+      const rolled = experiment(tmp(`cont-tm-bad-${name}-`), recorded(TM(), bad));
+      expect(experimentTaskMaterial(rolled.expDir, "1")).toMatchObject({ ok: false, problem: expect.stringMatching(/per-path task material is incomplete or not SHA-256/) });
+      const perPath = experiment(tmp(`cont-tm-badp-${name}-`), recorded(TM({ "test/fixtures/continuity/core": bad })));
+      expect(experimentTaskMaterial(perPath.expDir, "1")).toMatchObject({ ok: false, problem: expect.stringMatching(/per-path task material is incomplete or not SHA-256/) });
+    }
+  });
+  it("a side with any verification failure or no observations is UNVERIFIED, even when the rest match", () => {
+    const { expDir } = experiment(tmp("cont-tm-fail-"), recorded(TM()));
+    writeFileSync(join(expDir, "T-4", "repeat-3", "attempt-001", "manifest.json"), "tampered");
+    const r = experimentTaskMaterial(expDir, "1");
+    expect(r).toMatchObject({ ok: false, problem: expect.stringMatching(/1 verification failure\(s\): T-4#3/) });
+    const empty = experiment(tmp("cont-tm-empty-"), recorded(TM()), []);
+    expect(experimentTaskMaterial(empty.expDir, "1")).toMatchObject({ ok: false });
+    expect((experimentTaskMaterial(empty.expDir, "1") as { problem: string }).problem).toMatch(/verification failure|no verified observations/);
+  });
+  it("compare passes identical material, and refuses a differing path naming it with both values, or an unverified side", () => {
+    const a: TaskMaterialResult = { ok: true, sha256: "a".repeat(64), paths: TM(), source: "manifest" };
+    expect(compareTaskMaterial(a, { ...a, source: "git ea3ca8eca8d1" })).toEqual({ ok: true, differing: [], problem: null });
+    const b: TaskMaterialResult = { ok: true, sha256: "d".repeat(64), paths: TM({ "test/fixtures/continuity/rubric.md": "2".repeat(64) }), source: "manifest" };
+    expect(compareTaskMaterial(a, b)).toEqual({ ok: false, differing: [{ label: "test/fixtures/continuity/rubric.md", baseline: "1".repeat(64), candidate: "2".repeat(64) }], problem: null });
+    // Same per-path values under a different rolled value is still refused (the rolled value is the gate).
+    expect(compareTaskMaterial(a, { ...a, sha256: "d".repeat(64) }).ok).toBe(false);
+    // And the same rolled value over a differing per-path map (a hand-edited manifest) is refused, naming the path.
+    expect(compareTaskMaterial(a, { ...b, sha256: a.sha256 })).toEqual({ ok: false, differing: [{ label: "test/fixtures/continuity/rubric.md", baseline: "1".repeat(64), candidate: "2".repeat(64) }], problem: null });
+    expect(compareTaskMaterial(a, { ok: false, problem: "no verified observations" })).toEqual({ ok: false, differing: [], problem: "candidate: no verified observations" });
+    expect(compareTaskMaterial({ ok: false, problem: "x" }, a)).toEqual({ ok: false, differing: [], problem: "baseline: x" });
+  });
+  it("the report header states the task material, or that it is unverified", () => {
+    const { expDir, exp } = experiment(tmp("cont-tm-rep-"), recorded(TM()));
+    const { observations, failures } = selectObservations(expDir, exp, "1");
+    const text = renderReport(exp, aggregate(observations), observations, failures, "1", taskMaterialOf(observations));
+    expect(text).toContain(`Task material: ${"a".repeat(64)} (manifest).`);
+    expect(renderReport(exp, aggregate(observations), observations, failures, "1", { ok: false, problem: "p" })).toContain("Task material: UNVERIFIED (p).");
+  });
+  it("a legacy capture derives its task material from git at the verified head, only when the whole input tree reproduces the recorded inputTreeHash", () => {
+    const repo = tmp("cont-tm-git-");
+    const pkg = join(repo, "storybloq");
+    const fx = join(pkg, "test", "fixtures", "continuity");
+    mkdirSync(join(fx, "core", ".story"), { recursive: true }); mkdirSync(join(fx, "variants")); mkdirSync(join(pkg, "src"), { recursive: true });
+    writeFileSync(join(fx, "core", ".story", "config.json"), "{}"); writeFileSync(join(fx, "variants", "T-2.a.json"), "{}");
+    writeFileSync(join(fx, "facts.json"), "{}"); writeFileSync(join(fx, "fixture-map.json"), "{}"); writeFileSync(join(fx, "rubric.md"), "rubricVersion: 1\n");
+    writeFileSync(join(pkg, "src", "x.ts"), "export const x = 1;\n"); writeFileSync(join(pkg, "package.json"), "{}\n");
+    git(repo, ["init", "-q", "-b", "main"]); git(repo, ["add", "-A"]); git(repo, ["-c", "user.name=t", "-c", "user.email=t@t.t", "commit", "-q", "-m", "fixture"]);
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    const ith = hashInputs(INPUT_PATHS.map((p) => ({ label: p, path: join(pkg, p) })));
+    const expected = taskMaterial(pkg);
+    // The working tree moves on after the capture: the derivation must read the head, not the checkout.
+    writeFileSync(join(fx, "rubric.md"), "rubricVersion: 2\n");
+    const legacy = (headRec: string, ithRec: string) => experiment(tmp("cont-tm-leg-"), () => ({ inputTreeHash: ithRec, build: { storybloqVersion: "1.15.9", workspaceHead: headRec } }));
+    const ok = legacy(head, ith);
+    expect(experimentTaskMaterial(ok.expDir, "1", { pkgRoot: pkg })).toEqual({ ok: true, sha256: expected.sha256, paths: expected.paths, source: `git ${head.slice(0, 12)}, matches recorded inputTreeHash; preflight provenance` });
+    const mismatch = legacy(head, "0".repeat(64));
+    expect(experimentTaskMaterial(mismatch.expDir, "1", { pkgRoot: pkg })).toMatchObject({ ok: false, problem: expect.stringMatching(/does not reproduce the recorded inputTreeHash/) });
+    const unknown = legacy("deadbeef".repeat(5), ith);
+    expect(experimentTaskMaterial(unknown.expDir, "1", { pkgRoot: pkg })).toMatchObject({ ok: false, problem: expect.stringMatching(/not recorded and not derivable from git at deadbeefdead/) });
+    const split = experiment(tmp("cont-tm-split-"), (task) => ({ inputTreeHash: ith, build: { storybloqVersion: "1.15.9", workspaceHead: task === "T-3" ? "f".repeat(40) : head } }));
+    expect(experimentTaskMaterial(split.expDir, "1", { pkgRoot: pkg })).toMatchObject({ ok: false, problem: expect.stringMatching(/observations disagree on workspaceHead or inputTreeHash/) });
+    const blank = legacy(head, "");
+    expect(experimentTaskMaterial(blank.expDir, "1", { pkgRoot: pkg })).toMatchObject({ ok: false, problem: expect.stringMatching(/or do not record them/) });
   });
 });

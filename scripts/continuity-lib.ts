@@ -76,6 +76,66 @@ export function hashInputs(entries: readonly { readonly label: string; readonly 
   return h.digest("hex");
 }
 
+/** The executable and fixture inputs whose hash is the experiment's identity; output directories are exempt. */
+export const INPUT_PATHS = [
+  "src", "plugins", "scripts", "package.json", "package-lock.json", "tsup.config.ts", "vitest.config.ts",
+  "test/fixtures/continuity/core", "test/fixtures/continuity/overlays", "test/fixtures/continuity/variants",
+  "test/fixtures/continuity/facts.json", "test/fixtures/continuity/fixture-map.json", "test/fixtures/continuity/rubric.md",
+] as const;
+
+/**
+ * ISS-1273: the fixture material that defines the TASKS, and so must be byte-identical across arms. The overlays
+ * and src are expected to change between arms; these five never may. Labels are the PKG_ROOT-relative paths,
+ * which is the form that reproduces the arm-1 value pinned in the issue.
+ */
+export const TASK_MATERIAL = ["core", "variants", "facts.json", "fixture-map.json", "rubric.md"] as const;
+
+export function taskMaterialEntries(pkgRoot: string): { readonly label: string; readonly path: string }[] {
+  return TASK_MATERIAL.map((m) => { const label = `test/fixtures/continuity/${m}`; return { label, path: join(pkgRoot, label) }; });
+}
+
+/** One hash per entry (each is hashInputs over that entry alone); a walk that throws is kept as an error for its label. */
+export function hashInputsByPath(entries: readonly { readonly label: string; readonly path: string }[]): { readonly hashes: Record<string, string>; readonly errors: Record<string, string> } {
+  const hashes: Record<string, string> = {};
+  const errors: Record<string, string> = {};
+  for (const e of entries) {
+    try { hashes[e.label] = hashInputs([e]); } catch (err) { errors[e.label] = err instanceof Error ? err.message : String(err); }
+  }
+  return { hashes, errors };
+}
+
+/** The rolled task-material hash and its per-path breakdown. The rolled value cannot be rebuilt from the parts, so both are recorded. */
+export function taskMaterial(pkgRoot: string): { readonly sha256: string; readonly paths: Record<string, string> } {
+  const entries = taskMaterialEntries(pkgRoot);
+  const { hashes, errors } = hashInputsByPath(entries);
+  const failed = Object.keys(errors);
+  if (failed.length) throw new Error(`task material unreadable: ${failed.map((l) => `${l} (${errors[l]})`).join(", ")}`);
+  return { sha256: hashInputs(entries), paths: hashes };
+}
+
+/** Labels whose value differs, or which only one side has; sorted. */
+export function driftedPaths(expected: Record<string, string>, actual: Record<string, string>): string[] {
+  const keys = new Set([...Object.keys(expected), ...Object.keys(actual)]);
+  return [...keys].filter((k) => !(k in expected) || !(k in actual) || expected[k] !== actual[k]).sort();
+}
+
+/**
+ * ISS-1274: inputs a cell cannot reach under a no-rebuild run. A plugins-source edit changes nothing a cell executes
+ * while dist is unchanged (the cells run dist/ and an isolated config), so it is disclosed rather than invalidating.
+ * Everything else, and any label not listed, reaches the cell or its identity and invalidates.
+ */
+export const NON_EXECUTED_INPUTS = ["plugins"] as const;
+
+export function classifyInputDrift(paths: readonly string[], distUnchanged: boolean): { readonly invalidating: string[]; readonly disclosed: string[] } {
+  const invalidating: string[] = [];
+  const disclosed: string[] = [];
+  for (const p of paths) {
+    if (distUnchanged && (NON_EXECUTED_INPUTS as readonly string[]).includes(p)) disclosed.push(p);
+    else invalidating.push(p);
+  }
+  return { invalidating, disclosed };
+}
+
 // --- experiment identity --------------------------------------------------
 
 export interface ExperimentInputs {
@@ -403,6 +463,7 @@ export type InvalidReason =
   | "model-drift"
   | "build-drift"
   | "config-drift"
+  | "input-drift"
   | "mcp-servers"
   | "stream-corrupt"
   | "interrupted";
@@ -424,6 +485,8 @@ export interface ValidityInputs {
   readonly streamCorrupt: boolean;
   readonly initMcpServers: readonly { readonly name?: string; readonly status?: string }[] | null;
   readonly interrupted: boolean;
+  /** ISS-1274: INPUT_PATHS labels that drifted from preflight under the attempt and reach the cell (or could not be hashed). */
+  readonly inputDriftInvalidating: readonly string[];
 }
 
 export function sameHashes(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -440,6 +503,7 @@ export function validity(i: ValidityInputs): { readonly valid: boolean; readonly
   if (i.mainModels.length !== 1 || i.mainModels[0] !== i.pinnedModel) reasons.push("model-drift");
   if (!sameHashes(i.distHashesExpected, i.distHashesBefore) || !sameHashes(i.distHashesExpected, i.distHashesAfter)) reasons.push("build-drift");
   if (i.configHashBefore !== i.configHashExpected || i.configHashAfter !== i.configHashExpected) reasons.push("config-drift");
+  if (i.inputDriftInvalidating.length > 0) reasons.push("input-drift");
   const only = i.initMcpServers?.length === 1 ? i.initMcpServers[0] : undefined;
   if (!only || only.name !== "storybloq" || only.status !== "connected") reasons.push("mcp-servers");
   if (i.streamCorrupt) reasons.push("stream-corrupt");

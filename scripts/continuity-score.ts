@@ -9,12 +9,15 @@
  *                                attempt; behavioural failures get a mechanical all-fail score instead
  *   record  <attemptDir> <json>  validate one reviewer verdict and store score.rubric<v>.json (never overwrites)
  *   report  <expDir>             aggregate the preregistered cells and write results-<date>-<verified build version>-rubric<v>.md
+ *   compare <baseline> <candidate>  refuse a cross-arm comparison whose task material differs (ISS-1273); exit 1 when refused
  */
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join, basename, dirname, resolve } from "node:path";
-import { homedir, userInfo } from "node:os";
+import { homedir, userInfo, tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { TASKS, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, verifyAttemptDir, expectedCellKeys, qualifies, environmentSecrets, type VerifiedRecord } from "./continuity-lib.js";
+import { TASKS, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, verifyAttemptDir, expectedCellKeys, qualifies, environmentSecrets, type VerifiedRecord,
+  INPUT_PATHS, TASK_MATERIAL, hashInputs, taskMaterial, driftedPaths } from "./continuity-lib.js";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(SCRIPT_DIR, "..");
@@ -247,7 +250,104 @@ export function verifiedProvenance(observations: readonly Observation[]): Proven
   return keys.size === 1 ? observations[0]!.provenance : null;
 }
 
-export function renderReport(exp: ExperimentFile, agg: Aggregate, observations: readonly Observation[], failures: readonly string[], rubricVersion: string): string {
+// --- ISS-1273: task material across arms --------------------------------------
+
+/** An experiment's task material, or why it cannot be stated. `source` says where the value came from. */
+export type TaskMaterialResult =
+  | { readonly ok: true; readonly sha256: string; readonly paths: Record<string, string>; readonly source: string }
+  | { readonly ok: false; readonly problem: string };
+
+const TASK_MATERIAL_LABELS: readonly string[] = TASK_MATERIAL.map((m) => `test/fixtures/continuity/${m}`);
+
+/** A recorded hash is usable only as a full lowercase SHA-256; checksums prove the file, not that its fields are hashes. */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const isSha256 = (v: unknown): v is string => typeof v === "string" && SHA256_HEX.test(v);
+
+interface MaterialManifest { taskMaterialHash?: unknown; taskMaterialHashes?: unknown; inputTreeHash?: unknown; build?: { workspaceHead?: unknown } }
+
+function completePathMap(v: unknown): v is Record<string, string> {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const keys = Object.keys(v).sort();
+  const want = [...TASK_MATERIAL_LABELS].sort();
+  return keys.length === want.length && keys.every((k, i) => k === want[i] && isSha256((v as Record<string, unknown>)[k]));
+}
+
+/**
+ * Legacy captures (arm 1) recorded no task material. Their preflight refused a dirty input tree, so HEAD is what preflight
+ * hashed: re-derive the whole input tree at the verified head and accept it only when it reproduces the recorded
+ * inputTreeHash, then take the task material from that same tree. That is preflight provenance, not proof that nothing
+ * drifted during the capture (ISS-1274 is what makes that visible for new captures).
+ */
+function taskMaterialFromGit(head: string, recordedInputTreeHash: string, pkgRoot: string): TaskMaterialResult {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k.startsWith("GIT_")) delete env[k];
+  const git = (args: string[], cwd: string): Buffer => execFileSync("git", args, { cwd, env, maxBuffer: 1 << 30, stdio: ["ignore", "pipe", "pipe"] });
+  const out = mkdtempSync(join(tmpdir(), "continuity-taskmaterial-"));
+  try {
+    const top = git(["rev-parse", "--show-toplevel"], pkgRoot).toString().trim();
+    const prefix = git(["rev-parse", "--show-prefix"], pkgRoot).toString().trim();
+    git(["cat-file", "-e", `${head}^{commit}`], top);
+    const present = INPUT_PATHS.map((p) => `${prefix}${p}`).filter((p) => { try { git(["cat-file", "-e", `${head}:${p}`], top); return true; } catch { return false; } });
+    if (present.length) execFileSync("tar", ["-x", "-C", out], { input: git(["archive", "--format=tar", head, "--", ...present], top), maxBuffer: 1 << 30 });
+    const root = join(out, prefix);
+    const ith = hashInputs(INPUT_PATHS.map((p) => ({ label: p, path: join(root, p) })));
+    if (ith !== recordedInputTreeHash) return { ok: false, problem: `git at ${head.slice(0, 12)} does not reproduce the recorded inputTreeHash (${ith.slice(0, 12)} vs ${recordedInputTreeHash.slice(0, 12)})` };
+    const tm = taskMaterial(root);
+    return { ok: true, sha256: tm.sha256, paths: tm.paths, source: `git ${head.slice(0, 12)}, matches recorded inputTreeHash; preflight provenance` };
+  } catch (err) {
+    const msg = (err instanceof Error ? err.message : String(err)).split("\n")[0];
+    return { ok: false, problem: `task material not recorded and not derivable from git at ${head.slice(0, 12)}: ${msg}` };
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+}
+
+/** The task material every verified observation's checksum-verified manifest agrees on; experiment.json is never read. */
+export function taskMaterialOf(observations: readonly Observation[], opts: { readonly pkgRoot?: string } = {}): TaskMaterialResult {
+  if (observations.length === 0) return { ok: false, problem: "no verified observations" };
+  const manifests: MaterialManifest[] = [];
+  for (const o of observations) {
+    try { manifests.push(JSON.parse(readFileSync(join(o.attemptDir, "manifest.json"), "utf-8")) as MaterialManifest); } catch { return { ok: false, problem: `${o.task}#${o.repeat}: manifest.json unreadable` }; }
+  }
+  const carrying = manifests.filter((m) => m.taskMaterialHash !== undefined || m.taskMaterialHashes !== undefined).length;
+  if (carrying > 0 && carrying < manifests.length) return { ok: false, problem: "some observations record task material and some do not" };
+  if (carrying === manifests.length) {
+    for (const [i, m] of manifests.entries()) {
+      if (!isSha256(m.taskMaterialHash) || !completePathMap(m.taskMaterialHashes)) return { ok: false, problem: `${observations[i]!.task}#${observations[i]!.repeat}: per-path task material is incomplete or not SHA-256` };
+    }
+    const first = manifests[0]!;
+    const key = (m: MaterialManifest): string => JSON.stringify([m.taskMaterialHash, TASK_MATERIAL_LABELS.map((l) => (m.taskMaterialHashes as Record<string, string>)[l])]);
+    if (manifests.some((m) => key(m) !== key(first))) return { ok: false, problem: "observations disagree on task material" };
+    return { ok: true, sha256: first.taskMaterialHash as string, paths: { ...(first.taskMaterialHashes as Record<string, string>) }, source: "manifest" };
+  }
+  const heads = new Set(manifests.map((m) => JSON.stringify([m.build?.workspaceHead, m.inputTreeHash])));
+  const m0 = manifests[0]!;
+  if (heads.size !== 1 || typeof m0.build?.workspaceHead !== "string" || !isSha256(m0.inputTreeHash)) return { ok: false, problem: "observations disagree on workspaceHead or inputTreeHash, or do not record them" };
+  return taskMaterialFromGit(m0.build.workspaceHead, m0.inputTreeHash, opts.pkgRoot ?? PKG_ROOT);
+}
+
+/** An unverifiable cell can hide differing material, so any verification failure makes the whole side UNVERIFIED. */
+export function taskMaterialFor(observations: readonly Observation[], failures: readonly string[], opts: { readonly pkgRoot?: string } = {}): TaskMaterialResult {
+  if (failures.length) return { ok: false, problem: `${failures.length} verification failure(s): ${failures.join("; ")}` };
+  return taskMaterialOf(observations, opts);
+}
+
+export function experimentTaskMaterial(expDir: string, rubricVersion: string, opts: { readonly pkgRoot?: string } = {}): TaskMaterialResult {
+  let exp: ExperimentFile;
+  try { exp = JSON.parse(readFileSync(join(expDir, "experiment.json"), "utf-8")) as ExperimentFile; } catch { return { ok: false, problem: `${expDir}: experiment.json unreadable` }; }
+  const { observations, failures } = selectObservations(expDir, exp, rubricVersion);
+  return taskMaterialFor(observations, failures, opts);
+}
+
+/** The cross-arm precondition: the same rolled value and the same value at every path, else refused with each differing path named. */
+export function compareTaskMaterial(baseline: TaskMaterialResult, candidate: TaskMaterialResult): { readonly ok: boolean; readonly differing: { label: string; baseline: string; candidate: string }[]; readonly problem: string | null } {
+  if (!baseline.ok) return { ok: false, differing: [], problem: `baseline: ${baseline.problem}` };
+  if (!candidate.ok) return { ok: false, differing: [], problem: `candidate: ${candidate.problem}` };
+  const differing = driftedPaths(baseline.paths, candidate.paths).map((label) => ({ label, baseline: baseline.paths[label] ?? "<absent>", candidate: candidate.paths[label] ?? "<absent>" }));
+  return { ok: baseline.sha256 === candidate.sha256 && differing.length === 0, differing, problem: null };
+}
+
+export function renderReport(exp: ExperimentFile, agg: Aggregate, observations: readonly Observation[], failures: readonly string[], rubricVersion: string, material?: TaskMaterialResult): string {
   const p = verifiedProvenance(observations);
   const q = recomputeQualification(exp, observations);
   const saved = exp.qualification;
@@ -256,7 +356,7 @@ export function renderReport(exp: ExperimentFile, agg: Aggregate, observations: 
   const citable = scoringComplete && q.qualifying;
   const lines = [
     `# Continuity results: ${p ? `arm ${p.arm}, storybloq ${p.storybloqVersion}` : "experiment identity UNVERIFIED"}, rubric v${rubricVersion}`, "",
-    `Experiment ${exp.experimentHash}. Capture (recomputed from verified observations): **${q.qualifying ? "QUALIFYING" : "INCOMPLETE"}** (${q.reason})${saved && saved.qualifying !== q.qualifying ? ` [saved flag said ${saved.qualifying ? "QUALIFYING" : "INCOMPLETE"}: ${saved.reason}]` : ""}. Evidence verification: **${failures.length === 0 ? "OK" : `FAILED (${failures.length})`}**. Scoring: **${scoringComplete ? "COMPLETE" : `INCOMPLETE (${pending.length} observation(s) unscored${failures.length ? `, ${failures.length} cell(s) unverifiable` : ""})`}**. ${p ? `Isolation: ${p.isolation}${p.ownerExceptionId ? ` (owner exception ${p.ownerExceptionId})` : ""}. Model ${p.model}, effort ${p.effort} (all from verified attempt manifests).` : "Isolation, model and effort not shown: no verified observations agree on them."}`, "",
+    `Experiment ${exp.experimentHash}. Capture (recomputed from verified observations): **${q.qualifying ? "QUALIFYING" : "INCOMPLETE"}** (${q.reason})${saved && saved.qualifying !== q.qualifying ? ` [saved flag said ${saved.qualifying ? "QUALIFYING" : "INCOMPLETE"}: ${saved.reason}]` : ""}.${material ? ` Task material: ${material.ok ? `${material.sha256} (${material.source})` : `UNVERIFIED (${material.problem})`}.` : ""} Evidence verification: **${failures.length === 0 ? "OK" : `FAILED (${failures.length})`}**. Scoring: **${scoringComplete ? "COMPLETE" : `INCOMPLETE (${pending.length} observation(s) unscored${failures.length ? `, ${failures.length} cell(s) unverifiable` : ""})`}**. ${p ? `Isolation: ${p.isolation}${p.ownerExceptionId ? ` (owner exception ${p.ownerExceptionId})` : ""}. Model ${p.model}, effort ${p.effort} (all from verified attempt manifests).` : "Isolation, model and effort not shown: no verified observations agree on them."}`, "",
     citable ? "This file is citable as the release baseline." : "This file is NOT citable as a baseline until capture qualifies, every counted observation re-verifies, and every one is scored.", "",
     ...(failures.length ? ["## Verification failures", "", ...failures.map((f) => `- ${f}`), ""] : []),
     ...(pending.some((p) => p.problem) ? ["## Rejected stored scores", "", ...pending.filter((p) => p.problem).map((p) => `- ${p.task}#${p.repeat}: ${p.problem}`), ""] : []),
@@ -313,10 +413,20 @@ async function main(): Promise<void> {
     // The file name carries the build version only when the verified manifests agree on it; experiment.json's claim never names a report.
     const ver = verifiedProvenance(observations)?.storybloqVersion.replace(/[^0-9.]/g, "") ?? "unverified";
     const out = join(a1, `results-${new Date().toISOString().slice(0, 10)}-${ver}-rubric${rubricVersion}.md`);
-    publishText(out, renderReport(exp, agg, observations, failures, rubricVersion), allowlist);
+    publishText(out, renderReport(exp, agg, observations, failures, rubricVersion, taskMaterialFor(observations, failures)), allowlist);
     process.stdout.write(`${out}\n`);
+  } else if (cmd === "compare") {
+    const base = experimentTaskMaterial(a1, rubricVersion);
+    const cand = experimentTaskMaterial(a2, rubricVersion);
+    const r = compareTaskMaterial(base, cand);
+    if (r.ok && base.ok && cand.ok) {
+      process.stdout.write(`task material identical: ${base.sha256} (${base.source}; ${cand.source})\n`);
+    } else {
+      process.stdout.write(`REFUSED: ${r.problem ?? "task material differs:"}\n${r.differing.map((d) => `  ${d.label}: baseline ${d.baseline}, candidate ${d.candidate}`).join("\n")}${r.differing.length ? "\n" : ""}`);
+      process.exitCode = 1;
+    }
   } else {
-    throw new Error("usage: continuity-score.ts prepare <expDir> | record <attemptDir> <json> | report <expDir>");
+    throw new Error("usage: continuity-score.ts prepare <expDir> | record <attemptDir> <json> | report <expDir> | compare <baselineExpDir> <candidateExpDir>");
   }
 }
 

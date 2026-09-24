@@ -19,7 +19,7 @@ import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
   validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
-  environmentSecrets, ambiguousEnvironmentSecrets,
+  environmentSecrets, ambiguousEnvironmentSecrets, INPUT_PATHS, hashInputsByPath, taskMaterial, driftedPaths, classifyInputDrift,
 } from "./continuity-lib.js";
 import { killSidecar } from "../src/autonomous/liveness.js";
 import { loadRulingsSafe } from "../src/core/ruling-loader.js";
@@ -51,12 +51,52 @@ function refuseAmbiguousSecrets(env: NodeJS.ProcessEnv): void {
   );
 }
 export const DIST_FILES = ["dist/mcp.js", "dist/cli.js", "dist/index.js", "dist/presence.js"] as const;
-/** The executable and fixture inputs whose hash is the experiment's identity; output directories are exempt. */
-export const INPUT_PATHS = [
-  "src", "plugins", "scripts", "package.json", "package-lock.json", "tsup.config.ts", "vitest.config.ts",
-  "test/fixtures/continuity/core", "test/fixtures/continuity/overlays", "test/fixtures/continuity/variants",
-  "test/fixtures/continuity/facts.json", "test/fixtures/continuity/fixture-map.json", "test/fixtures/continuity/rubric.md",
-] as const;
+/** The experiment's identity inputs live in continuity-lib.ts so the scorer can re-derive them without importing the runner. */
+export { INPUT_PATHS };
+
+export type InputHashes = { readonly hashes: Record<string, string>; readonly errors: Record<string, string> };
+
+/** One hash per INPUT_PATHS entry under PKG_ROOT; a label whose walk fails is reported, never thrown. */
+export function inputHashes(): InputHashes {
+  return hashInputsByPath(INPUT_PATHS.map((p) => ({ label: p, path: join(PKG_ROOT, p) })));
+}
+
+export interface InputDrift {
+  readonly invalidating: string[];
+  readonly disclosed: string[];
+  /** Labels whose hash walk failed, with the message; each also counts as invalidating. */
+  readonly errors: Record<string, string>;
+}
+
+/** ISS-1274: every label that differs from preflight in any observation, split by whether it reaches the cell. */
+export function inputDrift(expected: Record<string, string>, observed: readonly InputHashes[], distUnchanged: boolean): InputDrift {
+  const errors: Record<string, string> = {};
+  for (const o of observed) for (const [label, msg] of Object.entries(o.errors)) errors[label] ??= msg;
+  const drifted = [...new Set(observed.flatMap((o) => driftedPaths(expected, o.hashes)))].sort();
+  const { invalidating, disclosed } = classifyInputDrift(drifted, distUnchanged);
+  const errored = Object.keys(errors);
+  return {
+    invalidating: [...new Set([...invalidating, ...errored])].sort(),
+    disclosed: disclosed.filter((l) => !errored.includes(l)),
+    errors,
+  };
+}
+
+/**
+ * The rolled hash, the per-path map and the task material are separate walks. Bracket them with per-path reads and refuse
+ * when anything moved or failed between them, so a mid-preflight edit cannot leave an identity and a baseline that
+ * describe different trees.
+ */
+export function bracketedInputs<T>(read: () => InputHashes, compute: () => T): { readonly hashes: Record<string, string>; readonly value: T } {
+  const before = read();
+  const value = compute();
+  const after = read();
+  const failed = [...new Set([...Object.keys(before.errors), ...Object.keys(after.errors)])].sort();
+  if (failed.length) throw new Error(`continuity-run: input paths could not be hashed (${failed.join(", ")})`);
+  const moved = driftedPaths(before.hashes, after.hashes);
+  if (moved.length) throw new Error(`continuity-run: input tree changed during preflight (${moved.join(", ")}); rerun preflight`);
+  return { hashes: after.hashes, value };
+}
 
 export interface RunOptions {
   readonly arm: 1 | 2 | 3;
@@ -260,6 +300,11 @@ export interface Preflight {
   readonly build: BuildManifest;
   readonly buildManifestHash: string;
   readonly inputTreeHash: string;
+  /** ISS-1273/1274: the same inputs hashed per path, so a drift names what moved. */
+  readonly inputHashes: Record<string, string>;
+  /** ISS-1273: the task material that must be identical across arms, rolled and per path. */
+  readonly taskMaterialHash: string;
+  readonly taskMaterialHashes: Record<string, string>;
   readonly experiment: string;
   readonly isolation: "fresh" | "shared";
   /** Shared: the live config dir. Fresh: null; each attempt provisions its own. */
@@ -298,7 +343,13 @@ export function preflight(o: RunOptions): Preflight {
     claudeVersion: sh("claude", ["--version"], PKG_ROOT),
   };
   const bmh = buildManifestHash(build);
-  const inputTreeHash = hashInputs(INPUT_PATHS.map((p) => ({ label: p, path: join(PKG_ROOT, p) })));
+  const { hashes: perPathHashes, value: { inputTreeHash, tm } } = bracketedInputs(inputHashes, () => ({
+    inputTreeHash: hashInputs(INPUT_PATHS.map((p) => ({ label: p, path: join(PKG_ROOT, p) }))),
+    tm: taskMaterial(PKG_ROOT),
+  }));
+  // The task material's per-path values are the same entries hashed the same way; a mismatch means a read moved.
+  const tmMoved = Object.keys(tm.paths).filter((l) => tm.paths[l] !== perPathHashes[l]);
+  if (tmMoved.length) throw new Error(`continuity-run: task material changed during preflight (${tmMoved.join(", ")}); rerun preflight`);
   let sharedConfigDir: string | null = null;
   let skillMarker: string | null = null;
   let cfg: { sha256: string; inventory: Record<string, string> };
@@ -318,7 +369,7 @@ export function preflight(o: RunOptions): Preflight {
   }
   const ownerException = o.isolation === "shared" && o.ownerException ? validateOwnerException(o.ownerException, WORKSPACE_ROOT) : null;
   const experiment = experimentHash({ arm: o.arm, inputTreeHash, buildManifestHash: bmh, model: o.model, effort: o.effort, timeoutMs: o.timeoutMs, maxBudgetUsd: o.maxBudgetUsd, clientVersion: build.claudeVersion, isolation: o.isolation, configHash: cfg.sha256 } satisfies ExperimentInputs);
-  return { build, buildManifestHash: bmh, inputTreeHash, experiment, isolation: o.isolation, sharedConfigDir, configHash: cfg.sha256, configInventory: cfg.inventory, skillMarker, allowlist: fixtureCredentialAllowlist(join(FIXTURE_ROOT, "core")), ownerException };
+  return { build, buildManifestHash: bmh, inputTreeHash, inputHashes: perPathHashes, taskMaterialHash: tm.sha256, taskMaterialHashes: tm.paths, experiment, isolation: o.isolation, sharedConfigDir, configHash: cfg.sha256, configInventory: cfg.inventory, skillMarker, allowlist: fixtureCredentialAllowlist(join(FIXTURE_ROOT, "core")), ownerException };
 }
 
 // --- one attempt -------------------------------------------------------------
@@ -336,6 +387,8 @@ export interface AttemptDeps {
   readonly signals?: SignalSource;
   /** The dist hash provider; tests inject a deterministic one so no build is needed. */
   readonly distHashes?: () => Record<string, string>;
+  /** The per-path input hash provider; tests inject a deterministic one so the real tree is never rehashed. */
+  readonly inputHashes?: () => InputHashes;
 }
 
 export interface AttemptOutcome {
@@ -343,6 +396,7 @@ export interface AttemptOutcome {
   readonly completion: CompletionStatus;
   readonly interrupted: boolean;
   readonly evidenceComplete: boolean;
+  readonly inputDrift: InputDrift;
 }
 
 async function validateClean(root: string): Promise<void> {
@@ -365,6 +419,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
   const now = deps.now ?? Date.now;
   const signals: SignalSource = deps.signals ?? process;
   const readDist = deps.distHashes ?? distHashes;
+  const readInputs = deps.inputHashes ?? inputHashes;
   const ticketId = ticketIdForTask(task);
   const shortExp = pf.experiment.slice(0, 12);
   const pubDir = join(o.out, shortExp, task, `repeat-${repeat}`, attemptDirName(attemptNo));
@@ -409,9 +464,15 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     const distBefore = readDist();
     // Drift before the spawn is not an attempt to record: the experiment's build identity no longer holds.
     if (!sameHashes(pf.build.dist, distBefore)) throw new Error(`continuity-run: dist/ changed since preflight (${Object.keys(pf.build.dist).filter((k) => pf.build.dist[k] !== distBefore[k]).join(", ") || "key set"}); rerun preflight`);
+    // ISS-1274: the same rule for the hashed inputs. An edit that reaches the cell voids the identity before anything is spent;
+    // a plugins-source edit (dist unchanged, checked just above) proceeds and is disclosed on the record.
+    const inputsBefore = readInputs();
+    const driftBefore = inputDrift(pf.inputHashes, [inputsBefore], true);
+    if (driftBefore.invalidating.length) throw new Error(`continuity-run: input tree changed since preflight (${driftBefore.invalidating.join(", ")}); rerun preflight`);
     const manifestPre = {
       experimentHash: pf.experiment, arm: o.arm, task, repeat, attempt: attemptNo, ticketId, model: o.model, effort: o.effort, isolation: o.isolation,
       ownerException: pf.ownerException, timeoutMs: o.timeoutMs, maxBudgetUsd: o.maxBudgetUsd, inputTreeHash: pf.inputTreeHash, buildManifestHash: pf.buildManifestHash,
+      inputHashes: pf.inputHashes, taskMaterialHash: pf.taskMaterialHash, taskMaterialHashes: pf.taskMaterialHashes,
       build: pf.build, configHashExpected: pf.configHash, configHashBefore: cfgBefore.sha256, configInventory: cfgBefore.inventory, skillMarker: pf.skillMarker,
       variantSha256: mat.variantSha256, overlay: mat.overlay ? basename(mat.overlay) : null,
       rubricVersion: /rubricVersion:\s*(\d+)/.exec(readFileSync(join(FIXTURE_ROOT, "rubric.md"), "utf-8"))?.[1] ?? null, startedAt: new Date().toISOString(),
@@ -532,6 +593,9 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     const { usage, toolCalls } = summarizeStream(parsed.events);
     if (firstPlanWrittenId !== usage.firstPlanWrittenToolUseId) watcherErrors.push(`watcher saw first plan_written ${firstPlanWrittenId ?? "none"}, stream summary says ${usage.firstPlanWrittenToolUseId ?? "none"}`);
     const distAfter = readDist();
+    // ISS-1274: rehash after the attempt; drift at either end (or a walk that failed) is drift under the run.
+    const inputsAfter = readInputs();
+    const drift = inputDrift(pf.inputHashes, [inputsBefore, inputsAfter], sameHashes(pf.build.dist, distBefore) && sameHashes(pf.build.dist, distAfter));
     const cfgAfter = effectiveConfigHash(configDir).sha256;
     const fp = (stateJson?.binaryFingerprint as { sha256?: string } | null | undefined)?.sha256 ?? null;
     const initServers = (usage.initEvent?.mcp_servers as { name?: string; status?: string }[] | undefined) ?? null;
@@ -539,6 +603,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
       stateBinaryFingerprintSha256: fp, builtMcpSha256: pf.build.dist["dist/mcp.js"] ?? "", toolResults: toolCalls.map((t) => t.result), mainModels: usage.mainModels, pinnedModel: o.model,
       distHashesExpected: pf.build.dist, distHashesBefore: distBefore, distHashesAfter: distAfter, configHashExpected: pf.configHash, configHashBefore: cfgBefore.sha256, configHashAfter: cfgAfter,
       streamCorrupt: parsed.corruptLines > 0 || streamErrors.length > 0 || watcherErrors.length > 0, initMcpServers: initServers, interrupted,
+      inputDriftInvalidating: drift.invalidating,
     });
     let headAfter = initialHead;
     try { headAfter = gitLocal(workdir, ["rev-parse", "HEAD"]); } catch { /* keep */ }
@@ -601,7 +666,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     publish("handover.md", newHandovers.map((f) => `<!-- ${f} -->\n${readFileSync(join(handoversDir, f), "utf-8")}`).join("\n\n"));
     const usageOut = { ...usage, initEvent: undefined, resultEvent: undefined, totalCostUsd: (usage.resultEvent as { total_cost_usd?: number } | null)?.total_cost_usd ?? null, numTurns: (usage.resultEvent as { num_turns?: number } | null)?.num_turns ?? null, resultSubtype: (usage.resultEvent as { subtype?: string } | null)?.subtype ?? null };
     publish("usage.json", JSON.stringify(usageOut, null, 2));
-    publish("manifest.json", JSON.stringify({ ...manifestPre, post: { distAfter, configHashAfter: cfgAfter, stateBinaryFingerprintSha256: fp, mainModels: usage.mainModels, subagentModels: usage.subagentModels, clientSessionId: usage.initEvent?.session_id ?? null, finishedAt: new Date().toISOString() } }, null, 2));
+    publish("manifest.json", JSON.stringify({ ...manifestPre, post: { distAfter, inputHashesAfter: inputsAfter.hashes, configHashAfter: cfgAfter, stateBinaryFingerprintSha256: fp, mainModels: usage.mainModels, subagentModels: usage.subagentModels, clientSessionId: usage.initEvent?.session_id ?? null, finishedAt: new Date().toISOString() } }, null, 2));
     writeFileSync(join(rawDir, "redaction.full.json"), JSON.stringify(redactionFull, null, 2));
     publish("redaction.json", JSON.stringify(redactionPublic, null, 2));
 
@@ -615,7 +680,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     const evidenceComplete = required.every((n) => published[n] === true);
     // The record itself is published through the same checker; a blocked record is a runner bug, not a redaction.
     const record = {
-      experimentHash: pf.experiment, arm: o.arm, task, repeat, attempt: attemptNo, ticketId, validity: v.valid ? "valid" : "invalid", invalidReasons: v.reasons,
+      experimentHash: pf.experiment, arm: o.arm, task, repeat, attempt: attemptNo, ticketId, validity: v.valid ? "valid" : "invalid", invalidReasons: v.reasons, inputDrift: drift,
       completion: comp.status, completionReason: comp.reason, completed: true, evidenceComplete, requiredArtefacts: required, wallMs, killKind: kill.kind, interrupted, exitCode: exit.code, exitSignal: exit.signal,
       spawnError: exit.error ? exit.error.message : null, streamCorruptLines: parsed.corruptLines, streamErrors, watcherErrors, truncatedTail: parsed.truncatedTail !== null, planCopies, sessionId: usage.guideSessionId,
       guideStates: usage.guideStates.map((g) => g.state), survivorsKilled: survivors ? survivors.split("\n").length : 0, sidecarOutcome, headBefore: initialHead, headAfter, published, finishedAt: new Date().toISOString(),
@@ -631,7 +696,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     await writeAtomic(join(pubDir, "artefacts.sha256.json"), JSON.stringify(hashes, null, 2));
     for (const [name, h] of Object.entries(hashes)) if (sha256(readFileSync(join(pubDir, name))) !== h) throw new Error(`artefact ${name} changed under the writer`);
     await writeAtomic(join(pubDir, "completed"), `${new Date().toISOString()}\n`);
-    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, evidenceComplete };
+    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, evidenceComplete, inputDrift: drift };
   } catch (err) {
     failure("attempt", err);
     throw err;
@@ -697,7 +762,8 @@ export async function runMatrix(o: RunOptions, pf: Preflight, deps: AttemptDeps 
         }
         if (decision.kind === "exhausted") { cells.push({ task, repeat, satisfied: false, evidenceComplete: false, attempt: null }); summary.push(`${task}#${repeat}: EXHAUSTED (only invalid attempts)`); break; }
         const r = await runAttempt(o, pf, task, repeat, decision.nextAttempt, deps);
-        summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}`);
+        const driftNote = `${r.inputDrift.invalidating.length ? ` INPUT DRIFT (${r.inputDrift.invalidating.join(", ")})` : ""}${r.inputDrift.disclosed.length ? ` input drift disclosed (${r.inputDrift.disclosed.join(", ")})` : ""}`;
+        summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}${driftNote}`);
         if (r.interrupted) {
           writeExperiment(o, pf, cells, summary, "interrupted by the operator");
           throw new SessionKilledError("external-kill", `continuity-run: interrupted during ${task}#${repeat}; no further attempts started`);
@@ -712,7 +778,7 @@ function writeExperiment(o: RunOptions, pf: Preflight, cells: CellRow[], summary
   const q = interruption ? { qualifying: false, shortCells: [], unpublishedCells: [], reason: interruption } : qualifies({ cells, isolation: o.isolation, ownerException: pf.ownerException?.id ?? null });
   const expDir = join(o.out, pf.experiment.slice(0, 12));
   mkdirSync(expDir, { recursive: true });
-  const text = sanitize(JSON.stringify({ experimentHash: pf.experiment, arm: o.arm, model: o.model, effort: o.effort, isolation: o.isolation, ownerException: pf.ownerException, inputTreeHash: pf.inputTreeHash, buildManifestHash: pf.buildManifestHash, configHash: pf.configHash, build: pf.build, cells, qualification: q, writtenAt: new Date().toISOString() }, null, 2), { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist }).text;
+  const text = sanitize(JSON.stringify({ experimentHash: pf.experiment, arm: o.arm, model: o.model, effort: o.effort, isolation: o.isolation, ownerException: pf.ownerException, inputTreeHash: pf.inputTreeHash, inputHashes: pf.inputHashes, taskMaterialHash: pf.taskMaterialHash, taskMaterialHashes: pf.taskMaterialHashes, buildManifestHash: pf.buildManifestHash, configHash: pf.configHash, build: pf.build, cells, qualification: q, writtenAt: new Date().toISOString() }, null, 2), { workdir: "\0never", home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist }).text;
   const verdict = publicationCheck(text, pf.allowlist, { secrets: RUNNER_SECRETS });
   if (!verdict.ok) throw new Error(`experiment.json would publish blocked content (${verdict.blocked.map((b) => b.label).join(",")}); runner bug`);
   writeFileSync(join(expDir, "experiment.json"), text);
