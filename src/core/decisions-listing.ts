@@ -26,6 +26,12 @@ export interface DecisionsListingItem {
 
 const ORDER: readonly RulingLifecycle[] = ["accepted", "accepted-legacy", "superseded", "proposed", "withdrawn", "quarantined", "conflicted"];
 
+/** T-528: the lifecycle order and section titles, exported so the Mac app's labels come from here, never retyped. */
+export const DECISIONS_LIFECYCLE_ORDER: readonly RulingLifecycle[] = ORDER;
+export function decisionsSectionTitle(lifecycle: RulingLifecycle): string {
+  return section(lifecycle);
+}
+
 function section(lifecycle: RulingLifecycle): string {
   switch (lifecycle) {
     case "accepted":

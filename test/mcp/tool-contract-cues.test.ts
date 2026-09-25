@@ -487,6 +487,8 @@ describe("tool description contract (T-460)", () => {
     // T-526 adds storybloq_context_brief (93 -> 94): the brief's consumer is
     // the agent about to plan. `brief --rebase` writes session state and
     // stays CLI-only.
-    expect(result.tools.length).toBe(94);
+    // T-528 adds storybloq_projection_write (94 -> 95): the Mac app's reader
+    // needs a full-freshness projection an agent can regenerate on request.
+    expect(result.tools.length).toBe(95);
   });
 });

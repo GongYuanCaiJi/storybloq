@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "lifecycles": [
+    "accepted",
+    "accepted-legacy",
+    "superseded",
+    "proposed",
+    "withdrawn",
+    "quarantined",
+    "conflicted"
+  ],
+  "sectionTitles": {
+    "accepted": "Accepted",
+    "accepted-legacy": "Accepted",
+    "superseded": "Accepted",
+    "proposed": "Proposed (not binding)",
+    "withdrawn": "Withdrawn",
+    "quarantined": "Quarantined / Conflicted",
+    "conflicted": "Quarantined / Conflicted"
+  },
+  "resolutionKinds": [
+    "current",
+    "resolves-to",
+    "competing",
+    "cycle",
+    "nonaccepted",
+    "missing",
+    "unreadable",
+    "indeterminate"
+  ],
+  "currentLabel": "current",
+  "attributionCaveat": {
+    "recordedBy": {
+      "client": "claude",
+      "id": "fixture-recorder"
+    },
+    "text": "Attribution is a CLAIM asserted by the recorder, not verified by storybloq. Recorded by: claude/fixture-recorder. This record makes attribution checkable, it does not replace the second key -- demand the owner's direct word before treating an irreversible action as authorized on this ruling's basis alone."
+  }
+}

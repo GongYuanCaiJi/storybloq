@@ -59,6 +59,7 @@ Run `storybloq <command>`. Positional arguments appear after the command; ? mark
 - **capability check** (--stamp?, --stamp-all?, --clear-pending?, --format?) - Check every capability against HEAD; --stamp re-records the checkpoint after re-reading an entry. Refused for a structural finding, which a new sha would hide rather than fix
 - **capability defer <id>** (--note, --issue?, --format?) - Record owed work on a capability as a pending note: it stays current, renders pending first, and a stamp is refused until --clear-pending
 - **capability restore <id>** (--from, --expect, --format?) - Restore one capability entry to its projection at --from, refused unless it still matches its projection at --expect. Rewrites only that entry, never deletes
+- **projection write** (--format?) - Regenerate the decisions projection the Mac app reads, with a full freshness check; ruling, capability and term writes and the CLI status refresh it structurally
 - **term list** (--core?, --thin?, --digest?, --format?) - List the glossary: what a word means here, and what it is not. Advisory throughout, so nothing here renames, rewrites or refuses on a term
 - **term get <id>** (--format?) - Show one term: its definition, the distinction that matters, and the capabilities and rulings behind it
 - **term match** (--text, --format?) - Which glossary terms appear in a piece of text. Whole-word and case-insensitive; a match SUGGESTS a term and changes nothing
@@ -229,6 +230,7 @@ Arguments marked ? are optional in the registered schema; handlers may require c
 - **storybloq_capability_add** (id, name, summary, entryPoints, contract, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Add a capability; stamps the checkpoint at HEAD, recording that its entry points were read
 - **storybloq_capability_update** (id, name?, summary?, entryPoints?, contract?, example?, cli?, mcp?, app?, files?, rulings?, items?, terms?, status?) - Edit a capability; supplied lists replace stored ones and the checkpoint is never touched
 - **storybloq_capability_check** (stamp?, stampAll?) - Check every capability against HEAD; stamp re-records the checkpoint, refused for a structural or incomplete finding
+- **storybloq_projection_write** - Regenerate the decisions projection the Mac app reads, with a full freshness check. The status tool never writes it
 - **storybloq_context_brief** (id, budget?) - The context brief for a ticket or issue: binding and suggested rulings with reasons, capabilities, terms, lessons, and what discovery could not see. Suggestions bind nothing
 - **storybloq_term_match** (text) - Which glossary terms appear in a piece of text. Whole-word, case-insensitive and advisory: a match suggests a term and changes nothing
 - **storybloq_term_list** (core?, thin?, digest?) - List the glossary, or its bounded names-only digest (core-first over the cap)

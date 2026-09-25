@@ -117,7 +117,12 @@ export interface TermReferenceIndex {
   readonly fromSnapshot?: boolean;
 }
 
-function indexFrom(capabilities: CapabilityScan, scan: LoadRulingsResult): TermReferenceIndex {
+/**
+ * The index from scans the caller already holds. T-528: the decisions
+ * projection passes the rulings scan it captured, so the term check reads the
+ * same bytes the projection hashed instead of scanning `.story/rulings/` again.
+ */
+export function termReferenceIndexFrom(capabilities: CapabilityScan, scan: LoadRulingsResult): TermReferenceIndex {
   return {
     capabilityIds: new Set(capabilities.ids),
     capabilityScanIncomplete: capabilities.incomplete,
@@ -139,7 +144,7 @@ export function buildTermReferenceIndexFromSnapshot(snapshot: LedgerSnapshot): T
     caps.kind === "ok"
       ? { ids: caps.entries.map((c) => c.id), incomplete: false }
       : { ids: [], incomplete: caps.kind !== "absent" };
-  return { ...indexFrom(capabilities, snapshot.rulingsScan()), fromSnapshot: true };
+  return { ...termReferenceIndexFrom(capabilities, snapshot.rulingsScan()), fromSnapshot: true };
 }
 
 /**
@@ -155,7 +160,7 @@ export function buildTermReferenceIndexFromSnapshot(snapshot: LedgerSnapshot): T
  * that links one.
  */
 export function buildTermReferenceIndex(root: string, capabilities: CapabilityScan): TermReferenceIndex {
-  return indexFrom(capabilities, loadRulingsSafe(root));
+  return termReferenceIndexFrom(capabilities, loadRulingsSafe(root));
 }
 
 /** The capability id set plus whether the read that produced it actually succeeded. */

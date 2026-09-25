@@ -270,8 +270,48 @@ export function registerStatusCommand(yargs: Argv): Argv {
       const clientTaskId = argv["client-task-id"] as string | undefined;
       // T-501: status is the /story priming call and the only CLI surface
       // that shows (and consumes) the usage-cost advisory.
-      await runReadCommand(format, (ctx) => handleStatus(ctx, clientTaskId, { compact }), { usageAdvisory: true });
+      let statusRoot: string | null = null;
+      await runReadCommand(format, (ctx) => {
+        statusRoot = ctx.root;
+        return handleStatus(ctx, clientTaskId, { compact });
+      }, { usageAdvisory: true });
+      // T-528: the CLI status refreshes the decisions projection (structural,
+      // 3 s). The MCP status tool stays read-only: it never reaches this.
+      if (statusRoot !== null) await (await import("./commands/projection.js")).refreshProjectionAfterWrite(statusRoot);
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// projection (T-528)
+// ---------------------------------------------------------------------------
+
+export function registerProjectionCommand(yargs: Argv): Argv {
+  return yargs.command(
+    "projection",
+    "The decisions projection the Mac app reads (.story/cache/decisions-projection.json)",
+    (y) =>
+      y
+        .command(
+          "write",
+          "Regenerate the decisions projection, with a full freshness check",
+          (y2) => addFormatOption(y2),
+          async (argv) => {
+            const format = parseOutputFormat(argv.format);
+            const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
+            if (!root) {
+              writeOutput(formatError("not_found", "No .story/ project found.", format));
+              process.exitCode = ExitCode.USER_ERROR;
+              return;
+            }
+            const result = await (await import("./commands/projection.js")).handleProjectionWrite(format, root);
+            writeOutput(result.output);
+            process.exitCode = result.exitCode ?? ExitCode.OK;
+          },
+        )
+        .demandCommand(1, "Specify a subcommand: write")
+        .strict(),
+    () => {},
   );
 }
 
@@ -3506,6 +3546,8 @@ async function runRulingWrite(format: RulingOutputFormat, fn: (root: string) => 
     const result = await fn(root);
     writeOutput(result.output);
     process.exitCode = result.exitCode ?? ExitCode.OK;
+    // T-528: a ruling write succeeded, so the projection is regenerated once.
+    if (process.exitCode === ExitCode.OK) await (await import("./commands/projection.js")).refreshProjectionAfterWrite(root);
   } catch (err: unknown) {
     if (err instanceof CliValidationError) {
       writeOutput(formatError(err.code, err.message, format));
@@ -3620,6 +3662,7 @@ export function registerRulingCommand(yargs: Argv): Argv {
               );
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
+              if (process.exitCode === ExitCode.OK) await (await import("./commands/projection.js")).refreshProjectionAfterWrite(root);
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {
                 writeOutput(formatError(err.code, err.message, format));
@@ -3685,6 +3728,7 @@ export function registerRulingCommand(yargs: Argv): Argv {
               );
               writeOutput(result.output);
               process.exitCode = result.exitCode ?? ExitCode.OK;
+              if (process.exitCode === ExitCode.OK) await (await import("./commands/projection.js")).refreshProjectionAfterWrite(root);
             } catch (err: unknown) {
               if (err instanceof CliValidationError) {
                 writeOutput(formatError(err.code, err.message, format));
@@ -5580,6 +5624,15 @@ export function registerSessionCommand(yargs: Argv): Argv {
                 transcriptPath: hookContext.transcriptPath,
                 subagent: hookContext.subagent,
               });
+              // T-528: awaited, never detached; one hash pass, and a structural
+              // write with no git only when the ledger moved.
+              let projectRoot: string | null = null;
+              try {
+                projectRoot = (await import("../core/project-root-discovery.js")).discoverProjectRoot(hookContext.cwd ?? process.cwd());
+              } catch {
+                projectRoot = null;
+              }
+              if (projectRoot) await (await import("./commands/projection.js")).refreshProjectionAtSessionStart(projectRoot);
             } catch (err) {
               // Hook contract: always exit 0, never block a session start.
               process.stderr.write(
@@ -6348,7 +6401,7 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runCatalogWrite(format, (root) =>
-              handleCapabilityAdd(capabilityWriteInput(argv), format, root),
+              handleCapabilityAdd(capabilityWriteInput(argv), format, root), true,
             );
           },
         )
@@ -6384,7 +6437,7 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runCatalogWrite(format, (root) =>
-              handleCapabilityUpdate({ ...capabilityWriteInput(argv), id: argv.id as string }, format, root),
+              handleCapabilityUpdate({ ...capabilityWriteInput(argv), id: argv.id as string }, format, root), true,
             );
           },
         )
@@ -6405,8 +6458,9 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
             // `check` needs both a root for the write and ctx.state for item
             // resolution, so it runs through the read pipeline and does its
             // write from inside the handler.
-            await runReadCommand(format, (ctx) =>
-              handleCapabilityCheck(
+            const stamping = argv["stamp-all"] === true || ((argv.stamp as string[] | undefined) ?? []).length > 0;
+            await runReadCommand(format, async (ctx) => {
+              const result = await handleCapabilityCheck(
                 {
                   stamp: argv.stamp as string[] | undefined,
                   stampAll: argv["stamp-all"] as boolean | undefined,
@@ -6415,8 +6469,13 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
                 format,
                 ctx.root,
                 ctx,
-              ),
-            );
+              );
+              // T-528: only a stamp writes; a plain check leaves the projection alone.
+              if (stamping && (result.exitCode ?? ExitCode.OK) === ExitCode.OK) {
+                await (await import("./commands/projection.js")).refreshProjectionAfterWrite(ctx.root);
+              }
+              return result;
+            });
           },
         )
         .command(
@@ -6433,14 +6492,18 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
             const format = parseOutputFormat(argv.format);
             // Through the read pipeline for ctx.state (the --issue lookup); the
             // write happens inside the handler, as `check` does it.
-            await runReadCommand(format, (ctx) =>
-              handleCapabilityDefer(
+            await runReadCommand(format, async (ctx) => {
+              const result = await handleCapabilityDefer(
                 { id: argv.id as string, note: argv.note as string, issue: argv.issue as string | undefined },
                 format,
                 ctx.root,
                 ctx,
-              ),
-            );
+              );
+              if ((result.exitCode ?? ExitCode.OK) === ExitCode.OK) {
+                await (await import("./commands/projection.js")).refreshProjectionAfterWrite(ctx.root);
+              }
+              return result;
+            });
           },
         )
         .command(
@@ -6450,7 +6513,7 @@ export function registerCapabilityCommand(yargs: Argv): Argv {
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runCatalogWrite(format, (root) =>
-              handleCapabilityRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root),
+              handleCapabilityRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root), true,
             );
           },
         ),
@@ -6490,6 +6553,8 @@ function capabilityWriteInput(argv: Record<string, unknown>): CapabilityWriteInp
 async function runCatalogWrite(
   format: ReturnType<typeof parseOutputFormat>,
   run: (root: string) => Promise<{ output: string; exitCode?: number }>,
+  /** T-528: the capability and term families regenerate the decisions projection after a successful write. */
+  refreshProjection = false,
 ): Promise<void> {
   const { formatError, ExitCode } = await import("../core/output-formatter.js");
   const root = (await import("../core/project-root-discovery.js")).discoverProjectRoot();
@@ -6502,6 +6567,9 @@ async function runCatalogWrite(
     const result = await run(root);
     writeOutput(result.output);
     process.exitCode = result.exitCode ?? ExitCode.OK;
+    if (refreshProjection && process.exitCode === ExitCode.OK) {
+      await (await import("./commands/projection.js")).refreshProjectionAfterWrite(root);
+    }
   } catch (err: unknown) {
     if (err instanceof CliValidationError) {
       writeOutput(formatError(err.code, err.message, format));
@@ -6623,7 +6691,7 @@ export function registerTermCommand(yargs: Argv): Argv {
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCatalogWrite(format, (root) => handleTermAdd(termWriteInput(argv), format, root));
+            await runCatalogWrite(format, (root) => handleTermAdd(termWriteInput(argv), format, root), true);
           },
         )
         .command(
@@ -6650,7 +6718,7 @@ export function registerTermCommand(yargs: Argv): Argv {
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runCatalogWrite(format, (root) =>
-              handleTermUpdate({ ...termWriteInput(argv), id: argv.id as string, clearPending: argv["clear-pending"] as boolean | undefined }, format, root),
+              handleTermUpdate({ ...termWriteInput(argv), id: argv.id as string, clearPending: argv["clear-pending"] as boolean | undefined }, format, root), true,
             );
           },
         )
@@ -6665,7 +6733,7 @@ export function registerTermCommand(yargs: Argv): Argv {
             ),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCatalogWrite(format, (root) => handleTermDefer({ id: argv.id as string, note: argv.note as string }, format, root));
+            await runCatalogWrite(format, (root) => handleTermDefer({ id: argv.id as string, note: argv.note as string }, format, root), true);
           },
         )
         .command(
@@ -6675,7 +6743,7 @@ export function registerTermCommand(yargs: Argv): Argv {
           async (argv) => {
             const format = parseOutputFormat(argv.format);
             await runCatalogWrite(format, (root) =>
-              handleTermRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root),
+              handleTermRestore({ id: argv.id as string, from: argv.from as string, expect: argv.expect as string }, format, root), true,
             );
           },
         )
@@ -6685,7 +6753,7 @@ export function registerTermCommand(yargs: Argv): Argv {
           (y2) => addFormatOption(y2.positional("id", { type: "string", demandOption: true, describe: "Term ID" })),
           async (argv) => {
             const format = parseOutputFormat(argv.format);
-            await runCatalogWrite(format, (root) => handleTermRemove(argv.id as string, format, root));
+            await runCatalogWrite(format, (root) => handleTermRemove(argv.id as string, format, root), true);
           },
         ),
   );

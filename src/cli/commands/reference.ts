@@ -319,6 +319,12 @@ export const COMMANDS: readonly CommandEntry[] = [
     flags: ["--from", "--expect", "--format"],
   },
   {
+    name: "projection write",
+    description: "Regenerate the decisions projection the Mac app reads, with a full freshness check; ruling, capability and term writes and the CLI status refresh it structurally",
+    usage: "storybloq projection write [--format <json|md>]",
+    flags: ["--format"],
+  },
+  {
     name: "term list",
     description: "List the glossary: what a word means here, and what it is not. Advisory throughout, so nothing here renames, rewrites or refuses on a term",
     usage: "storybloq term list [--core] [--thin] [--digest] [--format <json|md>]",
@@ -1059,6 +1065,7 @@ export const MCP_TOOLS: readonly McpToolEntry[] = [
   { name: "storybloq_capability_add", description: "Add a capability; stamps the checkpoint at HEAD, recording that its entry points were read", params: ["id","name","summary","entryPoints","contract","example?","cli?","mcp?","app?","files?","rulings?","items?","terms?","status?"] },
   { name: "storybloq_capability_update", description: "Edit a capability; supplied lists replace stored ones and the checkpoint is never touched", params: ["id","name?","summary?","entryPoints?","contract?","example?","cli?","mcp?","app?","files?","rulings?","items?","terms?","status?"] },
   { name: "storybloq_capability_check", description: "Check every capability against HEAD; stamp re-records the checkpoint, refused for a structural or incomplete finding", params: ["stamp?","stampAll?"] },
+  { name: "storybloq_projection_write", description: "Regenerate the decisions projection the Mac app reads, with a full freshness check. The status tool never writes it", params: [] },
   { name: "storybloq_context_brief", description: "The context brief for a ticket or issue: binding and suggested rulings with reasons, capabilities, terms, lessons, and what discovery could not see. Suggestions bind nothing", params: ["id","budget?"] },
   { name: "storybloq_term_match", description: "Which glossary terms appear in a piece of text. Whole-word, case-insensitive and advisory: a match suggests a term and changes nothing", params: ["text"] },
   { name: "storybloq_term_list", description: "List the glossary, or its bounded names-only digest (core-first over the cap)", params: ["core?","thin?","digest?"] },

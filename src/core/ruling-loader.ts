@@ -5,11 +5,11 @@ import { RULING_CANONICAL_ID_REGEX } from "../models/types.js";
 import { atomicCreate, atomicWrite, guardPath, serializeJSON } from "./project-loader.js";
 import { ProjectLoaderError } from "./errors.js";
 import { sanitizeDisplayText } from "./display-text.js";
-import { readBoundedFile } from "./limit-config.js";
+import { collapseBoundedRead, readBoundedFileDetailed, type BoundedReader } from "./limit-config.js";
 import { buildCitationResolutionContext, buildSuccessorIndex, lifecycleMapFor, type CitationResolutionContext, type UpwardBoard } from "./ruling.js";
 import type { RulingLifecycle } from "./ruling-lifecycle.js";
 import { readdirSafe, verifyContainment, verifyDirIdentity } from "./readdir-safe.js";
-import { resolveOrchestratorRoot } from "../federation/resolver.js";
+import { resolveOrchestratorRoot, type OrchestratorRootResult } from "../federation/resolver.js";
 
 /**
  * A ruling is a short attributed quote plus a handful of scalar fields -- a
@@ -76,8 +76,12 @@ export interface LoadRulingsResult {
  * Fail-safe, SYNCHRONOUS read of every ruling on disk (T-476), mirroring
  * `loadArrangementsSafe` exactly: never throws, skip-and-warn per file, a
  * missing `.story/rulings/` directory is the ordinary empty-project state.
+ *
+ * T-528: `read` defaults to the shipped bounded reader. The decisions
+ * projection passes a recording reader, so it parses rulings through this
+ * exact function while keeping the bytes each record was parsed from.
  */
-export function loadRulingsSafe(root: string): LoadRulingsResult {
+export function loadRulingsSafe(root: string, read: BoundedReader = readBoundedFileDetailed): LoadRulingsResult {
   const dir = resolve(root, ".story", "rulings");
   const scan = readdirSafe(dir);
   if (scan.warning !== null) {
@@ -130,7 +134,7 @@ export function loadRulingsSafe(root: string): LoadRulingsResult {
       continue;
     }
     const path = join(dir, file);
-    const raw = readBoundedFile(path, RULING_MAX_BYTES);
+    const raw = collapseBoundedRead(read(path, RULING_MAX_BYTES));
     if (raw === null) {
       warnings.push(`rulings/${sanitizeDisplayText(file)}: unreadable, empty, or exceeds size limit, skipped`);
       const recovered = recoverIdFromFilename(file);
@@ -258,7 +262,14 @@ export function buildCitationInputs(
  * lives in the callers, which is where the citation list is.
  */
 export function loadUpwardBoard(root: string): UpwardBoard | undefined {
-  const pointer = resolveOrchestratorRoot(root);
+  return loadUpwardBoardAt(resolveOrchestratorRoot(root));
+}
+
+/**
+ * T-528: the same board, from a pointer the caller already resolved (the
+ * decisions projection resolves it from the `config.json` bytes it hashed).
+ */
+export function loadUpwardBoardAt(pointer: OrchestratorRootResult): UpwardBoard | undefined {
   if (!pointer.ok) {
     // Not a linked node: the overwhelmingly common case, and the one that must
     // not change. A RECORDED pointer we could not follow is a different thing

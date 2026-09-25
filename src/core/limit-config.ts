@@ -52,7 +52,7 @@ export const LIMIT_CONFIG_BOUNDS = {
   fallbackResetMs: { min: 60_000, max: 691_200_000 }, // 8d (the reset clamp horizon)
 } as const;
 
-const CONFIG_MAX_BYTES = 262_144;
+export const CONFIG_MAX_BYTES = 262_144;
 
 function intOr(value: unknown, fallback: number, bounds: { min: number; max: number }): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= bounds.min && value <= bounds.max
@@ -68,7 +68,14 @@ function intOr(value: unknown, fallback: number, bounds: { min: number; max: num
  * a swap-to-symlink race from re-introducing traversal).
  */
 export function readBoundedFile(path: string, maxBytes = CONFIG_MAX_BYTES): string | null {
-  const read = readBoundedFileDetailed(path, maxBytes);
+  return collapseBoundedRead(readBoundedFileDetailed(path, maxBytes));
+}
+
+/**
+ * `readBoundedFile`'s collapse, on its own so a loader that takes an injected
+ * `BoundedReader` (T-528) keeps exactly the same null rule.
+ */
+export function collapseBoundedRead(read: BoundedRead): string | null {
   // An empty file collapses to null the way it always has: callers here treat
   // "no usable content" and "nothing there" alike.
   return read.kind === "ok" && read.text.length > 0 ? read.text : null;
@@ -93,8 +100,26 @@ export type BoundedRead =
    * checked containment on its own resolution of the pathname resolved it a
    * second time, independently, so only this value says what was really read.
    */
-  | { readonly kind: "ok"; readonly text: string; readonly target: string }
+  | {
+      readonly kind: "ok";
+      readonly text: string;
+      readonly target: string;
+      /**
+       * T-528: the exact bytes `text` was decoded from, so a caller that must
+       * hash what it parsed (the decisions projection's ledger revision) hashes
+       * the same read instead of a second one. Additive: existing callers
+       * ignore it.
+       */
+      readonly bytes: Buffer;
+    }
   | { readonly kind: "indeterminate"; readonly reason: string };
+
+/**
+ * T-528: the shape of `readBoundedFileDetailed`, for loaders that let a caller
+ * substitute a reader which records what was read. Defaulted everywhere, so
+ * every existing call is unchanged.
+ */
+export type BoundedReader = (path: string, maxBytes: number) => BoundedRead;
 
 export function readBoundedFileDetailed(path: string, maxBytes = CONFIG_MAX_BYTES): BoundedRead {
   let target: string;
@@ -119,7 +144,8 @@ export function readBoundedFileDetailed(path: string, maxBytes = CONFIG_MAX_BYTE
       if (n <= 0) break;
       read += n;
     }
-    return { kind: "ok", text: buf.subarray(0, read).toString("utf-8"), target };
+    const bytes = buf.subarray(0, read);
+    return { kind: "ok", text: bytes.toString("utf-8"), target, bytes };
   } catch (err: unknown) {
     const code = (err as { code?: string } | null)?.code;
     return { kind: "indeterminate", reason: code ?? "unreadable" };

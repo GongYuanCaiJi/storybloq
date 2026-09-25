@@ -46,11 +46,20 @@ export type OrchestratorRootResult =
     };
 
 export function resolveOrchestratorRoot(nodeRoot: string): OrchestratorRootResult {
+  return resolveOrchestratorRootFrom(nodeRoot, () => readFileSync(join(nodeRoot, ".story", "config.json"), "utf-8"));
+}
+
+/**
+ * T-528: the same resolution over a config the caller already read. The
+ * decisions projection passes the `config.json` bytes it hashed into the
+ * ledger revision, so the pointer it follows is the one the revision covers,
+ * never a second read. `readConfig` throws exactly as `readFileSync` would
+ * (an error with `code: "ENOENT"` for a missing file).
+ */
+export function resolveOrchestratorRootFrom(nodeRoot: string, readConfig: () => string): OrchestratorRootResult {
   let pointer: unknown;
   try {
-    const config = JSON.parse(
-      readFileSync(join(nodeRoot, ".story", "config.json"), "utf-8"),
-    ) as Record<string, unknown>;
+    const config = JSON.parse(readConfig()) as Record<string, unknown>;
     pointer = config.orchestrator;
   } catch (err: unknown) {
     // NO config at all is "not a project here", which is genuinely not a

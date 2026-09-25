@@ -1,0 +1,282 @@
+{
+  "schemaVersion": 1,
+  "writtenAt": "2026-09-24T00:00:00.000Z",
+  "cliVersion": "0.0.0-fixture",
+  "headCommit": "0123456789abcdef0123456789abcdef01234567",
+  "ledgerRevision": "fc7dd853054b1ee158f57cef9261ff11432148b591cc4822fb22b86f389e9923",
+  "freshnessInputs": {
+    "mode": "structural",
+    "checkedHead": null
+  },
+  "upwardBoard": {
+    "pointer": "none",
+    "state": "not-loaded"
+  },
+  "rulings": [
+    {
+      "id": "r-eftp2zdb6as643np",
+      "lifecycle": "accepted-legacy",
+      "reasons": [],
+      "supersedes": "r-rvcf99q7dwhzzpav",
+      "supersededBy": [],
+      "uncertainSuccessors": [],
+      "proposalsAgainst": [],
+      "citedBy": [
+        "T-1"
+      ],
+      "record": {
+        "id": "r-eftp2zdb6as643np",
+        "text": "Owner, 2026-09-14: \"Logging keeps redaction and request ids on every path. One logger, AppLogger; nothing else writes log lines. Every line carries the request id of the work it belongs to, and secrets are redacted before the line is written.\"",
+        "attribution": "owner-direct",
+        "recordedBy": {
+          "client": "claude",
+          "id": "fixture-seed-0000-0000-000000000000"
+        },
+        "date": "2026-09-14",
+        "scopeTags": [
+          "logging"
+        ],
+        "supersedes": "r-rvcf99q7dwhzzpav",
+        "createdAt": "2026-09-14T17:30:00.000Z"
+      }
+    },
+    {
+      "id": "r-fxdxynjdpcxprdhn",
+      "lifecycle": "accepted-legacy",
+      "reasons": [],
+      "supersedes": null,
+      "supersededBy": [],
+      "uncertainSuccessors": [],
+      "proposalsAgainst": [],
+      "citedBy": [],
+      "record": {
+        "id": "r-fxdxynjdpcxprdhn",
+        "text": "Owner, 2026-09-12: \"Billing amounts are integer cents. No floats anywhere in the billing path, including tests.\"",
+        "attribution": "owner-direct",
+        "recordedBy": {
+          "client": "claude",
+          "id": "fixture-seed-0000-0000-000000000000"
+        },
+        "date": "2026-09-12",
+        "scopeTags": [
+          "billing"
+        ],
+        "supersedes": null,
+        "createdAt": "2026-09-12T11:00:00.000Z"
+      }
+    },
+    {
+      "id": "r-p19bbvh0jhj8xgma",
+      "lifecycle": "accepted-legacy",
+      "reasons": [],
+      "supersedes": null,
+      "supersededBy": [],
+      "uncertainSuccessors": [],
+      "proposalsAgainst": [],
+      "citedBy": [],
+      "record": {
+        "id": "r-p19bbvh0jhj8xgma",
+        "text": "Owner, 2026-09-15: \"Background work carries the request id of the job that enqueued it. When a job runs, anything it logs is under the request id of the request that put it on the queue, not a fresh id.\"",
+        "attribution": "owner-direct",
+        "recordedBy": {
+          "client": "claude",
+          "id": "fixture-seed-0000-0000-000000000000"
+        },
+        "date": "2026-09-15",
+        "scopeTags": [
+          "logging",
+          "jobs"
+        ],
+        "supersedes": null,
+        "createdAt": "2026-09-15T09:10:00.000Z"
+      }
+    },
+    {
+      "id": "r-rvcf99q7dwhzzpav",
+      "lifecycle": "superseded",
+      "reasons": [],
+      "supersedes": null,
+      "supersededBy": [
+        "r-eftp2zdb6as643np"
+      ],
+      "uncertainSuccessors": [],
+      "proposalsAgainst": [],
+      "citedBy": [],
+      "record": {
+        "id": "r-rvcf99q7dwhzzpav",
+        "text": "Owner, 2026-09-10: \"All logging goes through one logger and every line has the request id on it.\"",
+        "attribution": "owner-direct",
+        "recordedBy": {
+          "client": "claude",
+          "id": "fixture-seed-0000-0000-000000000000"
+        },
+        "date": "2026-09-10",
+        "scopeTags": [
+          "logging"
+        ],
+        "supersedes": null,
+        "createdAt": "2026-09-10T15:00:00.000Z"
+      }
+    }
+  ],
+  "citations": [
+    {
+      "citedId": "r-eftp2zdb6as643np",
+      "resolution": {
+        "kind": "current",
+        "message": "current",
+        "upwardDependency": false
+      }
+    },
+    {
+      "citedId": "r-fxdxynjdpcxprdhn",
+      "resolution": {
+        "kind": "current",
+        "message": "current",
+        "upwardDependency": false
+      }
+    },
+    {
+      "citedId": "r-p19bbvh0jhj8xgma",
+      "resolution": {
+        "kind": "current",
+        "message": "current",
+        "upwardDependency": false
+      }
+    },
+    {
+      "citedId": "r-rvcf99q7dwhzzpav",
+      "resolution": {
+        "kind": "resolves-to",
+        "message": "ruling r-rvcf99q7dwhzzpav has been superseded by r-eftp2zdb6as643np",
+        "target": "r-eftp2zdb6as643np",
+        "upwardDependency": false
+      }
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "cap-logging",
+      "storedStatus": "current",
+      "effectiveStatus": "current",
+      "reasons": [],
+      "pendingNote": null,
+      "freshness": {
+        "kind": "not-checked",
+        "checkedAt": {
+          "sha": "0000000000000000000000000000000000000000",
+          "date": "2026-09-15"
+        }
+      },
+      "record": {
+        "id": "cap-logging",
+        "name": "Logging",
+        "summary": "AppLogger, the one logger in this service: every line carries a request id and secrets are redacted before the line reaches the sink.",
+        "surfaces": {
+          "files": [
+            "src/platform/logging/AppLogger.ts"
+          ]
+        },
+        "entryPoints": [
+          "src/platform/logging"
+        ],
+        "contract": "AppLogger.withRequestId(id, sink?) returns a logger bound to one request id; info/warn/error emit a LogLine {level, requestId, message, fields}; redact(fields) replaces secret-looking keys and values with [REDACTED] before the line reaches the sink. Implementation: src/platform/logging/AppLogger.ts.",
+        "rulings": [
+          "r-eftp2zdb6as643np"
+        ],
+        "terms": [
+          "term-redaction",
+          "term-request-id"
+        ],
+        "checkedAt": {
+          "sha": "0000000000000000000000000000000000000000",
+          "date": "2026-09-15"
+        },
+        "status": "current"
+      }
+    },
+    {
+      "id": "cap-request-routing",
+      "storedStatus": "current",
+      "effectiveStatus": "current",
+      "reasons": [],
+      "pendingNote": null,
+      "freshness": {
+        "kind": "not-checked",
+        "checkedAt": {
+          "sha": "0000000000000000000000000000000000000000",
+          "date": "2026-09-15"
+        }
+      },
+      "record": {
+        "id": "cap-request-routing",
+        "name": "Request routing",
+        "summary": "Router.add(method, path, handler) registers a route and Router.dispatch(req) picks the handler for method plus path, passing it an AppLogger bound to req.requestId.",
+        "surfaces": {
+          "files": [
+            "src/http/router.ts"
+          ]
+        },
+        "entryPoints": [
+          "src/http/router.ts"
+        ],
+        "contract": "Router.add(method, path, handler); Router.dispatch(req) calls the matching handler with an AppLogger bound to req.requestId. Implementation: src/http/router.ts.",
+        "checkedAt": {
+          "sha": "0000000000000000000000000000000000000000",
+          "date": "2026-09-15"
+        },
+        "status": "current"
+      }
+    }
+  ],
+  "terms": [
+    {
+      "id": "term-redaction",
+      "effectiveStatus": "current",
+      "reasons": [
+        {
+          "code": "term_thin",
+          "cls": "thin",
+          "detail": "thin entry: no distinction (what it is NOT, or what it differs from)"
+        }
+      ],
+      "pendingNote": null,
+      "record": {
+        "id": "term-redaction",
+        "term": "redaction",
+        "definition": "Replacing secret-looking keys (token, secret, password, authorization, api key) and secret-looking values (sk-..., Bearer ...) with [REDACTED] before a log line reaches the sink.",
+        "capabilities": [
+          "cap-logging"
+        ],
+        "rulings": [
+          "r-eftp2zdb6as643np"
+        ],
+        "updatedAt": "2026-09-15T00:00:00.000Z"
+      }
+    },
+    {
+      "id": "term-request-id",
+      "effectiveStatus": "current",
+      "reasons": [],
+      "pendingNote": null,
+      "record": {
+        "id": "term-request-id",
+        "term": "request id",
+        "aliases": [
+          "requestId"
+        ],
+        "definition": "The id of the incoming request a piece of work belongs to, assigned from the x-request-id header or a new UUID; every log line carries it.",
+        "distinction": "Not a job id: work a request puts on the queue logs under that request's id, never a fresh one.",
+        "capabilities": [
+          "cap-logging"
+        ],
+        "rulings": [
+          "r-eftp2zdb6as643np",
+          "r-p19bbvh0jhj8xgma"
+        ],
+        "updatedAt": "2026-09-15T00:00:00.000Z"
+      }
+    }
+  ],
+  "diagnostics": []
+}

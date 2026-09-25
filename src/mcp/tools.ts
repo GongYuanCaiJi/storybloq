@@ -168,6 +168,7 @@ import {
   handleCapabilityUpdate,
   handleCapabilityCheck,
 } from "../cli/commands/capability.js";
+import { handleProjectionWrite } from "../cli/commands/projection.js";
 import {
   handleTermList,
   handleTermGet,
@@ -1557,6 +1558,15 @@ export function registerAllTools(rawServer: McpServer, pinnedRoot: string, ctx?:
     },
   }, (args) => runMcpReadTool(pinnedRoot, (ctx) =>
     handleCapabilityCheck({ stamp: args.stamp, stampAll: args.stampAll }, "md", ctx.root, ctx)));
+
+  // --- Decisions projection (T-528) ---
+  // The one MCP surface that writes the projection. `storybloq_status` stays
+  // read-only: a read tool that wrote would put a write into every /story load.
+  server.registerTool("storybloq_projection_write", {
+    description:
+      "Regenerate .story/cache/decisions-projection.json, the file the Mac app reads, with a full freshness " +
+      "check. The CLI status and ruling, capability and term CLI writes refresh it structurally; the status tool does not.",
+  }, () => runMcpWriteTool(pinnedRoot, (root, format) => handleProjectionWrite(format, root)));
 
   // --- Context brief (T-526) ---
   // Read-only. `brief --rebase` writes session state and stays CLI-only.

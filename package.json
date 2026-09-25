@@ -52,6 +52,8 @@
     "build": "tsup",
     "test": "vitest run --maxWorkers=4",
     "test:watch": "vitest",
+    "labels:export": "tsx scripts/export-labels.ts",
+    "projection:fixtures": "tsx scripts/projection-fixtures.ts",
     "dev": "tsup --watch",
     "prepublishOnly": "npm run build && npm test"
   },

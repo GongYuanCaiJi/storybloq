@@ -17,7 +17,7 @@ import { isDeepStrictEqual } from "node:util";
 import { lstatSync, existsSync, realpathSync } from "node:fs";
 import type { z } from "zod";
 import { readdirSafe, verifyContainment, verifyDirIdentity, type DirIdentity } from "./readdir-safe.js";
-import { readBoundedFileDetailed } from "./limit-config.js";
+import { readBoundedFileDetailed, type BoundedReader } from "./limit-config.js";
 import { sanitizeDisplayPath, sanitizeDisplayText, MAX_PROSE_LENGTH } from "./display-text.js";
 import { withProjectLock, withConflictResolutionLock, atomicWrite } from "./project-loader.js";
 import { ProjectLoaderError } from "./errors.js";
@@ -120,7 +120,11 @@ export interface CatalogDefinition<TDoc> {
 export interface Catalog<TDoc> {
   readonly file: string;
   readonly key: string;
-  load: (root: string) => CatalogLoadResult<TDoc>;
+  /**
+   * T-528: `read` defaults to the shipped bounded reader; the decisions
+   * projection passes a recording reader to keep the bytes it parsed.
+   */
+  load: (root: string, read?: BoundedReader) => CatalogLoadResult<TDoc>;
   /** Public entry: acquires the project lock for ordinary callers. */
   mutate: (root: string, fn: (doc: TDoc) => TDoc) => Promise<TDoc>;
   /**
@@ -264,7 +268,7 @@ export function defineCatalog<TDoc>(def: CatalogDefinition<TDoc>): Catalog<TDoc>
    * local write access to `.story/`, which is the same threat model
    * `readdir-safe` documents for itself.
    */
-  function load(root: string): CatalogLoadResult<TDoc> {
+  function load(root: string, readFile: BoundedReader = readBoundedFileDetailed): CatalogLoadResult<TDoc> {
     const dir = storyDirOf(root);
     const path = join(dir, def.file);
 
@@ -318,7 +322,7 @@ export function defineCatalog<TDoc>(def: CatalogDefinition<TDoc>): Catalog<TDoc>
       throw new CatalogLoadError(def.file, containment);
     }
 
-    const read = readBoundedFileDetailed(path, CATALOG_MAX_BYTES);
+    const read = readFile(path, CATALOG_MAX_BYTES);
     if (read.kind === "absent") {
       // The leaf existed at step 2, so this is a dangling symlink or a file
       // that vanished mid-load. Either way it is an error, never an absence.

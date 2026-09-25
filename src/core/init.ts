@@ -160,7 +160,7 @@ export async function initProject(
 // root-level directory the presence records and heartbeat artifacts live in,
 // rather than matching any directory named `telemetry` at any depth inside a
 // project's own tracked `.story/` content.
-export const STORY_GITIGNORE_ENTRIES = ["snapshots/", "status.json", "sessions/", "spawn/", "federation-cache.json", "channel-inbox/", "servers/", "/telemetry/"];
+export const STORY_GITIGNORE_ENTRIES = ["snapshots/", "status.json", "sessions/", "spawn/", "federation-cache.json", "channel-inbox/", "servers/", "/telemetry/", "cache/"];
 
 /**
  * Ensures a .gitignore file contains the specified entries.

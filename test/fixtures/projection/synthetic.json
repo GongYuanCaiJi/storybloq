@@ -1,0 +1,2527 @@
+{
+  "scenarios": {
+    "full": {
+      "schemaVersion": 1,
+      "writtenAt": "2026-09-24T00:00:00.000Z",
+      "cliVersion": "0.0.0-fixture",
+      "headCommit": "0123456789abcdef0123456789abcdef01234567",
+      "ledgerRevision": "fc8a3529b3baa95c1f49d21dede25a2fe23634d4fb716fc9058b681d46fe30d3",
+      "freshnessInputs": {
+        "mode": "full",
+        "checkedHead": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "upwardBoard": {
+        "pointer": "recorded",
+        "state": "board"
+      },
+      "rulings": [
+        {
+          "id": "r-1111111111111111",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-2222222222222222",
+            "r-5555555555555555"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-1111111111111111",
+            "text": "Logging keeps redaction and request ids on every path",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "6bd82ca1"
+            },
+            "date": "2026-09-06",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-06T18:12:00.000Z"
+          }
+        },
+        {
+          "id": "r-2222222222222222",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-2222222222222222",
+            "text": "Background work carries the request id of the job that enqueued it",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-21T10:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "narrative": {
+              "context": "Jobs lose the request id at the queue boundary"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-22",
+              "createdAt": "2026-09-22T09:00:00.000Z",
+              "payloadDigest": "4bec1d4e9bfde185f9d44c0ec04c96d91745bfb38d419cd012c213f98359b2e1"
+            }
+          }
+        },
+        {
+          "id": "r-3333333333333333",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [
+            "r-6666666666666666"
+          ],
+          "citedBy": [
+            "ISS-1",
+            "T-1"
+          ],
+          "record": {
+            "id": "r-3333333333333333",
+            "text": "Redaction is never skipped",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T11:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": null,
+            "proposedFor": [],
+            "narrative": {
+              "consequences": "Debug builds log redacted values too"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-21",
+              "createdAt": "2026-09-21T11:00:00.000Z",
+              "payloadDigest": "2c476104e5bbd5fbd8665b296dcfaa3156ade33cb732ac0ec0c3f2a2a5d43c31"
+            }
+          }
+        },
+        {
+          "id": "r-4444444444444444",
+          "lifecycle": "withdrawn",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-4444444444444444",
+            "text": "Redaction may be skipped in debug builds",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T10:30:00.000Z",
+            "status": "withdrawn",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "withdrawal": {
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "createdAt": "2026-09-21T12:00:00.000Z",
+              "reason": "superseded by the owner's direct ruling r-3333333333333333"
+            }
+          }
+        },
+        {
+          "id": "r-5555555555555555",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-5555555555555555",
+            "text": "Logging keeps redaction and request ids on every path, including background jobs",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-23",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-23T08:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [],
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-23",
+              "createdAt": "2026-09-23T08:00:00.000Z",
+              "payloadDigest": "3ce6d03b86859e7dcce4b7ad1226ca8f349765c67997ffff2b4cf0491940fb32"
+            }
+          }
+        },
+        {
+          "id": "r-6666666666666666",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-6666666666666666",
+            "text": "A proposal against the current ruling",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-3333333333333333",
+            "proposedFor": [
+              "T-1"
+            ]
+          }
+        },
+        {
+          "id": "r-7777777777777777",
+          "lifecycle": "quarantined",
+          "reasons": [
+            {
+              "code": "ruling_status_without_acceptance",
+              "detail": "r-7777777777777777 claims status accepted with no acceptance record"
+            }
+          ],
+          "supersedes": "r-9999999999999999",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-7777777777777777",
+            "text": "Claims acceptance without evidence",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-9999999999999999",
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "accepted"
+          }
+        },
+        {
+          "id": "r-8888888888888888",
+          "lifecycle": "conflicted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-8888888888888888",
+            "text": "A record with an unresolved merge conflict",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "_conflicts": [
+              {
+                "field": "text",
+                "ours": "one wording",
+                "theirs": "another wording"
+              }
+            ]
+          }
+        },
+        {
+          "id": "r-9999999999999999",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [
+            "r-7777777777777777"
+          ],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-9999999999999999",
+            "text": "The target of an unverifiable successor",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-aaaaaaaaaaaaaaaa",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-bbbbbbbbbbbbbbbb"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-aaaaaaaaaaaaaaaa",
+            "text": "An older wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-bbbbbbbbbbbbbbbb",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": "r-aaaaaaaaaaaaaaaa",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-bbbbbbbbbbbbbbbb",
+            "text": "The newer wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-aaaaaaaaaaaaaaaa",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-cccccccccccccccc",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-dddddddddddddddd",
+          "supersededBy": [
+            "r-dddddddddddddddd"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-cccccccccccccccc",
+            "text": "One side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-dddddddddddddddd",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-dddddddddddddddd",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-cccccccccccccccc",
+          "supersededBy": [
+            "r-cccccccccccccccc"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-dddddddddddddddd",
+            "text": "The other side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-cccccccccccccccc",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-pppppppppppppppp",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-pppppppppppppppp",
+            "text": "A proposal against a quarantined record",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-7777777777777777",
+            "proposedFor": []
+          }
+        }
+      ],
+      "citations": [
+        {
+          "citedId": "r-1111111111111111",
+          "resolution": {
+            "kind": "competing",
+            "message": "ruling r-1111111111111111 has competing successors (r-2222222222222222, r-5555555555555555) -- chain is ambiguous",
+            "ids": [
+              "r-2222222222222222",
+              "r-5555555555555555"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-2222222222222222",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-3333333333333333",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-4444444444444444",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-4444444444444444 is withdrawn and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "withdrawn",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-5555555555555555",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-6666666666666666",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-6666666666666666 is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-7777777777777777",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-7777777777777777 is quarantined and binds nothing -- it is not an accepted ruling (ruling_status_without_acceptance)",
+            "lifecycle": "quarantined",
+            "reasons": [
+              "ruling_status_without_acceptance"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-8888888888888888",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-8888888888888888 is conflicted and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "conflicted",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-9999999999999999",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: r-7777777777777777 claims to supersede ruling r-9999999999999999's chain but the claim cannot be verified -- do not treat any shown ruling as current",
+            "reason": "unverifiable-successor",
+            "ids": [
+              "r-7777777777777777"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-aaaaaaaaaaaaaaaa",
+          "resolution": {
+            "kind": "resolves-to",
+            "message": "ruling r-aaaaaaaaaaaaaaaa has been superseded by r-bbbbbbbbbbbbbbbb",
+            "target": "r-bbbbbbbbbbbbbbbb",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-bbbbbbbbbbbbbbbb",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-cccccccccccccccc",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-cccccccccccccccc is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-dddddddddddddddd",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-dddddddddddddddd is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-eeeeeeeeeeeeeeee",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true,
+            "board": "orchestrator"
+          }
+        },
+        {
+          "citedId": "r-hhhhhhhhhhhhhhhh",
+          "resolution": {
+            "kind": "resolves-to",
+            "message": "ruling r-hhhhhhhhhhhhhhhh has been superseded by r-eeeeeeeeeeeeeeee",
+            "target": "r-eeeeeeeeeeeeeeee",
+            "upwardDependency": true,
+            "board": "orchestrator"
+          }
+        },
+        {
+          "citedId": "r-pppppppppppppppp",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-pppppppppppppppp is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-zzzzzzzzzzzzzzzz",
+          "resolution": {
+            "kind": "missing",
+            "message": "ruling r-zzzzzzzzzzzzzzzz not found",
+            "upwardDependency": true
+          }
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "cap-changed",
+          "storedStatus": "current",
+          "effectiveStatus": "review",
+          "reasons": [
+            {
+              "code": "capability_changed",
+              "cls": "freshness",
+              "detail": "1 file(s) under this entry's paths changed since 0000000"
+            }
+          ],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "changed",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-changed",
+            "name": "cap-changed",
+            "summary": "Synthetic capability cap-changed.",
+            "surfaces": {
+              "files": [
+                "src/changed.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/changed.ts"
+            ],
+            "contract": "Synthetic contract for cap-changed.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-current",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "current",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-current",
+            "name": "cap-current",
+            "summary": "Synthetic capability cap-current.",
+            "surfaces": {
+              "files": [
+                "src/current.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/current.ts"
+            ],
+            "contract": "Synthetic contract for cap-current.",
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "terms": [
+              "term-alpha"
+            ],
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-incomplete",
+          "storedStatus": "current",
+          "effectiveStatus": "review",
+          "reasons": [
+            {
+              "code": "capability_check_timeout",
+              "cls": "incomplete",
+              "detail": "the check deadline passed before this entry was checked"
+            }
+          ],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "check-incomplete",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-incomplete",
+            "name": "cap-incomplete",
+            "summary": "Synthetic capability cap-incomplete.",
+            "surfaces": {
+              "files": [
+                "src/incomplete.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/incomplete.ts"
+            ],
+            "contract": "Synthetic contract for cap-incomplete.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-unverifiable",
+          "storedStatus": "current",
+          "effectiveStatus": "review",
+          "reasons": [
+            {
+              "code": "capability_unverifiable_checkpoint",
+              "cls": "freshness",
+              "detail": "the checkpoint commit is not in this repository"
+            }
+          ],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "unverifiable",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-unverifiable",
+            "name": "cap-unverifiable",
+            "summary": "Synthetic capability cap-unverifiable.",
+            "surfaces": {
+              "files": [
+                "src/unverifiable.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/unverifiable.ts"
+            ],
+            "contract": "Synthetic contract for cap-unverifiable.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "terms": [
+        {
+          "id": "term-alpha",
+          "effectiveStatus": "current",
+          "reasons": [
+            {
+              "code": "term_thin",
+              "cls": "thin",
+              "detail": "thin entry: no distinction (what it is NOT, or what it differs from)"
+            }
+          ],
+          "pendingNote": null,
+          "record": {
+            "id": "term-alpha",
+            "term": "alpha",
+            "definition": "A synthetic term.",
+            "capabilities": [
+              "cap-current"
+            ],
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "updatedAt": "2026-09-15T00:00:00.000Z"
+          }
+        }
+      ],
+      "diagnostics": [
+        {
+          "file": "tickets/T-9.json",
+          "reason": "invalid JSON"
+        }
+      ]
+    },
+    "structural": {
+      "schemaVersion": 1,
+      "writtenAt": "2026-09-24T00:00:00.000Z",
+      "cliVersion": "0.0.0-fixture",
+      "headCommit": "0123456789abcdef0123456789abcdef01234567",
+      "ledgerRevision": "fc8a3529b3baa95c1f49d21dede25a2fe23634d4fb716fc9058b681d46fe30d3",
+      "freshnessInputs": {
+        "mode": "structural",
+        "checkedHead": null
+      },
+      "upwardBoard": {
+        "pointer": "recorded",
+        "state": "board"
+      },
+      "rulings": [
+        {
+          "id": "r-1111111111111111",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-2222222222222222",
+            "r-5555555555555555"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-1111111111111111",
+            "text": "Logging keeps redaction and request ids on every path",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "6bd82ca1"
+            },
+            "date": "2026-09-06",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-06T18:12:00.000Z"
+          }
+        },
+        {
+          "id": "r-2222222222222222",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-2222222222222222",
+            "text": "Background work carries the request id of the job that enqueued it",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-21T10:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "narrative": {
+              "context": "Jobs lose the request id at the queue boundary"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-22",
+              "createdAt": "2026-09-22T09:00:00.000Z",
+              "payloadDigest": "4bec1d4e9bfde185f9d44c0ec04c96d91745bfb38d419cd012c213f98359b2e1"
+            }
+          }
+        },
+        {
+          "id": "r-3333333333333333",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [
+            "r-6666666666666666"
+          ],
+          "citedBy": [
+            "ISS-1",
+            "T-1"
+          ],
+          "record": {
+            "id": "r-3333333333333333",
+            "text": "Redaction is never skipped",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T11:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": null,
+            "proposedFor": [],
+            "narrative": {
+              "consequences": "Debug builds log redacted values too"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-21",
+              "createdAt": "2026-09-21T11:00:00.000Z",
+              "payloadDigest": "2c476104e5bbd5fbd8665b296dcfaa3156ade33cb732ac0ec0c3f2a2a5d43c31"
+            }
+          }
+        },
+        {
+          "id": "r-4444444444444444",
+          "lifecycle": "withdrawn",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-4444444444444444",
+            "text": "Redaction may be skipped in debug builds",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T10:30:00.000Z",
+            "status": "withdrawn",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "withdrawal": {
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "createdAt": "2026-09-21T12:00:00.000Z",
+              "reason": "superseded by the owner's direct ruling r-3333333333333333"
+            }
+          }
+        },
+        {
+          "id": "r-5555555555555555",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-5555555555555555",
+            "text": "Logging keeps redaction and request ids on every path, including background jobs",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-23",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-23T08:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [],
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-23",
+              "createdAt": "2026-09-23T08:00:00.000Z",
+              "payloadDigest": "3ce6d03b86859e7dcce4b7ad1226ca8f349765c67997ffff2b4cf0491940fb32"
+            }
+          }
+        },
+        {
+          "id": "r-6666666666666666",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-6666666666666666",
+            "text": "A proposal against the current ruling",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-3333333333333333",
+            "proposedFor": [
+              "T-1"
+            ]
+          }
+        },
+        {
+          "id": "r-7777777777777777",
+          "lifecycle": "quarantined",
+          "reasons": [
+            {
+              "code": "ruling_status_without_acceptance",
+              "detail": "r-7777777777777777 claims status accepted with no acceptance record"
+            }
+          ],
+          "supersedes": "r-9999999999999999",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-7777777777777777",
+            "text": "Claims acceptance without evidence",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-9999999999999999",
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "accepted"
+          }
+        },
+        {
+          "id": "r-8888888888888888",
+          "lifecycle": "conflicted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-8888888888888888",
+            "text": "A record with an unresolved merge conflict",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "_conflicts": [
+              {
+                "field": "text",
+                "ours": "one wording",
+                "theirs": "another wording"
+              }
+            ]
+          }
+        },
+        {
+          "id": "r-9999999999999999",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [
+            "r-7777777777777777"
+          ],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-9999999999999999",
+            "text": "The target of an unverifiable successor",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-aaaaaaaaaaaaaaaa",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-bbbbbbbbbbbbbbbb"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-aaaaaaaaaaaaaaaa",
+            "text": "An older wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-bbbbbbbbbbbbbbbb",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": "r-aaaaaaaaaaaaaaaa",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-bbbbbbbbbbbbbbbb",
+            "text": "The newer wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-aaaaaaaaaaaaaaaa",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-cccccccccccccccc",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-dddddddddddddddd",
+          "supersededBy": [
+            "r-dddddddddddddddd"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-cccccccccccccccc",
+            "text": "One side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-dddddddddddddddd",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-dddddddddddddddd",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-cccccccccccccccc",
+          "supersededBy": [
+            "r-cccccccccccccccc"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-dddddddddddddddd",
+            "text": "The other side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-cccccccccccccccc",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-pppppppppppppppp",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-pppppppppppppppp",
+            "text": "A proposal against a quarantined record",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-7777777777777777",
+            "proposedFor": []
+          }
+        }
+      ],
+      "citations": [
+        {
+          "citedId": "r-1111111111111111",
+          "resolution": {
+            "kind": "competing",
+            "message": "ruling r-1111111111111111 has competing successors (r-2222222222222222, r-5555555555555555) -- chain is ambiguous",
+            "ids": [
+              "r-2222222222222222",
+              "r-5555555555555555"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-2222222222222222",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-3333333333333333",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-4444444444444444",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-4444444444444444 is withdrawn and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "withdrawn",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-5555555555555555",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-6666666666666666",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-6666666666666666 is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-7777777777777777",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-7777777777777777 is quarantined and binds nothing -- it is not an accepted ruling (ruling_status_without_acceptance)",
+            "lifecycle": "quarantined",
+            "reasons": [
+              "ruling_status_without_acceptance"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-8888888888888888",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-8888888888888888 is conflicted and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "conflicted",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-9999999999999999",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: r-7777777777777777 claims to supersede ruling r-9999999999999999's chain but the claim cannot be verified -- do not treat any shown ruling as current",
+            "reason": "unverifiable-successor",
+            "ids": [
+              "r-7777777777777777"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-aaaaaaaaaaaaaaaa",
+          "resolution": {
+            "kind": "resolves-to",
+            "message": "ruling r-aaaaaaaaaaaaaaaa has been superseded by r-bbbbbbbbbbbbbbbb",
+            "target": "r-bbbbbbbbbbbbbbbb",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-bbbbbbbbbbbbbbbb",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-cccccccccccccccc",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-cccccccccccccccc is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-dddddddddddddddd",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-dddddddddddddddd is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd"
+            ],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-eeeeeeeeeeeeeeee",
+          "resolution": {
+            "kind": "current",
+            "message": "current",
+            "upwardDependency": true,
+            "board": "orchestrator"
+          }
+        },
+        {
+          "citedId": "r-hhhhhhhhhhhhhhhh",
+          "resolution": {
+            "kind": "resolves-to",
+            "message": "ruling r-hhhhhhhhhhhhhhhh has been superseded by r-eeeeeeeeeeeeeeee",
+            "target": "r-eeeeeeeeeeeeeeee",
+            "upwardDependency": true,
+            "board": "orchestrator"
+          }
+        },
+        {
+          "citedId": "r-pppppppppppppppp",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-pppppppppppppppp is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": true
+          }
+        },
+        {
+          "citedId": "r-zzzzzzzzzzzzzzzz",
+          "resolution": {
+            "kind": "missing",
+            "message": "ruling r-zzzzzzzzzzzzzzzz not found",
+            "upwardDependency": true
+          }
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "cap-changed",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-changed",
+            "name": "cap-changed",
+            "summary": "Synthetic capability cap-changed.",
+            "surfaces": {
+              "files": [
+                "src/changed.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/changed.ts"
+            ],
+            "contract": "Synthetic contract for cap-changed.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-current",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-current",
+            "name": "cap-current",
+            "summary": "Synthetic capability cap-current.",
+            "surfaces": {
+              "files": [
+                "src/current.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/current.ts"
+            ],
+            "contract": "Synthetic contract for cap-current.",
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "terms": [
+              "term-alpha"
+            ],
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-incomplete",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-incomplete",
+            "name": "cap-incomplete",
+            "summary": "Synthetic capability cap-incomplete.",
+            "surfaces": {
+              "files": [
+                "src/incomplete.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/incomplete.ts"
+            ],
+            "contract": "Synthetic contract for cap-incomplete.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-unverifiable",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-unverifiable",
+            "name": "cap-unverifiable",
+            "summary": "Synthetic capability cap-unverifiable.",
+            "surfaces": {
+              "files": [
+                "src/unverifiable.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/unverifiable.ts"
+            ],
+            "contract": "Synthetic contract for cap-unverifiable.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "terms": [
+        {
+          "id": "term-alpha",
+          "effectiveStatus": "current",
+          "reasons": [
+            {
+              "code": "term_thin",
+              "cls": "thin",
+              "detail": "thin entry: no distinction (what it is NOT, or what it differs from)"
+            }
+          ],
+          "pendingNote": null,
+          "record": {
+            "id": "term-alpha",
+            "term": "alpha",
+            "definition": "A synthetic term.",
+            "capabilities": [
+              "cap-current"
+            ],
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "updatedAt": "2026-09-15T00:00:00.000Z"
+          }
+        }
+      ],
+      "diagnostics": [
+        {
+          "file": "tickets/T-9.json",
+          "reason": "invalid JSON"
+        }
+      ]
+    },
+    "unreadable": {
+      "schemaVersion": 1,
+      "writtenAt": "2026-09-24T00:00:00.000Z",
+      "cliVersion": "0.0.0-fixture",
+      "headCommit": "0123456789abcdef0123456789abcdef01234567",
+      "ledgerRevision": "6c371ea0de89f5e58cd4ab58aeca9f8129643f379637b027b463921fb01f4614",
+      "freshnessInputs": {
+        "mode": "structural",
+        "checkedHead": null
+      },
+      "upwardBoard": {
+        "pointer": "none",
+        "state": "not-loaded"
+      },
+      "rulings": [
+        {
+          "id": "r-1111111111111111",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-2222222222222222",
+            "r-5555555555555555"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-1111111111111111",
+            "text": "Logging keeps redaction and request ids on every path",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "6bd82ca1"
+            },
+            "date": "2026-09-06",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-06T18:12:00.000Z"
+          }
+        },
+        {
+          "id": "r-2222222222222222",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-2222222222222222",
+            "text": "Background work carries the request id of the job that enqueued it",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-21T10:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "narrative": {
+              "context": "Jobs lose the request id at the queue boundary"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-22",
+              "createdAt": "2026-09-22T09:00:00.000Z",
+              "payloadDigest": "4bec1d4e9bfde185f9d44c0ec04c96d91745bfb38d419cd012c213f98359b2e1"
+            }
+          }
+        },
+        {
+          "id": "r-3333333333333333",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [
+            "r-6666666666666666"
+          ],
+          "citedBy": [
+            "ISS-1",
+            "T-1"
+          ],
+          "record": {
+            "id": "r-3333333333333333",
+            "text": "Redaction is never skipped",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T11:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": null,
+            "proposedFor": [],
+            "narrative": {
+              "consequences": "Debug builds log redacted values too"
+            },
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-21",
+              "createdAt": "2026-09-21T11:00:00.000Z",
+              "payloadDigest": "2c476104e5bbd5fbd8665b296dcfaa3156ade33cb732ac0ec0c3f2a2a5d43c31"
+            }
+          }
+        },
+        {
+          "id": "r-4444444444444444",
+          "lifecycle": "withdrawn",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-4444444444444444",
+            "text": "Redaction may be skipped in debug builds",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-21",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-21T10:30:00.000Z",
+            "status": "withdrawn",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [
+              "T-2"
+            ],
+            "withdrawal": {
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "createdAt": "2026-09-21T12:00:00.000Z",
+              "reason": "superseded by the owner's direct ruling r-3333333333333333"
+            }
+          }
+        },
+        {
+          "id": "r-5555555555555555",
+          "lifecycle": "accepted",
+          "reasons": [],
+          "supersedes": "r-1111111111111111",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-5555555555555555",
+            "text": "Logging keeps redaction and request ids on every path, including background jobs",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "aaa3eb21"
+            },
+            "date": "2026-09-23",
+            "scopeTags": [
+              "logging"
+            ],
+            "supersedes": "r-1111111111111111",
+            "createdAt": "2026-09-23T08:00:00.000Z",
+            "status": "accepted",
+            "proposesToSupersede": "r-1111111111111111",
+            "proposedFor": [],
+            "acceptance": {
+              "attribution": "owner-direct",
+              "recordedBy": {
+                "client": "claude",
+                "id": "aaa3eb21"
+              },
+              "date": "2026-09-23",
+              "createdAt": "2026-09-23T08:00:00.000Z",
+              "payloadDigest": "3ce6d03b86859e7dcce4b7ad1226ca8f349765c67997ffff2b4cf0491940fb32"
+            }
+          }
+        },
+        {
+          "id": "r-6666666666666666",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-6666666666666666",
+            "text": "A proposal against the current ruling",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-3333333333333333",
+            "proposedFor": [
+              "T-1"
+            ]
+          }
+        },
+        {
+          "id": "r-7777777777777777",
+          "lifecycle": "quarantined",
+          "reasons": [
+            {
+              "code": "ruling_status_without_acceptance",
+              "detail": "r-7777777777777777 claims status accepted with no acceptance record"
+            }
+          ],
+          "supersedes": "r-9999999999999999",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-7777777777777777",
+            "text": "Claims acceptance without evidence",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-9999999999999999",
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "accepted"
+          }
+        },
+        {
+          "id": "r-8888888888888888",
+          "lifecycle": "conflicted",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-8888888888888888",
+            "text": "A record with an unresolved merge conflict",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "_conflicts": [
+              {
+                "field": "text",
+                "ours": "one wording",
+                "theirs": "another wording"
+              }
+            ]
+          }
+        },
+        {
+          "id": "r-9999999999999999",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [
+            "r-7777777777777777"
+          ],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-9999999999999999",
+            "text": "The target of an unverifiable successor",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-aaaaaaaaaaaaaaaa",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [
+            "r-bbbbbbbbbbbbbbbb"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-aaaaaaaaaaaaaaaa",
+            "text": "An older wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-bbbbbbbbbbbbbbbb",
+          "lifecycle": "accepted-legacy",
+          "reasons": [],
+          "supersedes": "r-aaaaaaaaaaaaaaaa",
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-bbbbbbbbbbbbbbbb",
+            "text": "The newer wording",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-aaaaaaaaaaaaaaaa",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-cccccccccccccccc",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-dddddddddddddddd",
+          "supersededBy": [
+            "r-dddddddddddddddd"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [
+            "T-1"
+          ],
+          "record": {
+            "id": "r-cccccccccccccccc",
+            "text": "One side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-dddddddddddddddd",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-dddddddddddddddd",
+          "lifecycle": "superseded",
+          "reasons": [],
+          "supersedes": "r-cccccccccccccccc",
+          "supersededBy": [
+            "r-cccccccccccccccc"
+          ],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-dddddddddddddddd",
+            "text": "The other side of a cycle",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": "r-cccccccccccccccc",
+            "createdAt": "2026-09-10T10:00:00.000Z"
+          }
+        },
+        {
+          "id": "r-pppppppppppppppp",
+          "lifecycle": "proposed",
+          "reasons": [],
+          "supersedes": null,
+          "supersededBy": [],
+          "uncertainSuccessors": [],
+          "proposalsAgainst": [],
+          "citedBy": [],
+          "record": {
+            "id": "r-pppppppppppppppp",
+            "text": "A proposal against a quarantined record",
+            "attribution": "owner-direct",
+            "recordedBy": {
+              "client": "claude",
+              "id": "fixture-recorder"
+            },
+            "date": "2026-09-10",
+            "scopeTags": [
+              "synthetic"
+            ],
+            "supersedes": null,
+            "createdAt": "2026-09-10T10:00:00.000Z",
+            "status": "proposed",
+            "proposesToSupersede": "r-7777777777777777",
+            "proposedFor": []
+          }
+        }
+      ],
+      "citations": [
+        {
+          "citedId": "r-1111111111111111",
+          "resolution": {
+            "kind": "competing",
+            "message": "ruling r-1111111111111111 has competing successors (r-2222222222222222, r-5555555555555555) -- chain is ambiguous",
+            "ids": [
+              "r-2222222222222222",
+              "r-5555555555555555"
+            ],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-2222222222222222",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current",
+            "reason": "unreadable-successor",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-3333333333333333",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current",
+            "reason": "unreadable-successor",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-4444444444444444",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-4444444444444444 is withdrawn and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "withdrawn",
+            "reasons": [],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-5555555555555555",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current",
+            "reason": "unreadable-successor",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-6666666666666666",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-6666666666666666 is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-7777777777777777",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-7777777777777777 is quarantined and binds nothing -- it is not an accepted ruling (ruling_status_without_acceptance)",
+            "lifecycle": "quarantined",
+            "reasons": [
+              "ruling_status_without_acceptance"
+            ],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-8888888888888888",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-8888888888888888 is conflicted and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "conflicted",
+            "reasons": [],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-9999999999999999",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: r-7777777777777777 claims to supersede ruling r-9999999999999999's chain but the claim cannot be verified -- do not treat any shown ruling as current",
+            "reason": "unverifiable-successor",
+            "ids": [
+              "r-7777777777777777"
+            ],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-aaaaaaaaaaaaaaaa",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current",
+            "reason": "unreadable-successor",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-bbbbbbbbbbbbbbbb",
+          "resolution": {
+            "kind": "indeterminate",
+            "message": "chain state unverifiable: one or more ruling files are unreadable and may hide a successor -- do not treat any shown ruling as current",
+            "reason": "unreadable-successor",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-cccccccccccccccc",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-cccccccccccccccc is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc"
+            ],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-dddddddddddddddd",
+          "resolution": {
+            "kind": "cycle",
+            "message": "ruling r-dddddddddddddddd is part of a supersedes cycle -- chain is invalid",
+            "ids": [
+              "r-dddddddddddddddd",
+              "r-cccccccccccccccc",
+              "r-dddddddddddddddd"
+            ],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-eeeeeeeeeeeeeeee",
+          "resolution": {
+            "kind": "missing",
+            "message": "ruling r-eeeeeeeeeeeeeeee not found",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-hhhhhhhhhhhhhhhh",
+          "resolution": {
+            "kind": "missing",
+            "message": "ruling r-hhhhhhhhhhhhhhhh not found",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-jjjjjjjjjjjjjjjj",
+          "resolution": {
+            "kind": "unreadable",
+            "message": "ruling r-jjjjjjjjjjjjjjjj is unreadable",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-kkkkkkkkkkkkkkkk",
+          "resolution": {
+            "kind": "unreadable",
+            "message": "ruling r-kkkkkkkkkkkkkkkk is unreadable",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-mmmmmmmmmmmmmmmm",
+          "resolution": {
+            "kind": "unreadable",
+            "message": "ruling r-mmmmmmmmmmmmmmmm is unreadable",
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-pppppppppppppppp",
+          "resolution": {
+            "kind": "nonaccepted",
+            "message": "ruling r-pppppppppppppppp is proposed and binds nothing -- it is not an accepted ruling",
+            "lifecycle": "proposed",
+            "reasons": [],
+            "upwardDependency": false
+          }
+        },
+        {
+          "citedId": "r-zzzzzzzzzzzzzzzz",
+          "resolution": {
+            "kind": "missing",
+            "message": "ruling r-zzzzzzzzzzzzzzzz not found",
+            "upwardDependency": false
+          }
+        }
+      ],
+      "capabilities": [
+        {
+          "id": "cap-changed",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-changed",
+            "name": "cap-changed",
+            "summary": "Synthetic capability cap-changed.",
+            "surfaces": {
+              "files": [
+                "src/changed.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/changed.ts"
+            ],
+            "contract": "Synthetic contract for cap-changed.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-current",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-current",
+            "name": "cap-current",
+            "summary": "Synthetic capability cap-current.",
+            "surfaces": {
+              "files": [
+                "src/current.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/current.ts"
+            ],
+            "contract": "Synthetic contract for cap-current.",
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "terms": [
+              "term-alpha"
+            ],
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-incomplete",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-incomplete",
+            "name": "cap-incomplete",
+            "summary": "Synthetic capability cap-incomplete.",
+            "surfaces": {
+              "files": [
+                "src/incomplete.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/incomplete.ts"
+            ],
+            "contract": "Synthetic contract for cap-incomplete.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        },
+        {
+          "id": "cap-unverifiable",
+          "storedStatus": "current",
+          "effectiveStatus": "current",
+          "reasons": [],
+          "pendingNote": null,
+          "freshness": {
+            "kind": "not-checked",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            }
+          },
+          "record": {
+            "id": "cap-unverifiable",
+            "name": "cap-unverifiable",
+            "summary": "Synthetic capability cap-unverifiable.",
+            "surfaces": {
+              "files": [
+                "src/unverifiable.ts"
+              ]
+            },
+            "entryPoints": [
+              "src/unverifiable.ts"
+            ],
+            "contract": "Synthetic contract for cap-unverifiable.",
+            "checkedAt": {
+              "sha": "0000000000000000000000000000000000000000",
+              "date": "2026-09-15"
+            },
+            "status": "current"
+          }
+        }
+      ],
+      "terms": [
+        {
+          "id": "term-alpha",
+          "effectiveStatus": "current",
+          "reasons": [
+            {
+              "code": "term_thin",
+              "cls": "thin",
+              "detail": "thin entry: no distinction (what it is NOT, or what it differs from)"
+            }
+          ],
+          "pendingNote": null,
+          "record": {
+            "id": "term-alpha",
+            "term": "alpha",
+            "definition": "A synthetic term.",
+            "capabilities": [
+              "cap-current"
+            ],
+            "rulings": [
+              "r-3333333333333333"
+            ],
+            "updatedAt": "2026-09-15T00:00:00.000Z"
+          }
+        }
+      ],
+      "diagnostics": [
+        {
+          "file": "rulings/",
+          "reason": "rulings/r-jjjjjjjjjjjjjjjj.json: invalid JSON"
+        },
+        {
+          "file": "rulings/",
+          "reason": "rulings/r-kkkkkkkkkkkkkkkk.json: filename does not match record id, skipped"
+        },
+        {
+          "file": "tickets/T-9.json",
+          "reason": "invalid JSON"
+        }
+      ]
+    }
+  }
+}
