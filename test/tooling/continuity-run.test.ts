@@ -14,7 +14,7 @@ import {
 } from "../../scripts/continuity-lib.js";
 import {
   buildClaudeArgs, parseArgs, buildManifestHash, readAttempts, INPUT_PATHS, checkOutputPaths, validateOwnerException, effectiveConfigHash, commandTokens,
-  provisionFreshConfig, runAttempt, runMatrix, RateLimitStopError, MachineLoadStopError, bracketedInputs, type Preflight, type RunOptions, type SpawnFn,
+  provisionFreshConfig, runAttempt, runMatrix, RateLimitStopError, MachineLoadStopError, ConfigDriftStopError, pluginInventoryHash, bracketedInputs, type Preflight, type RunOptions, type SpawnFn,
 } from "../../scripts/continuity-run.js";
 import { aggregate, COMPARISON_CHECKPOINT, scoringRequest, validateScore, mechanicalFailureScore, selectObservations, renderReport, loadScore, publishText, type AttemptRecord, type Observation,
   taskMaterialOf, experimentTaskMaterial, compareTaskMaterial, type TaskMaterialResult } from "../../scripts/continuity-score.js";
@@ -892,6 +892,33 @@ describe("dispatcher arguments, CLI and preflight helpers", () => {
     provisionFreshConfig(a); provisionFreshConfig(b);
     expect(effectiveConfigHash(a).sha256).toBe(effectiveConfigHash(b).sha256);
   });
+  it("ISS-1315: plugin inventories hash without the timestamps the client rewrites, and keep what a plugin is", () => {
+    const market = (repo: string, stamp: string): string => JSON.stringify({ official: { source: { source: "github", repo }, installLocation: "/x/official", lastUpdated: stamp } });
+    const cfg = tmp("cont-plug-"); mkdirSync(join(cfg, "plugins"));
+    const mk = join(cfg, "plugins", "known_marketplaces.json");
+    writeFileSync(mk, market("a/official", "2026-09-26T05:00:00.000Z"));
+    const h1 = effectiveConfigHash(cfg);
+    writeFileSync(mk, market("a/official", "2026-09-26T17:02:11.693Z"));
+    expect(effectiveConfigHash(cfg).sha256).toBe(h1.sha256);
+    writeFileSync(mk, market("b/official", "2026-09-26T05:00:00.000Z"));
+    expect(effectiveConfigHash(cfg).sha256).not.toBe(h1.sha256);
+    // Any depth, both keys, key order irrelevant.
+    const installed = (at: string, version: string) => JSON.stringify({ version: 2, plugins: { "p@m": [{ version, installedAt: at, lastUpdated: at, scope: "user" }] } });
+    expect(pluginInventoryHash(installed("2026-01-01", "1.0.0"))).toEqual(pluginInventoryHash(installed("2026-09-26", "1.0.0")));
+    expect(pluginInventoryHash(installed("2026-01-01", "1.0.0")).sha256).not.toBe(pluginInventoryHash(installed("2026-01-01", "1.0.1")).sha256);
+    expect(pluginInventoryHash('{"b":1,"a":2}').sha256).toBe(pluginInventoryHash('{"a":2,"b":1}').sha256);
+    // A "__proto__" key is data like any other: a change under it moves the hash, at the top and nested.
+    expect(pluginInventoryHash('{"__proto__":{"v":"1.0.0"}}').sha256).not.toBe(pluginInventoryHash('{"__proto__":{"v":"1.0.1"}}').sha256);
+    expect(pluginInventoryHash('{"p":{"__proto__":1}}').sha256).not.toBe(pluginInventoryHash('{"p":{}}').sha256);
+    // Unparseable text still hashes (raw), and the inventory says so, as settings.json does.
+    writeFileSync(mk, "{ not json");
+    const bad = effectiveConfigHash(cfg);
+    expect(bad.inventory["plugins/known_marketplaces.json"]).toMatch(/^[0-9a-f]{64}$/);
+    expect(bad.inventory["plugins/known_marketplaces.json:parse"]).toBe("invalid-json");
+    expect(h1.inventory["plugins/known_marketplaces.json:parse"]).toBeUndefined();
+    writeFileSync(mk, "{ not json!");
+    expect(effectiveConfigHash(cfg).sha256).not.toBe(bad.sha256);
+  });
 });
 
 // --- attempt and matrix lifecycle with a fake child process ------------------------------------
@@ -999,7 +1026,7 @@ function options(over: Partial<RunOptions> = {}): RunOptions {
 
 /** Every lifecycle call goes through here so no test depends on a built dist/. */
 type LoadDeps = { loadSample?: () => { load1: number | null; swapFreeBytes: number | null }; loadSampleMs?: number; now?: () => number };
-const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter } & LoadDeps): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string>; inputHashes: typeof fakeInputs } & LoadDeps =>
+const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter; log?: (line: string) => void } & LoadDeps): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string>; inputHashes: typeof fakeInputs } & LoadDeps =>
   ({ loadSample: () => ({ load1: 1, swapFreeBytes: 8 * 1024 ** 3 }), ...extra, distHashes: fakeDist, inputHashes: fakeInputs });
 /** A clock that advances a minute per reading, so a few real milliseconds of sampling span the rule's five minutes. */
 const minuteClock = (): (() => number) => { let t = 0; return () => (t += 60_000); };
@@ -1011,7 +1038,7 @@ describe("attempt lifecycle (fake child process, no model)", () => {
   it("a completed session is valid, completed, evidence-complete, and every published byte is sanitised", async () => {
     const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
-    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, rateLimited: false, machineLoad: false, evidenceComplete: true, inputDrift: { invalidating: [], disclosed: [], errors: {} } });
+    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, rateLimited: false, machineLoad: false, evidenceComplete: true, inputDrift: { invalidating: [], disclosed: [], errors: {} }, configDrift: null, invalidReasons: [], wallMs: expect.any(Number), exitCode: 0 });
     const pub = pubDirOf(o, pf); const raw = rawDirOf(o, pf);
     for (const f of ["record.json", "completed", "artefacts.sha256.json", "load.json", "evidence.jsonl", "plan.initial.md", "plan.md", "plan-context.md", "manifest.json", "usage.json", "redaction.json", "task.json", "handover.md", "ledger.changes.json"]) expect(existsSync(join(pub, f)), f).toBe(true);
     expect(existsSync(join(raw, "transcript.jsonl"))).toBe(true);
@@ -1087,6 +1114,49 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     const r = await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true }, again) }));
     expect(again).toHaveLength(2);
     expect(r.summary).toContain("T-4#1: satisfied by attempt-002");
+  });
+
+  it("ISS-1315: a config that drifted since preflight spawns nothing, costs no attempt, exits the matrix, and resumes once restored", async () => {
+    const shared = tmp("cont-shared-"); provisionFreshConfig(shared);
+    mkdirSync(join(shared, "plugins")); writeFileSync(join(shared, "plugins", "known_marketplaces.json"), JSON.stringify({ m: { source: { repo: "a/m" }, lastUpdated: "t1" } }));
+    const cfg = effectiveConfigHash(shared);
+    const o = options({ tasks: ["T-4", "T-3"], isolation: "shared" });
+    const pf = fakePreflight({ isolation: "shared", sharedConfigDir: shared, configHash: cfg.sha256, configInventory: cfg.inventory });
+    writeFileSync(join(shared, "plugins", "known_marketplaces.json"), JSON.stringify({ m: { source: { repo: "b/m" }, lastUpdated: "t1" } }));
+    writeFileSync(join(shared, "CLAUDE.md"), "drifted");
+    const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = []; const lines: string[] = [];
+    const err = await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true }, seen), log: (l) => lines.push(l) })).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigDriftStopError);
+    expect((err as Error).message).toContain("config drifted since preflight (CLAUDE.md, plugins/known_marketplaces.json)");
+    expect(seen).toHaveLength(0);
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as Record<string, unknown>;
+    expect(record).toMatchObject({ validity: "invalid", invalidReasons: ["config-drift"], completion: "not-started", configDrift: ["CLAUDE.md", "plugins/known_marketplaces.json"], wallMs: 0 });
+    expect(lines).toEqual(["attempt T-4#1.1 invalid [config-drift] wall=0 exit=none"]);
+    const expDir = join(o.out, pf.experiment.slice(0, 12));
+    expect(readAttempts(join(expDir, "T-4", "repeat-1"))[0]!.record).toMatchObject({ completion: "not-started", invalidReasons: ["config-drift"] });
+    expect(existsSync(join(expDir, "T-3"))).toBe(false);
+    // Restored: the refusal is not counted, so the cell resumes at attempt-002 with its full retry budget.
+    rmSync(join(shared, "CLAUDE.md"));
+    writeFileSync(join(shared, "plugins", "known_marketplaces.json"), JSON.stringify({ m: { source: { repo: "a/m" }, lastUpdated: "t2" } }));
+    const again: typeof seen = [];
+    const r = await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true }, again), log: () => {} }));
+    expect(again).toHaveLength(2);
+    expect(r.summary).toContain("T-4#1: satisfied by attempt-002");
+  });
+
+  it("ISS-1315: a not-started refusal never counts toward the retry budget", () => {
+    const rec = (n: number, extra: Record<string, unknown> = {}) => ({ name: `attempt-00${n}`, record: { validity: "invalid" as const, experimentHash: "e", completed: true, evidenceComplete: false, task: "T-4", repeat: 1, invalidReasons: ["config-drift"], ...extra } });
+    const refused = [1, 2, 3, 4, 5, 6].map((n) => rec(n, { completion: "not-started" }));
+    expect(decideCell(refused, "e", { task: "T-4", repeat: 1 })).toEqual({ kind: "run", nextAttempt: 7, mismatched: [] });
+    expect(decideCell([1, 2, 3, 4, 5, 6].map((n) => rec(n, { completion: "completed" })), "e", { task: "T-4", repeat: 1 }).kind).toBe("exhausted");
+  });
+
+  it("every attempt prints one progress line: cell, attempt, validity, reasons, wall seconds, exit code", async () => {
+    const o = options({ repeats: 2 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = []; const lines: string[] = [];
+    await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true }, seen), log: (l) => lines.push(l) }));
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^attempt T-4#1\.1 valid \[\] wall=\d+ exit=0$/);
+    expect(lines[1]).toMatch(/^attempt T-4#2\.1 valid \[\] wall=\d+ exit=0$/);
   });
 
   it("a timeout under sustained measured load is invalid (machine-load), not counted, and stops the matrix", async () => {

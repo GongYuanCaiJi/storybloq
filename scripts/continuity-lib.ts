@@ -619,7 +619,8 @@ export function parseSwapFree(text: string): number | null {
 
 // --- completion --------------------------------------------------------------
 
-export type CompletionStatus = "completed" | "completed-no-commit" | "incomplete";
+/** `not-started`: refused before the spawn (ISS-1315); nothing ran, so the attempt counts toward no retry budget. */
+export type CompletionStatus = "completed" | "completed-no-commit" | "incomplete" | "not-started";
 
 export interface CompletionInputs {
   readonly stateJson: { state?: string; status?: string; terminationReason?: string; completedTickets?: readonly { id?: string; displayId?: string }[] } | null;
@@ -1137,6 +1138,7 @@ export interface AttemptRecordLike {
   readonly task?: string;
   readonly repeat?: number;
   readonly invalidReasons?: readonly string[];
+  readonly completion?: string;
 }
 
 export type CellDecision =
@@ -1160,10 +1162,15 @@ export function decideCell(attempts: readonly { readonly name: string; readonly 
   for (const a of numbered) {
     if (a.record && matches(a.record) && a.record.completed && a.record.validity === "valid" && a.record.experimentHash === experiment) return { kind: "satisfied", attempt: a.name, evidenceComplete: a.record.evidenceComplete };
   }
-  const counted = numbered.filter((a) => a.record === null || (a.record.experimentHash === experiment && matches(a.record) && !a.record.invalidReasons?.some((r) => r === "rate-limited" || r === "machine-load"))).length;
+  const counted = numbered.filter((a) => a.record === null || (a.record.experimentHash === experiment && matches(a.record) && a.record.completion !== "not-started" && !a.record.invalidReasons?.some((r) => r === "rate-limited" || r === "machine-load"))).length;
   if (counted > MAX_INVALID_RETRIES) return { kind: "exhausted", mismatched };
   const next = (numbered.at(-1)?.n ?? 0) + 1;
   return { kind: "run", nextAttempt: next, mismatched };
+}
+
+/** ISS-1315: the inventory entries whose hash differs, or that exist on one side only, sorted. */
+export function configInventoryDrift(expected: Readonly<Record<string, string>>, actual: Readonly<Record<string, string>>): string[] {
+  return [...new Set([...Object.keys(expected), ...Object.keys(actual)])].filter((k) => expected[k] !== actual[k]).sort();
 }
 
 export function attemptDirName(n: number): string {

@@ -19,7 +19,7 @@ import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
   validity, rateLimitStop, machineLoadStop, parseSwapFree, LOAD_RULE, type LoadSample, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
-  environmentSecrets, ambiguousEnvironmentSecrets, INPUT_PATHS, hashInputsByPath, taskMaterial, driftedPaths, classifyInputDrift,
+  environmentSecrets, ambiguousEnvironmentSecrets, INPUT_PATHS, hashInputsByPath, taskMaterial, driftedPaths, classifyInputDrift, configInventoryDrift,
 } from "./continuity-lib.js";
 import { killSidecar } from "../src/autonomous/liveness.js";
 import { loadRulingsSafe } from "../src/core/ruling-loader.js";
@@ -234,13 +234,42 @@ export function effectiveConfigHash(configDir: string): { readonly sha256: strin
       }
     }
   }
-  for (const f of ["CLAUDE.md", "plugins/installed_plugins.json", "plugins/known_marketplaces.json"]) {
+  const claudeMd = join(configDir, "CLAUDE.md");
+  if (existsSync(claudeMd)) inv["CLAUDE.md"] = sha256(readFileSync(claudeMd));
+  for (const f of PLUGIN_INVENTORY_FILES) {
     const p = join(configDir, f);
-    if (existsSync(p)) inv[f] = sha256(readFileSync(p));
+    if (!existsSync(p)) continue;
+    const h = pluginInventoryHash(readFileSync(p, "utf-8"));
+    inv[f] = h.sha256;
+    if (!h.parseOk) inv[`${f}:parse`] = "invalid-json";
   }
   const skills = join(configDir, "skills", "story");
   if (existsSync(skills)) inv["skills/story"] = hashTree(skills).sha256;
   return { sha256: sha256(JSON.stringify(inv)), inventory: inv };
+}
+
+const PLUGIN_INVENTORY_FILES = ["plugins/installed_plugins.json", "plugins/known_marketplaces.json"] as const;
+/** Timestamps the client rewrites on every session start (ISS-1315); what a plugin IS stays pinned. */
+const VOLATILE_PLUGIN_KEYS: ReadonlySet<string> = new Set(["lastUpdated", "installedAt"]);
+
+function withoutVolatileKeys(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(withoutVolatileKeys);
+  if (v && typeof v === "object") {
+    // Null prototype: a parsed "__proto__" key must stay an own property, or it would hit the setter and vanish from the hash.
+    const out: Record<string, unknown> = Object.create(null);
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      if (!VOLATILE_PLUGIN_KEYS.has(k)) out[k] = withoutVolatileKeys((v as Record<string, unknown>)[k]);
+    }
+    return out;
+  }
+  return v;
+}
+
+/** A plugin inventory file hashed as sorted-key JSON without its volatile keys; unparseable text hashes raw. */
+export function pluginInventoryHash(text: string): { readonly sha256: string; readonly parseOk: boolean } {
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return { sha256: sha256(text), parseOk: false }; }
+  return { sha256: sha256(JSON.stringify(withoutVolatileKeys(parsed))), parseOk: true };
 }
 
 function isDir(p: string): boolean {
@@ -400,6 +429,8 @@ export interface AttemptDeps {
   /** The machine-load sampler and its period; tests inject both. */
   readonly loadSample?: () => Omit<LoadSample, "t">;
   readonly loadSampleMs?: number;
+  /** The per-attempt progress line; stdout by default. */
+  readonly log?: (line: string) => void;
 }
 
 /** One reading of this Mac: load1 from the kernel, free swap from vm.swapusage; an unreadable figure is null. */
@@ -420,6 +451,11 @@ export interface AttemptOutcome {
   readonly machineLoad: boolean;
   readonly evidenceComplete: boolean;
   readonly inputDrift: InputDrift;
+  /** ISS-1315: the inventory entries that had drifted when the attempt was refused before its spawn, else null. */
+  readonly configDrift: readonly string[] | null;
+  readonly invalidReasons: readonly string[];
+  readonly wallMs: number;
+  readonly exitCode: number | null;
 }
 
 async function validateClean(root: string): Promise<void> {
@@ -481,6 +517,25 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
       configDir = pf.sharedConfigDir!;
     }
     const cfgBefore = effectiveConfigHash(configDir);
+    // ISS-1315: a config that has moved since preflight moved for every attempt after it too. Spawn nothing,
+    // record the refusal (not counted toward the retry budget), and let the matrix stop for repair.
+    if (cfgBefore.sha256 !== pf.configHash) {
+      const drifted = configInventoryDrift(pf.configInventory, cfgBefore.inventory);
+      const reasons = ["config-drift"];
+      const record = {
+        experimentHash: pf.experiment, arm: o.arm, task, repeat, attempt: attemptNo, ticketId, validity: "invalid", invalidReasons: reasons, inputDrift: { invalidating: [], disclosed: [], errors: {} },
+        completion: "not-started", completionReason: `config drifted since preflight: ${drifted.join(", ") || "inventory hash"}`, completed: true, evidenceComplete: false, requiredArtefacts: [], wallMs: 0,
+        killKind: null, interrupted: false, rateLimitStop: null, machineLoadStop: null, exitCode: null, exitSignal: null, configDrift: drifted, finishedAt: new Date().toISOString(),
+      };
+      const sctx = { workdir, home: homedir(), user: userInfo().username, pkgRoot: PKG_ROOT, allowlist: pf.allowlist };
+      const recordText = sanitize(JSON.stringify(record, null, 2), sctx).text;
+      const recordVerdict = publicationCheck(recordText, pf.allowlist, { secrets: RUNNER_SECRETS });
+      if (!recordVerdict.ok) throw new Error(`record.json would publish blocked content (${recordVerdict.blocked.map((b) => b.label).join(",")}); runner bug`);
+      await writeAtomic(join(pubDir, "record.json"), recordText);
+      await writeAtomic(join(pubDir, "artefacts.sha256.json"), JSON.stringify({ "record.json": sha256(readFileSync(join(pubDir, "record.json"))) }, null, 2));
+      await writeAtomic(join(pubDir, "completed"), `${new Date().toISOString()}\n`);
+      return { validity: "invalid", completion: "not-started", interrupted: false, rateLimited: false, machineLoad: false, evidenceComplete: false, inputDrift: record.inputDrift, configDrift: drifted, invalidReasons: reasons, wallMs: 0, exitCode: null };
+    }
 
     const mcpConfigPath = join(workdir, ".continuity-mcp.json");
     writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: { storybloq: { command: process.execPath, args: [join(PKG_ROOT, "dist", "mcp.js")] } } }, null, 2));
@@ -729,7 +784,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     await writeAtomic(join(pubDir, "artefacts.sha256.json"), JSON.stringify(hashes, null, 2));
     for (const [name, h] of Object.entries(hashes)) if (sha256(readFileSync(join(pubDir, name))) !== h) throw new Error(`artefact ${name} changed under the writer`);
     await writeAtomic(join(pubDir, "completed"), `${new Date().toISOString()}\n`);
-    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, rateLimited: limitStop !== null, machineLoad: loadStop !== null, evidenceComplete, inputDrift: drift };
+    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, rateLimited: limitStop !== null, machineLoad: loadStop !== null, evidenceComplete, inputDrift: drift, configDrift: null, invalidReasons: v.reasons, wallMs, exitCode: exit.code };
   } catch (err) {
     failure("attempt", err);
     throw err;
@@ -748,6 +803,11 @@ export class MachineLoadStopError extends Error {
   constructor(message: string) { super(message); this.name = "MachineLoadStopError"; }
 }
 
+/** ISS-1315: raised when the client config drifted before a spawn; a re-run after the config is restored resumes. */
+export class ConfigDriftStopError extends Error {
+  constructor(message: string) { super(message); this.name = "ConfigDriftStopError"; }
+}
+
 /** Raised when a cell publishes without its evidence: the experiment cannot qualify, so the matrix stops. */
 export class EvidenceIncompleteError extends Error {
   constructor(message: string) { super(message); this.name = "EvidenceIncompleteError"; }
@@ -757,7 +817,7 @@ export class EvidenceIncompleteError extends Error {
 
 export interface AttemptEntry {
   readonly name: string;
-  readonly record: { readonly validity: "valid" | "invalid"; readonly experimentHash: string; readonly completed: boolean; readonly evidenceComplete: boolean; readonly task?: string; readonly repeat?: number; readonly invalidReasons?: readonly string[] } | null;
+  readonly record: { readonly validity: "valid" | "invalid"; readonly experimentHash: string; readonly completed: boolean; readonly evidenceComplete: boolean; readonly task?: string; readonly repeat?: number; readonly invalidReasons?: readonly string[]; readonly completion?: string } | null;
   readonly reason?: string;
 }
 
@@ -767,7 +827,7 @@ export function readAttempts(cellDir: string): AttemptEntry[] {
   return readdirSync(cellDir).filter((d) => d.startsWith("attempt-")).map((name): AttemptEntry => {
     const v = verifyAttemptDir(join(cellDir, name));
     if (!v.record) return { name, record: null, reason: v.reason ?? undefined };
-    return { name, record: { validity: v.record.validity, experimentHash: v.record.experimentHash, completed: true, evidenceComplete: v.evidenceComplete, task: v.record.task, repeat: v.record.repeat, invalidReasons: v.record.invalidReasons }, reason: v.reason ?? undefined };
+    return { name, record: { validity: v.record.validity, experimentHash: v.record.experimentHash, completed: true, evidenceComplete: v.evidenceComplete, task: v.record.task, repeat: v.record.repeat, invalidReasons: v.record.invalidReasons, completion: v.record.completion }, reason: v.reason ?? undefined };
   });
 }
 
@@ -805,8 +865,13 @@ export async function runMatrix(o: RunOptions, pf: Preflight, deps: AttemptDeps 
         }
         if (decision.kind === "exhausted") { cells.push({ task, repeat, satisfied: false, evidenceComplete: false, attempt: null }); summary.push(`${task}#${repeat}: EXHAUSTED (only invalid attempts)`); break; }
         const r = await runAttempt(o, pf, task, repeat, decision.nextAttempt, deps);
+        (deps.log ?? ((line: string) => process.stdout.write(`${line}\n`)))(`attempt ${task}#${repeat}.${decision.nextAttempt} ${r.validity} [${r.invalidReasons.join(", ")}] wall=${Math.round(r.wallMs / 1000)} exit=${r.exitCode ?? "none"}`);
         const driftNote = `${r.inputDrift.invalidating.length ? ` INPUT DRIFT (${r.inputDrift.invalidating.join(", ")})` : ""}${r.inputDrift.disclosed.length ? ` input drift disclosed (${r.inputDrift.disclosed.join(", ")})` : ""}`;
         summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}${r.rateLimited ? " RATE-LIMITED" : ""}${r.machineLoad ? " MACHINE-LOAD" : ""}${driftNote}`);
+        if (r.configDrift !== null) {
+          writeExperiment(o, pf, cells, summary, "the client config drifted since preflight; restore it (or rerun preflight) and re-run the same command");
+          throw new ConfigDriftStopError(`continuity-run: ${task}#${repeat} refused before its spawn: config drifted since preflight (${r.configDrift.join(", ") || "inventory hash"}). No attempt was spent; no further attempts started.`);
+        }
         if (r.interrupted) {
           writeExperiment(o, pf, cells, summary, "interrupted by the operator");
           throw new SessionKilledError("external-kill", `continuity-run: interrupted during ${task}#${repeat}; no further attempts started`);
@@ -851,6 +916,6 @@ async function main(): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     process.stderr.write(`${err instanceof SessionKilledError ? `[${err.kind}] ` : ""}${(err as Error).stack ?? String(err)}\n`);
-    process.exit(err instanceof SessionKilledError ? 130 : err instanceof EvidenceIncompleteError ? 4 : err instanceof RateLimitStopError ? 5 : err instanceof MachineLoadStopError ? 6 : 1);
+    process.exit(err instanceof SessionKilledError ? 130 : err instanceof EvidenceIncompleteError ? 4 : err instanceof RateLimitStopError ? 5 : err instanceof MachineLoadStopError ? 6 : err instanceof ConfigDriftStopError ? 7 : 1);
   });
 }
