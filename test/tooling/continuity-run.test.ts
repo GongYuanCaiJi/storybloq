@@ -642,6 +642,20 @@ describe("hashing", () => {
     expect(hashTree(inst).sha256).not.toBe(h1);
     expect(hashTree(inst).links).toEqual(["extra.md"]);
   });
+  it("the installer's marker and a well-formed fingerprint sidecar are exempt; a malformed sidecar is an extra file", () => {
+    const root = tmp("cont-fp-");
+    const src = join(root, "src"); const inst = join(root, "inst");
+    for (const d of [src, inst]) mkdirSync(d);
+    writeFileSync(join(src, "SKILL.md"), "same"); writeFileSync(join(inst, "SKILL.md"), "same");
+    writeFileSync(join(inst, ".storybloq-version"), "1.16.0\n");
+    writeFileSync(join(inst, ".storybloq-skill-fingerprint"), `sha256:${"a".repeat(64)}\n`);
+    const ok = skillPayloadDiff(inst, src);
+    expect(ok).toEqual({ ok: true, extra: [], missing: [], changed: [], marker: "1.16.0" });
+    writeFileSync(join(inst, ".storybloq-skill-fingerprint"), "sha256:not-a-digest\n");
+    const bad = skillPayloadDiff(inst, src);
+    expect(bad.ok).toBe(false);
+    expect(bad.extra).toEqual([".storybloq-skill-fingerprint"]);
+  });
   it("volatile names are skipped only directly under .story; a source directory named telemetry still counts", () => {
     const root = tmp("cont-vol-");
     mkdirSync(join(root, "src", "telemetry"), { recursive: true }); writeFileSync(join(root, "src", "telemetry", "x.ts"), "1");

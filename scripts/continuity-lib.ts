@@ -1273,14 +1273,27 @@ export function qualifies(i: QualificationInputs): { readonly qualifying: boolea
 // --- skill payload inventory ------------------------------------------------
 
 export const SKILL_MARKER_FILE = ".storybloq-version";
+/**
+ * ISS-1302's installer sidecar beside the marker, one `sha256:<hex>` line
+ * (src/core/skill-version-marker.ts). Exempt only in that shape: anything else
+ * under this name is an extra file like any other.
+ */
+export const SKILL_FINGERPRINT_FILE = ".storybloq-skill-fingerprint";
+const SKILL_FINGERPRINT_SHAPE = /^sha256:[0-9a-f]{64}$/;
 
-/** Installed skill payload equals the source payload except for exactly the documented marker. */
+/** Installed skill payload equals the source payload except for exactly the documented marker and fingerprint sidecar. */
 export function skillPayloadDiff(installedDir: string, sourceDir: string): { readonly ok: boolean; readonly extra: string[]; readonly missing: string[]; readonly changed: string[]; readonly marker: string | null } {
   const inst = hashTree(installedDir);
   const src = hashTree(sourceDir);
   const instSet = new Set(inst.files);
   const srcSet = new Set(src.files);
-  const extra = [...inst.files.filter((f) => !srcSet.has(f) && f !== SKILL_MARKER_FILE), ...inst.links.map((l) => `${l} (symlink)`), ...src.links.map((l) => `${l} (symlink in source)`)];
+  const sidecar = (f: string): boolean => {
+    if (f === SKILL_MARKER_FILE) return true;
+    if (f !== SKILL_FINGERPRINT_FILE) return false;
+    // Unreadable is not exempt: it stays an extra file, never a crash.
+    try { return SKILL_FINGERPRINT_SHAPE.test(readFileSync(join(installedDir, f), "utf-8").trim()); } catch { return false; }
+  };
+  const extra = [...inst.files.filter((f) => !srcSet.has(f) && !sidecar(f)), ...inst.links.map((l) => `${l} (symlink)`), ...src.links.map((l) => `${l} (symlink in source)`)];
   const missing = src.files.filter((f) => !instSet.has(f));
   const changed = src.files.filter((f) => instSet.has(f) && !readFileSync(join(installedDir, f)).equals(readFileSync(join(sourceDir, f))));
   const markerPath = join(installedDir, SKILL_MARKER_FILE);
