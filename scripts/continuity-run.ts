@@ -11,19 +11,20 @@
  */
 import { spawn as nodeSpawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, copyFileSync, readdirSync, createWriteStream, cpSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir, homedir, userInfo } from "node:os";
+import { tmpdir, homedir, userInfo, loadavg } from "node:os";
 import { dirname, join, resolve, basename } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertSubscriptionAuthOnly, assertValidTimerMs, writeAtomic, SessionKilledError, ALTERNATE_AUTH_ENV_VARS } from "./headless-common.js";
 import { jsonShapePreserved,
   TASKS, type Task, REPEATS, ticketIdForTask, materialize, variantDiscoveryViolations, parseStream, summarizeStream,
-  validity, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
+  validity, rateLimitStop, machineLoadStop, parseSwapFree, LOAD_RULE, type LoadSample, completion, sanitize, publicationCheck, fixtureCredentialAllowlist, diffLedger, decideCell, attemptDirName,
   qualifies, experimentHash, hashInputs, hashTree, sha256, skillPayloadDiff, verifyAttemptDir, sameHashes, type ExperimentInputs, type ToolCallRecord, type CompletionStatus,
   environmentSecrets, ambiguousEnvironmentSecrets, INPUT_PATHS, hashInputsByPath, taskMaterial, driftedPaths, classifyInputDrift,
 } from "./continuity-lib.js";
 import { killSidecar } from "../src/autonomous/liveness.js";
 import { loadRulingsSafe } from "../src/core/ruling-loader.js";
 import { buildSuccessorIndex } from "../src/core/ruling.js";
+import { classifyLifecycle } from "../src/core/ruling-lifecycle.js";
 import { loadProject } from "../src/core/project-loader.js";
 import { handleValidate } from "../src/cli/commands/validate.js";
 import type { CommandContext } from "../src/cli/types.js";
@@ -266,7 +267,14 @@ export function validateOwnerException(id: string, workspaceRoot: string): { rea
   if (!ruling) throw new Error(`continuity-run: owner exception ${id} is not a readable ruling in ${workspaceRoot}/.story/rulings${loaded.warnings.length ? ` (${loaded.warnings.join("; ")})` : ""}`);
   const successors = buildSuccessorIndex(loaded.rulings).successorsByTarget.get(id);
   if (successors && successors.length > 0) throw new Error(`continuity-run: ruling ${id} is superseded by ${successors.join(", ")}`);
-  if (!/T-525/.test(ruling.text) || !/\bshared\b/i.test(ruling.text)) throw new Error(`continuity-run: ruling ${id} does not name T-525 and shared isolation; it cannot serve as the owner exception`);
+  const lifecycle = classifyLifecycle(ruling).lifecycle;
+  if (lifecycle !== "accepted" && lifecycle !== "accepted-legacy") throw new Error(`continuity-run: ruling ${id} is ${lifecycle}, not accepted; it cannot serve as the owner exception`);
+  // The text is the owner's own words, which need not spell the ticket out; the record's scope tags and context may.
+  const tags = (ruling.scopeTags ?? []).map((t) => t.toLowerCase());
+  const namesTicket = /\bT-525\b/i.test(ruling.text) || /\bT-525\b/i.test(ruling.narrative?.context ?? "") || tags.includes("t-525");
+  const namesShared = /\bshared\b/i.test(ruling.text) || tags.includes("shared");
+  const missing = [namesTicket ? null : "T-525", namesShared ? null : "shared isolation"].filter((m): m is string => m !== null);
+  if (missing.length > 0) throw new Error(`continuity-run: ruling ${id} does not name ${missing.join(" and ")}; it cannot serve as the owner exception`);
   return { id, sha256: sha256(readFileSync(join(workspaceRoot, ".story", "rulings", `${id}.json`))) };
 }
 
@@ -389,12 +397,27 @@ export interface AttemptDeps {
   readonly distHashes?: () => Record<string, string>;
   /** The per-path input hash provider; tests inject a deterministic one so the real tree is never rehashed. */
   readonly inputHashes?: () => InputHashes;
+  /** The machine-load sampler and its period; tests inject both. */
+  readonly loadSample?: () => Omit<LoadSample, "t">;
+  readonly loadSampleMs?: number;
+}
+
+/** One reading of this Mac: load1 from the kernel, free swap from vm.swapusage; an unreadable figure is null. */
+export function sampleMachine(): Omit<LoadSample, "t"> {
+  let swapFreeBytes: number | null = null;
+  try { swapFreeBytes = parseSwapFree(execFileSync("sysctl", ["-n", "vm.swapusage"], { encoding: "utf-8", timeout: 5000 })); } catch { /* unreadable */ }
+  const load1 = loadavg()[0];
+  return { load1: typeof load1 === "number" && Number.isFinite(load1) ? load1 : null, swapFreeBytes };
 }
 
 export interface AttemptOutcome {
   readonly validity: "valid" | "invalid";
   readonly completion: CompletionStatus;
   readonly interrupted: boolean;
+  /** B2: the session stopped on a rate limit or overload; the matrix stops rather than spend the cell's retries on it. */
+  readonly rateLimited: boolean;
+  /** The pre-registered load rule invalidated this timeout; the matrix stops until the machine is quiet. */
+  readonly machineLoad: boolean;
   readonly evidenceComplete: boolean;
   readonly inputDrift: InputDrift;
 }
@@ -519,6 +542,11 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     signals.once("SIGINT", onSignal);
     signals.once("SIGTERM", onSignal);
     const termTimer = setTimeout(() => escalate("timeout"), o.timeoutMs);
+    const loadSamples: LoadSample[] = [];
+    const takeSample = (): void => { try { loadSamples.push({ t: now(), ...(deps.loadSample ?? sampleMachine)() }); } catch { loadSamples.push({ t: now(), load1: null, swapFreeBytes: null }); } };
+    takeSample();
+    const loadTimer = setInterval(takeSample, deps.loadSampleMs ?? LOAD_RULE.sampleMs);
+    cleanup.push(() => clearInterval(loadTimer));
     cleanup.push(() => { clearTimeout(termTimer); if (killTimer) clearTimeout(killTimer); signals.off("SIGINT", onSignal); signals.off("SIGTERM", onSignal); });
     cleanup.push(() => { if (child.exitCode === null && child.signalCode === null) killGroup("SIGKILL"); });
 
@@ -565,12 +593,14 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
       child.on("close", (code, signal) => res({ code, signal }));
     });
     clearTimeout(termTimer); if (killTimer) clearTimeout(killTimer);
+    clearInterval(loadTimer); takeSample();
     signals.off("SIGINT", onSignal); signals.off("SIGTERM", onSignal);
     if (lineBuf.trim()) feed(lineBuf);
     await new Promise<void>((r) => outStream.end(r));
     await new Promise<void>((r) => errStream.end(r));
     if (exit.signal === "SIGKILL" && kill.kind === null) kill.kind = "external-kill";
-    // A timeout is a behavioural failure under the fixed budget, never an interruption: the observation stands.
+    // A timeout is a behavioural failure under the fixed budget, never an interruption: the observation stands,
+    // unless the stream shows it was spent on a rate limit or overload (rateLimitStop, B2).
     const interrupted = kill.kind === "runner-signal" || kill.kind === "external-kill";
     const survivors = child.pid ? pgrep(["-g", String(child.pid)], workdir) : "";
     if (survivors) killGroup("SIGKILL");
@@ -599,11 +629,13 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     const cfgAfter = effectiveConfigHash(configDir).sha256;
     const fp = (stateJson?.binaryFingerprint as { sha256?: string } | null | undefined)?.sha256 ?? null;
     const initServers = (usage.initEvent?.mcp_servers as { name?: string; status?: string }[] | undefined) ?? null;
+    const limitStop = rateLimitStop(parsed.events);
+    const loadStop = machineLoadStop(kill.kind, loadSamples);
     const v = validity({
       stateBinaryFingerprintSha256: fp, builtMcpSha256: pf.build.dist["dist/mcp.js"] ?? "", toolResults: toolCalls.map((t) => t.result), mainModels: usage.mainModels, pinnedModel: o.model,
       distHashesExpected: pf.build.dist, distHashesBefore: distBefore, distHashesAfter: distAfter, configHashExpected: pf.configHash, configHashBefore: cfgBefore.sha256, configHashAfter: cfgAfter,
       streamCorrupt: parsed.corruptLines > 0 || streamErrors.length > 0 || watcherErrors.length > 0, initMcpServers: initServers, interrupted,
-      inputDriftInvalidating: drift.invalidating,
+      inputDriftInvalidating: drift.invalidating, rateLimitStop: limitStop, machineLoadStop: loadStop,
     });
     let headAfter = initialHead;
     try { headAfter = gitLocal(workdir, ["rev-parse", "HEAD"]); } catch { /* keep */ }
@@ -666,6 +698,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     publish("handover.md", newHandovers.map((f) => `<!-- ${f} -->\n${readFileSync(join(handoversDir, f), "utf-8")}`).join("\n\n"));
     const usageOut = { ...usage, initEvent: undefined, resultEvent: undefined, totalCostUsd: (usage.resultEvent as { total_cost_usd?: number } | null)?.total_cost_usd ?? null, numTurns: (usage.resultEvent as { num_turns?: number } | null)?.num_turns ?? null, resultSubtype: (usage.resultEvent as { subtype?: string } | null)?.subtype ?? null };
     publish("usage.json", JSON.stringify(usageOut, null, 2));
+    publish("load.json", JSON.stringify({ rule: LOAD_RULE, samples: loadSamples.map((x) => ({ offsetMs: x.t - started, load1: x.load1, swapFreeBytes: x.swapFreeBytes })) }, null, 2));
     publish("manifest.json", JSON.stringify({ ...manifestPre, post: { distAfter, inputHashesAfter: inputsAfter.hashes, configHashAfter: cfgAfter, stateBinaryFingerprintSha256: fp, mainModels: usage.mainModels, subagentModels: usage.subagentModels, clientSessionId: usage.initEvent?.session_id ?? null, finishedAt: new Date().toISOString() } }, null, 2));
     writeFileSync(join(rawDir, "redaction.full.json"), JSON.stringify(redactionFull, null, 2));
     publish("redaction.json", JSON.stringify(redactionPublic, null, 2));
@@ -673,7 +706,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     // Required evidence follows the observed lifecycle, not what happened to be captured: a session that reported
     // plan_written owes the INITIAL snapshot and the FINAL plan; a session that produced a digest owes the PLAN
     // context. A genuine behavioural failure that never wrote a plan owes neither.
-    const required = ["evidence.jsonl", "source.diff", "ledger.changes.json", "reports.json", "handover.md", "usage.json", "manifest.json", "task.json"];
+    const required = ["evidence.jsonl", "source.diff", "ledger.changes.json", "reports.json", "handover.md", "usage.json", "manifest.json", "task.json", "load.json"];
     if (usage.firstPlanWrittenToolUseId !== null) required.push("plan.initial.md", "plan.md");
     if (sessionDir && existsSync(join(sessionDir, "context-digest.md"))) required.push("plan-context.md");
     for (const pc of planCopies) if (!required.includes(pc.file)) required.push(pc.file);
@@ -681,7 +714,7 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     // The record itself is published through the same checker; a blocked record is a runner bug, not a redaction.
     const record = {
       experimentHash: pf.experiment, arm: o.arm, task, repeat, attempt: attemptNo, ticketId, validity: v.valid ? "valid" : "invalid", invalidReasons: v.reasons, inputDrift: drift,
-      completion: comp.status, completionReason: comp.reason, completed: true, evidenceComplete, requiredArtefacts: required, wallMs, killKind: kill.kind, interrupted, exitCode: exit.code, exitSignal: exit.signal,
+      completion: comp.status, completionReason: comp.reason, completed: true, evidenceComplete, requiredArtefacts: required, wallMs, killKind: kill.kind, interrupted, rateLimitStop: limitStop, machineLoadStop: loadStop, exitCode: exit.code, exitSignal: exit.signal,
       spawnError: exit.error ? exit.error.message : null, streamCorruptLines: parsed.corruptLines, streamErrors, watcherErrors, truncatedTail: parsed.truncatedTail !== null, planCopies, sessionId: usage.guideSessionId,
       guideStates: usage.guideStates.map((g) => g.state), survivorsKilled: survivors ? survivors.split("\n").length : 0, sidecarOutcome, headBefore: initialHead, headAfter, published, finishedAt: new Date().toISOString(),
     };
@@ -696,13 +729,23 @@ export async function runAttempt(o: RunOptions, pf: Preflight, task: Task, repea
     await writeAtomic(join(pubDir, "artefacts.sha256.json"), JSON.stringify(hashes, null, 2));
     for (const [name, h] of Object.entries(hashes)) if (sha256(readFileSync(join(pubDir, name))) !== h) throw new Error(`artefact ${name} changed under the writer`);
     await writeAtomic(join(pubDir, "completed"), `${new Date().toISOString()}\n`);
-    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, evidenceComplete, inputDrift: drift };
+    return { validity: record.validity as "valid" | "invalid", completion: comp.status, interrupted, rateLimited: limitStop !== null, machineLoad: loadStop !== null, evidenceComplete, inputDrift: drift };
   } catch (err) {
     failure("attempt", err);
     throw err;
   } finally {
     for (const fn of cleanup.reverse()) { try { fn(); } catch { /* best effort */ } }
   }
+}
+
+/** B2: raised when an attempt stopped on a rate limit or overload; a re-run after it clears resumes the matrix. */
+export class RateLimitStopError extends Error {
+  constructor(message: string) { super(message); this.name = "RateLimitStopError"; }
+}
+
+/** Raised when a timeout was invalidated by the pre-registered load rule; a re-run on a quiet machine resumes the matrix. */
+export class MachineLoadStopError extends Error {
+  constructor(message: string) { super(message); this.name = "MachineLoadStopError"; }
 }
 
 /** Raised when a cell publishes without its evidence: the experiment cannot qualify, so the matrix stops. */
@@ -714,7 +757,7 @@ export class EvidenceIncompleteError extends Error {
 
 export interface AttemptEntry {
   readonly name: string;
-  readonly record: { readonly validity: "valid" | "invalid"; readonly experimentHash: string; readonly completed: boolean; readonly evidenceComplete: boolean; readonly task?: string; readonly repeat?: number } | null;
+  readonly record: { readonly validity: "valid" | "invalid"; readonly experimentHash: string; readonly completed: boolean; readonly evidenceComplete: boolean; readonly task?: string; readonly repeat?: number; readonly invalidReasons?: readonly string[] } | null;
   readonly reason?: string;
 }
 
@@ -724,7 +767,7 @@ export function readAttempts(cellDir: string): AttemptEntry[] {
   return readdirSync(cellDir).filter((d) => d.startsWith("attempt-")).map((name): AttemptEntry => {
     const v = verifyAttemptDir(join(cellDir, name));
     if (!v.record) return { name, record: null, reason: v.reason ?? undefined };
-    return { name, record: { validity: v.record.validity, experimentHash: v.record.experimentHash, completed: true, evidenceComplete: v.evidenceComplete, task: v.record.task, repeat: v.record.repeat }, reason: v.reason ?? undefined };
+    return { name, record: { validity: v.record.validity, experimentHash: v.record.experimentHash, completed: true, evidenceComplete: v.evidenceComplete, task: v.record.task, repeat: v.record.repeat, invalidReasons: v.record.invalidReasons }, reason: v.reason ?? undefined };
   });
 }
 
@@ -763,10 +806,18 @@ export async function runMatrix(o: RunOptions, pf: Preflight, deps: AttemptDeps 
         if (decision.kind === "exhausted") { cells.push({ task, repeat, satisfied: false, evidenceComplete: false, attempt: null }); summary.push(`${task}#${repeat}: EXHAUSTED (only invalid attempts)`); break; }
         const r = await runAttempt(o, pf, task, repeat, decision.nextAttempt, deps);
         const driftNote = `${r.inputDrift.invalidating.length ? ` INPUT DRIFT (${r.inputDrift.invalidating.join(", ")})` : ""}${r.inputDrift.disclosed.length ? ` input drift disclosed (${r.inputDrift.disclosed.join(", ")})` : ""}`;
-        summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}${driftNote}`);
+        summary.push(`${task}#${repeat} ${attemptDirName(decision.nextAttempt)}: ${r.validity} ${r.completion}${r.interrupted ? " INTERRUPTED" : ""}${r.rateLimited ? " RATE-LIMITED" : ""}${r.machineLoad ? " MACHINE-LOAD" : ""}${driftNote}`);
         if (r.interrupted) {
           writeExperiment(o, pf, cells, summary, "interrupted by the operator");
           throw new SessionKilledError("external-kill", `continuity-run: interrupted during ${task}#${repeat}; no further attempts started`);
+        }
+        if (r.rateLimited) {
+          writeExperiment(o, pf, cells, summary, "stopped on a rate limit or overload; re-run the same command after it clears");
+          throw new RateLimitStopError(`continuity-run: ${task}#${repeat} stopped on a rate limit or overload; the attempt is invalid and not counted. No further attempts started; re-run the same command after it clears.`);
+        }
+        if (r.machineLoad) {
+          writeExperiment(o, pf, cells, summary, "a timeout under the pre-registered machine-load rule; re-run the same command when the machine is quiet");
+          throw new MachineLoadStopError(`continuity-run: ${task}#${repeat} timed out under measured machine load; the attempt is invalid and not counted. No further attempts started; re-run the same command when the machine is quiet.`);
         }
       }
     }
@@ -800,6 +851,6 @@ async function main(): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     process.stderr.write(`${err instanceof SessionKilledError ? `[${err.kind}] ` : ""}${(err as Error).stack ?? String(err)}\n`);
-    process.exit(err instanceof SessionKilledError ? 130 : err instanceof EvidenceIncompleteError ? 4 : 1);
+    process.exit(err instanceof SessionKilledError ? 130 : err instanceof EvidenceIncompleteError ? 4 : err instanceof RateLimitStopError ? 5 : err instanceof MachineLoadStopError ? 6 : 1);
   });
 }

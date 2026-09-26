@@ -453,6 +453,57 @@ export function summarizeStream(events: readonly StreamEvent[]): { readonly usag
 
 // --- validity ---------------------------------------------------------------
 
+const LIMIT_STATUSES: ReadonlySet<number> = new Set([429, 529]);
+const LIMIT_ERRORS: ReadonlySet<string> = new Set(["rate_limit", "overloaded"]);
+const lastOf = (events: readonly StreamEvent[], match: (e: StreamEvent) => boolean): StreamEvent | undefined => {
+  for (let i = events.length - 1; i >= 0; i--) if (match(events[i]!)) return events[i];
+  return undefined;
+};
+
+/** The longest suffix of the stream holding nothing but results, rate-limit events and API retries. */
+function quietTail(events: readonly StreamEvent[]): readonly StreamEvent[] {
+  let i = events.length;
+  while (i > 0) {
+    const e = events[i - 1]!;
+    if (!(e.type === "result" || e.type === "rate_limit_event" || (e.type === "system" && e.subtype === "api_retry"))) break;
+    i--;
+  }
+  return events.slice(i);
+}
+
+/**
+ * B2: a session the subscription refused (rate limit) or the API could not serve (overload) stopped for a remote
+ * reason, not a behavioural one, so the attempt is invalid and re-runnable rather than a counted failure. The
+ * evidence is read from the client's structured stream fields only, never from prose: the result's
+ * api_error_status, the final main-session assistant message's error, a rejected rate_limit_event in the stream's
+ * quiet tail, and for a session killed without a result (the timeout), a 429/529 retry in that tail. A session whose
+ * result is not an error was not stopped, whatever limit events it saw on the way, and a definitive error of
+ * another kind (a non-limit status or assistant error) settles the question the other way.
+ */
+export function rateLimitStop(events: readonly StreamEvent[]): string | null {
+  const result = lastOf(events, (e) => e.type === "result");
+  if (result && result.is_error !== true) return null;
+  // A definitive error of another kind is the session's own outcome: it is never reread as a limit.
+  const status = result?.api_error_status;
+  if (typeof status === "number") return LIMIT_STATUSES.has(status) ? `result api_error_status ${status}` : null;
+  const isMain = (e: StreamEvent): boolean => e.type === "assistant" && (e.parent_tool_use_id === null || e.parent_tool_use_id === undefined);
+  const lastMain = lastOf(events, isMain);
+  if (typeof lastMain?.error === "string") return LIMIT_ERRORS.has(lastMain.error) ? `final assistant error ${lastMain.error}` : null;
+  // Only a refusal or retry in the stream's quiet tail can be what stopped it: once anything else follows (a
+  // message, a tool result, thinking progress), the session was still working and the limit was survived.
+  const tail = quietTail(events);
+  const info = lastOf(tail, (e) => e.type === "rate_limit_event")?.rate_limit_info as { status?: unknown; overageStatus?: unknown; rateLimitType?: unknown } | undefined;
+  if (info?.status === "rejected" && info.overageStatus !== "allowed" && info.overageStatus !== "allowed_warning") {
+    const kind = typeof info.rateLimitType === "string" && /^[a-z_]{1,40}$/.test(info.rateLimitType) ? info.rateLimitType : "unknown";
+    return `rate_limit_event rejected (${kind})`;
+  }
+  if (!result) {
+    const retry = lastOf(tail, (e) => e.type === "system" && e.subtype === "api_retry");
+    if (retry && typeof retry.error_status === "number" && LIMIT_STATUSES.has(retry.error_status)) return `api_retry ${retry.error_status} with nothing after it`;
+  }
+  return null;
+}
+
 /** The one ISS-906 sentence, matched by its stable head. */
 export const STALE_NOTE_HEAD = "Server binary is stale";
 
@@ -466,7 +517,9 @@ export type InvalidReason =
   | "input-drift"
   | "mcp-servers"
   | "stream-corrupt"
-  | "interrupted";
+  | "interrupted"
+  | "rate-limited"
+  | "machine-load";
 
 export interface ValidityInputs {
   readonly stateBinaryFingerprintSha256: string | null | undefined;
@@ -487,6 +540,10 @@ export interface ValidityInputs {
   readonly interrupted: boolean;
   /** ISS-1274: INPUT_PATHS labels that drifted from preflight under the attempt and reach the cell (or could not be hashed). */
   readonly inputDriftInvalidating: readonly string[];
+  /** B2: the evidence that the session stopped on a subscription rate limit or an API overload, or null (see rateLimitStop). */
+  readonly rateLimitStop: string | null;
+  /** The pre-registered load rule's evidence for a timed-out attempt, or null (see machineLoadStop). */
+  readonly machineLoadStop: string | null;
 }
 
 export function sameHashes(a: Record<string, string>, b: Record<string, string>): boolean {
@@ -507,7 +564,57 @@ export function validity(i: ValidityInputs): { readonly valid: boolean; readonly
   const only = i.initMcpServers?.length === 1 ? i.initMcpServers[0] : undefined;
   if (!only || only.name !== "storybloq" || only.status !== "connected") reasons.push("mcp-servers");
   if (i.streamCorrupt) reasons.push("stream-corrupt");
+  if (i.rateLimitStop !== null) reasons.push("rate-limited");
+  if (i.machineLoadStop !== null) reasons.push("machine-load");
   return { valid: reasons.length === 0, reasons };
+}
+
+// --- machine load ------------------------------------------------------------
+
+/** One reading of the machine taken by the runner during an attempt; a null field could not be read. */
+export interface LoadSample {
+  readonly t: number;
+  readonly load1: number | null;
+  readonly swapFreeBytes: number | null;
+}
+
+/**
+ * The pre-registered rule (pen ruling, fixed before the first arm-2 cell): a timed-out attempt is invalid when the
+ * runner's own samples show load1 over 15 for 5 or more consecutive minutes during it. Free swap is sampled for the
+ * record only: macOS reports headroom inside the allocated swap files, not memory pressure, so it never decides.
+ */
+export const LOAD_RULE = { load1Over: 15, minMs: 5 * 60_000, sampleMs: 60_000, maxGapMs: 90_000 } as const;
+
+const breaches = (s: LoadSample): boolean => s.load1 !== null && s.load1 > LOAD_RULE.load1Over;
+
+/**
+ * Only a timeout qualifies: a completed or otherwise failed attempt is never invalidated for load. Consecutive means
+ * breaching samples with no gap over maxGapMs between them (a missed sample breaks the run rather than bridging it),
+ * spanning at least minMs from the first to the last. An unreadable field is not a breach.
+ */
+export function machineLoadStop(killKind: string | null, samples: readonly LoadSample[]): string | null {
+  if (killKind !== "timeout") return null;
+  let runStart: LoadSample | null = null;
+  let prev: LoadSample | null = null;
+  for (const s of samples) {
+    if (!breaches(s)) { runStart = null; prev = s; continue; }
+    if (runStart === null || prev === null || s.t - prev.t > LOAD_RULE.maxGapMs) runStart = s;
+    prev = s;
+    if (s.t - runStart.t >= LOAD_RULE.minMs) {
+      const t0 = samples[0]?.t ?? runStart.t;
+      return `load rule breached for ${Math.round((s.t - runStart.t) / 60_000)} min from +${Math.round((runStart.t - t0) / 60_000)} min`;
+    }
+  }
+  return null;
+}
+
+/** Parses the free figure of macOS `sysctl -n vm.swapusage` ("total = 6144.00M  used = 5553.00M  free = 591.00M"). */
+export function parseSwapFree(text: string): number | null {
+  const m = /free\s*=\s*([0-9.]+)([KMG])/.exec(text);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n)) return null;
+  return Math.round(n * (m[2] === "G" ? 1024 ** 3 : m[2] === "M" ? 1024 ** 2 : 1024));
 }
 
 // --- completion --------------------------------------------------------------
@@ -1029,6 +1136,7 @@ export interface AttemptRecordLike {
   /** The cell the record was captured for; a record copied into another cell can never satisfy it. */
   readonly task?: string;
   readonly repeat?: number;
+  readonly invalidReasons?: readonly string[];
 }
 
 export type CellDecision =
@@ -1039,7 +1147,9 @@ export type CellDecision =
 /**
  * One valid observation satisfies a cell. Every allocated attempt directory of this experiment counts toward the
  * retry limit, including one whose record never persisted (a crash is still a paid attempt), and a record from a
- * foreign experiment counts for nothing but its number. Attempt numbers only grow.
+ * foreign experiment counts for nothing but its number. A rate-limited attempt (B2) is the one exception: a remote
+ * refusal is not a paid try at the cell, so it never exhausts it, and neither is a timeout the pre-registered load
+ * rule invalidated (machine-load). Attempt numbers only grow.
  */
 export function decideCell(attempts: readonly { readonly name: string; readonly record: AttemptRecordLike | null }[], experiment: string, cell: { readonly task: string; readonly repeat: number }): CellDecision {
   const numbered = attempts
@@ -1050,7 +1160,7 @@ export function decideCell(attempts: readonly { readonly name: string; readonly 
   for (const a of numbered) {
     if (a.record && matches(a.record) && a.record.completed && a.record.validity === "valid" && a.record.experimentHash === experiment) return { kind: "satisfied", attempt: a.name, evidenceComplete: a.record.evidenceComplete };
   }
-  const counted = numbered.filter((a) => a.record === null || (a.record.experimentHash === experiment && matches(a.record))).length;
+  const counted = numbered.filter((a) => a.record === null || (a.record.experimentHash === experiment && matches(a.record) && !a.record.invalidReasons?.some((r) => r === "rate-limited" || r === "machine-load"))).length;
   if (counted > MAX_INVALID_RETRIES) return { kind: "exhausted", mismatched };
   const next = (numbered.at(-1)?.n ?? 0) + 1;
   return { kind: "run", nextAttempt: next, mismatched };

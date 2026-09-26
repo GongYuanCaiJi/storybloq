@@ -7,14 +7,14 @@ import { join, resolve, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import {
-  parseStream, summarizeStream, usageContext, validity, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, environmentSecrets, ambiguousEnvironmentSecrets,
+  parseStream, summarizeStream, usageContext, validity, rateLimitStop, machineLoadStop, parseSwapFree, LOAD_RULE, completion, sanitize, publicationCheck, jsonShapePreserved, fixtureCredentialAllowlist, environmentSecrets, ambiguousEnvironmentSecrets,
   diffLedger, decideCell, qualifies, expectedCellKeys, experimentHash, materialize, variantDiscoveryViolations, skillPayloadDiff, hashInputs, hashTree, sha256,
   verifyAttemptDir, isWellFormedEvent, TASKS, REPEATS, MAX_INVALID_RETRIES, type ValidityInputs,
   TASK_MATERIAL, taskMaterialEntries, taskMaterial, hashInputsByPath, driftedPaths, classifyInputDrift, NON_EXECUTED_INPUTS, INPUT_PATHS as LIB_INPUT_PATHS,
 } from "../../scripts/continuity-lib.js";
 import {
   buildClaudeArgs, parseArgs, buildManifestHash, readAttempts, INPUT_PATHS, checkOutputPaths, validateOwnerException, effectiveConfigHash, commandTokens,
-  provisionFreshConfig, runAttempt, runMatrix, bracketedInputs, type Preflight, type RunOptions, type SpawnFn,
+  provisionFreshConfig, runAttempt, runMatrix, RateLimitStopError, MachineLoadStopError, bracketedInputs, type Preflight, type RunOptions, type SpawnFn,
 } from "../../scripts/continuity-run.js";
 import { aggregate, COMPARISON_CHECKPOINT, scoringRequest, validateScore, mechanicalFailureScore, selectObservations, renderReport, loadScore, publishText, type AttemptRecord, type Observation,
   taskMaterialOf, experimentTaskMaterial, compareTaskMaterial, type TaskMaterialResult } from "../../scripts/continuity-score.js";
@@ -158,7 +158,7 @@ describe("validity", () => {
   const base: ValidityInputs = {
     stateBinaryFingerprintSha256: "abc", builtMcpSha256: "abc", toolResults: ["ok"], mainModels: ["claude-opus-5"], pinnedModel: "claude-opus-5",
     distHashesExpected: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, distHashesBefore: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, distHashesAfter: { "dist/mcp.js": "abc", "dist/cli.js": "cli" }, configHashExpected: "c", configHashBefore: "c", configHashAfter: "c",
-    streamCorrupt: false, initMcpServers: [{ name: "storybloq", status: "connected" }], interrupted: false, inputDriftInvalidating: [],
+    streamCorrupt: false, initMcpServers: [{ name: "storybloq", status: "connected" }], interrupted: false, inputDriftInvalidating: [], rateLimitStop: null, machineLoadStop: null,
   };
   it("a clean run is valid", () => expect(validity(base)).toEqual({ valid: true, reasons: [] }));
   it("null fingerprint fails closed", () => expect(validity({ ...base, stateBinaryFingerprintSha256: null }).reasons).toEqual(["no-fingerprint"]));
@@ -190,6 +190,112 @@ describe("validity", () => {
     expect(validity({ ...base, inputDriftInvalidating: ["src"] }).reasons).toEqual(["input-drift"]);
     expect(validity({ ...base, inputDriftInvalidating: [] })).toEqual({ valid: true, reasons: [] });
   });
+  it("B2: a rate-limit or overload stop is its own reason", () => {
+    expect(validity({ ...base, rateLimitStop: "result api_error_status 429" })).toEqual({ valid: false, reasons: ["rate-limited"] });
+  });
+  it("a load-rule invalidation is its own reason", () => {
+    expect(validity({ ...base, machineLoadStop: "load rule breached for 5 min from +0 min" })).toEqual({ valid: false, reasons: ["machine-load"] });
+  });
+});
+
+describe("machineLoadStop (pre-registered load rule)", () => {
+  const GB = 1024 ** 3;
+  const run = (n: number, over: { load1?: number | null; swapFreeBytes?: number | null } = {}, stepMs = 60_000, t0 = 0) =>
+    Array.from({ length: n }, (_, i) => ({ t: t0 + i * stepMs, load1: 16, swapFreeBytes: 4 * GB, ...over }));
+  const quiet = (t: number) => ({ t, load1: 2, swapFreeBytes: 4 * GB });
+  it("the rule is the ruled one: load1 over 15 for 5 consecutive minutes; swap is recorded, never decides", () => {
+    expect(LOAD_RULE).toEqual({ load1Over: 15, minMs: 300_000, sampleMs: 60_000, maxGapMs: 90_000 });
+  });
+  it("only a timeout qualifies; a completed or otherwise ended attempt is never invalidated for load", () => {
+    expect(machineLoadStop("timeout", run(6))).toBe("load rule breached for 5 min from +0 min");
+    for (const k of [null, "external-kill", "runner-signal"]) expect(machineLoadStop(k, run(20))).toBeNull();
+  });
+  it("five minutes of consecutive breach is required; four is not enough", () => {
+    expect(machineLoadStop("timeout", run(5))).toBeNull();
+    expect(machineLoadStop("timeout", [quiet(0), ...run(6, {}, 60_000, 60_000)])).toBe("load rule breached for 5 min from +1 min");
+  });
+  it("load1 alone decides; the threshold is strict; low free swap never breaches; an unreadable figure is not a breach", () => {
+    expect(machineLoadStop("timeout", run(6, { load1: 2, swapFreeBytes: 0 }))).toBeNull();
+    expect(machineLoadStop("timeout", run(6, { load1: 16, swapFreeBytes: null }))).not.toBeNull();
+    expect(machineLoadStop("timeout", run(6, { load1: 15 }))).toBeNull();
+    expect(machineLoadStop("timeout", run(6, { load1: 2, swapFreeBytes: GB }))).toBeNull();
+    expect(machineLoadStop("timeout", run(6, { load1: null, swapFreeBytes: null }))).toBeNull();
+  });
+  it("a quiet sample or a missed sample (a gap over 90 s) breaks the run instead of bridging it", () => {
+    const broken = [...run(3), quiet(180_000), ...run(3, {}, 60_000, 240_000)];
+    expect(machineLoadStop("timeout", broken)).toBeNull();
+    expect(machineLoadStop("timeout", [...run(3), ...run(3, {}, 60_000, 300_000)])).toBeNull();
+    expect(machineLoadStop("timeout", run(11, {}, 30_000))).toBe("load rule breached for 5 min from +0 min");
+  });
+  it("parses macOS vm.swapusage free figures", () => {
+    expect(parseSwapFree("total = 6144.00M  used = 5553.00M  free = 591.00M  (encrypted)")).toBe(591 * 1024 ** 2);
+    expect(parseSwapFree("total = 8.00G  used = 6.50G  free = 1.50G  (encrypted)")).toBe(1.5 * GB);
+    expect(parseSwapFree("free = 512.00K")).toBe(512 * 1024);
+    expect(parseSwapFree("no swap here")).toBeNull();
+  });
+});
+
+describe("rateLimitStop (B2)", () => {
+  const started = [INIT, assistant("r1", [{ type: "text", text: "working" }], u(10, 0, 100))];
+  const events = (...lines: string[]) => parseStream([...started, ...lines].join("\n")).events;
+  const limit = (status: string, extra: Record<string, unknown> = {}): string => ev("rate_limit_event", { rate_limit_info: { status, rateLimitType: "five_hour", overageStatus: "rejected", ...extra } });
+  const errorResult = (status: number | null): string => ev("result", { subtype: "success", is_error: true, api_error_status: status, result: "API Error", num_turns: 1 });
+  const apiError = (error: string, parent: string | null = null): string => ev("assistant", { request_id: "rx", parent_tool_use_id: parent, error, message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "API Error" }] } });
+  const retry = (status: number | null): string => ev("system", { subtype: "api_retry", attempt: 3, max_retries: 10, retry_delay_ms: 30000, error_status: status, error: status === 529 ? "overloaded" : "rate_limit" });
+
+  it("an error result carrying 429 or 529 is a stop; another API status is not", () => {
+    expect(rateLimitStop(events(errorResult(429)))).toBe("result api_error_status 429");
+    expect(rateLimitStop(events(errorResult(529)))).toBe("result api_error_status 529");
+    expect(rateLimitStop(events(errorResult(500)))).toBeNull();
+    expect(rateLimitStop(events(errorResult(null)))).toBeNull();
+  });
+  it("a session whose result is not an error was not stopped, whatever it saw on the way", () => {
+    expect(rateLimitStop(events(limit("rejected"), apiError("rate_limit"), ev("result", { subtype: "success", is_error: false, api_error_status: 429 })))).toBeNull();
+  });
+  it("the final main-session message carrying rate_limit or overloaded is a stop; a subagent's or an earlier one is not", () => {
+    expect(rateLimitStop(events(apiError("rate_limit"), errorResult(null)))).toBe("final assistant error rate_limit");
+    expect(rateLimitStop(events(apiError("overloaded")))).toBe("final assistant error overloaded");
+    expect(rateLimitStop(events(apiError("server_error"), errorResult(500)))).toBeNull();
+    // A final non-limit error settles it: a rejected limit event trailing it in the quiet tail must not reclassify it.
+    expect(rateLimitStop(events(apiError("billing_error"), limit("rejected"), errorResult(null)))).toBeNull();
+    expect(rateLimitStop(events(apiError("rate_limit", "toolu_sub"), errorResult(null)))).toBeNull();
+    expect(rateLimitStop(events(apiError("overloaded"), assistant("r2", [{ type: "text", text: "recovered" }], u(1, 0, 1)), errorResult(null)))).toBeNull();
+  });
+  it("a last rate_limit_event of rejected, with no paid overage covering it, is a stop, including under a timeout kill", () => {
+    expect(rateLimitStop(events(limit("rejected")))).toBe("rate_limit_event rejected (five_hour)");
+    expect(rateLimitStop(events(limit("rejected", { rateLimitType: "Weird Type!" }), errorResult(null)))).toBe("rate_limit_event rejected (unknown)");
+    expect(rateLimitStop(events(limit("rejected", { overageStatus: "allowed" })))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected", { overageStatus: "allowed_warning" })))).toBeNull();
+    expect(rateLimitStop(events(limit("allowed_warning")))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), limit("allowed")))).toBeNull();
+  });
+  it("a killed session whose last word is a 429/529 retry was stopped; a retry it recovered from, or another status, was not", () => {
+    expect(rateLimitStop(events(retry(529)))).toBe("api_retry 529 with nothing after it");
+    expect(rateLimitStop(events(retry(429)))).toBe("api_retry 429 with nothing after it");
+    expect(rateLimitStop(events(retry(500)))).toBeNull();
+    expect(rateLimitStop(events(retry(null)))).toBeNull();
+    // The retry branch is only for a session that never produced a result: once a result exists, it settles the question.
+    expect(rateLimitStop(events(retry(429), errorResult(null)))).toBeNull();
+    expect(rateLimitStop(events(retry(529), assistant("r2", [{ type: "text", text: "recovered" }], u(1, 0, 1))))).toBeNull();
+    expect(rateLimitStop(events(retry(529), errorResult(500)))).toBeNull();
+  });
+  it("a definitive error of another kind, or a refusal the session outlived, is never read as a limit", () => {
+    expect(rateLimitStop(events(limit("rejected"), errorResult(400)))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), apiError("invalid_request")))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), assistant("r2", [{ type: "text", text: "went on" }], u(1, 0, 1)), errorResult(null)))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), assistant("r2", [{ type: "text", text: "went on" }], u(1, 0, 1))))).toBeNull();
+  });
+  it("a refusal or retry followed by any progress (thinking, a subagent turn, a tool result) was survived", () => {
+    const thinking = ev("system", { subtype: "thinking_tokens", tokens: 10 });
+    const subTurn = assistant("rs", [{ type: "text", text: "sub" }], u(1, 0, 1), "toolu_sub");
+    expect(rateLimitStop(events(retry(529), thinking))).toBeNull();
+    expect(rateLimitStop(events(retry(429), subTurn))).toBeNull();
+    expect(rateLimitStop(events(retry(529), toolResult("t9", "ok")))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), thinking))).toBeNull();
+    expect(rateLimitStop(events(limit("rejected"), subTurn, errorResult(null)))).toBeNull();
+    expect(rateLimitStop(events(retry(529), limit("allowed_warning"), retry(529)))).toBe("api_retry 529 with nothing after it");
+  });
+  it("a clean stream is not a stop", () => expect(rateLimitStop(events())).toBeNull());
 });
 
 describe("completion", () => {
@@ -618,6 +724,20 @@ describe("cells, retries, qualification", () => {
     expect(decideCell(crashes, E, CELL)).toEqual({ kind: "exhausted", mismatched: [] });
     expect(decideCell(crashes.slice(0, 1), E, CELL)).toEqual({ kind: "run", nextAttempt: 2, mismatched: [] });
   });
+  it("B2: a rate-limited attempt never counts toward exhaustion; every other invalid reason still does", () => {
+    const limited = Array.from({ length: MAX_INVALID_RETRIES + 2 }, (_, i) => ({ name: `attempt-00${i + 1}`, record: { ...rec("invalid"), invalidReasons: ["rate-limited"] } }));
+    expect(decideCell(limited, E, CELL)).toEqual({ kind: "run", nextAttempt: MAX_INVALID_RETRIES + 3, mismatched: [] });
+    const drifted = limited.map((a) => ({ ...a, record: { ...a.record, invalidReasons: ["config-drift"] } }));
+    expect(decideCell(drifted, E, CELL)).toEqual({ kind: "exhausted", mismatched: [] });
+    const loaded = limited.map((a) => ({ ...a, record: { ...a.record, invalidReasons: ["machine-load"] } }));
+    expect(decideCell(loaded, E, CELL)).toEqual({ kind: "run", nextAttempt: MAX_INVALID_RETRIES + 3, mismatched: [] });
+    // Mixed: the rate-limited attempts are skipped and the others still count, whatever their order.
+    const at = (n: number, reason: string) => ({ name: `attempt-00${n}`, record: { ...rec("invalid"), invalidReasons: [reason] } });
+    const mixedRun = [at(1, "rate-limited"), at(2, "config-drift"), at(3, "rate-limited"), at(4, "stream-corrupt")];
+    expect(decideCell(mixedRun, E, CELL)).toEqual({ kind: "run", nextAttempt: 5, mismatched: [] });
+    expect(decideCell([...mixedRun, at(5, "model-drift")], E, CELL)).toEqual({ kind: "exhausted", mismatched: [] });
+    expect(decideCell([at(1, "config-drift"), at(2, "rate-limited"), at(3, "rate-limited"), at(4, "stream-corrupt"), at(5, "rate-limited")], E, CELL)).toEqual({ kind: "run", nextAttempt: 6, mismatched: [] });
+  });
   it("qualifies only for exactly the preregistered cells, each satisfied with complete evidence; shared needs an exception", () => {
     const all = TASKS.flatMap((task) => Array.from({ length: REPEATS }, (_, i) => ({ task, repeat: i + 1, satisfied: true, evidenceComplete: true })));
     expect(expectedCellKeys()).toHaveLength(15);
@@ -715,12 +835,29 @@ describe("dispatcher arguments, CLI and preflight helpers", () => {
     w("r-cccccccccccccccc", "Owner: T-525 shared isolation allowed (old wording)");
     w("r-dddddddddddddddd", "Owner: T-525 shared isolation withdrawn; capture fresh only.", "r-cccccccccccccccc");
     expect(validateOwnerException("r-aaaaaaaaaaaaaaaa", ws).id).toBe("r-aaaaaaaaaaaaaaaa");
-    expect(() => validateOwnerException("r-bbbbbbbbbbbbbbbb", ws)).toThrow(/does not name T-525/);
+    expect(() => validateOwnerException("r-bbbbbbbbbbbbbbbb", ws)).toThrow(/does not name T-525 and shared isolation;/);
     expect(() => validateOwnerException("r-cccccccccccccccc", ws)).toThrow(/superseded by r-dddddddddddddddd/);
     expect(() => validateOwnerException("r-eeeeeeeeeeeeeeee", ws)).toThrow(/not a readable ruling/);
     expect(() => validateOwnerException("N-1", ws)).toThrow(/not a ruling id/);
     writeFileSync(join(ws, ".story", "rulings", "r-ffffffffffffffff.json"), "{corrupt");
     expect(() => validateOwnerException("r-ffffffffffffffff", ws)).toThrow(/not a readable ruling/);
+  });
+  it("B2: the owner's verbatim text need not name the ticket; T-525 may come from text, narrative.context or scopeTags, shared from text or scopeTags", () => {
+    const ws = tmp("cont-ws2-"); mkdirSync(join(ws, ".story", "rulings"), { recursive: true });
+    const seed = JSON.parse(readFileSync(join(FIXTURE, "core", ".story", "rulings", "r-eftp2zdb6as643np.json"), "utf-8")) as Record<string, unknown>;
+    const w = (id: string, over: Record<string, unknown>): void => writeFileSync(join(ws, ".story", "rulings", `${id}.json`), JSON.stringify({ ...seed, id, supersedes: null, scopeTags: [], ...over }));
+    const verbatim = "why do you even need CLAUDE_CODE_OAUTH_TOKEN? use the shared auth on the system";
+    w("r-gggggggggggggggg", { text: "t-525 may run in SHARED isolation" });
+    w("r-hhhhhhhhhhhhhhhh", { text: verbatim, narrative: { context: "T-525 slice 2 was blocked on a token." } });
+    w("r-jjjjjjjjjjjjjjjj", { text: verbatim, scopeTags: ["T-525"] });
+    w("r-kkkkkkkkkkkkkkkk", { text: "T-525 captures use the machine's auth", scopeTags: ["Shared", "benchmark"] });
+    w("r-mmmmmmmmmmmmmmmm", { text: verbatim, scopeTags: ["t-5250"], narrative: { context: "T-5251 only" } });
+    w("r-nnnnnnnnnnnnnnnn", { text: "T-525 captures use the machine's auth", narrative: { context: "shared isolation" }, scopeTags: ["t-525"] });
+    w("r-pppppppppppppppp", { text: "T-525 shared isolation allowed", status: "withdrawn" });
+    for (const id of ["r-gggggggggggggggg", "r-hhhhhhhhhhhhhhhh", "r-jjjjjjjjjjjjjjjj", "r-kkkkkkkkkkkkkkkk"]) expect(validateOwnerException(id, ws).id, id).toBe(id);
+    expect(() => validateOwnerException("r-mmmmmmmmmmmmmmmm", ws)).toThrow(/does not name T-525;/);
+    expect(() => validateOwnerException("r-nnnnnnnnnnnnnnnn", ws)).toThrow(/does not name shared isolation;/);
+    expect(() => validateOwnerException("r-pppppppppppppppp", ws)).toThrow(/not accepted/);
   });
   it("the effective configuration inventories quoted hook paths, the user CLAUDE.md, the plugin inventory and the skill tree", () => {
     const cfg = tmp("cont-cfg-");
@@ -774,6 +911,8 @@ interface FakeBehaviour {
   readonly noPlanFile?: boolean;
   readonly handoverText?: string | ((ticketId: string) => string | undefined);
   readonly stateExtra?: Record<string, unknown>;
+  /** Stream lines written after the standard ones (B2: a rate-limit stop). */
+  readonly tail?: readonly string[];
 }
 
 /** Deterministic dist hashes: the lifecycle tests never need a build. */
@@ -818,6 +957,7 @@ function fakeSpawn(behaviour: FakeBehaviour, seen: { cwd: string; env: NodeJS.Pr
       toolResult("t3", stateLine("PLAN_REVIEW")),
     ];
     if (behaviour.complete) lines.push(ev("result", { subtype: "success", total_cost_usd: 0.5, num_turns: 4, usage: {} }));
+    lines.push(...(behaviour.tail ?? []));
     setTimeout(() => {
       for (const l of lines) child.stdout.write(`${l}\n`);
       if (!behaviour.hang) child.finish(0, null);
@@ -844,7 +984,11 @@ function options(over: Partial<RunOptions> = {}): RunOptions {
 }
 
 /** Every lifecycle call goes through here so no test depends on a built dist/. */
-const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter }): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string>; inputHashes: typeof fakeInputs } => ({ ...extra, distHashes: fakeDist, inputHashes: fakeInputs });
+type LoadDeps = { loadSample?: () => { load1: number | null; swapFreeBytes: number | null }; loadSampleMs?: number; now?: () => number };
+const deps = (extra: { spawnFn: SpawnFn; signals?: EventEmitter } & LoadDeps): { spawnFn: SpawnFn; signals?: EventEmitter; distHashes: () => Record<string, string>; inputHashes: typeof fakeInputs } & LoadDeps =>
+  ({ loadSample: () => ({ load1: 1, swapFreeBytes: 8 * 1024 ** 3 }), ...extra, distHashes: fakeDist, inputHashes: fakeInputs });
+/** A clock that advances a minute per reading, so a few real milliseconds of sampling span the rule's five minutes. */
+const minuteClock = (): (() => number) => { let t = 0; return () => (t += 60_000); };
 
 const pubDirOf = (o: RunOptions, pf: Preflight, task = "T-4", repeat = 1, attempt = "attempt-001"): string => join(o.out, pf.experiment.slice(0, 12), task, `repeat-${repeat}`, attempt);
 const rawDirOf = (o: RunOptions, pf: Preflight, task = "T-4", repeat = 1, attempt = "attempt-001"): string => join(o.rawOut, pf.experiment.slice(0, 12), task, `repeat-${repeat}`, attempt);
@@ -853,9 +997,9 @@ describe("attempt lifecycle (fake child process, no model)", () => {
   it("a completed session is valid, completed, evidence-complete, and every published byte is sanitised", async () => {
     const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
-    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, evidenceComplete: true, inputDrift: { invalidating: [], disclosed: [], errors: {} } });
+    expect(r).toEqual({ validity: "valid", completion: "completed", interrupted: false, rateLimited: false, machineLoad: false, evidenceComplete: true, inputDrift: { invalidating: [], disclosed: [], errors: {} } });
     const pub = pubDirOf(o, pf); const raw = rawDirOf(o, pf);
-    for (const f of ["record.json", "completed", "artefacts.sha256.json", "evidence.jsonl", "plan.initial.md", "plan.md", "plan-context.md", "manifest.json", "usage.json", "redaction.json", "task.json", "handover.md", "ledger.changes.json"]) expect(existsSync(join(pub, f)), f).toBe(true);
+    for (const f of ["record.json", "completed", "artefacts.sha256.json", "load.json", "evidence.jsonl", "plan.initial.md", "plan.md", "plan-context.md", "manifest.json", "usage.json", "redaction.json", "task.json", "handover.md", "ledger.changes.json"]) expect(existsSync(join(pub, f)), f).toBe(true);
     expect(existsSync(join(raw, "transcript.jsonl"))).toBe(true);
     expect(existsSync(join(raw, "plans", "plan.initial.md"))).toBe(true);
     const workdir = seen[0]!.cwd;
@@ -899,6 +1043,74 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     expect(exp.qualification.reason).toBe("interrupted by the operator");
     expect(existsSync(join(o.out, pf.experiment.slice(0, 12), "QUALIFYING"))).toBe(false);
     expect(existsSync(join(o.out, pf.experiment.slice(0, 12), "T-3"))).toBe(false);
+  });
+
+  it("B2: a timeout spent on a rate limit is invalid (rate-limited), never a behavioural failure", async () => {
+    const o = options({ timeoutMs: 80, sigkillGraceMs: 40 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const tail = [ev("rate_limit_event", { rate_limit_info: { status: "rejected", rateLimitType: "five_hour", overageStatus: "rejected" } })];
+    const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ hang: true, ignoreTerm: true, tail }, seen) }));
+    expect(r.validity).toBe("invalid"); expect(r.rateLimited).toBe(true); expect(r.interrupted).toBe(false);
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as Record<string, unknown>;
+    expect(record.killKind).toBe("timeout");
+    expect(record.invalidReasons).toEqual(["rate-limited"]);
+    expect(record.rateLimitStop).toBe("rate_limit_event rejected (five_hour)");
+  });
+
+  it("B2: a rate-limit stop stops the matrix before any further spawn; the re-run resumes the cell without counting it", async () => {
+    const o = options({ tasks: ["T-4", "T-3"], repeats: 1 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const tail = [ev("result", { subtype: "success", is_error: true, api_error_status: 429, result: "API Error: 429", num_turns: 3 })];
+    await expect(runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ tail }, seen) }))).rejects.toBeInstanceOf(RateLimitStopError);
+    expect(seen).toHaveLength(1);
+    const record = JSON.parse(readFileSync(join(pubDirOf(o, pf), "record.json"), "utf-8")) as Record<string, unknown>;
+    expect(record.validity).toBe("invalid"); expect(record.invalidReasons).toEqual(["rate-limited"]); expect(record.rateLimitStop).toBe("result api_error_status 429");
+    const expDir = join(o.out, pf.experiment.slice(0, 12));
+    const exp = JSON.parse(readFileSync(join(expDir, "experiment.json"), "utf-8")) as { qualification: { reason: string } };
+    expect(exp.qualification.reason).toBe("stopped on a rate limit or overload; re-run the same command after it clears");
+    expect(existsSync(join(expDir, "QUALIFYING"))).toBe(false);
+    expect(existsSync(join(expDir, "T-3"))).toBe(false);
+    expect(readAttempts(join(expDir, "T-4", "repeat-1"))[0]!.record!.invalidReasons).toEqual(["rate-limited"]);
+    const again: typeof seen = [];
+    const r = await runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ complete: true }, again) }));
+    expect(again).toHaveLength(2);
+    expect(r.summary).toContain("T-4#1: satisfied by attempt-002");
+  });
+
+  it("a timeout under sustained measured load is invalid (machine-load), not counted, and stops the matrix", async () => {
+    const o = options({ tasks: ["T-4", "T-3"], timeoutMs: 80, sigkillGraceMs: 40 }); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const loaded = { loadSample: () => ({ load1: 22, swapFreeBytes: 8 * 1024 ** 3 }), loadSampleMs: 5, now: minuteClock() };
+    await expect(runMatrix(o, pf, deps({ spawnFn: fakeSpawn({ hang: true, ignoreTerm: true }, seen), ...loaded }))).rejects.toBeInstanceOf(MachineLoadStopError);
+    expect(seen).toHaveLength(1);
+    const pub = pubDirOf(o, pf);
+    const record = JSON.parse(readFileSync(join(pub, "record.json"), "utf-8")) as Record<string, unknown>;
+    expect(record.killKind).toBe("timeout"); expect(record.validity).toBe("invalid"); expect(record.invalidReasons).toEqual(["machine-load"]);
+    expect(record.machineLoadStop).toMatch(/^load rule breached for \d+ min from \+0 min$/);
+    const load = JSON.parse(readFileSync(join(pub, "load.json"), "utf-8")) as { rule: unknown; samples: Record<string, unknown>[] };
+    expect(load.rule).toEqual(LOAD_RULE); expect(load.samples.length).toBeGreaterThanOrEqual(6); expect(load.samples.every((x) => x.load1 === 22)).toBe(true);
+    // Offsets from the attempt start, never clock timestamps: the minute clock starts the attempt at 60 000.
+    expect(load.samples.every((x) => !("t" in x) && typeof x.offsetMs === "number")).toBe(true);
+    expect(load.samples[0]!.offsetMs).toBe(60_000);
+    const expDir = join(o.out, pf.experiment.slice(0, 12));
+    expect(JSON.parse(readFileSync(join(expDir, "experiment.json"), "utf-8")).qualification.reason).toBe("a timeout under the pre-registered machine-load rule; re-run the same command when the machine is quiet");
+    expect(existsSync(join(expDir, "T-3"))).toBe(false);
+  });
+
+  it("the sampling timer stops with the attempt, so no sample leaks past it", async () => {
+    let samples = 0;
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen), loadSample: () => { samples++; return { load1: 1, swapFreeBytes: 8 * 1024 ** 3 }; }, loadSampleMs: 5 }));
+    const atEnd = samples;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(samples).toBe(atEnd);
+  });
+
+  it("the same load never invalidates a completed attempt, and a quiet timeout stays a behavioural failure", async () => {
+    const hot = () => ({ loadSample: () => ({ load1: 22, swapFreeBytes: 1024 }), loadSampleMs: 5, now: minuteClock() });
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    const done = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen), ...hot() }));
+    expect(done.validity).toBe("valid"); expect(done.machineLoad).toBe(false);
+    const o2 = options({ timeoutMs: 80, sigkillGraceMs: 40 });
+    const t = await runAttempt(o2, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ hang: true, ignoreTerm: true }, seen), loadSampleMs: 5, now: minuteClock() }));
+    expect(t.validity).toBe("valid"); expect(t.machineLoad).toBe(false); expect(t.completion).toBe("incomplete");
   });
 
   it("fresh isolation provisions a distinct config dir per attempt, each hashing to the experiment's fingerprint, removed afterwards", async () => {
@@ -1008,6 +1220,16 @@ describe("attempt lifecycle (fake child process, no model)", () => {
     expect((JSON.parse(readFileSync(join(pubDirOf(o2, pf), "record.json"), "utf-8")) as { invalidReasons: string[] }).invalidReasons).toEqual(["build-drift"]);
   });
 
+  it("the machine-load rule's evidence is required: a capture stripped of load.json is refused by the verifier, naming it", async () => {
+    const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
+    await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true }, seen) }));
+    const pub = pubDirOf(o, pf);
+    expect(verifyAttemptDir(pub)).toMatchObject({ evidenceComplete: true, reason: null });
+    const manifestPath = join(pub, "artefacts.sha256.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as Record<string, string>;
+    delete manifest["load.json"]; writeFileSync(manifestPath, JSON.stringify(manifest)); rmSync(join(pub, "load.json"));
+    expect(verifyAttemptDir(pub)).toMatchObject({ evidenceComplete: false, reason: "required artefact load.json not in manifest" });
+  });
   it("required evidence follows the lifecycle: a plan_written report without a captured plan leaves evidence incomplete", async () => {
     const o = options(); const pf = fakePreflight(); const seen: { cwd: string; env: NodeJS.ProcessEnv; child: FakeChild }[] = [];
     const r = await runAttempt(o, pf, "T-4", 1, 1, deps({ spawnFn: fakeSpawn({ complete: true, noPlanFile: true }, seen) }));
